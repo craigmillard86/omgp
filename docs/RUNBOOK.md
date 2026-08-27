@@ -3,7 +3,7 @@
 ## Activation checklist (one-time, in order)
 1. Push repo; `specify init` with Claude Code integration; run the
    constitution prompt from speckit-prompts.md.
-2. Replace `@OWNER` in .github/CODEOWNERS.
+2. CODEOWNERS: already set to @craigmillard83.
 3. Branch protection on main: require `ci-gate`, 1 review, Code Owners
    review, no force pushes, include admins.
 4. Repo settings: enable secret scanning + push protection; enable

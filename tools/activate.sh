@@ -3,12 +3,10 @@
 # `git push`. Requires: gh CLI authed to the repo's owner account.
 # Usage: OWNER=<github-username> REPO=<repo-name> tools/activate.sh
 set -euo pipefail
-: "${OWNER:?set OWNER}"; : "${REPO:?set REPO}"
+OWNER="${OWNER:-craigmillard83}"; REPO="${REPO:-omgp}"
 R="$OWNER/$REPO"
 
-echo "== step 2: CODEOWNERS owner"
-sed -i.bak "s/@OWNER/@$OWNER/g" .github/CODEOWNERS && rm -f .github/CODEOWNERS.bak
-git add .github/CODEOWNERS && git commit -m "governance: set code owner" && git push
+echo "== step 2: CODEOWNERS already set (@craigmillard83)"
 
 echo "== step 3: branch protection on main"
 gh api -X PUT "repos/$R/branches/main/protection" \
