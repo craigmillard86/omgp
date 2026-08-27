@@ -1,23 +1,23 @@
 # Mechanical enforcement of human-ruling artefacts (OPERATING-POLICY §2/§3).
 # With branch protection "require review from Code Owners" enabled, any PR
 # touching these paths REQUIRES the owner's review — instruction becomes gate.
-# Replace @craigmillard83 with your GitHub username on setup.
+# Replace @craigmillard86 with your GitHub username on setup.
 
 # Tier 3 — protocol & evidence ground truth
-/protocol/                      @craigmillard83
-/tests/vectors/                 @craigmillard83
-/docs/protocol-l3.md            @craigmillard83
-/docs/trunk-link-layer.md       @craigmillard83
-/docs/omgp-spec-v0.7.md         @craigmillard83
+/protocol/                      @craigmillard86
+/tests/vectors/                 @craigmillard86
+/docs/protocol-l3.md            @craigmillard86
+/docs/trunk-link-layer.md       @craigmillard86
+/docs/omgp-spec-v0.7.md         @craigmillard86
 
 # Tier 3 — governance itself
-/docs/OPERATING-POLICY.md       @craigmillard83
-/docs/GOVERNANCE.md             @craigmillard83
-/.github/                       @craigmillard83
-/CLAUDE.md                      @craigmillard83
-/.specify/memory/constitution.md @craigmillard83
+/docs/OPERATING-POLICY.md       @craigmillard86
+/docs/GOVERNANCE.md             @craigmillard86
+/.github/                       @craigmillard86
+/CLAUDE.md                      @craigmillard86
+/.specify/memory/constitution.md @craigmillard86
 
 # Tier 2 — toolchain pinning & pipeline definition
-/IDF_VERSION                    @craigmillard83
-/pipeline.sh                    @craigmillard83
-/tools/codegen.py               @craigmillard83
+/IDF_VERSION                    @craigmillard86
+/pipeline.sh                    @craigmillard86
+/tools/codegen.py               @craigmillard86
