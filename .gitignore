@@ -1,0 +1,5 @@
+build/
+esp32-host/build/
+esp32-host/sdkconfig
+__pycache__/
+*.pyc

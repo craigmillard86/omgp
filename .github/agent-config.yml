@@ -1,0 +1,14 @@
+# Agent autonomy configuration — referenced by workflows and agents.
+# Changing this file is a T3 (governance) change.
+
+# Highest EXPECTED risk tier that story enrichment may auto-release to
+# dispatch (apply `ready` without human review of the story).
+# 0 = docs/tests/scenarios only; 1 = + host-only code; 2 = + core/link
+# (2 not recommended until telemetry supports it). T3 is never releasable.
+auto_ready_max_tier: 1
+
+# Backstops that make auto-release safe (do not remove):
+# - ready-gate still validates the enriched story mechanically
+# - risk-score re-rates the ACTUAL diff at PR time; a T2+/T3 outcome from
+#   an auto-released story is reviewed as a prediction failure
+# - CODEOWNERS + human merge approval apply to every PR regardless

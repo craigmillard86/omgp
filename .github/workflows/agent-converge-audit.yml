@@ -1,0 +1,42 @@
+name: agent-converge-audit
+# Weekly spec-drift audit: headless Claude compares implementation against
+# docs/protocol-l3.md, docs/trunk-link-layer.md and the constitution, and
+# files ONE consolidated issue if drift is found. Read-only: no code changes.
+on:
+  schedule:
+    - cron: '0 6 * * 1'    # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Claude Code — spec conformance audit
+        uses: anthropics/claude-code-action@v1
+        with:
+          # Subscription auth: token from `claude setup-token` (Pro/Max/Team/Enterprise).
+          # Swap to anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} for pay-as-you-go.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Read-only audit. Compare the implementation in core/, link/,
+            sim/ and protocol/ against docs/protocol-l3.md,
+            docs/trunk-link-layer.md, protocol/omgp-protocol.yaml and
+            .specify/memory/constitution.md.
+            Look for: behaviour diverging from spec sections, spec
+            requirements with no covering test or scenario, OPEN-QUESTIONS
+            entries that code has silently answered, and golden-rule
+            violations (allocation after init, wall-clock use, inline
+            timing constants).
+            If findings exist, file ONE issue titled
+            "Converge audit <date>" labelled converge-audit, listing each
+            finding with file/spec-section references and a proposed
+            disposition (fix code | amend spec | add test). If clean, file
+            nothing and end.
+          claude_args: |
+            --allowedTools "Bash(gh issue create*),Read,Grep,Glob"

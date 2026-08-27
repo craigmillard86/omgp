@@ -1,0 +1,59 @@
+name: ready-gate
+# Definition-of-Ready enforcement: applying `ready` triggers validation of
+# the story body against the PRD scheme. Non-conforming stories have `ready`
+# removed with a comment listing gaps — the label only sticks if the story
+# is genuinely agent-implementable. See docs/DEFINITION-OF-READY.md.
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  issues: write
+
+jobs:
+  validate:
+    if: github.event.label.name == 'ready'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const iss = context.payload.issue;
+            const body = iss.body || '';
+            const problems = [];
+            const section = name => {
+              const m = body.match(new RegExp(`###\\s*${name}\\s*\\n([\\s\\S]*?)(?=\\n###|$)`, 'i'));
+              return m ? m[1].trim() : null;
+            };
+            const required = ['Intent', 'Spec references', 'Acceptance criteria',
+                              'Evidence required', 'Out of scope', 'Dependencies',
+                              'Expected risk tier'];
+            for (const s of required) {
+              const v = section(s);
+              if (v === null) problems.push(`missing section: **${s}**`);
+              else if (v.length < 3 || /^_?no response_?$/i.test(v))
+                problems.push(`empty section: **${s}**`);
+            }
+            const acc = section('Acceptance criteria') || '';
+            if (!/- \[[ x]\]/i.test(acc))
+              problems.push('Acceptance criteria must be checkbox assertions (`- [ ] ...`)');
+            const risk = section('Expected risk tier') || '';
+            if (/T3/.test(risk))
+              problems.push('Expected risk **T3**: human-ruling work must not be released to agent dispatch — split the story or do the T3 part first, humanly');
+            const deps = section('Dependencies') || '';
+            for (const m of deps.matchAll(/#(\d+)/g)) {
+              const dep = await github.rest.issues.get({owner, repo, issue_number: Number(m[1])}).catch(() => null);
+              if (dep && dep.data.state === 'open')
+                problems.push(`dependency #${m[1]} is still open`);
+            }
+            if (/REPLACE:/.test(body))
+              problems.push('template placeholders (`REPLACE:`) still present');
+            if (problems.length) {
+              await github.rest.issues.removeLabel({owner, repo, issue_number: iss.number, name: 'ready'}).catch(()=>{});
+              await github.rest.issues.createComment({owner, repo, issue_number: iss.number,
+                body: `🚦 **Not ready** — Definition of Ready gaps (docs/DEFINITION-OF-READY.md):\n\n- ${problems.join('\n- ')}\n\nFix and re-apply \`ready\`.`});
+            } else {
+              await github.rest.issues.createComment({owner, repo, issue_number: iss.number,
+                body: '🚦 Definition of Ready: **passed** — eligible for agent dispatch.'});
+            }

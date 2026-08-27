@@ -1,0 +1,124 @@
+name: ci
+on:
+  push: {branches: [main]}
+  pull_request:
+  workflow_dispatch:
+
+# Superseded runs on the same PR are cancelled — agents push often
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: native (build + full test suite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: System deps
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+
+      - name: Python deps
+        run: pip install jinja2 pyyaml pytest
+
+      - name: Cache CMake build tree
+        uses: actions/cache@v4
+        with:
+          path: build/native
+          key: native-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json') }}
+
+      - name: Codegen drift guard
+        run: |
+          python3 tools/codegen.py
+          git diff --exit-code docs/ || { echo "::error::protocol docs out of sync with omgp-protocol.yaml"; exit 1; }
+
+      - name: Pipeline — all local stages
+        run: ./pipeline.sh codegen build unit refimpl diffcheck scenarios
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-failure-logs
+          path: |
+            build/native/Testing/**
+            build/native/**/*.log
+          if-no-files-found: ignore
+
+  esp32:
+    name: esp32-s3 firmware (pinned IDF)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned IDF version
+        id: idf
+        run: echo "version=$(cat IDF_VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache IDF build tree
+        uses: actions/cache@v4
+        with:
+          path: esp32-host/build
+          key: idf-${{ steps.idf.outputs.version }}-${{ hashFiles('esp32-host/sdkconfig*', 'esp32-host/CMakeLists.txt') }}
+
+      - name: Target build (Xtensa toolchain via espressif/idf container)
+        run: ./pipeline.sh esp32
+
+      - name: Upload firmware artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: omgp-host-esp32s3-${{ github.sha }}
+          path: esp32-host/build/*.bin
+          if-no-files-found: ignore
+
+  deep-verify:
+    # Risk-scaled deep testing: T2/T3 PRs run focused fuzz + diff-scoped
+    # mutation BEFORE merge (nightly covers the whole repo after).
+    # Dormant until F1 delivers fuzz targets and mutation config — the
+    # tool stubs exit 0 with a notice; F1's acceptance criteria include
+    # making this job bite (see speckit F1 spec).
+    name: deep-verify (T2/T3 only)
+    if: >
+      github.event_name == 'pull_request' &&
+      (contains(github.event.pull_request.labels.*.name, 'risk:t2') ||
+       contains(github.event.pull_request.labels.*.name, 'risk:t3'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Deps
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake ninja-build clang
+          pip install jinja2 pyyaml
+      - name: Focused fuzz (10 min, touched targets)
+        run: ./pipeline.sh codegen build && ./tools/fuzz-smoke.sh 600
+      - name: Diff-scoped mutation
+        run: ./tools/mutate.sh --diff origin/main
+
+  # Merge gate: branch protection requires this single check,
+  # so adding/removing jobs never means editing protection rules.
+  gate:
+    name: ci-gate
+    needs: [native, esp32, deep-verify]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Verify all jobs succeeded (deep-verify may be skipped, never failed)
+        run: |
+          [ "${{ needs.native.result }}" = "success" ] || exit 1
+          [ "${{ needs.esp32.result }}" = "success" ] || exit 1
+          [ "${{ needs.deep-verify.result }}" = "success" ] || [ "${{ needs.deep-verify.result }}" = "skipped" ] || exit 1

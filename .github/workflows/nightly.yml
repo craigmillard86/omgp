@@ -1,0 +1,66 @@
+name: nightly
+on:
+  schedule:
+    - cron: '30 2 * * *'      # 02:30 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write               # failures file an issue instead of vanishing
+
+jobs:
+  long-fuzz:
+    name: extended fuzzing (30 min per target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Deps
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake ninja-build clang
+          pip install jinja2 pyyaml
+      - name: Build + long fuzz
+        run: |
+          ./pipeline.sh codegen build
+          ./tools/fuzz-smoke.sh 1800   # arrives with F1; exits 0 with a notice until then
+      - name: Upload fuzz corpus/crashes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ github.run_id }}
+          path: build/fuzz/**
+          if-no-files-found: ignore
+
+  mutation:
+    name: mutation testing (weekly, Mondays)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && format('{0}', github.run_number) != '')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gate to Mondays for the scheduled trigger
+        id: day
+        run: echo "run=$([ "$(date -u +%u)" = "1" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+      - name: Deps
+        if: steps.day.outputs.run == 'yes'
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+      - name: Mutation run
+        if: steps.day.outputs.run == 'yes'
+        run: ./tools/mutate.sh   # arrives with F1; exits 0 with a notice until then
+
+  file-issue-on-failure:
+    needs: [long-fuzz, mutation]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              title: `Nightly CI failure — run ${context.runId}`,
+              body: `A nightly job failed: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['ci', 'nightly-failure']
+            });

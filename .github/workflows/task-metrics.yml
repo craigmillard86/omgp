@@ -1,0 +1,90 @@
+name: task-metrics
+# Per-task timing telemetry, GitHub-native. Two signals:
+#  - in-progress label add/remove -> active-time intervals (event log)
+#  - issue closed -> summary record with lead time and total active time
+on:
+  issues:
+    types: [labeled, unlabeled, closed]
+
+permissions:
+  contents: write
+  issues: read
+
+concurrency:
+  group: task-metrics          # serialise appends to the log files
+  cancel-in-progress: false
+
+jobs:
+  record:
+    if: >
+      github.event.action == 'closed' ||
+      (github.event.label.name == 'in-progress')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: main}
+
+      - name: Record event / close summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            fs.mkdirSync('metrics', {recursive: true});
+            const iss = context.payload.issue;
+            const labels = iss.labels.map(l => l.name);
+            const isTask = labels.includes('task') || labels.includes('nightly-failure')
+                        || labels.includes('converge-audit');
+            if (!isTask) return;
+
+            if (context.payload.action !== 'closed') {
+              // interval marker: in-progress added or removed
+              fs.appendFileSync('metrics/task-events.jsonl', JSON.stringify({
+                issue: iss.number,
+                event: context.payload.action === 'labeled' ? 'start' : 'stop',
+                at: new Date().toISOString()
+              }) + '\n');
+              return;
+            }
+
+            // closed: compute active time from the event log + lead time
+            let active_h = 0, open = null;
+            if (fs.existsSync('metrics/task-events.jsonl')) {
+              for (const line of fs.readFileSync('metrics/task-events.jsonl','utf8').split('\n')) {
+                if (!line.trim()) continue;
+                const e = JSON.parse(line);
+                if (e.issue !== iss.number) continue;
+                if (e.event === 'start') open = new Date(e.at);
+                else if (e.event === 'stop' && open) {
+                  active_h += (new Date(e.at) - open) / 36e5; open = null;
+                }
+              }
+            }
+            if (open) active_h += (new Date(iss.closed_at) - open) / 36e5;
+
+            // closing PR, if closed via "Closes #n"
+            const tl = await github.rest.issues.listEventsForTimeline({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: iss.number, per_page: 100
+            });
+            const xref = tl.data.find(e => e.event === 'cross-referenced'
+                          && e.source?.issue?.pull_request);
+            fs.appendFileSync('metrics/task-log.jsonl', JSON.stringify({
+              issue: iss.number,
+              title: iss.title,
+              feature: (labels.find(l => l.startsWith('feature:')) || 'feature:none').slice(8),
+              origin: labels.includes('nightly-failure') ? 'nightly'
+                    : labels.includes('converge-audit') ? 'audit' : 'planned',
+              opened_at: iss.created_at,
+              closed_at: iss.closed_at,
+              lead_time_h: Math.round((new Date(iss.closed_at) - new Date(iss.created_at)) / 36e4) / 10,
+              active_time_h: Math.round(active_h * 10) / 10,
+              closing_pr: xref ? xref.source.issue.number : null,
+              assignee_type: iss.assignees.some(a => a.type === 'Bot') ? 'agent'
+                           : labels.includes('agent-authored') ? 'agent' : 'human'
+            }) + '\n');
+
+      - name: Commit
+        run: |
+          git config user.name "task-metrics[bot]"
+          git config user.email "metrics@users.noreply.github.com"
+          git add metrics/ && git commit -m "metrics: task event (issue #${{ github.event.issue.number }})" && git push || echo "nothing to commit"

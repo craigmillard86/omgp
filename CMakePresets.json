@@ -1,0 +1,12 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "native",
+      "binaryDir": "${sourceDir}/build/native",
+      "cacheVariables": { "OMGP_SANITIZERS": "ON", "CMAKE_BUILD_TYPE": "Debug" }
+    }
+  ],
+  "buildPresets": [ { "name": "native", "configurePreset": "native" } ],
+  "testPresets":  [ { "name": "native", "configurePreset": "native", "output": {"outputOnFailure": true} } ]
+}

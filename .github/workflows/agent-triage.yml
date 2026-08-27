@@ -1,0 +1,60 @@
+name: agent-triage
+# Standing autonomous loop: when nightly files a failure issue, Claude Code
+# investigates headlessly and opens a fix PR for human review. Never merges.
+# NOTE: verify inputs against current anthropics/claude-code-action docs on setup;
+# requires CLAUDE_CODE_OAUTH_TOKEN repo secret (claude setup-token) + Claude GitHub App installed.
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: 'Issue number to triage'
+        required: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: agent-triage
+  cancel-in-progress: false     # let an in-flight investigation finish
+
+jobs:
+  triage:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'nightly-failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Toolchain (so the agent can run the pipeline)
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake ninja-build
+          pip install jinja2 pyyaml pytest
+      - name: Claude Code — investigate and propose fix
+        uses: anthropics/claude-code-action@v1
+        with:
+          # Subscription auth: token from `claude setup-token` (Pro/Max/Team/Enterprise).
+          # Swap to anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} for pay-as-you-go.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are the triage agent for this repo. Read CLAUDE.md and
+            docs/OPERATING-POLICY.md first and stay within agent permissions.
+            Target: issue #${{ github.event.issue.number || inputs.issue }}.
+            1. Reproduce the failure using ./pipeline.sh stages.
+            2. Diagnose root cause; if a code fix is warranted, implement it
+               TDD-style: add the failing regression test/scenario first.
+            3. Run the full local pipeline until green.
+            4. Open a PR on branch fix/issue-<n> labelled agent-authored,
+               linking the issue, summarising root cause and evidence.
+            If the failure is environmental or the fix requires a human
+            ruling (protocol change, vector regeneration, spec ambiguity),
+            do NOT attempt it: comment your analysis on the issue and add
+            the label needs-human.
+          claude_args: |
+            --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr create*),Edit,Read,Write,Grep,Glob"

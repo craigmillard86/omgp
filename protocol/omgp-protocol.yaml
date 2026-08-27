@@ -1,0 +1,128 @@
+# OMGP Protocol Definition — single source of truth
+# Edit this file, run tools/codegen.py, update docs tables in the same commit.
+# Versioned with the protocol, not the software.
+
+protocol:
+  major: 1
+  minor: 0
+
+limits:
+  max_l3_payload: 64          # bytes; one L3 message per trunk frame
+  max_descriptor_bytes: 2048
+  module_bus_chunk: 28        # READ_DESC max_len on module bus (SMBus block fit)
+  max_nodes: 128
+  param_value_max: 4095       # 12-bit logical resolution
+
+addressing:
+  host: 0x00
+  backplane_min: 0x01
+  backplane_max: 0x0F
+  module_min: 0x10
+  module_max: 0x7F
+  reserved_min: 0x80          # future multicast/broadcast; MUST NOT be used in v1
+  module_i2c_base: 0x20       # module bus address = base + slot_id
+
+l3_flags:
+  response: 0x01
+  error: 0x02
+
+opcodes:
+  PING:           {code: 0x01, target: any,       idempotent: true}
+  IDENTIFY:       {code: 0x02, target: any,       idempotent: true}
+  READ_DESC:      {code: 0x03, target: any,       idempotent: true}
+  SELECT_CHANNEL: {code: 0x10, target: module,    idempotent: true, semantics: accept_then_settle}
+  SET_BYPASS:     {code: 0x11, target: module,    idempotent: true}
+  SET_PARAM:      {code: 0x12, target: module,    idempotent: true, note: absolute values only}
+  GET_PARAM:      {code: 0x13, target: module,    idempotent: true}
+  GET_STATUS:     {code: 0x14, target: any,       idempotent: true}
+  GET_EVENT:      {code: 0x15, target: any,       idempotent: false, note: drains queue; replay-safe via L2 seq replay buffer}
+  BP_SLOT_MAP:    {code: 0x20, target: backplane, idempotent: true}
+  BP_POWER:       {code: 0x21, target: backplane, idempotent: true}
+  BP_ROUTE:       {code: 0x22, target: backplane, idempotent: true, status: provisional}
+  ERROR:          {code: 0x7F, target: response_only}
+
+reserved_opcode_ranges:
+  firmware_update: {min: 0x60, max: 0x6F}   # design pending; do not allocate
+
+error_codes:
+  ERR_UNKNOWN_OPCODE: 0x01
+  ERR_BAD_PAYLOAD:    0x02
+  ERR_UNKNOWN_TARGET: 0x03    # unknown param/channel
+  ERR_BUSY:           0x04    # settling or bridge in-flight; retry later
+  ERR_NOT_PERMITTED:  0x05
+  ERR_INTERNAL:       0x06
+
+node_states:
+  INIT: 0
+  READY: 1
+  SETTLING: 2
+  FAULT: 3
+  DISABLED: 4
+
+events:
+  CHANNEL_SETTLED:        0x01
+  FAULT_RAISED:           0x02
+  FAULT_CLEARED:          0x03
+  PARAM_CHANGED_LOCALLY:  0x04   # reserved; modules have no local controls in v1
+  USER_DEFINED_MIN:       0xF0
+  USER_DEFINED_MAX:       0xFF
+
+param_kinds:
+  CONTINUOUS: 0
+  TOGGLE: 1
+  ENUM: 2
+  MOMENTARY: 3
+  TRIGGER: 4
+  READONLY: 5
+
+tlv:
+  PROTOCOL:     {type: 0x01, required: true}
+  MODULE_TYPE:  {type: 0x02, required: true}
+  NAME:         {type: 0x03, required: true,  max_len: 24}
+  MANUFACTURER: {type: 0x04, required: true,  max_len: 24}
+  MODEL_ID:     {type: 0x05, required: true}
+  SERIAL:       {type: 0x06, required: false, max_len: 16}
+  CHANNEL:      {type: 0x10, required: true,  repeated: true}
+  SWITCHING:    {type: 0x11, required: true}
+  PARAM:        {type: 0x20, required: true,  repeated: true}
+  PARAM_ENUM:   {type: 0x21, required: false, repeated: true}
+  AUDIO:        {type: 0x30, required: true}
+  POWER_LV:     {type: 0x40, required: true}
+  POWER_TUBE:   {type: 0x41, required: false}
+  VENDOR:       {type: 0x7E, required: false, repeated: true}
+
+module_types:      # Spec §4 classes
+  ANALOGUE_EFFECT: 0x01
+  SMART_ANALOGUE:  0x02
+  TUBE_PREAMP:     0x03
+  SS_PREAMP:       0x04
+  DSP_EFFECT:      0x05
+  HYBRID:          0x06
+  SIMULATION:      0x07
+  ROUTING_MIXER:   0x08
+  OUTPUT:          0x09
+  CONTROL:         0x0A
+  POWER:           0x0B
+  TUBE_POWER:      0x0C
+  DEVELOPMENT:     0x0D
+
+link_trunk:        # trunk spec §9 conformance timing
+  bit_rate: 1000000
+  bit_rate_fallback: 115200
+  flag_byte: 0x7E
+  escape_byte: 0x7D
+  escape_xor: 0x20
+  crc: crc16_ccitt_false
+  T_turn_min_us: 20
+  T_turn_max_us: 100
+  T_resp_us: 200
+  T_gap_us: 50
+  T_poll_us: 2000
+  retries: 2
+  suspect_after_failures: 3
+  offline_after_suspect_ms: 1000
+
+module_bus:
+  speed_hz: 400000
+  conventions: smbus            # PEC, clock-low timeout, SMBALERT via IRQ#
+  transaction_timeout_ms: 5

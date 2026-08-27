@@ -1,0 +1,49 @@
+name: risk-score
+# Automatic PR risk tiering by touched paths + change shape (GOVERNANCE.md §3).
+# Applies risk:t0..t3 label; T3 additionally gets needs-human and a comment.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const pr = context.payload.pull_request;
+            const files = await github.paginate(github.rest.pulls.listFiles,
+              {owner, repo, pull_number: pr.number, per_page: 100});
+            const paths = files.map(f => f.filename);
+            const touches = re => paths.some(p => re.test(p));
+            const removedTests = files.some(f =>
+              /^tests\//.test(f.filename) && f.deletions > 0 &&
+              (f.status === 'removed' || f.deletions > f.additions));
+
+            let tier = 0, reasons = [];
+            const T = (n, why) => { if (n > tier) tier = n; reasons.push(`T${n}: ${why}`); };
+
+            if (touches(/^(protocol\/|tests\/vectors\/|\.github\/|CLAUDE\.md|docs\/(OPERATING-POLICY|GOVERNANCE|protocol-l3|trunk-link-layer|omgp-spec)|\.specify\/memory\/)/))
+              T(3, 'touches ground-truth or governance artefacts');
+            if (removedTests) T(3, 'reduces test content');
+            if (touches(/^(core\/|link\/)/)) T(2, 'portable protocol-critical code');
+            if (touches(/^(pipeline\.sh|IDF_VERSION|tools\/codegen\.py)/)) T(2, 'build/toolchain definition');
+            if (pr.additions + pr.deletions > 800) T(2, `large change (${pr.additions + pr.deletions} lines)`);
+            if (touches(/^(sim\/|cli\/|transport\/|tools\/)/)) T(1, 'host-only code');
+            if (tier === 0) reasons.push('T0: docs/tests/scenarios only');
+
+            // replace any prior risk label
+            for (const l of pr.labels.filter(l => l.name.startsWith('risk:')))
+              await github.rest.issues.removeLabel({owner, repo, issue_number: pr.number, name: l.name}).catch(()=>{});
+            const labels = [`risk:t${tier}`];
+            if (tier === 3) labels.push('needs-human');
+            await github.rest.issues.addLabels({owner, repo, issue_number: pr.number, labels});
+            if (tier === 3)
+              await github.rest.issues.createComment({owner, repo, issue_number: pr.number,
+                body: `⚖️ **Risk T3** — this PR touches artefacts requiring explicit human ruling (GOVERNANCE.md §3):\n\n- ${reasons.join('\n- ')}\n\nCODEOWNERS review is required; agent-authored T3 changes should normally have been escalated, not implemented.`});
+            core.summary.addHeading(`Risk tier: T${tier}`).addList(reasons).write();

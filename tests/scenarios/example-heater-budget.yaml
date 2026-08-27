@@ -1,0 +1,33 @@
+# Scenario: tube heater budget denial (Spec v0.7 §47, test 2)
+# Verifies: backplane refuses to energise a module whose declared heater
+# demand exceeds remaining capacity, and the host reports it.
+name: heater-budget-denial
+requirement: spec-v0.7 §47
+
+rig:
+  backplanes:
+    - id: bp1
+      type: preamp
+      slots: 4
+      heater_capacity_ma: 5000
+  modules: []          # attached during the script, not at boot
+
+script:
+  - boot: {}
+  - advance_ms: 50     # allow enrolment + discovery to settle
+  - attach: {backplane: bp1, slot: 0, module: virtual-modules/four-tube-preamp.json,
+             override: {heater_max_ma: 1300}}
+  - attach: {backplane: bp1, slot: 1, module: virtual-modules/four-tube-preamp.json,
+             override: {heater_max_ma: 1200}}
+  - attach: {backplane: bp1, slot: 2, module: virtual-modules/four-tube-preamp.json,
+             override: {heater_max_ma: 1400}}
+  - advance_ms: 200
+  - expect: {node: bp1/slot0, state: READY}
+  - expect: {node: bp1/slot1, state: READY}
+  - expect: {node: bp1/slot2, state: READY}
+  - attach: {backplane: bp1, slot: 3, module: virtual-modules/four-tube-preamp.json,
+             override: {heater_max_ma: 1500}}   # total request 5400 > 5000
+  - advance_ms: 200
+  - expect: {node: bp1/slot3, state: DISABLED, reason: POWER_BUDGET}
+  - expect_event: {source: bp1, type: FAULT_RAISED, detail: HEATER_BUDGET}
+  - expect: {node: bp1/slot0, state: READY}     # existing modules unaffected

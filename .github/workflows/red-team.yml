@@ -1,0 +1,113 @@
+name: red-team
+# Devil's-advocate testing: falsification, not confirmation. Two modes:
+#  - PR mode (risk:t2/t3 labelled): attack the change — write and RUN
+#    hostile tests/scenarios trying to break it; report only reproducible
+#    reds or an explicit concession.
+#  - Protocol mode (monthly/manual): attack the system through the
+#    hostile-module threat model (malicious descriptors, bus babble,
+#    resource exhaustion, power-declaration lies) and file findings.
+# Rule of evidence: a finding without a runnable reproducer is not a finding.
+on:
+  pull_request:
+    types: [labeled]
+  schedule:
+    - cron: '0 5 1 * *'      # monthly protocol red-team
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'pr <number> or protocol'
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  attack-pr:
+    if: >
+      github.event_name == 'pull_request' &&
+      (github.event.label.name == 'risk:t2' || github.event.label.name == 'risk:t3')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '${{ github.event.pull_request.head.sha }}', fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Toolchain
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake ninja-build
+          pip install jinja2 pyyaml pytest
+      - name: Claude Code — adversarial attack on the change
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are the red team. Your stance: PR
+            #${{ github.event.pull_request.number }} is WRONG and your job
+            is to prove it. Read CLAUDE.md, the diff, and the spec sections
+            it cites. Then ATTACK:
+            - boundary and pathological inputs the tests don't cover
+              (zero/max lengths, wraparound, truncation mid-frame,
+              duplicate/out-of-order sequences)
+            - timing attacks: retries colliding with settling, claims of
+              idempotency under duplicated delivery, superframe budget
+              starvation
+            - hostile-module behaviour reachable through this change:
+              descriptor lies, oversized TLVs, event-queue flooding,
+              ERR_BUSY livelock
+            - the tests themselves: write a plausible bug this diff COULD
+              have contained and check the suite would have caught it
+            METHOD: write your attacks as real tests/scenarios in a scratch
+            directory (do NOT modify existing tests), run them via
+            ./pipeline.sh stages and direct execution. Iterate.
+            REPORT: one PR comment. For each finding: the runnable
+            reproducer (inline, copy-pasteable), observed vs expected, and
+            severity. If everything you tried passed, say exactly what you
+            attacked and concede: "attacked N vectors, change held."
+            Never file style opinions. Never modify the PR. A finding
+            without a reproducer must be labelled speculation and last.
+          claude_args: |
+            --allowedTools "Bash(./pipeline.sh*),Bash(g++*),Bash(python3*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Read,Write,Grep,Glob"
+
+  attack-protocol:
+    if: >
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'protocol')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Toolchain
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake ninja-build
+          pip install jinja2 pyyaml pytest
+      - name: Claude Code — hostile-module red team
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are the protocol red team for an OPEN hardware platform:
+            assume module firmware is written by adversaries. Read
+            docs/protocol-l3.md, docs/trunk-link-layer.md,
+            protocol/omgp-protocol.yaml and the current implementation.
+            Threat model — a hostile or defective module that: lies in its
+            descriptor (power, switching times, channel counts), floods
+            events, holds IRQ# asserted, answers ERR_BUSY forever, replays
+            stale responses, sends oversized/malformed TLVs, exhausts the
+            descriptor cache, or times its responses to maximise trunk
+            disruption through the bridge. Also: what can a hostile
+            BACKPLANE do that a module cannot?
+            For each viable attack: demonstrate it as a runnable scenario
+            or test where the implementation exists, or as a precise
+            walkthrough against the spec text where it does not, and state
+            the defence (spec change, host mitigation, or accepted risk).
+            OUTPUT: one issue titled "Protocol red-team <date>" labelled
+            red-team + needs-human, findings severity-ordered with
+            reproducers/walkthroughs, plus attacks tried that failed.
+            Do not modify any repository file.
+          claude_args: |
+            --allowedTools "Bash(./pipeline.sh*),Bash(python3*),Bash(gh issue*),Read,Write,Grep,Glob"

@@ -1,0 +1,43 @@
+name: security
+on:
+  push: {branches: [main]}
+  pull_request:
+  schedule:
+    - cron: '0 4 * * 3'   # weekly full scan
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  codeql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Deps
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake ninja-build
+          pip install jinja2 pyyaml
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp, python, actions
+          queries: security-and-quality
+      - name: Build for analysis
+        run: ./pipeline.sh codegen build
+      - uses: github/codeql-action/analyze@v3
+
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure

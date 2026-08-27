@@ -1,0 +1,50 @@
+name: Story / task (AI-ready PRD)
+description: A work item spec'd to the Definition of Ready for agent development
+labels: [task]
+body:
+  - type: textarea
+    id: intent
+    attributes:
+      label: Intent
+      description: What and why, one paragraph. No implementation detail.
+    validations: {required: true}
+  - type: textarea
+    id: spec-refs
+    attributes:
+      label: Spec references
+      description: "Authoritative sections this implements (e.g. protocol-l3 §3.2, trunk §7). 'None' only for tooling stories."
+      placeholder: "docs/protocol-l3.md §3.2; docs/trunk-link-layer.md §7"
+    validations: {required: true}
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Testable statements. Each becomes a test or scenario; write them as assertions, not aspirations.
+      placeholder: |
+        - [ ] SELECT_CHANNEL to a settling module returns ERR_BUSY
+        - [ ] scenario f03-settle-timeout.yaml passes
+    validations: {required: true}
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence required
+      description: Which pipeline stages / new scenarios prove this done, beyond OPERATING-POLICY §5 baseline.
+    validations: {required: true}
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: What an agent must NOT do here, and known adjacent temptations.
+    validations: {required: true}
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: "Issues/tasks that must merge first, or 'None'."
+    validations: {required: true}
+  - type: dropdown
+    id: risk-expectation
+    attributes:
+      label: Expected risk tier
+      options: ["T0 - docs/tests only", "T1 - host-only code", "T2 - core/link/toolchain", "T3 - requires human-ruling artefacts (should not be agent-dispatched)"]
+    validations: {required: true}

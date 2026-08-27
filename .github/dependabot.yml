@@ -1,0 +1,12 @@
+# Dependency currency: PRs for stale actions/deps, flowing through the same
+# gates as everything else (risk-score will tier .github/ changes T3).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+    labels: [dependencies]
+  - package-ecosystem: pip
+    directory: /tools
+    schedule: {interval: weekly}
+    labels: [dependencies]
