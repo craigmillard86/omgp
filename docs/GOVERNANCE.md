@@ -72,6 +72,16 @@ the enforcement.
 - Standing loops (nightly, triage, audit, dispatch, metrics) are enumerated
   in OPERATING-POLICY §4 with their human touchpoints.
 
+## 4b. Public-repo posture
+
+This repository is public. Consequences enforced here: agent workflows
+that execute code with secrets never run for fork PRs (same-repo guard);
+@claude mention responses are restricted to users with write access (the
+action's default — keep it); risk labelling of fork PRs uses
+pull_request_target WITHOUT any code checkout; no third-party trademarks
+in module names or examples; LICENSE (Apache-2.0) present from first
+commit — a public repo without one forbids the contributions it invites.
+
 ## 5. Audit trail
 
 Every consequential event leaves a queryable artefact: claims and releases

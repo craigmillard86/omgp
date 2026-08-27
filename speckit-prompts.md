@@ -189,8 +189,10 @@ exceptions permitted here). JSON via a single-header library
 (nlohmann/json), YAML via yaml-cpp or rapidyaml — choose one and record it.
 Rig and scenario execution run entirely in simulated time via the shared
 Clock. Virtual module behaviour is table-driven from JSON, not subclassed
-per module. Ship virtual-modules/ts808.json, dual-drive.json,
-british-preamp.json (tube, 3 channels), four-tube-preamp.json, delay.json.
+per module. Ship virtual-modules/green-overdrive.json, dual-drive.json,
+hirise-preamp.json (tube, 3 channels), four-tube-preamp.json, delay.json.
+Generic names only — no references to third-party product trademarks
+anywhere in this public repo.
 Scenario runner is the deliverable CI entry point:
 scenario_runner <dir|file>. Follow CLAUDE.md golden rules, especially
 rule 6.

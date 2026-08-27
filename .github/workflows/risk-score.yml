@@ -2,7 +2,10 @@ name: risk-score
 # Automatic PR risk tiering by touched paths + change shape (GOVERNANCE.md §3).
 # Applies risk:t0..t3 label; T3 additionally gets needs-human and a comment.
 on:
-  pull_request:
+  # pull_request_target so fork PRs can be labelled (write token).
+  # SAFE ONLY because this job never checks out or runs PR code — it
+  # reads the changed-file list via the API. Never add a checkout here.
+  pull_request_target:
     types: [opened, synchronize, reopened]
 
 permissions:
