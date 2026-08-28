@@ -27,7 +27,7 @@ All multi-byte integers are **little-endian** (§4). Sizes in bytes. "LE16" = `u
 | `link_trunk` | name → int or string | `TRUNK_<name>` (strings as `const char*`) |
 | `module_bus` | name → int or string | `MBUS_<name>` |
 | **new** `l3_payloads` | OPCODE → `{request: [fields], response: [fields]}` (FR-008 layouts; `opaque: true` for BP_*) | `PAYLOAD_INFO[]` `{code, req_len_min, req_len_max, resp_len_min, resp_len_max, opaque}` |
-| **new** `descriptor` | `crc: crc16_ccitt_false`, `max_bytes: 2048` (moves `limits.max_descriptor_bytes` semantics here or references it) | `DESC_CRC` name, `DESC_MAX_BYTES` |
+| **new** `descriptor` | `crc: crc16_ccitt_false` only — the 2048 cap remains `limits.max_descriptor_bytes` (single source) | `DESC_CRC` name; `DESC_MAX_BYTES` emitted as an alias of `LIMIT_max_descriptor_bytes` |
 
 Validation on load (FR-004): unique `code` across `opcodes`; unique `type` across `tlv`;
 unique values across `error_codes`, `events`, `module_types`, `node_states`,

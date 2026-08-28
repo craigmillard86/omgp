@@ -8,7 +8,8 @@ python3 tools/codegen.py [--yaml FILE] [--out DIR] [--vectors DIR] [--check]
   --out      output dir (default build/gen)
   --vectors  also render omgp_vectors.h from DIR/*.json (default tests/vectors when present)
   --check    render to a temp dir and exit 1 with a unified diff if --out differs; write nothing
-exit 0 ok | 1 drift (--check) | 2 YAML validation error (message names the conflict)
+  --check-docs  verify docs/protocol-l3.md tables against the YAML (see Drift guard); write nothing
+exit 0 ok | 1 drift (--check / --check-docs) | 2 YAML validation error (message names the conflict)
 ```
 
 Prints exactly one line on success: `codegen: wrote <out>/omgp_protocol.h, omgp_protocol.py[, omgp_vectors.h]`
@@ -32,7 +33,8 @@ struct TlvInfo { uint8_t type; bool required; bool repeated; uint8_t max_len; };
 inline constexpr TlvInfo TLV_INFO[] = { {0x01, true, false, 0}, ... };            // sorted by type
 struct PayloadInfo { uint8_t code; uint8_t req_min, req_max, resp_min, resp_max; bool opaque; };
 inline constexpr PayloadInfo PAYLOAD_INFO[] = { ... };                            // sorted by code
-inline constexpr uint16_t DESC_MAX_BYTES = 2048;  inline constexpr const char* DESC_CRC = "crc16_ccitt_false";
+inline constexpr uint16_t DESC_MAX_BYTES = LIMIT_max_descriptor_bytes;   // alias — not a second YAML value
+inline constexpr const char* DESC_CRC = "crc16_ccitt_false";
 ```
 
 ### `omgp_protocol.py`
@@ -63,8 +65,13 @@ Sorted by `name`. Used by Catch2 tests (decode → canonical equality; canonical
 - `\n` newlines, UTF-8, trailing newline, no trailing whitespace.
 - **Test**: `sha256(run1) == sha256(run2)`; `sha256(run(shuffled_yaml)) == sha256(run1)`
   where `shuffled_yaml` is the same document with every mapping's key order reversed.
-- **Drift guard** (CI, existing step): `python3 tools/codegen.py --check` must exit 0
-  against the committed `docs/` tables and the generated outputs used by the build.
+- **Drift guard** (CI codegen step): `python3 tools/codegen.py --check-docs` must exit
+  0. It parses the `docs/protocol-l3.md` tables (§3.1 opcodes, error-code line, §3.4
+  events, §4.1 record types) and the YAML, and fails naming any opcode/error/TLV/event/
+  module type present in one but not the other, or present in both with different
+  codes. The tables remain human-authored prose (rule 1: "update the affected docs
+  table in the same commit"); this makes forgetting to do so mechanical. `--check` is a
+  developer tool for verifying a `--out` directory and is not used by CI.
 
 ## Validation (spec FR-004) — exit 2 with message
 

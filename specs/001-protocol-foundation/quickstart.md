@@ -19,7 +19,7 @@ docker --version                       # for the ESP32-S3 target build
 python3 tools/codegen.py && sha256sum build/gen/omgp_protocol.h build/gen/omgp_protocol.py > /tmp/a
 python3 tools/codegen.py && sha256sum build/gen/omgp_protocol.h build/gen/omgp_protocol.py | diff - /tmp/a && echo DETERMINISTIC
 python3 -m pytest -q tools/refimpl/test_codegen.py       # shuffled-YAML determinism, FR-004 conflicts, tables
-python3 tools/codegen.py --check                          # exit 0 = committed outputs/docs in sync
+python3 tools/codegen.py --check-docs                     # exit 0 = docs/protocol-l3.md tables match the YAML
 ```
 Expected: `DETERMINISTIC`; pytest all passed; `--check` exit 0. If determinism were
 broken the `diff` prints differing hashes and `DETERMINISTIC` never appears.

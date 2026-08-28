@@ -86,8 +86,9 @@ struct RecordView { uint8_t type; uint8_t len; const uint8_t* value; uint16_t of
 class RecordCursor {                     // zero-copy, O(1) state, no allocation
  public:
   RecordCursor(const uint8_t* blob, size_t len);      // does NOT check the 2048 cap
-  Status next(RecordView& out);          // Ok / Truncated; returns false-equivalent at end
-  bool at_end() const;
+  Status next(RecordView& out);          // Ok (out filled) / Truncated (len overruns blob);
+                                         // at end: returns Ok, leaves out untouched, at_end() is true
+  bool at_end() const;                   // callers loop: while (!c.at_end() && c.next(v) == Status::Ok)
 };
 
 Status validate_descriptor(const uint8_t* blob, size_t len, DescriptorReport& report);
@@ -123,7 +124,8 @@ contain no literal that duplicates one of these (FR-005; `check_embedded.py`).
 ## Guarantees (labelled)
 
 - No heap: *by construction* (no allocating constructs) and *demonstrated* natively by
-  the `--wrap=malloc` link check.
+  the counting `--wrap=malloc` guard — every test wraps codec calls in
+  `HEAP_FREE_SCOPE` and asserts zero `malloc` calls occurred.
 - No read beyond input: *by construction* — every read is preceded by a bound check
   against `len`; *demonstrated* by ASan under fuzzing (SC-004).
 - No exceptions/RTTI: *by construction* (`-fno-exceptions -fno-rtti` makes their use a

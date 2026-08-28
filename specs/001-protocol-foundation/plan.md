@@ -20,6 +20,10 @@ corpus of ≥10k messages / ≥1k descriptors plus an invalid-input corpus, real
 targets behind `tools/fuzz-smoke.sh`, and Mull incremental mutation behind
 `tools/mutate.sh --diff` so the CI `deep-verify` job can finally fail.
 
+**Terms**: spec.md's "definition file" = `protocol/omgp-protocol.yaml`; "host-core
+implementation" = the C++ `omgp_l3` library in `l3/`; "reference implementation" =
+`tools/refimpl/` (Python).
+
 ## Technical Context
 
 **Language/Version**: C++17 (portable subset for `l3/`: no exceptions, no RTTI, no heap
@@ -137,7 +141,7 @@ link/crc16.hpp                    # unchanged; reused by descriptor_crc()
 
 third_party/catch2/               # NEW (T2 dependency slice): amalgamated Catch2 v3 + LICENSE.txt + VERSION
 tools/
-├── codegen.py                    # rewritten on Jinja2; --out, --yaml, --check, --vectors
+├── codegen.py                    # rewritten on Jinja2; --out, --yaml, --check, --check-docs, --vectors
 ├── diffcheck.py                  # extended: batch mode, message + descriptor + invalid corpora
 ├── l3_helper.cpp                 # host-only CLI (stdin lines → stdout lines) for diffcheck
 ├── check_embedded.py             # NEW: static scan (heap/exceptions/RTTI/protocol literals)
@@ -153,12 +157,14 @@ tools/
     └── test_*.py                 # pytest
 
 tests/
+├── support/                      # linked into every Catch2 test; never built as tests
+│   ├── catch_listener.cpp        # prints "EXECUTED: <n>" (assertion total) for the floor
+│   └── heap_guard.cpp            # counting __wrap_malloc + HEAP_FREE_SCOPE
 ├── unit/
-│   ├── test_smoke.cpp            # kept; EXECUTED contract preserved
+│   ├── test_smoke.cpp            # kept; standalone main; EXECUTED contract preserved
 │   ├── test_l3_header.cpp        # Catch2
 │   ├── test_l3_payload.cpp
-│   ├── test_l3_descriptor.cpp
-│   └── catch_listener.cpp        # prints "EXECUTED: <n>" (assertion total) for the floor
+│   └── test_l3_descriptor.cpp
 ├── property/
 │   └── test_l3_roundtrip.cpp     # seeded generators: encode→decode→encode identity, invalid→Status
 ├── fuzz/
@@ -170,14 +176,16 @@ tests/
     └── descriptor_sample.json
 
 esp32-host/
-├── CMakeLists.txt                # runs codegen before IDF configure
-└── components/omgp_l3/CMakeLists.txt  # NEW: idf_component_register(SRCS ../../l3/*.cpp ...)
+├── CMakeLists.txt                # asserts build/gen exists (codegen runs on the host: stage_esp32 → stage_codegen)
+└── components/omgp_l3/CMakeLists.txt  # NEW: idf_component_register(SRC_DIRS ../../../l3 ...)
     main/l3_smoke.cpp             # NEW: references encode/decode so the component links
 
 CMakeLists.txt, CMakePresets.json # omgp_l3 target, Catch2 target, tests, l3_helper, `fuzz` preset
 pipeline.sh                       # quality: check_embedded; unit: Catch2 binaries; refimpl: pytest;
                                   # UNIT_TEST_FLOOR raised
-.github/workflows/ci.yml          # deep-verify: install Mull, `mutate.sh --diff origin/main --require`
+.github/workflows/ci.yml          # three human PRs: Phase 1 esp32 job runs codegen on host;
+                                  # post-US1 drift step `codegen.py --check-docs`;
+                                  # post-US4 deep-verify installs Mull + `mutate.sh --diff origin/main --require`
 .github/workflows/risk-score.yml  # add l3/ to the T2 "portable protocol-critical code" regex
 CLAUDE.md                         # repo layout gains l3/; rule 5 names l3/ alongside core/ link/
 docs/protocol-l3.md               # §3.1 table gains the ruled response layouts (T3, with YAML)

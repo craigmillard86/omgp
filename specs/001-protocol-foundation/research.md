@@ -14,7 +14,10 @@ remains from the Technical Context.
   keeps it). The pipeline `esp32` stage (Docker `espressif/idf:v5.3`) is the target
   build. Additionally the native `omgp_l3` target compiles with
   `-fno-exceptions -fno-rtti` so the portable-subset constraint is checked on every
-  local build, not only in Docker.
+  local build, not only in Docker. Codegen runs on the **host** before the Docker
+  build (`pipeline.sh stage_esp32` calls `stage_codegen`; the CI `esp32` job installs
+  the Python deps and runs `./pipeline.sh codegen` first) — the `espressif/idf` image
+  has no Jinja2, so the IDF CMake only asserts `build/gen/omgp_protocol.h` exists.
 - **Rationale**: the plan input asked for "esp32 cross-compile check using
   arm-none-eabi-gcc, compile-only". The ESP32-S3 is Xtensa LX7; CLAUDE.md rule 10 says
   the target build uses ESP-IDF "never a generic ARM toolchain", and constitution
@@ -64,7 +67,7 @@ remains from the Technical Context.
   Apache-2.0-compatible) and a `VERSION` file recording the exact release tag and the
   sha256 of both files. Build as a static library once (`catch2_amalgamated`), link
   test executables against it. The bootstrap g++ path compiles the same two files.
-  A `tests/unit/catch_listener.cpp` event listener prints `EXECUTED: <n>` where `n` is
+  A `tests/support/catch_listener.cpp` event listener prints `EXECUTED: <n>` where `n` is
   the total assertion count at run end, preserving the `pipeline.sh` floor contract on
   both the ctest path (parsed from `LastTest.log`, summed across binaries) and the
   bootstrap path.
@@ -112,7 +115,7 @@ remains from the Technical Context.
 - **Decision**: add configure preset `fuzz` (`CMAKE_CXX_COMPILER=clang++`,
   `OMGP_FUZZ=ON`, `OMGP_SANITIZERS=ON`, `-fsanitize=fuzzer,address,undefined`) building
   four targets in `tests/fuzz/`: `fuzz_header` (decode_header on raw bytes),
-  `fuzz_payload` (byte 0 selects opcode, rest is payload → payload decoder),
+  `fuzz_payload` (byte 0 = opcode, byte 1 = direction, rest = payload → payload decoder),
   `fuzz_descriptor` (RecordCursor + validate on raw blob), `fuzz_roundtrip`
   (decode → if OK encode → assert bytes identical → decode again → assert equal).
   `tools/fuzz-smoke.sh <seconds>` configures/builds the preset, derives a seed corpus
@@ -215,15 +218,18 @@ remains from the Technical Context.
   code, TLV type, event, module type, flag, or limit from the YAML, **excluding** values
   < 0x10 (bit masks and small counts are too common) unless the literal appears in a
   `case`/comparison against a field named in the YAML; an escape hatch comment
-  `// literal-ok: <reason>` suppresses one line. Additionally the native `omgp_l3`
-  target links with `-Wl,--wrap=malloc` and a wrapper that aborts, proving no heap use
-  reaches the linker on the native build.
+  `// literal-ok: <reason>` suppresses one line. Additionally every native Catch2 test
+  links with `-Wl,--wrap=malloc` and a **counting** `__wrap_malloc` (forwards to
+  `__real_malloc`); tests wrap each codec call in `HEAP_FREE_SCOPE` and assert the
+  count did not change. (An aborting wrapper is wrong: `--wrap` is link-wide and Catch2
+  itself allocates, so every test would abort at startup.)
 - **Rationale**: SC-007 asks for zero findings; a grep-level scan is cheap, portable,
   and runs without cmake (bootstrap path).
 - **Alternatives considered**: clang-tidy checks only (rejected: not present on the
   bootstrap path); `-ffreestanding` (rejected: not what it enforces).
-- **Label**: heap absence on native *demonstrated* by the link-wrap; on Xtensa *assumed*
-  (same sources, `-fno-exceptions -fno-rtti` applied in the IDF component).
+- **Label**: heap absence on native *demonstrated* by the counting wrapper (zero
+  `malloc` calls across every codec invocation in the suite); on Xtensa *assumed* (same
+  sources, `-fno-exceptions -fno-rtti` applied in the IDF component).
 
 ## R-11 — Payload layouts not fixed by §3.1 beyond the FR-008 ruling (assumed defaults)
 

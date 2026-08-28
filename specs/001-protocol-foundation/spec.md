@@ -383,10 +383,12 @@ exits non-zero when a planted surviving mutant exceeds the threshold.
 **Test tooling (approved dependencies)**
 
 - **FR-032**: This feature MAY introduce one C++ unit-test framework and one mutation-testing
-  tool, each open-source under a licence compatible with Apache-2.0, pinned to an exact
-  version, and vendored or fetched in a way that builds offline (CLAUDE.md notes
-  "Catch2 via FetchContent (or vendored for offline builds)"). Neither may become a
-  dependency of host-core code. Their introduction is a T2 "new dependency" change
+  tool, each open-source under a licence compatible with Apache-2.0 and pinned to an
+  exact version. The test framework MUST be vendored so the build works offline
+  (CLAUDE.md notes "Catch2 via FetchContent (or vendored for offline builds)"); the
+  mutation tool is a CI-only analysis tool installed as a pinned package, and its
+  absence locally MUST be disclosed by the mutation harness rather than silently passed
+  (FR-027). Neither may become a dependency of host-core code. Their introduction is a T2 "new dependency" change
   (GOVERNANCE.md §3) and MUST land as its own reviewable slice.
 - **FR-033**: Adopting a test framework MUST keep the pipeline's unit-test execution floor
   working: the unit stage MUST still obtain a count of executed checks/assertions (the
@@ -503,9 +505,11 @@ exits non-zero when a planted surviving mutant exceeds the threshold.
   protocol release.
 - **Existing artefacts are extended, not replaced**: `tools/codegen.py`,
   `tools/diffcheck.py`, `tools/fuzz-smoke.sh`, `tools/mutate.sh`, `tools/refimpl/` and
-  the existing `crc_helper` differential all continue to work; their current output
-  contracts (stage names, exit codes) are preserved because `pipeline.sh` and CI depend
-  on them.
+  the existing `crc_helper` differential all continue to work, and pipeline stage names
+  are preserved because `pipeline.sh` and CI depend on them. Two exit-code contracts
+  change deliberately: `tools/fuzz-smoke.sh` exits non-zero when no fuzzer toolchain is
+  present (it is only invoked where fuzzing is required), and `tools/mutate.sh
+  --require` exits non-zero when the mutation tool is missing.
 - **Existing generated outputs are regenerated, not hand-edited**: `build/gen/` is a
   build product; any change to its contents comes from the definition file or the
   generator.

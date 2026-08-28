@@ -70,7 +70,9 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   small slack (documented in the commit that raises it: "raise when tests are added;
   NEVER lower").
 - `refimpl`: `python3 -m pytest -q tools/refimpl`.
-- `codegen`: `python3 tools/codegen.py --vectors tests/vectors`.
+- `codegen`: `python3 tools/codegen.py --vectors tests/vectors && python3 tools/codegen.py --check-docs`.
+- `esp32`: calls `stage_codegen` first so `build/gen/` exists on the host before the
+  Docker build (the IDF image has no Jinja2).
 - New optional stage `fuzz` (`./pipeline.sh fuzz` → `tools/fuzz-smoke.sh 60`) — not in
   the default stage list.
 
@@ -80,17 +82,28 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   -fno-exceptions -fno-rtti)`; `target_include_directories(build/gen, .)`.
 - `add_library(catch2_amalgamated STATIC third_party/catch2/catch_amalgamated.cpp)`.
 - Test executables: `test_smoke` (kept), `test_l3_header`, `test_l3_payload`,
-  `test_l3_descriptor`, `test_l3_roundtrip` each `add_test`; native link option
-  `-Wl,--wrap=malloc` on the `omgp_l3` consumers' test for the heap check.
+  `test_l3_descriptor`, `test_l3_roundtrip` each `add_test`, all linking
+  `tests/support/*.cpp` (Catch2 listener, counting `__wrap_malloc` heap guard) with
+  `-Wl,--wrap=malloc`.
 - `CMakePresets.json`: add `fuzz` configure/build presets (clang, `OMGP_FUZZ=ON`).
-- `esp32-host/CMakeLists.txt`: `execute_process(python3 tools/codegen.py)` before
-  `project()`; component `components/omgp_l3` registers `../../l3/*.cpp` with
+- `esp32-host/CMakeLists.txt`: `message(FATAL_ERROR "run ./pipeline.sh codegen first")`
+  if `../build/gen/omgp_protocol.h` is missing (codegen runs on the host, never inside
+  the IDF container); component `components/omgp_l3` uses
+  `idf_component_register(SRC_DIRS ../../../l3 INCLUDE_DIRS ../../../l3 ../../../build/gen)`
+  (three levels up is the repo root; `SRCS` does not glob) with
   `-fno-exceptions -fno-rtti`; `main/l3_smoke.cpp` exercises encode/decode.
 
 ## CI (`.github/workflows/ci.yml`, T3)
 
-`deep-verify`: install pinned Mull for the runner's clang; replace the stub calls with
-`./tools/fuzz-smoke.sh 600` (already) and `./tools/mutate.sh --diff origin/main --require`.
+Three separate human PRs, each landing only after the tool it enables exists (a
+workflow edit inside an agent PR makes the whole PR T3 — see tasks.md PR boundaries):
+1. Phase 1 (T006): `esp32` job gains `actions/setup-python`, `pip install -r
+   tools/requirements.txt` and `./pipeline.sh codegen` before `./pipeline.sh esp32`.
+2. After US1 merges (T027 follow-up): codegen drift-guard step runs
+   `python3 tools/codegen.py --check-docs` after codegen.
+3. After T053–T061 merge (T062): `deep-verify` installs pinned Mull for the runner's
+   clang and switches to `./tools/mutate.sh --diff origin/main --require`
+   (`fuzz-smoke.sh 600` is already called).
 `native` job unchanged (pipeline does the rest). `risk-score.yml`: add `l3\/` to the T2
 regex. `CLAUDE.md`: layout + rule 5 mention `l3/`.
 
