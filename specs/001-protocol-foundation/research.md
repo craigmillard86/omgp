@@ -104,11 +104,28 @@ remains from the Technical Context.
 - **Alternatives considered**: universalmutator (Python, regex-based; rejected: no diff
   scoping, textual mutants, slow full rebuild per mutant); Dextool mutate (D toolchain;
   rejected: heavy toolchain for CI); repo-local script (rejected by ruling).
-- **Label**: Mull's exact CLI flags for incremental mode and the Ubuntu package name
-  are *assumed* (no network in this session to confirm the current release); the first
-  task in that slice verifies them and records the pinned version in `tools/mutate.cfg`.
-  The "gate can fail" property is *demonstrated* by the planted-mutant test in
-  quickstart.
+- **Label (updated during implementation, T058/T059)**: *demonstrated*, not assumed.
+  Verified against the project on 2026-08-28: latest release **0.34.0**; `.deb` per LLVM
+  major for Ubuntu 22.04/24.04 (`Mull-<N>-0.34.0-LLVM-<x.y.z>-ubuntu-amd64-<ver>.deb`);
+  plugin `/usr/lib/mull-ir-frontend-<N>` with `-fpass-plugin=… -g -grecord-command-line`;
+  runner `mull-runner-<N>`; incremental mode via `mull.yml` `gitDiffRef`/`gitProjectRoot`;
+  reporters `IDE, SQLite, GitHubAnnotations, Patches, Elements, Sarif` (no "JSON").
+  Exercised locally by extracting the LLVM-14 package (no install) and running it on
+  this repository — 997 mutants across `l3/`. Two traps found and fixed in the harness:
+  (1) the IR frontend reads `mull.yml` at **compile** time, so the config must exist
+  before the instrumented build and the build must be fresh; (2) an unknown mutator
+  name silently yields zero mutants — the harness now fails on "no mutants in a
+  non-empty scope" instead of passing; (3) `gitDiffRef` must NOT be in the
+  compile-time config (the plugin then embeds nothing) — it belongs to the run-time
+  config only; (4) `includePaths`/`excludePaths` must not be used at all: excluding
+  the TU that holds `main()` (Catch2) removes the run-time mutant dispatch, so every TU
+  is instrumented; (5) Mull's `gitDiffRef` filter drops every mutant in files the diff
+  **adds** (only modified-file hunks survive), so it is not used at all — `mutate.sh`
+  runs every mutant (`--workers`) and scopes the report itself from `git diff -U0`,
+  new files included, restricted to `l3/ link/ core/`. Measured kill rate on the
+  descriptor commit with the unit binaries as oracle: **76.8 % (265/345)** — threshold
+  ruling queued in `docs/OPEN-QUESTIONS.md`. The "gate can fail" property is
+  *demonstrated* by the planted-mutant test in quickstart / `tests/fuzz/README.md`.
 
 ## R-05 — Fuzzing: libFuzzer via a `fuzz` CMake preset
 

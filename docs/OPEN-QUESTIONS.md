@@ -139,3 +139,44 @@ now; the reviewer of the feature's Phase 1 PR is asked to rule inline.
 **Ruling:** pending — rule inline on the Phase 1 PR of feature 001, or
 append a superseding entry per item.
 **Supersedes:** none.
+
+## 2026-08-28 — Mutation kill-rate threshold for deep-verify
+
+**Context:** `tools/mutate.cfg` carries `threshold_pct = 80`, the provisional
+value from the feature-001 plan (research R-04: "tune after first real
+run"). The first real run — Mull 0.34.0, diff scope = the descriptor
+commit (`l3/l3_descriptor.*`, `l3/l3_utf8.hpp`), oracle = the three unit
+binaries — measured a **62 % kill rate** (107 killed / 171 reached).
+Survivors are dominated by mutants the unit tests cannot distinguish
+(byte-shift/or operators in `get16` when test values have a zero high
+byte, `assign_const` on report counters, boundary `<`/`<=` on values the
+tests never place at the edge). The property tests would kill more but
+are too slow per mutant at `-O0`. Lowering a gate threshold is a human
+ruling (GOVERNANCE.md §1), not something the agent adjusts to go green.
+**Recommendation:** keep 80 % as the target; set the enforced threshold
+to 60 % now with the measured baseline recorded here, and raise it as
+unit tests gain boundary cases (raising is agent-safe; lowering is T3).
+Alternatively enforce 80 % immediately and accept that `deep-verify` is
+red for this feature's PR until survivors are killed.
+**Ruling:** pending — human, when wiring T062 (deep-verify `--require`).
+**Supersedes:** none.
+
+## 2026-08-28 — Mutation kill-rate threshold: corrected measurement
+
+**Context:** the 62 % in the previous entry was measured before the
+harness scoped mutants correctly — Mull's own `gitDiffRef` filter keeps
+mutants in *modified* files and drops every mutant in files the diff
+*adds*, so that run had scored `tools/canonical.cpp` mutants against the
+descriptor unit tests. With scoping done by `tools/mutate.sh` from
+`git diff -U0` (new files included) the descriptor commit measures
+**76.8 % (265 killed / 345, 80 survived)**; survivors are boundary
+comparisons (`<`→`<=`, `>`→`>=`) and `assign_const` on report counters
+in `l3/l3_descriptor.cpp` and the UTF-8 byte-class bounds in
+`l3/l3_utf8.hpp`.
+**Recommendation:** keep 80 % as the enforced threshold — the gap is
+small and every survivor names a missing boundary test; killing them is
+ordinary agent work (CLAUDE.md working agreements: "kill surviving
+mutants rather than chasing line %"). Enforce on `deep-verify` from
+T062 onward.
+**Ruling:** pending — human, with T062.
+**Supersedes:** the previous entry's measurement and its 60 % suggestion.

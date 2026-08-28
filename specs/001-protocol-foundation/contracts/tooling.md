@@ -19,23 +19,36 @@ Every fast/partial path states its blind spot on stdout (CLAUDE.md working agree
    any target exits non-zero or any artifact was written; lists reproducer commands
    (`build/fuzz/<target> <artifact>`).
 
-## `tools/mutate.sh [--diff <ref>] [--require] [--threshold <pct>]`
+## `tools/mutate.sh [--diff <ref>] [--require] [--threshold <pct>] [--dry-run]`
 
 ```
 ./tools/mutate.sh --diff origin/main --require      # CI deep-verify
 ./tools/mutate.sh --diff HEAD~1                      # local
 ```
-1. Scope = files under `l3/ link/ core/` with added/changed lines in `git diff <ref>`
-   (line ranges collected per file). No scope → `mutation: nothing in scope (<ref>)`,
-   exit 0, in < 60 s.
-2. Tool check: `mull-runner`/`mull-cxx` (version pinned in `tools/mutate.cfg`,
-   with the clang major it matches). Absent → with `--require` exit 1 and
+1. `--diff <ref>` must name a commit in the clone (exit 2 otherwise — a shallow checkout
+   is an error, not a silent empty scope). Scope = files under `l3/ link/ core/` changed
+   relative to `<ref>`; no scope → `mutation: nothing in scope (<ref>)`, exit 0, < 60 s.
+   `--dry-run` prints the scope and stops.
+2. Tool check: `mull-runner-<N>` and `/usr/lib/mull-ir-frontend-<N>` for the clang major
+   in use (`tools/mutate.cfg` pins the Mull version; `MULL_RUNNER`/`MULL_PLUGIN` override
+   the paths, e.g. for an extracted package). Absent → with `--require` exit 1 and
    `mutation: mull <ver> required but not found`; without → exit 0 after
-   `mutation: mull not present — skipped (blind spot: no mutation coverage in this environment)`.
-3. Builds a clang native build with Mull instrumentation (separate build dir
-   `build/mutate/`), runs the Catch2 binaries under Mull restricted to the scope lines.
-4. Prints the Mutation Report (data-model §7) and writes `build/mutate/report.json`.
-5. Exit 1 if `kill_rate < threshold` (default from `tools/mutate.cfg`, initial 80).
+   `mutation: mull not present — skipped (blind spot: …)`.
+3. `build/mutate/mull.yml` holds mutators + timeout only and is written **before** a fresh
+   instrumented clang build (`-fpass-plugin=… -g -grecord-command-line -O0`, sanitizers
+   off): the IR frontend reads it at compile time, every translation unit is instrumented
+   (any include/exclude path filter removes Catch2's `main()` TU and with it the run-time
+   mutant dispatch — measured on 0.34.0), and Mull's `gitDiffRef` is not used because it
+   drops all mutants in files the diff *adds*.
+4. Runs the three unit binaries (`test_l3_header/payload/descriptor` — the property
+   binaries are too slow per mutant at -O0) under the runner with `--workers $(nproc)`
+   and the `IDE` + `Elements` reporters (+ `GitHubAnnotations` under CI); merges the
+   Elements JSON reports by mutant identity (killed if any binary kills it) and keeps
+   only mutants under `scope_dirs` on lines `git diff -U0 <ref>` added/changed (whole
+   file for new files; everything in scope when `--diff` is omitted).
+5. Prints the Mutation Report (data-model §7) and writes `build/mutate/report.json`.
+6. Exit 1 if any runner failed, if no report was produced, if the scope is non-empty but
+   zero mutants were generated, or if `kill_rate < threshold` (`tools/mutate.cfg`, 80).
 
 ## `tools/l3_helper` (built by CMake and by the bootstrap g++ path)
 

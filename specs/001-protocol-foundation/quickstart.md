@@ -84,10 +84,18 @@ reaching the decoder and step 6 proves nothing.
 ## 7. Mutation scoping bites — and is cheap when idle (US4, SC-005)
 
 ```bash
+./tools/mutate.sh --diff origin/main --dry-run    # print the in-scope files and stop
 ./tools/mutate.sh --diff origin/main              # local: disclosed-skip if Mull absent
 ./tools/mutate.sh --diff origin/main --require    # what CI runs: fails if Mull missing
-git stash && ./tools/mutate.sh --diff HEAD && git stash pop   # nothing in scope → < 60 s
+./tools/mutate.sh --diff HEAD                      # clean tree → "nothing in scope" in < 60 s
+# Without root: extract the matching .deb (tools/mutate.cfg names it) and point the harness at it
+MULL_RUNNER=/path/extracted/usr/bin/mull-runner-14 MULL_PLUGIN=/path/extracted/usr/lib/mull-ir-frontend-14 \
+  ./tools/mutate.sh --diff HEAD~1 --require
 ```
+Output ends with `mutation: diff_ref=… mutants=N killed=K survived=S not_covered=C
+kill_rate=…% threshold=80%` and one `survivor:` line per surviving mutant
+(`file:line:column mutator`). Zero mutants in a non-empty scope is a **failure**
+(instrumentation not reaching the code), never a pass.
 **Discriminating check** (do not commit): in `l3/l3_payload.cpp` change
 `value > LIMIT_param_value_max` to `>=` and temporarily delete the 4095-boundary test →
 report lists one survivor, exit 1. Restore both → killed, exit 0.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # OMGP pipeline — single definition used by CI, developers, and agents.
 # Usage: ./pipeline.sh [stage...]   (default: all local stages)
-# Stages: codegen quality build unit refimpl diffcheck scenarios esp32
+# Stages: codegen quality build unit refimpl diffcheck scenarios esp32 | fuzz (optional, clang)
 set -euo pipefail
 cd "$(dirname "$0")"
 STAGES=("${@:-codegen quality build unit refimpl diffcheck scenarios}")
@@ -12,8 +12,8 @@ CXXFLAGS_BOOT="-std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefi
 WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=_Znwm -Wl,--wrap=_Znam"
 
 # raise when tests are added; NEVER lower to get green (that change is itself T3)
-# 133602 = 133607 executed (7 binaries; the seeded property tests dominate) minus 5 slack — feature 001 US3
-UNIT_TEST_FLOOR=133602
+# 133608 = 133613 executed (7 binaries; the seeded property tests dominate) minus 5 slack — feature 001 US4
+UNIT_TEST_FLOOR=133608
 
 stage_codegen() {
   # Constants + vectors header from the YAML, then prove the human-authored docs tables
@@ -31,7 +31,7 @@ stage_quality() {
     echo "quality: clang-format not present (skipped in this env)"
   fi
   if command -v clang-tidy >/dev/null 2>&1 && [ -f build/native/compile_commands.json ]; then
-    find core link -name '*.cpp' 2>/dev/null \
+    find core link l3 -name '*.cpp' 2>/dev/null \
       | xargs -r clang-tidy -p build/native --warnings-as-errors='*'
   else
     echo "quality: clang-tidy skipped (needs compile_commands.json from cmake build)"
@@ -125,6 +125,11 @@ stage_diffcheck() { python3 tools/diffcheck.py; }
 stage_scenarios() {
   if [ -x "$BIN/scenario_runner" ]; then "$BIN/scenario_runner" tests/scenarios/
   else python3 tools/scenario_lint.py; fi   # lint-only until F4 delivers the runner
+}
+stage_fuzz() {
+  # Optional (not in the default list): libFuzzer smoke over every decoder, clang only.
+  # CI deep-verify runs tools/fuzz-smoke.sh 600 directly; FUZZ_SECONDS=… for a longer soak.
+  tools/fuzz-smoke.sh "${FUZZ_SECONDS:-60}"
 }
 stage_esp32() {
   # Codegen runs on the host: the IDF image has no Jinja2, and build/gen/ is inside the mount.

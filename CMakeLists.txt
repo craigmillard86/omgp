@@ -50,6 +50,13 @@ add_library(omgp_canon STATIC tools/canonical.cpp)
 target_include_directories(omgp_canon PUBLIC tools)
 target_link_libraries(omgp_canon PUBLIC omgp_l3)
 
+# --- fuzz targets (clang only; `fuzz` preset) — the rest of the tree is skipped there so a
+#     fuzz build stays fast and never needs the Catch2 object ---
+if(OMGP_FUZZ)
+  add_subdirectory(tests/fuzz)
+  return()
+endif()
+
 # --- tests ---
 add_executable(test_smoke tests/unit/test_smoke.cpp) # standalone main; kept as the floor's baseline
 add_test(NAME smoke COMMAND test_smoke)
