@@ -1,8 +1,8 @@
 // CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflect, no xorout)
 // trunk spec §4: computed over unstuffed dst..payload bytes.
 #pragma once
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 namespace omgp {
 inline uint16_t crc16_ccitt_false(const uint8_t* d, size_t n, uint16_t crc = 0xFFFF) {
     for (size_t i = 0; i < n; ++i) {
