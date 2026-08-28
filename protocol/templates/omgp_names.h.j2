@@ -1,0 +1,22 @@
+// GENERATED from protocol/omgp-protocol.yaml by tools/codegen.py -- DO NOT EDIT.
+// Host-only name tables (code -> symbol) for tools, tests and the canonical-text codec.
+// Not for the embedded path: l3/ never needs names. Sorted by code. Range markers
+// (*_MIN / *_MAX) are included; renderers must treat them as ranges, not names.
+#pragma once
+#include <cstddef>
+#include <cstdint>
+namespace omgp {
+namespace names {
+struct Entry {
+    uint8_t code;
+    const char* name;
+};
+{% for m in name_maps %}
+inline constexpr Entry {{ m.csymbol | replace('_CODES', '_TABLE') }}[] = {
+{% for e in m.entries %}
+    { {{ e.value }}, "{{ e.name }}" },
+{% endfor %}
+};
+{% endfor %}
+} // namespace names
+} // namespace omgp

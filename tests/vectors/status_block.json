@@ -1,0 +1,15 @@
+{
+  "bytes": "01 02 00 00 4D 00 01",
+  "canonical": "state=READY channel=2 bypass=0 fault=0x00 uptime_s=77 pending=1",
+  "fields": {
+    "active_channel": 2,
+    "bypass": 0,
+    "event_pending": 1,
+    "fault_code": 0,
+    "state": 1,
+    "uptime_s": 77
+  },
+  "kind": "status",
+  "name": "status_block",
+  "spec_ref": "protocol-l3 \u00a73.3"
+}

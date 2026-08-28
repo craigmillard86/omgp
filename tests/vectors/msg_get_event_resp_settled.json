@@ -1,0 +1,16 @@
+{
+  "bytes": "15 10 0A 01 03 01 02 01",
+  "canonical": "op=GET_EVENT node=0x10 seq=10 flags=0x01 evt=CHANNEL_SETTLED remaining=2 detail=01",
+  "fields": {
+    "detail": "01",
+    "event_type": 1,
+    "flags": 1,
+    "node_id": 16,
+    "opcode": "GET_EVENT",
+    "remaining_count": 2,
+    "seq": 10
+  },
+  "kind": "message",
+  "name": "msg_get_event_resp_settled",
+  "spec_ref": "protocol-l3 \u00a73.2/\u00a73.4 CHANNEL_SETTLED"
+}

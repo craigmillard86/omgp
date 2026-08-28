@@ -1,0 +1,17 @@
+{
+  "bytes": "12 10 03 00 04 01 FF FF 0F",
+  "canonical": "op=SET_PARAM node=0x10 seq=3 flags=0x00 param_id=1 scope=0xFF value=4095",
+  "fields": {
+    "flags": 0,
+    "node_id": 16,
+    "opcode": "SET_PARAM",
+    "param_id": 1,
+    "scope": 255,
+    "seq": 3,
+    "value": 4095
+  },
+  "kind": "message",
+  "name": "msg_set_param_req",
+  "note": "boundary: value 4095, scope module",
+  "spec_ref": "protocol-l3 \u00a73.1 SET_PARAM (absolute value, max)"
+}

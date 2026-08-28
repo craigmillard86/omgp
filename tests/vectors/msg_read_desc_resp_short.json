@@ -1,0 +1,15 @@
+{
+  "bytes": "03 10 03 01 0B F8 07 08 01 02 03 04 05 06 07 08",
+  "canonical": "op=READ_DESC node=0x10 seq=3 flags=0x01 offset=2040 bytes=0102030405060708",
+  "fields": {
+    "data": "0102030405060708",
+    "flags": 1,
+    "node_id": 16,
+    "offset": 2040,
+    "opcode": "READ_DESC",
+    "seq": 3
+  },
+  "kind": "message",
+  "name": "msg_read_desc_resp_short",
+  "spec_ref": "protocol-l3 \u00a73.1 READ_DESC response, last chunk"
+}

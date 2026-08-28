@@ -45,11 +45,22 @@ function(omgp_add_catch_test name)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
+# --- host-only canonical-text codec (C++ side of the differential test) ---
+add_library(omgp_canon STATIC tools/canonical.cpp)
+target_include_directories(omgp_canon PUBLIC tools)
+target_link_libraries(omgp_canon PUBLIC omgp_l3)
+
 # --- tests ---
 add_executable(test_smoke tests/unit/test_smoke.cpp) # standalone main; kept as the floor's baseline
 add_test(NAME smoke COMMAND test_smoke)
 omgp_add_catch_test(test_l3_types tests/unit/test_l3_types.cpp)
 omgp_add_catch_test(test_gen_constants tests/unit/test_gen_constants.cpp)
+omgp_add_catch_test(test_l3_header tests/unit/test_l3_header.cpp)
+omgp_add_catch_test(test_l3_payload tests/unit/test_l3_payload.cpp)
+target_link_libraries(test_l3_payload PRIVATE omgp_canon)
+omgp_add_catch_test(test_l3_roundtrip tests/property/test_l3_roundtrip.cpp)
 
 # --- host-only tools ---
 add_executable(crc_helper tools/crc_helper.cpp)
+add_executable(l3_helper tools/l3_helper.cpp)
+target_link_libraries(l3_helper PRIVATE omgp_canon)

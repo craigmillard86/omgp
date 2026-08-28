@@ -1,0 +1,14 @@
+{
+  "bytes": "11 10 08 00 01 01",
+  "canonical": "op=SET_BYPASS node=0x10 seq=8 flags=0x00 bypass=1",
+  "fields": {
+    "bypass": 1,
+    "flags": 0,
+    "node_id": 16,
+    "opcode": "SET_BYPASS",
+    "seq": 8
+  },
+  "kind": "message",
+  "name": "msg_set_bypass_req",
+  "spec_ref": "protocol-l3 \u00a73.1 SET_BYPASS"
+}

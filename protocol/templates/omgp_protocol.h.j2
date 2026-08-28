@@ -23,6 +23,11 @@ inline constexpr uint8_t RESERVED_{{ r.name }}_MAX = {{ r.max }};
 inline constexpr uint16_t DESC_MAX_BYTES = LIMIT_max_descriptor_bytes; // alias, not a second YAML value
 inline constexpr const char* DESC_CRC = "{{ descriptor.crc }}";
 
+// --- code tables (sorted; for range checks without literals) ---
+{% for m in name_maps %}
+inline constexpr uint8_t {{ m.csymbol }}[] = { {% for e in m.entries %}{{ e.value }}{% if not loop.last %}, {% endif %}{% endfor %} };
+{% endfor %}
+
 // --- attribute tables ---
 enum class Target : uint8_t { Any, Module, Backplane, ResponseOnly };
 struct OpcodeInfo {

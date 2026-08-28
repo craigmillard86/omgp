@@ -19,7 +19,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 CODEGEN = ROOT / "tools" / "codegen.py"
 YAML = ROOT / "protocol" / "omgp-protocol.yaml"
 DOCS = ROOT / "docs" / "protocol-l3.md"
-OUTPUTS = ("omgp_protocol.h", "omgp_protocol.py", "omgp_vectors.h")
+OUTPUTS = ("omgp_protocol.h", "omgp_protocol.py", "omgp_vectors.h", "omgp_names.h")
 
 
 def run(*args: str, yaml_path=YAML):
@@ -260,3 +260,14 @@ def test_success_line(tmp_path):
     rc, out, _ = run("--out", str(tmp_path / "o"))
     assert rc == 0
     assert out.strip().startswith("codegen: wrote ") and "omgp_vectors.h" in out
+
+
+def test_names_header_tables(tmp_path):
+    out = tmp_path / "o"
+    assert run("--out", str(out))[0] == 0
+    hdr = (out / "omgp_names.h").read_text()
+    for table in ("OPCODE_TABLE", "TLV_TABLE", "ERROR_TABLE", "EVENT_TABLE", "MODULE_TYPE_TABLE",
+                  "NODE_STATE_TABLE", "PARAM_KIND_TABLE"):
+        assert f"Entry {table}[]" in hdr, table
+    assert '{ 0x7F, "ERROR" }' in hdr and '{ 0xF0, "USER_DEFINED_MIN" }' in hdr
+    assert "namespace names" in hdr

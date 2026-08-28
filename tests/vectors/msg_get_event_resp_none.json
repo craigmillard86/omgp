@@ -1,0 +1,16 @@
+{
+  "bytes": "15 10 09 01 02 00 00",
+  "canonical": "op=GET_EVENT node=0x10 seq=9 flags=0x01 evt=NONE remaining=0 detail=",
+  "fields": {
+    "detail": "",
+    "event_type": 0,
+    "flags": 1,
+    "node_id": 16,
+    "opcode": "GET_EVENT",
+    "remaining_count": 0,
+    "seq": 9
+  },
+  "kind": "message",
+  "name": "msg_get_event_resp_none",
+  "spec_ref": "protocol-l3 \u00a73.4 empty queue -> NONE"
+}

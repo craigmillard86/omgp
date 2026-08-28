@@ -1,0 +1,76 @@
+"""Canonical-text tests (spec 001 T029). Exact strings from contracts/canonical-text.md."""
+from __future__ import annotations
+
+import pathlib
+import sys
+
+import pytest
+
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+from _gen import P  # noqa: E402
+import canonical as C  # noqa: E402
+import omgp_l3 as l3  # noqa: E402
+
+G = P()
+H = l3.Header
+
+CASES = [
+    ("op=PING node=0x01 seq=0 flags=0x00", H(G.OP_PING, 1, 0, 0, 0), None),
+    ("op=IDENTIFY node=0x10 seq=5 flags=0x01 major=1 minor=0 mt=TUBE_PREAMP desc_len=612 desc_crc=0x4A3F",
+     H(G.OP_IDENTIFY, 0x10, 5, G.FLAG_response, 7), l3.IdentifyResp(1, 0, G.MT_TUBE_PREAMP, 612, 0x4A3F)),
+    ("op=SET_PARAM node=0x10 seq=3 flags=0x00 param_id=1 scope=0xFF value=4095",
+     H(G.OP_SET_PARAM, 0x10, 3, 0, 4), l3.SetParamReq(1, 0xFF, 4095)),
+    ("op=GET_EVENT node=0x10 seq=9 flags=0x01 evt=NONE remaining=0 detail=",
+     H(G.OP_GET_EVENT, 0x10, 9, G.FLAG_response, 2), l3.GetEventResp(G.EVT_NONE, 0, b"")),
+    ("op=BP_POWER node=0x02 seq=1 flags=0x00 opaque=01ff00",
+     H(G.OP_BP_POWER, 2, 1, 0, 3), l3.OpaquePayload(bytes.fromhex("01ff00"))),
+    ("op=ERROR node=0x10 seq=3 flags=0x03 err=ERR_BUSY detail=",
+     H(G.OP_ERROR, 0x10, 3, G.FLAG_response | G.FLAG_error, 1), l3.ErrorResp(G.ERR_BUSY, b"")),
+    ("op=READ_DESC node=0x10 seq=2 flags=0x00 offset=1987 max_len=61",
+     H(G.OP_READ_DESC, 0x10, 2, 0, 3), l3.ReadDescReq(1987, 61)),
+    ("op=READ_DESC node=0x10 seq=2 flags=0x01 offset=2040 bytes=0102030405060708",
+     H(G.OP_READ_DESC, 0x10, 2, G.FLAG_response, 11), l3.ReadDescResp(2040, bytes(range(1, 9)))),
+    ("op=GET_STATUS node=0x10 seq=4 flags=0x01 state=READY channel=2 bypass=0 fault=0x00 uptime_s=77 pending=1",
+     H(G.OP_GET_STATUS, 0x10, 4, G.FLAG_response, 7), l3.StatusBlock(G.STATE_READY, 2, 0, 0, 77, 1)),
+    ("op=GET_EVENT node=0x10 seq=9 flags=0x01 evt=0xF0 remaining=0 detail=deadbeef",
+     H(G.OP_GET_EVENT, 0x10, 9, G.FLAG_response, 6), l3.GetEventResp(0xF0, 0, bytes.fromhex("deadbeef"))),
+]
+
+
+@pytest.mark.parametrize("line,header,obj", CASES, ids=[c[0].split()[0] + c[0].split()[3] for c in CASES])
+def test_message_round_trip(line, header, obj):
+    assert C.message_to_canonical(header, obj) == line
+    h, o = C.canonical_to_message(line)
+    assert (h, o) == (header, obj)
+
+
+def test_unknown_opcode_renders_hex_with_raw_payload():
+    line = "op=0x63 node=0x10 seq=1 flags=0x00 raw=0a0b"
+    h, o = C.canonical_to_message(line)
+    assert h == H(0x63, 0x10, 1, 0, 2) and o == l3.RawPayload(bytes.fromhex("0a0b"))
+    assert C.message_to_canonical(h, o) == line
+
+
+def test_status_block_canonical():
+    line = "state=READY channel=2 bypass=0 fault=0x00 uptime_s=77 pending=1"
+    sb = l3.StatusBlock(G.STATE_READY, 2, 0, 0, 77, 1)
+    assert C.status_to_canonical(sb) == line
+    assert C.canonical_to_status(line) == sb
+
+
+def test_error_rendering():
+    assert C.error_to_canonical(l3.L3Error("Truncated", "x")) == "ERR Truncated"
+
+
+def test_string_quoting_is_ascii_and_reversible():
+    raw = b'a"b\\c\xc3\xa9 z'
+    q = C.quote_str(raw)
+    assert q == '"a\\"b\\\\c\\xc3\\xa9 z"'
+    assert q.isascii() and C.unquote_str(q) == raw
+
+
+def test_bad_canonical_is_rejected_as_bad_request():
+    with pytest.raises(C.CanonicalError):
+        C.canonical_to_message("op=PING node=0x01")
+    with pytest.raises(C.CanonicalError):
+        C.canonical_to_message("op=NOPE node=0x01 seq=0 flags=0x00")

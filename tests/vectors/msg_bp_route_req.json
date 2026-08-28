@@ -1,0 +1,14 @@
+{
+  "bytes": "22 02 02 00 01 00",
+  "canonical": "op=BP_ROUTE node=0x02 seq=2 flags=0x00 opaque=00",
+  "fields": {
+    "data": "00",
+    "flags": 0,
+    "node_id": 2,
+    "opcode": "BP_ROUTE",
+    "seq": 2
+  },
+  "kind": "message",
+  "name": "msg_bp_route_req",
+  "spec_ref": "protocol-l3 \u00a73.1 BP_ROUTE (opaque, format TBD)"
+}

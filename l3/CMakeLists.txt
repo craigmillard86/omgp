@@ -1,8 +1,10 @@
 # omgp_l3 — L3 message + descriptor codecs. Embedded path (CLAUDE.md rule 5): the
 # portable-subset constraints are compiler-enforced here, not just documented.
-# Sources are listed explicitly; append as codecs land (l3_header, l3_payload, l3_descriptor).
+# Sources are listed explicitly; append as codecs land (l3_descriptor with US3).
 add_library(omgp_l3 STATIC
   l3_status.cpp
+  l3_header.cpp
+  l3_payload.cpp
 )
 target_include_directories(omgp_l3 PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}

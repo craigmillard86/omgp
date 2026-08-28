@@ -25,7 +25,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / "protocol" / "templates"
-OUTPUTS = ("omgp_protocol.h", "omgp_protocol.py", "omgp_vectors.h")
+OUTPUTS = ("omgp_protocol.h", "omgp_protocol.py", "omgp_vectors.h", "omgp_names.h")
 
 FIELD_WIDTH = {"u8": 1, "u16": 2}
 FIELD_TYPES = {"u8", "u16", "bytes"}
@@ -48,14 +48,15 @@ SCALAR_SECTIONS = [
 ]
 BYTE_SECTIONS = {"addressing", "l3_flags", "opcodes", "error_codes", "node_states", "events",
                  "param_kinds", "tlv", "module_types"}
-NAME_MAPS = [  # (python symbol, section, value-of). Plural: TLV_NAME is already the NAME record's type.
-    ("OPCODE_NAMES", "opcodes", lambda v: v["code"]),
-    ("TLV_NAMES", "tlv", lambda v: v["type"]),
-    ("ERROR_NAMES", "error_codes", lambda v: v),
-    ("EVENT_NAMES", "events", lambda v: v),
-    ("MODULE_TYPE_NAMES", "module_types", lambda v: v),
-    ("STATE_NAMES", "node_states", lambda v: v),
-    ("KIND_NAMES", "param_kinds", lambda v: v),
+NAME_MAPS = [  # (python names map, C++ codes array, section, value-of).
+    # Plural NAMES because TLV_NAME is already the NAME record's type constant.
+    ("OPCODE_NAMES", "OPCODE_CODES", "opcodes", lambda v: v["code"]),
+    ("TLV_NAMES", "TLV_CODES", "tlv", lambda v: v["type"]),
+    ("ERROR_NAMES", "ERROR_CODES", "error_codes", lambda v: v),
+    ("EVENT_NAMES", "EVENT_CODES", "events", lambda v: v),
+    ("MODULE_TYPE_NAMES", "MODULE_TYPE_CODES", "module_types", lambda v: v),
+    ("STATE_NAMES", "NODE_STATE_CODES", "node_states", lambda v: v),
+    ("KIND_NAMES", "PARAM_KIND_CODES", "param_kinds", lambda v: v),
 ]
 
 
@@ -211,10 +212,10 @@ def build_model(p: dict, vectors_dir: pathlib.Path | None) -> dict:
         payload_fields.append(entry)
 
     name_maps = []
-    for symbol, section, value_of in NAME_MAPS:
+    for symbol, csymbol, section, value_of in NAME_MAPS:
         items = sorted(({"value": _hex2(value_of(v)), "name": k} for k, v in p[section].items()),
                        key=lambda e: int(e["value"], 16))
-        name_maps.append({"symbol": symbol, "entries": items})
+        name_maps.append({"symbol": symbol, "csymbol": csymbol, "entries": items})
 
     return {
         "protocol": p["protocol"], "scalar_sections": scalar_sections, "reserved": reserved,
@@ -388,7 +389,7 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     for name, text in rendered.items():
         (out_dir / name).write_text(text)
-    print(f"codegen: wrote {_rel(out_dir)}/{OUTPUTS[0]}, {OUTPUTS[1]}, {OUTPUTS[2]}")
+    print(f"codegen: wrote {_rel(out_dir)}/{OUTPUTS[0]}, " + ", ".join(OUTPUTS[1:]))
     return 0
 
 

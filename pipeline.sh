@@ -12,8 +12,8 @@ CXXFLAGS_BOOT="-std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefi
 WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=_Znwm -Wl,--wrap=_Znam"
 
 # raise when tests are added; NEVER lower to get green (that change is itself T3)
-# 105 = 110 executed (smoke 7 + l3_types 40 + gen_constants 63) minus 5 slack — feature 001 US1
-UNIT_TEST_FLOOR=105
+# 30414 = 30419 executed (6 binaries; the seeded property tests dominate) minus 5 slack — feature 001 US2
+UNIT_TEST_FLOOR=30414
 
 stage_codegen() {
   # Constants + vectors header from the YAML, then prove the human-authored docs tables
@@ -56,7 +56,7 @@ stage_build() {
       g++ ${CXXFLAGS_BOOT/-Werror/} -Ithird_party/catch2 -c third_party/catch2/catch_amalgamated.cpp -o "$BIN/catch2.o"
     fi
     local support l3srcs t name
-    support=$(ls tests/support/*.cpp)
+    support="$(ls tests/support/*.cpp) tools/canonical.cpp"   # canonical.cpp: host-only, used by tests + l3_helper
     l3srcs=$(ls l3/*.cpp 2>/dev/null || true)
     # One binary per tests/unit/test_*.cpp and tests/property/test_*.cpp. test_smoke keeps its
     # own main (linking it with Catch2's main would be a duplicate symbol).
@@ -66,11 +66,12 @@ stage_build() {
       if [ "$name" = test_smoke ]; then
         g++ $CXXFLAGS_BOOT "$t" -o "$BIN/test_smoke"
       else
-        g++ $CXXFLAGS_BOOT -I. -Il3 -Ithird_party/catch2 -Itests/support \
+        g++ $CXXFLAGS_BOOT -I. -Il3 -Itools -Ithird_party/catch2 -Itests/support \
           "$t" $support $l3srcs "$BIN/catch2.o" $WRAP_LDFLAGS -o "$BIN/$name"
       fi
     done
     g++ $CXXFLAGS_BOOT tools/crc_helper.cpp -o "$BIN/crc_helper"
+    g++ $CXXFLAGS_BOOT -I. -Il3 -Itools tools/l3_helper.cpp tools/canonical.cpp $l3srcs -o "$BIN/l3_helper"
   fi
 }
 

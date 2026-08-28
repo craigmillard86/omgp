@@ -1,0 +1,13 @@
+{
+  "bytes": "15 10 09 00 00",
+  "canonical": "op=GET_EVENT node=0x10 seq=9 flags=0x00",
+  "fields": {
+    "flags": 0,
+    "node_id": 16,
+    "opcode": "GET_EVENT",
+    "seq": 9
+  },
+  "kind": "message",
+  "name": "msg_get_event_req",
+  "spec_ref": "protocol-l3 \u00a73.1 GET_EVENT"
+}

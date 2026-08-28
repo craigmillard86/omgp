@@ -71,6 +71,21 @@ TEST_CASE("PAYLOAD_INFO bounds follow the l3_payloads layouts", "[gen]") {
     }
 }
 
+TEST_CASE("code tables are sorted and complete", "[gen]") {
+    STATIC_REQUIRE(count_of(omgp::OPCODE_CODES) == count_of(omgp::OPCODE_INFO));
+    STATIC_REQUIRE(count_of(omgp::TLV_CODES) == count_of(omgp::TLV_INFO));
+    STATIC_REQUIRE(count_of(omgp::ERROR_CODES) == 6);
+    STATIC_REQUIRE(count_of(omgp::EVENT_CODES) ==
+                   7); // NONE..PARAM_CHANGED_LOCALLY + USER_DEFINED_MIN/MAX
+    STATIC_REQUIRE(count_of(omgp::MODULE_TYPE_CODES) == 13);
+    STATIC_REQUIRE(count_of(omgp::NODE_STATE_CODES) == 5);
+    STATIC_REQUIRE(count_of(omgp::PARAM_KIND_CODES) == 6);
+    for (size_t i = 1; i < count_of(omgp::ERROR_CODES); ++i)
+        REQUIRE(omgp::ERROR_CODES[i - 1] < omgp::ERROR_CODES[i]);
+    REQUIRE(omgp::ERROR_CODES[0] == omgp::ERR_UNKNOWN_OPCODE);
+    REQUIRE(omgp::EVENT_CODES[0] == omgp::EVT_NONE);
+}
+
 TEST_CASE("descriptor constants alias the single YAML limit", "[gen]") {
     STATIC_REQUIRE(omgp::DESC_MAX_BYTES == omgp::LIMIT_max_descriptor_bytes);
     REQUIRE(std::string(omgp::DESC_CRC) == "crc16_ccitt_false");

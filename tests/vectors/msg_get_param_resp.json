@@ -1,0 +1,16 @@
+{
+  "bytes": "13 10 04 01 04 02 00 00 08",
+  "canonical": "op=GET_PARAM node=0x10 seq=4 flags=0x01 param_id=2 scope=0x00 value=2048",
+  "fields": {
+    "flags": 1,
+    "node_id": 16,
+    "opcode": "GET_PARAM",
+    "param_id": 2,
+    "scope": 0,
+    "seq": 4,
+    "value": 2048
+  },
+  "kind": "message",
+  "name": "msg_get_param_resp",
+  "spec_ref": "protocol-l3 \u00a73.1 GET_PARAM response"
+}
