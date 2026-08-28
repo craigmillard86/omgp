@@ -53,7 +53,7 @@ Applied automatically to every PR by the `risk-score` workflow
 |---|---|---|
 | T0 | docs, tests, scenarios only | light review; verify tests test the right thing |
 | T1 | host-only code (sim/, cli/, transport/, tools/) | normal review |
-| T2 | portable protocol-critical code (core/, link/), pipeline/toolchain definition, or >800 lines | careful review; check against spec sections cited |
+| T2 | portable protocol-critical code (core/, link/), pipeline/toolchain definition, any new dependency, or >800 lines | careful review; check against spec sections cited |
 | T3 | ground-truth artefacts (protocol YAML, vectors, spec docs), governance (policy, workflows, CLAUDE.md, constitution), or any reduction of test content | CODEOWNERS-gated; agent-authored T3 is a policy breach signal — it should have escalated `needs-human` instead |
 
 Any T3 signal outranks lower signals (weakest-dimension floor rule applied

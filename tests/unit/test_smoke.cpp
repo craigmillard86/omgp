@@ -3,8 +3,10 @@
 #include <cstdio>
 #include <cstring>
 static int fails = 0;
+static int executed = 0;
 #define CHECK(c)                                                                                   \
     do {                                                                                           \
+        ++executed;                                                                                \
         if (!(c)) {                                                                                \
             std::printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c);                                \
             ++fails;                                                                               \
@@ -21,6 +23,7 @@ int main() {
     // CRC published check value: "123456789" -> 0x29B1
     const char* s = "123456789";
     CHECK(omgp::crc16_ccitt_false(reinterpret_cast<const uint8_t*>(s), std::strlen(s)) == 0x29B1);
+    std::printf("EXECUTED: %d\n", executed);
     if (fails) {
         std::printf("%d check(s) failed\n", fails);
         return 1;

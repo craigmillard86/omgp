@@ -56,6 +56,12 @@ in your summary rather than silently choosing.
     uses the ESP-IDF toolchain (pinned via the `espressif/idf` Docker image
     in CI and for local target builds), never a generic ARM toolchain.
     Don't merge with either red.
+11. **Label every claim about what a guard, check or change establishes.**
+    State whether it is proved by construction, demonstrated by a named
+    test, or assumed. Unlabelled property claims are overclaims. For any
+    "cannot", "never" or "always", state what makes it true: the
+    language/structure, or the current contents of the repo. The latter is
+    a control, not a guarantee.
 
 ## Build & test
 
@@ -138,7 +144,14 @@ telemetry reads exactly these signals and nothing else.
   codecs then all tests.
 - When a spec ambiguity blocks you, implement nothing speculative: add the
   question to `docs/OPEN-QUESTIONS.md` with your recommended answer and
-  proceed only if a safe default exists.
+  proceed only if a safe default exists. Entries are append-only and dated;
+  supersede a prior entry by appending a new one that references it, never
+  by editing history.
 - Never modify `.specify/` artifacts outside the Spec Kit workflow.
 - Mutation testing (`tools/mutate.sh`) runs weekly, not per-commit; if asked
   to improve coverage, kill surviving mutants rather than chasing line %.
+- Chain build and test in one invocation (`build && test`) so a failed
+  build can never report a stale binary's results. For any manual check
+  offered as evidence, state what the output would have been if the claim
+  were false; if identical, the evidence supports nothing and must not be
+  cited.

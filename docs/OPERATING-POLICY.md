@@ -86,7 +86,8 @@ Delivery" project board. Working rules, for agents and humans alike:
 A change is done when: unit + property tests green, scenario suite green,
 diffcheck green, both build presets pass, no new sanitizer findings, docs/
 YAML updated together if the protocol changed, and — for bug fixes — a
-regression scenario exists that fails without the fix.
+regression scenario exists that fails without the fix. PR descriptions and
+review findings follow the claim-labelling rule (CLAUDE.md rule 11).
 
 ## 6. Telemetry and review cadence
 
