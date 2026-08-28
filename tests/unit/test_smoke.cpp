@@ -1,9 +1,15 @@
-#include "omgp_protocol.h"
 #include "../../link/crc16.hpp"
+#include "omgp_protocol.h"
 #include <cstdio>
 #include <cstring>
 static int fails = 0;
-#define CHECK(c) do{ if(!(c)){ std::printf("FAIL %s:%d %s\n",__FILE__,__LINE__,#c); ++fails; } }while(0)
+#define CHECK(c)                                                                                   \
+    do {                                                                                           \
+        if (!(c)) {                                                                                \
+            std::printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c);                                \
+            ++fails;                                                                               \
+        }                                                                                          \
+    } while (0)
 int main() {
     // generated constants match the YAML source of truth
     CHECK(omgp::OP_PING == 0x01);
@@ -15,7 +21,10 @@ int main() {
     // CRC published check value: "123456789" -> 0x29B1
     const char* s = "123456789";
     CHECK(omgp::crc16_ccitt_false(reinterpret_cast<const uint8_t*>(s), std::strlen(s)) == 0x29B1);
-    if (fails) { std::printf("%d check(s) failed\n", fails); return 1; }
+    if (fails) {
+        std::printf("%d check(s) failed\n", fails);
+        return 1;
+    }
     std::printf("unit: all checks passed\n");
     return 0;
 }
