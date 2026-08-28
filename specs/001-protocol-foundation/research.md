@@ -30,7 +30,11 @@ remains from the Technical Context.
   skipping the target build for this feature (rejected: rule 10 "both builds must stay
   green").
 - **Label**: rule conflict *demonstrated* by reading CLAUDE.md rule 10 and
-  `.github/workflows/ci.yml` `esp32` job; IDF component wiring *assumed* until built.
+  `.github/workflows/ci.yml` `esp32` job; IDF component wiring *demonstrated* on
+  2026-08-29 — `./pipeline.sh esp32` (espressif/idf:v5.3, Docker Desktop WSL
+  integration) compiled `l3/l3_header.cpp`, `l3_payload.cpp`, `l3_descriptor.cpp`,
+  `l3_status.cpp` and `main/l3_smoke.cpp` with `xtensa-esp32s3-elf-g++`, zero warnings,
+  `omgp-host.bin` 206,800 bytes.
 
 ## R-02 — Codegen: Jinja2 templates, deterministic by construction
 

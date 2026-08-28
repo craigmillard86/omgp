@@ -150,7 +150,7 @@ later work is T2 or lower. Nothing in later phases may start until this merges
 - [X] T049 [US3] Implement `l3/l3_descriptor.hpp` + `l3/l3_descriptor.cpp`: `RecordCursor`, typed `decode_*` per record, `validate_descriptor` (256-bit seen bitmap, `TLV_INFO`-driven required/repeated/max_len, fixed-length table from data-model §3.1, counts), `DescriptorWriter` (`add_*`, `add_raw`, `finish`), `descriptor_crc` via `link/crc16.hpp`; cite `// protocol-l3 §4, §4.1`; make T043/T044 pass
 - [X] T050 [US3] Extend `tools/l3_helper.cpp` with `DENC`/`DDEC`/`DVAL` verbs and descriptor canonical parse/render
 - [X] T051 [US3] Extend `tools/diffcheck.py` with a seeded descriptor corpus (≥1,000 valid: random record mixes incl. unknown/VENDOR/max-length strings/2048-byte blobs) and invalid descriptor corpus (each rule in T042 mutated from the sample) compared via `DENC`/`DDEC`/`DVAL`
-- [ ] T052 [US3] Run `./pipeline.sh` green, raise `UNIT_TEST_FLOOR`; run `./pipeline.sh esp32` to prove `l3/` compiles for ESP32-S3 with the descriptor code included
+- [X] T052 [US3] Run `./pipeline.sh` green, raise `UNIT_TEST_FLOOR`; run `./pipeline.sh esp32` to prove `l3/` compiles for ESP32-S3 with the descriptor code included
 
 **Checkpoint**: US3 independent test passes; SC-006 (sample round-trip, 2048/2049) demonstrated in both languages; both builds green.
 

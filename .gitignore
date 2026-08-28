@@ -12,3 +12,4 @@ Thumbs.db
 .idea/
 # harness path bug: nested settings copy is never project content
 .claude/.claude/
+esp32-host/sdkconfig.old
