@@ -7,7 +7,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+/* l3_smoke.cpp — links the portable L3 codec component into the firmware. */
+const char* omgp_l3_smoke(void);
+
 void app_main(void) {
-    printf("OMGP host scaffold — protocol v1.0 pending host-core port\n");
+    printf("OMGP host scaffold — protocol v1.0 pending host-core port (l3: %s)\n",
+           omgp_l3_smoke());
     for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
 }

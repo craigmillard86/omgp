@@ -8,16 +8,19 @@ STAGES=("${@:-codegen quality build unit refimpl diffcheck scenarios}")
 [ $# -eq 0 ] && STAGES=(codegen quality build unit refimpl diffcheck scenarios)
 BIN=build/native
 CXXFLAGS_BOOT="-std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Ibuild/gen"
+# Counting heap guard for Catch2 tests (tests/support/heap_guard.hpp) — mirrors CMakeLists.txt.
+WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=_Znwm -Wl,--wrap=_Znam"
 
 # raise when tests are added; NEVER lower to get green (that change is itself T3)
-UNIT_TEST_FLOOR=7
+# 42 = 47 executed (test_smoke 7 + test_l3_types 40) minus 5 slack — feature 001 Phase 2
+UNIT_TEST_FLOOR=42
 
 stage_codegen()  { python3 tools/codegen.py; }
 
 stage_quality() {
   # Code quality gates: formatting + static analysis. Runs on every merge.
   if command -v clang-format >/dev/null 2>&1; then
-    find core link sim cli transport tools -name '*.cpp' -o -name '*.hpp' 2>/dev/null \
+    find core link l3 sim cli transport tools tests -name '*.cpp' -o -name '*.hpp' 2>/dev/null \
       | xargs -r clang-format --dry-run --Werror
   else
     echo "quality: clang-format not present (skipped in this env)"
@@ -28,6 +31,9 @@ stage_quality() {
   else
     echo "quality: clang-tidy skipped (needs compile_commands.json from cmake build)"
   fi
+  # CLAUDE.md rules 1/4/5 for embedded-path code: no heap/exceptions/RTTI, no protocol
+  # literals that the YAML defines, spec citations in l3/. Pure Python; runs on every path.
+  python3 tools/check_embedded.py
 }
 
 stage_build() {
@@ -39,8 +45,27 @@ stage_build() {
     echo "build: cmake not found -> bootstrap g++ build (sanitizers on)"
     echo "bootstrap build: same sources+sanitizers as CMake preset; ctest/coverage paths not exercised"
     mkdir -p "$BIN"
-    g++ $CXXFLAGS_BOOT tests/unit/test_smoke.cpp -o "$BIN/test_smoke"
-    g++ $CXXFLAGS_BOOT tools/crc_helper.cpp     -o "$BIN/crc_helper"
+    # Vendored Catch2 (third_party/catch2/VERSION), compiled once and reused while unchanged;
+    # third-party warnings never fail the build, so -Werror is dropped for this object only.
+    if [ ! -f "$BIN/catch2.o" ] || [ third_party/catch2/catch_amalgamated.cpp -nt "$BIN/catch2.o" ]; then
+      g++ ${CXXFLAGS_BOOT/-Werror/} -Ithird_party/catch2 -c third_party/catch2/catch_amalgamated.cpp -o "$BIN/catch2.o"
+    fi
+    local support l3srcs t name
+    support=$(ls tests/support/*.cpp)
+    l3srcs=$(ls l3/*.cpp 2>/dev/null || true)
+    # One binary per tests/unit/test_*.cpp and tests/property/test_*.cpp. test_smoke keeps its
+    # own main (linking it with Catch2's main would be a duplicate symbol).
+    for t in tests/unit/test_*.cpp tests/property/test_*.cpp; do
+      [ -f "$t" ] || continue
+      name=$(basename "$t" .cpp)
+      if [ "$name" = test_smoke ]; then
+        g++ $CXXFLAGS_BOOT "$t" -o "$BIN/test_smoke"
+      else
+        g++ $CXXFLAGS_BOOT -I. -Il3 -Ithird_party/catch2 -Itests/support \
+          "$t" $support $l3srcs "$BIN/catch2.o" $WRAP_LDFLAGS -o "$BIN/$name"
+      fi
+    done
+    g++ $CXXFLAGS_BOOT tools/crc_helper.cpp -o "$BIN/crc_helper"
   fi
 }
 
@@ -61,21 +86,26 @@ stage_unit() {
       return 1
     fi
   else
-    local out rc
-    set +e
-    out=$("$BIN/test_smoke")
-    rc=$?
-    set -e
-    echo "$out"
-    if [ "$rc" -ne 0 ]; then
-      return "$rc"
-    fi
-    local n
-    n=$(printf '%s\n' "$out" | grep -o 'EXECUTED: [0-9]\+' | grep -o '[0-9]\+') || true
-    n=${n:-0}
-    echo "unit: executed $n check(s) (bootstrap path)"
-    if [ "$n" -lt "$UNIT_TEST_FLOOR" ]; then
-      echo "unit: executed check count ($n) below floor ($UNIT_TEST_FLOOR) - test filter may be broken" >&2
+    # Every test binary runs; its output is always printed (even on failure) and the
+    # EXECUTED: lines are summed across binaries for the floor.
+    local total=0 bin out rc n
+    for bin in "$BIN"/test_*; do
+      [ -x "$bin" ] || continue
+      set +e
+      out=$("$bin")
+      rc=$?
+      set -e
+      echo "$out"
+      if [ "$rc" -ne 0 ]; then
+        echo "unit: $(basename "$bin") failed (exit $rc)" >&2
+        return "$rc"
+      fi
+      n=$(printf '%s\n' "$out" | grep -o 'EXECUTED: [0-9]\+' | grep -o '[0-9]\+' | tail -1) || true
+      total=$((total + ${n:-0}))
+    done
+    echo "unit: executed $total check(s) (bootstrap path)"
+    if [ "$total" -lt "$UNIT_TEST_FLOOR" ]; then
+      echo "unit: executed check count ($total) below floor ($UNIT_TEST_FLOOR) - test filter may be broken" >&2
       return 1
     fi
   fi
@@ -88,6 +118,8 @@ stage_scenarios() {
   else python3 tools/scenario_lint.py; fi   # lint-only until F4 delivers the runner
 }
 stage_esp32() {
+  # Codegen runs on the host: the IDF image has no Jinja2, and build/gen/ is inside the mount.
+  stage_codegen
   docker run --rm -v "$PWD":/w -w /w/esp32-host "espressif/idf:$(cat IDF_VERSION)" \
     bash -c "idf.py set-target esp32s3 && idf.py build"
 }
