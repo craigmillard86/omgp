@@ -37,7 +37,8 @@ CHUNK = 400  # requests in flight per pipe round trip (well under the 64 KiB pip
 
 
 class Helper:
-    """One l3_helper process; requests are sent in chunks and answered in order."""
+    """One l3_helper process; requests are streamed in while a reader thread drains the
+    answers, so neither pipe can fill and deadlock (descriptor lines run to several KB)."""
 
     def __init__(self, path: pathlib.Path):
         if not path.exists():
@@ -46,13 +47,20 @@ class Helper:
                                   bufsize=1)
 
     def ask(self, lines: list[str]) -> list[str]:
+        import threading
+
         out: list[str] = []
-        for i in range(0, len(lines), CHUNK):
-            chunk = lines[i:i + CHUNK]
-            self.p.stdin.write("".join(l + "\n" for l in chunk))
-            self.p.stdin.flush()
-            for _ in chunk:
+
+        def reader():
+            for _ in lines:
                 out.append(self.p.stdout.readline().rstrip("\n"))
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        for i in range(0, len(lines), CHUNK):
+            self.p.stdin.write("".join(l + "\n" for l in lines[i:i + CHUNK]))
+            self.p.stdin.flush()
+        t.join()
         return out
 
     def close(self):

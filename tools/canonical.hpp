@@ -29,5 +29,13 @@ std::string status_line(omgp::l3::Status s); // "ERR <name>"
 std::string hex_lower(const uint8_t* data, size_t len);
 bool parse_hex(const std::string& text, std::vector<uint8_t>& out); // spaces allowed, any case
 
+// Descriptors (§4): records joined by " | "; strings quoted with \" \\ \xNN escapes.
+std::string render_descriptor(const uint8_t* blob, size_t len); // canonical | "ERR <Status>"
+bool encode_descriptor(const std::string& canonical, std::vector<uint8_t>& out, std::string& error);
+// DVAL line: "OK skipped=<n> channels=<n> params=<n>" | "ERR <Status> type=0x.. offset=<n>"
+std::string validate_line(const uint8_t* blob, size_t len);
+std::string quote_str(const uint8_t* data, size_t len);
+bool unquote_str(const std::string& quoted, std::vector<uint8_t>& out);
+
 } // namespace canon
 } // namespace omgp

@@ -530,3 +530,392 @@ bool encode_status(const std::string& canonical, std::vector<uint8_t>& out, std:
 
 } // namespace canon
 } // namespace omgp
+
+// ================================================================================================
+// Descriptors (spec 001 US3, T050). Mirrors the descriptor half of tools/refimpl/canonical.py.
+// ================================================================================================
+
+#include "l3/l3_descriptor.hpp"
+
+namespace omgp {
+namespace canon {
+
+using namespace omgp::l3;
+
+namespace {
+
+std::string sv(Str s) {
+    return quote_str(s.data, s.len);
+}
+
+std::string render_record(const RecordView& v) {
+    const uint8_t t = v.type;
+    if (t == TLV_PROTOCOL) {
+        ProtocolRec r;
+        decode_protocol(v, r);
+        return "PROTOCOL major=" + dec(r.major) + " minor=" + dec(r.minor);
+    }
+    if (t == TLV_MODULE_TYPE)
+        return "MODULE_TYPE mt=" + name_or_hex(names::MODULE_TYPE_TABLE, v.value[0]);
+    if (t == TLV_NAME)
+        return "NAME s=" + quote_str(v.value, v.len);
+    if (t == TLV_MANUFACTURER)
+        return "MANUFACTURER s=" + quote_str(v.value, v.len);
+    if (t == TLV_MODEL_ID) {
+        ModelIdRec r;
+        decode_model_id(v, r);
+        return "MODEL_ID model=" + hex4(r.vendor_model) + " hw=" + hex4(r.hw_rev) +
+               " fw=" + hex4(r.fw_rev);
+    }
+    if (t == TLV_SERIAL)
+        return "SERIAL s=" + quote_str(v.value, v.len);
+    if (t == TLV_CHANNEL) {
+        ChannelRec r;
+        decode_channel(v, r);
+        return "CHANNEL idx=" + dec(r.index) + " s=" + sv(r.name);
+    }
+    if (t == TLV_SWITCHING) {
+        SwitchingRec r;
+        decode_switching(v, r);
+        return "SWITCHING flags=" + hex2(r.flags) + " settle_ms=" + dec(r.settle_ms);
+    }
+    if (t == TLV_PARAM) {
+        ParamRec r;
+        decode_param(v, r);
+        return "PARAM id=" + dec(r.param_id) + " scope=" + hex2(r.scope) +
+               " kind=" + name_or_hex(names::PARAM_KIND_TABLE, r.kind) +
+               " default=" + dec(r.default_value) + " s=" + sv(r.name);
+    }
+    if (t == TLV_PARAM_ENUM) {
+        ParamEnumRec r;
+        decode_param_enum(v, r);
+        return "PARAM_ENUM id=" + dec(r.param_id) + " idx=" + dec(r.index) + " s=" + sv(r.label);
+    }
+    if (t == TLV_AUDIO) {
+        AudioRec r;
+        decode_audio(v, r);
+        return "AUDIO io=" + hex2(r.io_flags) + " input_mode=" + dec(r.input_mode) +
+               " in_max=" + dec(r.in_max_mvrms) + " out_max=" + dec(r.out_max_mvrms);
+    }
+    if (t == TLV_POWER_LV) {
+        PowerLvRec r;
+        decode_power_lv(v, r);
+        return "POWER_LV p15=" + dec(r.p15_ma) + " n15=" + dec(r.n15_ma) + " p9=" + dec(r.p9_ma) +
+               " p5=" + dec(r.p5_ma);
+    }
+    if (t == TLV_POWER_TUBE) {
+        PowerTubeRec r;
+        decode_power_tube(v, r);
+        return "POWER_TUBE class=" + dec(r.power_class) + " tubes=" + dec(r.tubes) +
+               " sections=" + dec(r.sections) + " heater_nom=" + dec(r.heater_nom_ma) +
+               " heater_max=" + dec(r.heater_max_ma) + " bplus_v=" + dec(r.bplus_nom_v) +
+               " bplus_exp=" + dec(r.bplus_exp_ma) + " bplus_max=" + dec(r.bplus_max_ma);
+    }
+    if (t == TLV_VENDOR) {
+        VendorRec r;
+        decode_vendor(v, r);
+        return "VENDOR vendor=" + hex4(r.vendor_id) + " data=" + hex_lower(r.data.data, r.data.len);
+    }
+    return "UNKNOWN type=" + hex2(t) + " data=" + hex_lower(v.value, v.len);
+}
+
+// Split on '|' outside quotes, then each chunk into NAME + key=value tokens (quotes honoured).
+bool split_records(const std::string& text, std::vector<std::string>& out) {
+    std::string cur;
+    bool quoted = false, esc = false;
+    for (char ch : text) {
+        if (quoted) {
+            cur.push_back(ch);
+            if (esc)
+                esc = false;
+            else if (ch == '\\')
+                esc = true;
+            else if (ch == '"')
+                quoted = false;
+            continue;
+        }
+        if (ch == '"') {
+            quoted = true;
+            cur.push_back(ch);
+        } else if (ch == '|') {
+            out.push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(ch);
+        }
+    }
+    if (quoted)
+        return false;
+    out.push_back(cur);
+    std::vector<std::string> trimmed;
+    for (auto& s : out) {
+        size_t a = s.find_first_not_of(' '), b = s.find_last_not_of(' ');
+        if (a != std::string::npos)
+            trimmed.push_back(s.substr(a, b - a + 1));
+    }
+    out = trimmed;
+    return true;
+}
+
+bool record_tokens(const std::string& chunk, std::string& name, Tokens& t) {
+    std::vector<std::string> toks;
+    std::string cur;
+    bool quoted = false, esc = false;
+    for (char ch : chunk) {
+        if (quoted) {
+            cur.push_back(ch);
+            if (esc)
+                esc = false;
+            else if (ch == '\\')
+                esc = true;
+            else if (ch == '"')
+                quoted = false;
+            continue;
+        }
+        if (ch == '"') {
+            quoted = true;
+            cur.push_back(ch);
+        } else if (ch == ' ') {
+            if (!cur.empty()) {
+                toks.push_back(cur);
+                cur.clear();
+            }
+        } else {
+            cur.push_back(ch);
+        }
+    }
+    if (!cur.empty())
+        toks.push_back(cur);
+    if (toks.empty())
+        return false;
+    name = toks[0];
+    for (size_t i = 1; i < toks.size(); ++i) {
+        const size_t eq = toks[i].find('=');
+        if (eq == std::string::npos || t.kv.count(toks[i].substr(0, eq)))
+            return false;
+        t.kv[toks[i].substr(0, eq)] = toks[i].substr(eq + 1);
+    }
+    return true;
+}
+
+bool take_str(Tokens& t, const char* key, std::vector<uint8_t>& out) {
+    std::string s;
+    if (!t.take(key, s) || !unquote_str(s, out) || out.size() > 0xFF) {
+        t.bad = true;
+        return false;
+    }
+    return true;
+}
+
+// Parses one canonical record and appends it to the writer. Returns Ok/codec Status; sets
+// t.bad (→ BadRequest) on malformed text.
+Status add_record(DescriptorWriter& w, const std::string& chunk, Tokens& t) {
+    std::string name;
+    if (!record_tokens(chunk, name, t)) {
+        t.bad = true;
+        return Status::Ok;
+    }
+    unsigned a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0;
+    std::vector<uint8_t> s1;
+    Status st = Status::Ok;
+    if (name == "PROTOCOL") {
+        if (!(t.take_uint("major", a) && t.take_uint("minor", b)))
+            return Status::Ok;
+        st = w.add_protocol(ProtocolRec{static_cast<uint8_t>(a), static_cast<uint8_t>(b)});
+    } else if (name == "MODULE_TYPE") {
+        if (!t.take_named("mt", names::MODULE_TYPE_TABLE, a))
+            return Status::Ok;
+        st = w.add_module_type(ModuleTypeRec{static_cast<uint8_t>(a)});
+    } else if (name == "NAME" || name == "MANUFACTURER" || name == "SERIAL") {
+        if (!take_str(t, "s", s1))
+            return Status::Ok;
+        const Str s{s1.data(), static_cast<uint8_t>(s1.size())};
+        st = name == "NAME"           ? w.add_name(s)
+             : name == "MANUFACTURER" ? w.add_manufacturer(s)
+                                      : w.add_serial(s);
+    } else if (name == "MODEL_ID") {
+        if (!(t.take_uint("model", a) && t.take_uint("hw", b) && t.take_uint("fw", c)))
+            return Status::Ok;
+        st = w.add_model_id(ModelIdRec{static_cast<uint16_t>(a), static_cast<uint16_t>(b),
+                                       static_cast<uint16_t>(c)});
+    } else if (name == "CHANNEL") {
+        if (!(t.take_uint("idx", a) && take_str(t, "s", s1)))
+            return Status::Ok;
+        st = w.add_channel(
+            ChannelRec{static_cast<uint8_t>(a), Str{s1.data(), static_cast<uint8_t>(s1.size())}});
+    } else if (name == "SWITCHING") {
+        if (!(t.take_uint("flags", a) && t.take_uint("settle_ms", b)))
+            return Status::Ok;
+        st = w.add_switching(SwitchingRec{static_cast<uint8_t>(a), static_cast<uint16_t>(b)});
+    } else if (name == "PARAM") {
+        if (!(t.take_uint("id", a) && t.take_uint("scope", b) &&
+              t.take_named("kind", names::PARAM_KIND_TABLE, c) && t.take_uint("default", d) &&
+              take_str(t, "s", s1)))
+            return Status::Ok;
+        if (d > 0xFFFF)
+            return Status::OutOfRange;
+        st = w.add_param(ParamRec{static_cast<uint8_t>(a), static_cast<uint8_t>(b),
+                                  static_cast<uint8_t>(c), static_cast<uint16_t>(d),
+                                  Str{s1.data(), static_cast<uint8_t>(s1.size())}});
+    } else if (name == "PARAM_ENUM") {
+        if (!(t.take_uint("id", a) && t.take_uint("idx", b) && take_str(t, "s", s1)))
+            return Status::Ok;
+        st = w.add_param_enum(ParamEnumRec{static_cast<uint8_t>(a), static_cast<uint8_t>(b),
+                                           Str{s1.data(), static_cast<uint8_t>(s1.size())}});
+    } else if (name == "AUDIO") {
+        if (!(t.take_uint("io", a) && t.take_uint("input_mode", b) && t.take_uint("in_max", c) &&
+              t.take_uint("out_max", d)))
+            return Status::Ok;
+        st = w.add_audio(AudioRec{static_cast<uint8_t>(a), static_cast<uint8_t>(b),
+                                  static_cast<uint16_t>(c), static_cast<uint16_t>(d)});
+    } else if (name == "POWER_LV") {
+        if (!(t.take_uint("p15", a) && t.take_uint("n15", b) && t.take_uint("p9", c) &&
+              t.take_uint("p5", d)))
+            return Status::Ok;
+        st = w.add_power_lv(PowerLvRec{static_cast<uint16_t>(a), static_cast<uint16_t>(b),
+                                       static_cast<uint16_t>(c), static_cast<uint16_t>(d)});
+    } else if (name == "POWER_TUBE") {
+        if (!(t.take_uint("class", a) && t.take_uint("tubes", b) && t.take_uint("sections", c) &&
+              t.take_uint("heater_nom", d) && t.take_uint("heater_max", e) &&
+              t.take_uint("bplus_v", f) && t.take_uint("bplus_exp", g) &&
+              t.take_uint("bplus_max", h)))
+            return Status::Ok;
+        st = w.add_power_tube(PowerTubeRec{static_cast<uint8_t>(a), static_cast<uint8_t>(b),
+                                           static_cast<uint8_t>(c), static_cast<uint16_t>(d),
+                                           static_cast<uint16_t>(e), static_cast<uint16_t>(f),
+                                           static_cast<uint8_t>(g), static_cast<uint8_t>(h)});
+    } else if (name == "VENDOR") {
+        if (!(t.take_uint("vendor", a) && t.take_hex("data", s1)))
+            return Status::Ok;
+        if (s1.size() > 253)
+            return Status::OutOfRange;
+        st = w.add_vendor(
+            VendorRec{static_cast<uint16_t>(a), Bytes{s1.data(), static_cast<uint8_t>(s1.size())}});
+    } else if (name == "UNKNOWN") {
+        if (!(t.take_uint("type", a) && t.take_hex("data", s1)))
+            return Status::Ok;
+        if (s1.size() > 0xFF)
+            return Status::OutOfRange;
+        st = w.add_raw(static_cast<uint8_t>(a), s1.data(), static_cast<uint8_t>(s1.size()));
+    } else {
+        t.bad = true;
+        return Status::Ok;
+    }
+    if (!t.kv.empty())
+        t.bad = true;
+    return t.bad ? Status::Ok : st;
+}
+
+} // namespace
+
+std::string quote_str(const uint8_t* data, size_t len) {
+    static const char* digits = "0123456789abcdef";
+    std::string q = "\"";
+    for (size_t i = 0; i < len; ++i) {
+        const uint8_t b = data[i];
+        if (b == '"')
+            q += "\\\"";
+        else if (b == '\\')
+            q += "\\\\";
+        else if (b >= 0x20 && b <= 0x7E)
+            q.push_back(static_cast<char>(b));
+        else {
+            q += "\\x";
+            q.push_back(digits[b >> 4]);
+            q.push_back(digits[b & 0x0F]);
+        }
+    }
+    q.push_back('"');
+    return q;
+}
+
+bool unquote_str(const std::string& q, std::vector<uint8_t>& out) {
+    out.clear();
+    if (q.size() < 2 || q.front() != '"' || q.back() != '"')
+        return false;
+    for (size_t i = 1; i + 1 < q.size(); ++i) {
+        const char c = q[i];
+        if (c != '\\') {
+            out.push_back(static_cast<uint8_t>(c));
+            continue;
+        }
+        if (i + 2 >= q.size())
+            return false;
+        const char n = q[i + 1];
+        if (n == '"' || n == '\\') {
+            out.push_back(static_cast<uint8_t>(n));
+            ++i;
+        } else if (n == 'x' && i + 4 < q.size()) {
+            std::vector<uint8_t> byte;
+            if (!parse_hex(q.substr(i + 2, 2), byte) || byte.size() != 1)
+                return false;
+            out.push_back(byte[0]);
+            i += 3;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string validate_line(const uint8_t* blob, size_t len) {
+    DescriptorReport r;
+    const Status st = validate_descriptor(blob, len, r);
+    if (st == Status::Ok)
+        return "OK skipped=" + dec(r.skipped_unknown) + " channels=" + dec(r.channel_count) +
+               " params=" + dec(r.param_count);
+    return status_line(st) + " type=" + hex2(r.type) + " offset=" + dec(r.offset);
+}
+
+std::string render_descriptor(const uint8_t* blob, size_t len) {
+    DescriptorReport r;
+    const Status st = validate_descriptor(blob, len, r);
+    if (st != Status::Ok)
+        return status_line(st);
+    std::string out;
+    RecordCursor c(blob, len);
+    RecordView v;
+    bool first = true;
+    while (!c.at_end() && c.next(v) == Status::Ok) {
+        if (!first)
+            out += " | ";
+        first = false;
+        out += render_record(v);
+    }
+    return out;
+}
+
+bool encode_descriptor(const std::string& canonical, std::vector<uint8_t>& out,
+                       std::string& error) {
+    std::vector<std::string> chunks;
+    if (!split_records(canonical, chunks)) {
+        error = "ERR BadRequest";
+        return false;
+    }
+    std::vector<uint8_t> buf(DESC_MAX_BYTES);
+    DescriptorWriter w(buf.data(), buf.size());
+    for (const auto& chunk : chunks) {
+        Tokens t;
+        const Status st = add_record(w, chunk, t);
+        if (t.bad) { // malformed text: unknown record, missing/extra/unparsable keys
+            error = "ERR BadRequest";
+            return false;
+        }
+        if (st != Status::Ok) {
+            error = status_line(st);
+            return false;
+        }
+    }
+    DescriptorReport r;
+    const Status fin = w.finish(r);
+    if (fin != Status::Ok) {
+        error = status_line(fin);
+        return false;
+    }
+    out.assign(buf.begin(), buf.begin() + static_cast<long>(w.size()));
+    error.clear();
+    return true;
+}
+
+} // namespace canon
+} // namespace omgp

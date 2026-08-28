@@ -58,6 +58,8 @@ omgp_add_catch_test(test_gen_constants tests/unit/test_gen_constants.cpp)
 omgp_add_catch_test(test_l3_header tests/unit/test_l3_header.cpp)
 omgp_add_catch_test(test_l3_payload tests/unit/test_l3_payload.cpp)
 target_link_libraries(test_l3_payload PRIVATE omgp_canon)
+omgp_add_catch_test(test_l3_descriptor tests/unit/test_l3_descriptor.cpp)
+target_link_libraries(test_l3_descriptor PRIVATE omgp_canon)
 omgp_add_catch_test(test_l3_roundtrip tests/property/test_l3_roundtrip.cpp)
 
 # --- host-only tools ---

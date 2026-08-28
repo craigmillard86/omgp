@@ -74,3 +74,40 @@ def test_bad_canonical_is_rejected_as_bad_request():
         C.canonical_to_message("op=PING node=0x01")
     with pytest.raises(C.CanonicalError):
         C.canonical_to_message("op=NOPE node=0x01 seq=0 flags=0x00")
+
+
+# --- descriptors (spec 001 T046) ------------------------------------------------------------
+
+import omgp_descriptor as D  # noqa: E402
+
+SAMPLE_LINE = ('PROTOCOL major=1 minor=0 | MODULE_TYPE mt=TUBE_PREAMP | NAME s="British Preamp" | '
+               'MANUFACTURER s="OMGP" | MODEL_ID model=0x0101 hw=0x0002 fw=0x0103 | SERIAL s="BP-0001" | '
+               'CHANNEL idx=0 s="Clean" | CHANNEL idx=1 s="Crunch" | SWITCHING flags=0x01 settle_ms=120 | '
+               'PARAM id=1 scope=0xFF kind=CONTINUOUS default=2048 s="Gain" | PARAM_ENUM id=3 idx=0 s="Bright" | '
+               'AUDIO io=0x03 input_mode=1 in_max=500 out_max=1200 | POWER_LV p15=40 n15=40 p9=0 p5=20 | '
+               'POWER_TUBE class=2 tubes=2 sections=4 heater_nom=600 heater_max=700 bplus_v=250 bplus_exp=12 '
+               'bplus_max=20 | VENDOR vendor=0x1234 data=deadbeef | UNKNOWN type=0x55 data=01020304050607')
+
+
+def test_descriptor_canonical_matches_contract_example():
+    recs = C.canonical_to_descriptor(SAMPLE_LINE)
+    assert recs[0] == D.ProtocolRec(1, 0) and recs[2] == D.NameRec("British Preamp")
+    assert recs[-1] == D.UnknownRec(0x55, bytes.fromhex("01020304050607"))
+    assert C.descriptor_to_canonical(recs) == SAMPLE_LINE
+    blob = D.build_descriptor(recs)
+    assert C.render_descriptor_bytes(blob) == SAMPLE_LINE
+    assert C.validate_line(blob) == "OK skipped=1 channels=2 params=1"
+
+
+def test_descriptor_strings_with_pipes_spaces_and_escapes_survive():
+    recs = [D.ProtocolRec(1, 0), D.NameRec('a | b "c" \\ é')]
+    line = C.descriptor_to_canonical(recs)
+    assert line == 'PROTOCOL major=1 minor=0 | NAME s="a | b \\"c\\" \\\\ \\xc3\\xa9"'
+    assert C.canonical_to_descriptor(line) == recs
+
+
+def test_validate_line_error_form():
+    assert C.validate_line(b"\x01\x02\x01") == "ERR Truncated type=0x01 offset=0"
+    assert C.validate_line(b"") == f"ERR MissingRequired type=0x{G.TLV_PROTOCOL:02X} offset=0"
+    assert C.render_descriptor_bytes(b"\x01") == "ERR Truncated"
+    assert C.descriptor_to_canonical([]) == ""

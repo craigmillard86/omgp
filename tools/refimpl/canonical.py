@@ -264,3 +264,181 @@ def render_bytes(b: bytes) -> str:
     except l3.L3Error as e:
         return error_to_canonical(e)
     return message_to_canonical(h, obj)
+
+
+# --- descriptors (contracts/canonical-text.md "Descriptors") ---------------------------------
+
+import omgp_descriptor as D  # noqa: E402  (after the message half so import order is explicit)
+
+
+def _hex4(v: int) -> str:
+    return f"0x{v:04X}"
+
+
+def _render_record(rec) -> str:
+    if isinstance(rec, D.ProtocolRec):
+        return f"PROTOCOL major={rec.major} minor={rec.minor}"
+    if isinstance(rec, D.ModuleTypeRec):
+        return f"MODULE_TYPE mt={_name_or_hex(G.MODULE_TYPE_NAMES, rec.type)}"
+    if isinstance(rec, D.NameRec):
+        return f"NAME s={quote_str(rec.s.encode('utf-8'))}"
+    if isinstance(rec, D.ManufacturerRec):
+        return f"MANUFACTURER s={quote_str(rec.s.encode('utf-8'))}"
+    if isinstance(rec, D.ModelIdRec):
+        return f"MODEL_ID model={_hex4(rec.vendor_model)} hw={_hex4(rec.hw_rev)} fw={_hex4(rec.fw_rev)}"
+    if isinstance(rec, D.SerialRec):
+        return f"SERIAL s={quote_str(rec.s.encode('utf-8'))}"
+    if isinstance(rec, D.ChannelRec):
+        return f"CHANNEL idx={rec.index} s={quote_str(rec.name.encode('utf-8'))}"
+    if isinstance(rec, D.SwitchingRec):
+        return f"SWITCHING flags={_hex2(rec.flags)} settle_ms={rec.settle_ms}"
+    if isinstance(rec, D.ParamRec):
+        return (f"PARAM id={rec.param_id} scope={_hex2(rec.scope)} kind={_name_or_hex(G.KIND_NAMES, rec.kind)} "
+                f"default={rec.default} s={quote_str(rec.name.encode('utf-8'))}")
+    if isinstance(rec, D.ParamEnumRec):
+        return f"PARAM_ENUM id={rec.param_id} idx={rec.index} s={quote_str(rec.label.encode('utf-8'))}"
+    if isinstance(rec, D.AudioRec):
+        return (f"AUDIO io={_hex2(rec.io_flags)} input_mode={rec.input_mode} in_max={rec.in_max_mvrms} "
+                f"out_max={rec.out_max_mvrms}")
+    if isinstance(rec, D.PowerLvRec):
+        return f"POWER_LV p15={rec.p15_ma} n15={rec.n15_ma} p9={rec.p9_ma} p5={rec.p5_ma}"
+    if isinstance(rec, D.PowerTubeRec):
+        return (f"POWER_TUBE class={rec.power_class} tubes={rec.tubes} sections={rec.sections} "
+                f"heater_nom={rec.heater_nom_ma} heater_max={rec.heater_max_ma} bplus_v={rec.bplus_nom_v} "
+                f"bplus_exp={rec.bplus_exp_ma} bplus_max={rec.bplus_max_ma}")
+    if isinstance(rec, D.VendorRec):
+        return f"VENDOR vendor={_hex4(rec.vendor_id)} data={rec.data.hex()}"
+    if isinstance(rec, D.UnknownRec):
+        return f"UNKNOWN type={_hex2(rec.type)} data={rec.data.hex()}"
+    raise CanonicalError(f"cannot render {type(rec).__name__}")
+
+
+def descriptor_to_canonical(records) -> str:
+    return " | ".join(_render_record(r) for r in records)
+
+
+def _split_records(text: str) -> list[str]:
+    """Split on '|' outside quoted strings."""
+    out, cur, quoted, esc = [], [], False, False
+    for ch in text:
+        if quoted:
+            cur.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                quoted = False
+            continue
+        if ch == '"':
+            quoted = True
+            cur.append(ch)
+        elif ch == "|":
+            out.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    if quoted:
+        raise CanonicalError("unterminated string")
+    out.append("".join(cur))
+    return [s.strip() for s in out if s.strip()]
+
+
+def _record_tokens(chunk: str) -> tuple[str, dict[str, str]]:
+    """'NAME s="a b"' -> ('NAME', {'s': '"a b"'}), honouring quotes."""
+    toks, cur, quoted, esc = [], [], False, False
+    for ch in chunk:
+        if quoted:
+            cur.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                quoted = False
+            continue
+        if ch == '"':
+            quoted = True
+            cur.append(ch)
+        elif ch == " ":
+            if cur:
+                toks.append("".join(cur))
+                cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        toks.append("".join(cur))
+    if not toks:
+        raise CanonicalError("empty record")
+    kv: dict[str, str] = {}
+    for tok in toks[1:]:
+        if "=" not in tok:
+            raise CanonicalError(f"token without '=': {tok!r}")
+        k, v = tok.split("=", 1)
+        if k in kv:
+            raise CanonicalError(f"duplicate key {k!r}")
+        kv[k] = v
+    return toks[0], kv
+
+
+def _parse_record(chunk: str):
+    name, kv = _record_tokens(chunk)
+    t = _take
+    q = lambda key: unquote_str(t(kv, key)).decode("utf-8", errors="surrogateescape")  # noqa: E731
+    if name == "PROTOCOL":
+        rec = D.ProtocolRec(_int(t(kv, "major")), _int(t(kv, "minor")))
+    elif name == "MODULE_TYPE":
+        rec = D.ModuleTypeRec(_parse_named("mt", t(kv, "mt")))
+    elif name == "NAME":
+        rec = D.NameRec(q("s"))
+    elif name == "MANUFACTURER":
+        rec = D.ManufacturerRec(q("s"))
+    elif name == "MODEL_ID":
+        rec = D.ModelIdRec(_int(t(kv, "model")), _int(t(kv, "hw")), _int(t(kv, "fw")))
+    elif name == "SERIAL":
+        rec = D.SerialRec(q("s"))
+    elif name == "CHANNEL":
+        rec = D.ChannelRec(_int(t(kv, "idx")), q("s"))
+    elif name == "SWITCHING":
+        rec = D.SwitchingRec(_int(t(kv, "flags")), _int(t(kv, "settle_ms")))
+    elif name == "PARAM":
+        rec = D.ParamRec(_int(t(kv, "id")), _int(t(kv, "scope")), _parse_named("kind", t(kv, "kind")),
+                         _int(t(kv, "default")), q("s"))
+    elif name == "PARAM_ENUM":
+        rec = D.ParamEnumRec(_int(t(kv, "id")), _int(t(kv, "idx")), q("s"))
+    elif name == "AUDIO":
+        rec = D.AudioRec(_int(t(kv, "io")), _int(t(kv, "input_mode")), _int(t(kv, "in_max")), _int(t(kv, "out_max")))
+    elif name == "POWER_LV":
+        rec = D.PowerLvRec(_int(t(kv, "p15")), _int(t(kv, "n15")), _int(t(kv, "p9")), _int(t(kv, "p5")))
+    elif name == "POWER_TUBE":
+        rec = D.PowerTubeRec(_int(t(kv, "class")), _int(t(kv, "tubes")), _int(t(kv, "sections")),
+                             _int(t(kv, "heater_nom")), _int(t(kv, "heater_max")), _int(t(kv, "bplus_v")),
+                             _int(t(kv, "bplus_exp")), _int(t(kv, "bplus_max")))
+    elif name == "VENDOR":
+        rec = D.VendorRec(_int(t(kv, "vendor")), _hexbytes(t(kv, "data")))
+    elif name == "UNKNOWN":
+        rec = D.UnknownRec(_int(t(kv, "type")), _hexbytes(t(kv, "data")))
+    else:
+        raise CanonicalError(f"unknown record {name!r}")
+    if kv:
+        raise CanonicalError(f"unexpected keys {sorted(kv)} in {name}")
+    return rec
+
+
+def canonical_to_descriptor(text: str) -> list:
+    return [_parse_record(chunk) for chunk in _split_records(text)]
+
+
+def validate_line(blob: bytes) -> str:
+    """The DVAL line both implementations must produce."""
+    r = D.validate_descriptor(blob)
+    if r.status == "Ok":
+        return f"OK skipped={r.skipped_unknown} channels={r.channel_count} params={r.param_count}"
+    return f"ERR {r.status} type={_hex2(r.type)} offset={r.offset}"
+
+
+def render_descriptor_bytes(blob: bytes) -> str:
+    try:
+        return descriptor_to_canonical(D.parse_descriptor(blob))
+    except l3.L3Error as e:
+        return error_to_canonical(e)

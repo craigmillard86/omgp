@@ -1,0 +1,65 @@
+{
+  "bytes": "01 02 01 00 02 01 01 03 01 4E 04 01 4D 05 06 01 00 01 00 01 00 10 06 00 43 6C 65 61 6E 11 03 00 00 00 20 09 01 FF 00 00 00 47 61 69 6E 30 06 03 00 F4 01 B0 04 40 08 28 00 28 00 00 00 14 00",
+  "canonical": "PROTOCOL major=1 minor=0 | MODULE_TYPE mt=ANALOGUE_EFFECT | NAME s=\"N\" | MANUFACTURER s=\"M\" | MODEL_ID model=0x0001 hw=0x0001 fw=0x0001 | CHANNEL idx=0 s=\"Clean\" | SWITCHING flags=0x00 settle_ms=0 | PARAM id=1 scope=0xFF kind=CONTINUOUS default=0 s=\"Gain\" | AUDIO io=0x03 input_mode=0 in_max=500 out_max=1200 | POWER_LV p15=40 n15=40 p9=0 p5=20",
+  "fields": {
+    "records": [
+      {
+        "major": 1,
+        "minor": 0,
+        "type": "PROTOCOL"
+      },
+      {
+        "type": 1
+      },
+      {
+        "s": "N",
+        "type": "NAME"
+      },
+      {
+        "s": "M",
+        "type": "MANUFACTURER"
+      },
+      {
+        "fw_rev": 1,
+        "hw_rev": 1,
+        "type": "MODEL_ID",
+        "vendor_model": 1
+      },
+      {
+        "index": 0,
+        "name": "Clean",
+        "type": "CHANNEL"
+      },
+      {
+        "flags": 0,
+        "settle_ms": 0,
+        "type": "SWITCHING"
+      },
+      {
+        "default": 0,
+        "kind": 0,
+        "name": "Gain",
+        "param_id": 1,
+        "scope": 255,
+        "type": "PARAM"
+      },
+      {
+        "in_max_mvrms": 500,
+        "input_mode": 0,
+        "io_flags": 3,
+        "out_max_mvrms": 1200,
+        "type": "AUDIO"
+      },
+      {
+        "n15_ma": 40,
+        "p15_ma": 40,
+        "p5_ma": 20,
+        "p9_ma": 0,
+        "type": "POWER_LV"
+      }
+    ]
+  },
+  "kind": "descriptor",
+  "name": "descriptor_min",
+  "spec_ref": "protocol-l3 \u00a74.1 required records only"
+}

@@ -35,6 +35,19 @@ int main() {
             out = omgp::canon::parse_hex(arg, bytes)
                       ? omgp::canon::render_message(bytes.data(), bytes.size())
                       : "ERR BadRequest";
+        } else if (verb == "DENC") {
+            std::string err;
+            out = omgp::canon::encode_descriptor(arg, bytes, err)
+                      ? omgp::canon::hex_lower(bytes.data(), bytes.size())
+                      : err;
+        } else if (verb == "DDEC") {
+            out = omgp::canon::parse_hex(arg, bytes)
+                      ? omgp::canon::render_descriptor(bytes.data(), bytes.size())
+                      : "ERR BadRequest";
+        } else if (verb == "DVAL") {
+            out = omgp::canon::parse_hex(arg, bytes)
+                      ? omgp::canon::validate_line(bytes.data(), bytes.size())
+                      : "ERR BadRequest";
         } else if (verb == "CRC") {
             if (omgp::canon::parse_hex(arg, bytes)) {
                 char b[8];

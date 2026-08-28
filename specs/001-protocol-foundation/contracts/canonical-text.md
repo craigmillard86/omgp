@@ -10,7 +10,11 @@ identical typed values — string equality **is** the semantic-identity test.
 
 - Named constants render as their YAML name: `op=SET_PARAM`, `err=ERR_BUSY`,
   `evt=CHANNEL_SETTLED`, `mt=TUBE_PREAMP`, `state=READY`, `kind=ENUM`. Unknown values
-  render as hex: `op=0x63`.
+  render as hex: `op=0x63`. Range markers (`USER_DEFINED_MIN`/`_MAX`) are not names of
+  values: an event in that range renders as hex (`evt=0xF0`).
+- An opcode absent from the YAML is forwarded verbatim and renders its payload as
+  `raw=<hex>`; a *known* opcode used in the wrong direction (e.g. ERROR as a request) is a
+  codec rejection (`ERR UnknownOpcode`), not a forward.
 - Byte-sized ids/flags render as `0x%02X`: `node=0x10 flags=0x00 scope=0xFF`.
 - Counters/quantities render as decimal: `seq=3 value=4095 settle_ms=120 uptime_s=77`.
 - Byte tails render as contiguous lowercase hex, empty allowed: `detail=` / `detail=0a0b`.
