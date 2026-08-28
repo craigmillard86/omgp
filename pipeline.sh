@@ -61,9 +61,15 @@ stage_unit() {
       return 1
     fi
   else
-    local out
+    local out rc
+    set +e
     out=$("$BIN/test_smoke")
+    rc=$?
+    set -e
     echo "$out"
+    if [ "$rc" -ne 0 ]; then
+      return "$rc"
+    fi
     local n
     n=$(printf '%s\n' "$out" | grep -o 'EXECUTED: [0-9]\+' | grep -o '[0-9]\+') || true
     n=${n:-0}
