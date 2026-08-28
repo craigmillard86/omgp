@@ -1,0 +1,32 @@
+// GENERATED from tests/vectors/*.json by tools/codegen.py -- DO NOT EDIT.
+// Golden byte vectors (immutable evidence, CLAUDE.md rule 9) for the C++ tests; the same
+// JSON files feed the Python reference. Sorted by name. Format: contracts/canonical-text.md.
+#pragma once
+#include <cstddef>
+#include <cstdint>
+namespace omgp {
+namespace vectors {
+struct Vector {
+    const char* name;
+    const char* kind;      // "message" | "status" | "descriptor"
+    const char* spec_ref;
+    const char* canonical; // canonical-text rendering of the fields
+    const uint8_t* bytes;
+    uint16_t len;
+};
+{% for v in vectors %}
+inline constexpr uint8_t V_{{ v.name }}[] = { {{ v.bytes_c }} };
+{% endfor %}
+{% if vectors %}
+inline constexpr Vector ALL[] = {
+{% for v in vectors %}
+    { "{{ v.name }}", "{{ v.kind }}", "{{ v.spec_ref_c }}", "{{ v.canonical_c }}", V_{{ v.name }}, {{ v.len }} },
+{% endfor %}
+};
+inline constexpr size_t COUNT = sizeof(ALL) / sizeof(ALL[0]);
+{% else %}
+inline constexpr const Vector* ALL = nullptr; // no vectors yet
+inline constexpr size_t COUNT = 0;
+{% endif %}
+} // namespace vectors
+} // namespace omgp

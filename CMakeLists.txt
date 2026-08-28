@@ -49,6 +49,7 @@ endfunction()
 add_executable(test_smoke tests/unit/test_smoke.cpp) # standalone main; kept as the floor's baseline
 add_test(NAME smoke COMMAND test_smoke)
 omgp_add_catch_test(test_l3_types tests/unit/test_l3_types.cpp)
+omgp_add_catch_test(test_gen_constants tests/unit/test_gen_constants.cpp)
 
 # --- host-only tools ---
 add_executable(crc_helper tools/crc_helper.cpp)

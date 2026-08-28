@@ -12,10 +12,15 @@ CXXFLAGS_BOOT="-std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefi
 WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=_Znwm -Wl,--wrap=_Znam"
 
 # raise when tests are added; NEVER lower to get green (that change is itself T3)
-# 42 = 47 executed (test_smoke 7 + test_l3_types 40) minus 5 slack — feature 001 Phase 2
-UNIT_TEST_FLOOR=42
+# 105 = 110 executed (smoke 7 + l3_types 40 + gen_constants 63) minus 5 slack — feature 001 US1
+UNIT_TEST_FLOOR=105
 
-stage_codegen()  { python3 tools/codegen.py; }
+stage_codegen() {
+  # Constants + vectors header from the YAML, then prove the human-authored docs tables
+  # still match it (the docs drift guard; spec 001 FR-001, SC-002).
+  python3 tools/codegen.py --vectors tests/vectors
+  python3 tools/codegen.py --check-docs
+}
 
 stage_quality() {
   # Code quality gates: formatting + static analysis. Runs on every merge.
@@ -111,7 +116,10 @@ stage_unit() {
   fi
 }
 
-stage_refimpl()   { python3 tools/refimpl/omgp_crc.py; }
+stage_refimpl() {
+  python3 tools/refimpl/omgp_crc.py
+  python3 -m pytest -q tools/refimpl   # reference implementation + tool tests (jinja2/pytest: tools/requirements.txt)
+}
 stage_diffcheck() { python3 tools/diffcheck.py; }
 stage_scenarios() {
   if [ -x "$BIN/scenario_runner" ]; then "$BIN/scenario_runner" tests/scenarios/

@@ -41,9 +41,11 @@ inline constexpr const char* DESC_CRC = "crc16_ccitt_false";
 
 Same names as module-level ints/strs; tables as tuples of dicts:
 `OPCODE_INFO = ({"code": 0x01, "target": "any", "idempotent": True}, ...)`,
-`TLV_INFO`, `PAYLOAD_INFO`; plus reverse maps `OPCODE_NAME = {0x01: "PING", ...}`,
-`TLV_NAME`, `ERROR_NAME`, `EVENT_NAME`, `MODULE_TYPE_NAME` (Python only; C++ tests get
-names via `status_name`/vectors).
+`TLV_INFO`, `PAYLOAD_INFO`, `PAYLOAD_FIELDS` (per-opcode request/response field lists:
+name, type, max, len_from); plus reverse maps `OPCODE_NAMES = {0x01: "PING", ...}`,
+`TLV_NAMES`, `ERROR_NAMES`, `EVENT_NAMES`, `MODULE_TYPE_NAMES`, `STATE_NAMES`,
+`KIND_NAMES` — plural because `TLV_NAME` is already the NAME record's type constant
+(Python only; C++ tests get names via `status_name`/vectors).
 
 ### `omgp_vectors.h` (namespace `omgp::vectors`)
 

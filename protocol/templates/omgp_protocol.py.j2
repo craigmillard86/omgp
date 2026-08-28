@@ -1,0 +1,61 @@
+# GENERATED from protocol/omgp-protocol.yaml by tools/codegen.py -- DO NOT EDIT.
+# Single source of truth for protocol values (CLAUDE.md rule 1). Same symbol names as
+# build/gen/omgp_protocol.h; tables as tuples of dicts, plus reverse name maps.
+PROTOCOL_MAJOR = {{ protocol.major }}
+PROTOCOL_MINOR = {{ protocol.minor }}
+{% for sec in scalar_sections %}
+# --- {{ sec.section }} ---
+{% for it in sec.entries %}
+{{ it.symbol }} = {{ it.pyvalue }}
+{% endfor %}
+{% endfor %}
+# --- reserved_opcode_ranges ---
+{% for r in reserved %}
+RESERVED_{{ r.name }}_MIN = {{ r.min }}
+RESERVED_{{ r.name }}_MAX = {{ r.max }}
+{% endfor %}
+# --- descriptor (protocol-l3 §4) ---
+DESC_MAX_BYTES = LIMIT_max_descriptor_bytes  # alias, not a second YAML value
+DESC_CRC = "{{ descriptor.crc }}"
+
+# --- attribute tables (sorted by code/type) ---
+OPCODE_INFO = (
+{% for o in opcode_info %}
+    {"name": "{{ o.name }}", "code": {{ o.chex }}, "target": "{{ o.target }}", "idempotent": {{ o.idempotent_py }}},
+{% endfor %}
+)
+TLV_INFO = (
+{% for t in tlv_info %}
+    {"name": "{{ t.name }}", "type": {{ t.thex }}, "required": {{ t.required_py }}, "repeated": {{ t.repeated_py }}, "max_len": {{ t.max_len }}},
+{% endfor %}
+)
+PAYLOAD_INFO = (
+{% for p in payload_info %}
+    {"name": "{{ p.name }}", "code": {{ p.chex }}, "req_min": {{ p.req_min }}, "req_max": {{ p.req_max }}, "resp_min": {{ p.resp_min }}, "resp_max": {{ p.resp_max }}, "opaque": {{ p.opaque_py }}},
+{% endfor %}
+)
+# Wire layouts (protocol-l3 §3.1/§3.3; rulings in docs/OPEN-QUESTIONS.md): fields in order; type u8|u16|bytes;
+# optional max (inclusive upper bound) and len_from (name of the preceding length field).
+PAYLOAD_FIELDS = {
+{% for p in payload_fields %}
+    "{{ p.name }}": {
+{% for dir in ("request", "response") %}
+        "{{ dir }}": (
+{% for f in p[dir] %}
+            {"name": "{{ f.name }}", "type": "{{ f.type }}", "max": {{ f.max_py }}, "len_from": {{ f.len_from_py }}},
+{% endfor %}
+        ),
+{% endfor %}
+        "opaque": {{ p.opaque_py }},
+    },
+{% endfor %}
+}
+
+# --- reverse name maps ---
+{% for m in name_maps %}
+{{ m.symbol }} = {
+{% for e in m.entries %}
+    {{ e.value }}: "{{ e.name }}",
+{% endfor %}
+}
+{% endfor %}
