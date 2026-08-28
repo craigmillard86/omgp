@@ -69,6 +69,10 @@ jobs:
             attacked and concede: "attacked N vectors, change held."
             Never file style opinions. Never modify the PR. A finding
             without a reproducer must be labelled speculation and last.
+            End the comment with a required final section "NOT EXAMINED:"
+            listing what was out of scope of this attack pass. If nothing
+            was excluded, state that explicitly: "NOT EXAMINED: nothing
+            excluded".
           claude_args: |
             --allowedTools "Bash(./pipeline.sh*),Bash(g++*),Bash(python3*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Read,Write,Grep,Glob"
 
@@ -109,6 +113,10 @@ jobs:
             OUTPUT: one issue titled "Protocol red-team <date>" labelled
             red-team + needs-human, findings severity-ordered with
             reproducers/walkthroughs, plus attacks tried that failed.
+            End the issue with a required final section "NOT EXAMINED:"
+            listing what was out of scope of this attack pass. If nothing
+            was excluded, state that explicitly: "NOT EXAMINED: nothing
+            excluded".
             Do not modify any repository file.
           claude_args: |
             --allowedTools "Bash(./pipeline.sh*),Bash(python3*),Bash(gh issue*),Read,Write,Grep,Glob"

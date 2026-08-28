@@ -9,6 +9,9 @@ STAGES=("${@:-codegen quality build unit refimpl diffcheck scenarios}")
 BIN=build/native
 CXXFLAGS_BOOT="-std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Ibuild/gen"
 
+# raise when tests are added; NEVER lower to get green (that change is itself T3)
+UNIT_TEST_FLOOR=7
+
 stage_codegen()  { python3 tools/codegen.py; }
 
 stage_quality() {
@@ -34,6 +37,7 @@ stage_build() {
     # Bootstrap mode: constrained environments (sandboxes, minimal agent hosts).
     # Same sources, same sanitizers; CMake presets remain the canonical build.
     echo "build: cmake not found -> bootstrap g++ build (sanitizers on)"
+    echo "bootstrap build: same sources+sanitizers as CMake preset; ctest/coverage paths not exercised"
     mkdir -p "$BIN"
     g++ $CXXFLAGS_BOOT tests/unit/test_smoke.cpp -o "$BIN/test_smoke"
     g++ $CXXFLAGS_BOOT tools/crc_helper.cpp     -o "$BIN/crc_helper"
@@ -43,8 +47,37 @@ stage_build() {
 stage_unit() {
   if command -v ctest >/dev/null 2>&1 && [ -f build/native/CTestTestfile.cmake ]; then
     ctest --preset native --output-on-failure
+    # ctest only prints test-binary stdout inline on failure, so on a green
+    # run the "EXECUTED: <n>" line lives in ctest's per-test log instead.
+    local log="build/native/Testing/Temporary/LastTest.log"
+    local n=0
+    if [ -f "$log" ]; then
+      n=$(grep -o 'EXECUTED: [0-9]\+' "$log" | awk -F': ' '{s+=$2} END{print s+0}') || true
+    fi
+    n=${n:-0}
+    echo "unit: executed $n check(s) (ctest path)"
+    if [ "$n" -lt "$UNIT_TEST_FLOOR" ]; then
+      echo "unit: executed check count ($n) below floor ($UNIT_TEST_FLOOR) - test filter may be broken" >&2
+      return 1
+    fi
   else
-    "$BIN/test_smoke"
+    local out rc
+    set +e
+    out=$("$BIN/test_smoke")
+    rc=$?
+    set -e
+    echo "$out"
+    if [ "$rc" -ne 0 ]; then
+      return "$rc"
+    fi
+    local n
+    n=$(printf '%s\n' "$out" | grep -o 'EXECUTED: [0-9]\+' | grep -o '[0-9]\+') || true
+    n=${n:-0}
+    echo "unit: executed $n check(s) (bootstrap path)"
+    if [ "$n" -lt "$UNIT_TEST_FLOOR" ]; then
+      echo "unit: executed check count ($n) below floor ($UNIT_TEST_FLOOR) - test filter may be broken" >&2
+      return 1
+    fi
   fi
 }
 
