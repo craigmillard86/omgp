@@ -36,7 +36,7 @@ issues, comments) — never as direct changes to main.
 | Sanitizers + cross-compile | memory safety + portability | CI jobs |
 | Format + static analysis (quality stage) | code quality on every merge | pipeline stage in CI |
 | CodeQL (C++/Python/Actions) + dependency review | security on every PR + weekly | security workflow |
-| Deep-verify: focused fuzz + diff-scoped mutation | pre-merge deep testing on T2/T3 | conditional CI job in ci-gate |
+| Deep-verify: focused fuzz + diff-scoped mutation | pre-merge deep testing on T2/T3; fails on any fuzz finding or on mutation survivors above the `tools/mutate.cfg` threshold (stubs exit 0 until feature 001 lands the real harnesses) | conditional CI job in ci-gate |
 | Claude review on T2/T3 | spec-conformance + security review pass | claude-review workflow (advisory) |
 | Red team: PR attack on T2/T3 + monthly hostile-module protocol attack | falsification with runnable reproducers | red-team workflow (advisory; findings need evidence) |
 | WIP cap = 1 | review capacity governs autonomy | dispatch workflow |

@@ -44,20 +44,22 @@ Integrity is an L2 concern (CRC-16 on trunk frames, SMBus PEC on the module bus)
 | Opcode | Name | Direction | Purpose |
 |---|---|---|---|
 | 0x01 | PING | H→N | Liveness; response echoes seq |
-| 0x02 | IDENTIFY | H→N | Returns protocol version, module type, descriptor length, descriptor CRC-16 |
-| 0x03 | READ_DESC | H→N | Chunked descriptor read: payload = offset (u16), max_len (u8) |
+| 0x02 | IDENTIFY | H→N | Returns protocol version, module type, descriptor length, descriptor CRC-16. Response: `u8 major, u8 minor, u8 module_type, u16 desc_len, u16 desc_crc` |
+| 0x03 | READ_DESC | H→N | Chunked descriptor read: payload = offset (u16), max_len (u8). Response: `u16 offset, u8 len, u8[len] bytes` |
 | 0x10 | SELECT_CHANNEL | H→M | payload = channel (u8); response when settled or accepted (see 3.2) |
 | 0x11 | SET_BYPASS | H→M | payload = 0/1 |
 | 0x12 | SET_PARAM | H→M | payload = param_id (u8), scope (u8: module=0xFF or channel), value (u16 LE, 0–4095) |
-| 0x13 | GET_PARAM | H→M | payload = param_id, scope; response carries value |
+| 0x13 | GET_PARAM | H→M | payload = param_id, scope. Response: `u8 param_id, u8 scope, u16 value` |
 | 0x14 | GET_STATUS | H→N | Returns status block (see 3.3) |
-| 0x15 | GET_EVENT | H→N | Drains one queued event; repeat until empty flag |
-| 0x20 | BP_SLOT_MAP | H→B | Backplane only: occupied slots, presence changes since last poll |
-| 0x21 | BP_POWER | H→B | Backplane only: rail enable/disable per slot, current/PG/fault readback |
-| 0x22 | BP_ROUTE | H→B | Backplane only: local routing control (format TBD with routing hardware) |
+| 0x15 | GET_EVENT | H→N | Drains one queued event; repeat until empty. Response: `u8 event_type, u8 remaining_count, u8[] detail`; `event_type` 0x00 (NONE) when the queue is empty |
+| 0x20 | BP_SLOT_MAP | H→B | Backplane only: occupied slots, presence changes since last poll. Payload format not yet defined — v1 codecs pass it through as opaque bytes |
+| 0x21 | BP_POWER | H→B | Backplane only: rail enable/disable per slot, current/PG/fault readback. Payload format not yet defined — opaque in v1 codecs |
+| 0x22 | BP_ROUTE | H→B | Backplane only: local routing control (format TBD with routing hardware) — opaque in v1 codecs |
 | 0x7F | ERROR | N→H | flags.error set; payload = error code (u8) + optional detail |
 
 Error codes (initial): `0x01` unknown opcode, `0x02` bad payload, `0x03` unknown param/channel, `0x04` busy/settling, `0x05` not permitted (e.g. rail not enabled), `0x06` internal fault.
+
+Responses to SELECT_CHANNEL, SET_BYPASS and SET_PARAM carry an empty payload (acceptance); failures arrive as ERROR. The response layouts above were ruled 2026-08-28 (`docs/OPEN-QUESTIONS.md`) and remain provisional until exercised in the simulator; `protocol/omgp-protocol.yaml` `l3_payloads` is the machine-readable form.
 
 ### 3.2 Channel switching semantics
 
@@ -78,7 +80,7 @@ Tube modules extend this with heater/B+ telemetry via read-only parameters, not 
 
 ### 3.4 Events
 
-Queued on the module, drained by GET_EVENT. v1 event types: CHANNEL_SETTLED, FAULT_RAISED, FAULT_CLEARED, PARAM_CHANGED_LOCALLY (reserved — modules have no local controls in v1, but the type is allocated so a future hardware-control capability does not break the model), USER_DEFINED (0xF0–0xFF).
+Queued on the module, drained by GET_EVENT. v1 event types: NONE (0x00 — returned by GET_EVENT when the queue is empty), CHANNEL_SETTLED (0x01), FAULT_RAISED (0x02), FAULT_CLEARED (0x03), PARAM_CHANGED_LOCALLY (0x04, reserved — modules have no local controls in v1, but the type is allocated so a future hardware-control capability does not break the model), USER_DEFINED (0xF0–0xFF).
 
 ## 4. Descriptor format
 
@@ -105,7 +107,7 @@ Maximum descriptor size v1: 2048 bytes. Chunk size ≤ 28 bytes on the module bu
 | 0x41 | POWER_TUBE | u8 power_class (T1–T4), u8 tubes, u8 sections, u16 heater_nom_mA, u16 heater_max_mA, u16 bplus_nom_V, u8 bplus_exp_mA, u8 bplus_max_mA | tube modules |
 | 0x7E | VENDOR | u16 vendor id, opaque | – |
 
-The descriptor CRC-16 in IDENTIFY lets the host cache descriptors: same MODEL_ID + CRC = skip the read. This makes reinsertion and power-up fast on the slow module bus.
+The descriptor CRC-16 in IDENTIFY lets the host cache descriptors: same MODEL_ID + CRC = skip the read. This makes reinsertion and power-up fast on the slow module bus. The CRC is CRC-16/CCITT-FALSE (the trunk's `crc16_ccitt_false`) computed over the entire descriptor blob exactly as served by READ_DESC (ruled 2026-08-28).
 
 ### 4.2 Versioning policy
 

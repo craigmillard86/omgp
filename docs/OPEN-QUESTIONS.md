@@ -116,3 +116,26 @@ can observe the change.
 discipline begins at the first tagged protocol release; until then,
 definition-file changes do not bump `protocol.minor`.
 **Supersedes:** none.
+
+## 2026-08-28 — L3 payload details not fixed by §3.1 (feature 001 defaults)
+
+**Context:** implementing `specs/001-protocol-foundation` surfaced
+details `docs/protocol-l3.md` §3–§4 leaves open beyond the layouts ruled
+above (plan research R-11). Each has a safe default that the codecs adopt
+now; the reviewer of the feature's Phase 1 PR is asked to rule inline.
+**Recommendation (adopted as defaults):**
+- Responses to SELECT_CHANNEL / SET_BYPASS / SET_PARAM are empty
+  (acceptance); failures arrive as ERROR. (§3.2 says "responds
+  immediately with accepted" and names no field.)
+- GET_EVENT on an empty queue returns `event_type = 0x00` — a new
+  `events.NONE` symbol — with `remaining_count = 0` and no detail.
+- PING / IDENTIFY / GET_STATUS / GET_EVENT requests carry no payload.
+- ERROR `detail` is optional bytes after the code, preserved verbatim.
+- Required string records (NAME, MANUFACTURER) may be empty: the spec gives
+  only an upper bound; a lower bound is host acceptance policy.
+- POWER_TUBE `power_class` is 1–4 (T1–T4); 0 and >4 are rejected.
+- READ_DESC response `len` ≤ 61 (64 − 3); the 28-byte module-bus chunk is
+  a transport limit the codec does not enforce.
+**Ruling:** pending — rule inline on the Phase 1 PR of feature 001, or
+append a superseding entry per item.
+**Supersedes:** none.
