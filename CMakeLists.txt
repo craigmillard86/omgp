@@ -22,6 +22,7 @@ enable_testing()
 
 # --- portable libraries (embedded path: CLAUDE.md rule 5 enforced per target) ---
 add_subdirectory(l3)
+add_subdirectory(link)
 
 # --- test framework: vendored Catch2 v3 (third_party/catch2/VERSION records tag + sha256) ---
 add_library(catch2_amalgamated STATIC third_party/catch2/catch_amalgamated.cpp)
@@ -40,7 +41,7 @@ set(OMGP_WRAP_LDFLAGS -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc
 
 function(omgp_add_catch_test name)
   add_executable(${name} ${ARGN})
-  target_link_libraries(${name} PRIVATE omgp_l3 omgp_test_support catch2_amalgamated)
+  target_link_libraries(${name} PRIVATE omgp_l3 omgp_link omgp_test_support catch2_amalgamated)
   target_link_options(${name} PRIVATE ${OMGP_WRAP_LDFLAGS})
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
@@ -48,7 +49,7 @@ endfunction()
 # --- host-only canonical-text codec (C++ side of the differential test) ---
 add_library(omgp_canon STATIC tools/canonical.cpp)
 target_include_directories(omgp_canon PUBLIC tools)
-target_link_libraries(omgp_canon PUBLIC omgp_l3)
+target_link_libraries(omgp_canon PUBLIC omgp_l3 omgp_link)
 
 # --- fuzz targets (clang only; `fuzz` preset) — the rest of the tree is skipped there so a
 #     fuzz build stays fast and never needs the Catch2 object ---
@@ -72,4 +73,4 @@ omgp_add_catch_test(test_l3_roundtrip tests/property/test_l3_roundtrip.cpp)
 # --- host-only tools ---
 add_executable(crc_helper tools/crc_helper.cpp)
 add_executable(l3_helper tools/l3_helper.cpp)
-target_link_libraries(l3_helper PRIVATE omgp_canon)
+target_link_libraries(l3_helper PRIVATE omgp_canon omgp_link)
