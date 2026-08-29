@@ -38,8 +38,12 @@ jobs:
           key: native-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json') }}
 
       - name: Codegen drift guard
+        # --check-docs (feature 001, T027): the opcode/error/TLV tables in docs/protocol-l3.md
+        # must match the YAML — codegen never edits docs, so the diff check alone cannot see
+        # a table that was left stale.
         run: |
           python3 tools/codegen.py
+          python3 tools/codegen.py --check-docs
           git diff --exit-code docs/ || { echo "::error::protocol docs out of sync with omgp-protocol.yaml"; exit 1; }
 
       - name: Pipeline — all local stages
@@ -98,9 +102,9 @@ jobs:
   deep-verify:
     # Risk-scaled deep testing: T2/T3 PRs run focused fuzz + diff-scoped
     # mutation BEFORE merge (nightly covers the whole repo after).
-    # Dormant until F1 delivers fuzz targets and mutation config — the
-    # tool stubs exit 0 with a notice; F1's acceptance criteria include
-    # making this job bite (see speckit F1 spec).
+    # Live since feature 001: tools/fuzz-smoke.sh runs real libFuzzer targets
+    # and tools/mutate.sh runs Mull (pinned in tools/mutate.cfg) with --require,
+    # so a missing tool fails the job instead of passing silently.
     name: deep-verify (T2/T3 only)
     if: >
       github.event_name == 'pull_request' &&
@@ -110,16 +114,24 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with: {fetch-depth: 0}   # mutate.sh scopes against origin/main; a depth-1 clone has no such ref
       - uses: actions/setup-python@v5
         with: {python-version: '3.12'}
       - name: Deps
         run: |
           sudo apt-get update && sudo apt-get install -y cmake ninja-build clang
           pip install jinja2 pyyaml
+      - name: Mull (mutation testing, pinned per tools/mutate.cfg)
+        run: |
+          # ubuntu-latest (24.04) ships clang 18; the deb must match that LLVM major.
+          clang++ --version | head -1
+          wget -q https://github.com/mull-project/mull/releases/download/0.34.0/Mull-18-0.34.0-LLVM-18.1.3-ubuntu-amd64-24.04.deb
+          sudo apt-get install -y ./Mull-18-0.34.0-LLVM-18.1.3-ubuntu-amd64-24.04.deb
+          mull-runner-18 -version
       - name: Focused fuzz (10 min, touched targets)
         run: ./pipeline.sh codegen build && ./tools/fuzz-smoke.sh 600
       - name: Diff-scoped mutation
-        run: ./tools/mutate.sh --diff origin/main
+        run: ./tools/mutate.sh --diff origin/main --require
 
   # Merge gate: branch protection requires this single check,
   # so adding/removing jobs never means editing protection rules.
