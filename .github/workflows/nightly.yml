@@ -27,7 +27,7 @@ jobs:
           ./tools/fuzz-smoke.sh 1800   # real libFuzzer targets since feature 001; exits 1 without clang
       - name: Upload fuzz corpus/crashes
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-artifacts-${{ github.run_id }}
           path: build/fuzz/**
@@ -61,7 +61,7 @@ jobs:
         run: ./tools/mutate.sh --require --trend-log build/mutate/trend.jsonl
       - name: Upload mutation report + trend line
         if: steps.day.outputs.run == 'yes' && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mutation-${{ github.run_id }}
           path: |
