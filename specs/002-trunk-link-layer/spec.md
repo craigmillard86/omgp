@@ -35,6 +35,22 @@ specification.
   between the reference and fallback bit rates; the first valid answer clears the fault
   and the rate that obtained it becomes the rate in use (restoring the reference rate
   later is an L4/human action). Recorded in `docs/OPEN-QUESTIONS.md`.
+- Q: Where does the link layer sit relative to the message-level `OMGPTransport` of Spec
+  §42, and does the simulator's `VirtualTransport` run the real L2 engines? → A: Below it.
+  The trunk implementation of `OMGPTransport` is the L2 master engine over a **byte-wire**
+  interface this feature defines (transmit bytes; receive bytes with arrival instants;
+  get/set bit rate). The simulator's `VirtualTransport` (F4) runs the same L2 engines over
+  a virtual byte wire with fault injection, so every §7 mode is wire-level scenario
+  configuration; this feature's scripted test transport is the first byte-wire
+  implementation. The host-core still sees only messages (Spec §41).
+- Q: What are the trunk node-health states called? → A: The trunk document's own words:
+  `UNENROLLED` (never answered), `ENROLLED` (healthy), `SUSPECT`, `OFFLINE`. The L3
+  `node_states` (INIT/READY/…) are module states and are not reused for trunk health.
+- Q: Should the link layer expose per-node statistics to the layers above? → A: Yes — a
+  fixed-size per-address counter block (transactions, retries, timeouts, CRC-failed
+  responses, discarded frames, replays served) plus bus-level counters (bit-rate changes,
+  bus faults), read-only to the layer above and resettable by it; part of the interface
+  note and asserted by this feature's tests (FR-011a).
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -178,18 +194,18 @@ for polling, and the notifications emitted.
 
 **Acceptance Scenarios**:
 
-1. **Given** a healthy node, **When** two transactions fail and the third succeeds,
-   **Then** the node stays healthy and the failure count resets.
-2. **Given** a healthy node, **When** three consecutive transactions fail, **Then** the
+1. **Given** an ENROLLED node, **When** two transactions fail and the third succeeds,
+   **Then** the node stays ENROLLED and the failure count resets.
+2. **Given** an ENROLLED node, **When** three consecutive transactions fail, **Then** the
    node is SUSPECT and is due for polling only once per ten superframe periods.
 3. **Given** a SUSPECT node, **When** one valid response arrives, **Then** the node is
-   healthy again with a zero failure count.
+   ENROLLED again with a zero failure count.
 4. **Given** a SUSPECT node, **When** one second passes with no valid response, **Then**
    the node is OFFLINE and a notification names it; a node SUSPECT for less than one
    second is not OFFLINE.
 5. **Given** an OFFLINE node, **When** the enrolment rotation asks which addresses to
    probe, **Then** the node's address is included; **When** it answers a probe, **Then**
-   it is healthy again and a notification reports its return.
+   it is ENROLLED again and a notification reports its return.
 6. **Given** the timing values in the definition file, **When** any of them is changed
    there, **Then** the tests that pin the thresholds fail — the values are read from the
    generated symbols, never restated.
@@ -213,10 +229,10 @@ assert no bus fault.
 
 **Acceptance Scenarios**:
 
-1. **Given** several healthy nodes, **When** all of them fail per the bus-fault rule
+1. **Given** several ENROLLED nodes, **When** all of them fail per the bus-fault rule
    (FR-028), **Then** the host declares BUS_FAULT once, raises one alert, and the next
    probes go out at the fallback bit rate.
-2. **Given** several healthy nodes, **When** only some of them fail, **Then** those nodes
+2. **Given** several ENROLLED nodes, **When** only some of them fail, **Then** those nodes
    follow the Story 4 state machine and no bus fault is declared.
 3. **Given** a declared bus fault, **When** probes alternate between the reference and
    fallback rates and a node answers one of them, **Then** the bus fault clears, a
@@ -224,7 +240,7 @@ assert no bus fault.
    at (FR-026).
 4. **Given** a single enrolled node, **When** it becomes SUSPECT, **Then** BUS_FAULT is
    declared (one node is all nodes) and the re-probe policy starts; a SUSPECT node in a
-   two-node rig whose peer is HEALTHY declares nothing.
+   two-node rig whose peer is ENROLLED declares nothing.
 
 ---
 
@@ -269,7 +285,7 @@ assert no bus fault.
 - Simulated time that does not advance (a test forgets to step the clock): the engine
   never spins — every wait is a comparison against the injected clock, and a transaction
   cannot time out until time is advanced past the timeout.
-- Node health when the node has never been polled: unknown, not healthy — a fresh address
+- Node health when the node has never been polled: UNENROLLED, not ENROLLED — a fresh address
   is neither SUSPECT nor OFFLINE nor counted towards a bus fault until it has been enrolled
   by a valid response.
 
@@ -327,8 +343,14 @@ assert no bus fault.
 - **FR-011**: Frames that are not the expected response (wrong source, wrong destination,
   wrong or stale sequence, response bit clear, duplicates of an already-accepted response,
   frames arriving while no transaction is open) MUST be discarded without changing the
-  open transaction's outcome, and MUST be counted so tests and the simulator can observe
-  them.
+  open transaction's outcome, and MUST be counted (FR-011a) so tests and the simulator can
+  observe them.
+- **FR-011a**: The link layer MUST keep, per trunk address, a fixed-size counter block —
+  transactions started, retries sent, timeouts, CRC-failed responses, frames discarded,
+  replays served (node side) — and, per bus, bit-rate changes and bus faults declared;
+  counters MUST be readable by the layer above, resettable by it, never allocated after
+  initialisation, and MUST be what this feature's own tests assert (e.g. "exactly two
+  retries", "one replay served") instead of reaching into engine internals.
 - **FR-012**: The engine MUST model transmission time from the frame's stuffed length and
   the bit rate in use (10 bits per byte, 8N1) so that "final stop bit" instants — from
   which turnaround and timeout are measured — are computed, not assumed, and change
@@ -336,6 +358,13 @@ assert no bus fault.
 - **FR-013**: The engine MUST hand every accepted response's payload to the layer above
   as opaque bytes; it MUST NOT inspect or depend on L3 content (CLAUDE.md architecture
   invariant: L2 is opaque to L3).
+- **FR-013a**: The link layer MUST sit below the message-level `OMGPTransport` (Spec §42):
+  both engines talk to the wire only through a **byte-wire** interface this feature
+  defines — transmit a byte sequence; receive bytes with their arrival instants; report
+  and change the bit rate in use — and the trunk implementation of `OMGPTransport` is the
+  master engine over that interface. The scripted test transport (FR-030) MUST implement
+  the byte-wire interface, and the interface note (SC-010) MUST document it so the
+  simulator's virtual wire (F4) can be a second implementation running the same L2 code.
 
 **Node-side engine and replay buffer (§3, §7)**
 
@@ -354,13 +383,13 @@ assert no bus fault.
 
 **Node health (§7)**
 
-- **FR-018**: The health tracker MUST maintain, per trunk address, a state in {UNKNOWN,
-  HEALTHY, SUSPECT, OFFLINE}, a consecutive-failure count, and the instant the node
+- **FR-018**: The health tracker MUST maintain, per trunk address, a state in {UNENROLLED,
+  ENROLLED, SUSPECT, OFFLINE}, a consecutive-failure count, and the instant the node
   entered SUSPECT; it MUST be updated solely from transaction outcomes and the injected
   clock.
 - **FR-019**: A node MUST become SUSPECT when its consecutive failures reach the definition
   file's threshold (3); any valid response MUST reset the count and return a SUSPECT node
-  to HEALTHY.
+  to ENROLLED.
 - **FR-020**: A SUSPECT node MUST be reported as due for polling only once per ten
   superframe periods (`10 × T_poll`, from the generated symbol), measured from the last
   poll of that node; the tracker exposes "is this node due at time t" — the scheduler (F3)
@@ -370,15 +399,15 @@ assert no bus fault.
   notification naming the node exactly once per transition.
 - **FR-022**: OFFLINE nodes MUST remain in the enrolment rotation: the tracker's list of
   addresses to probe MUST include them; a valid response from an OFFLINE node MUST make it
-  HEALTHY and emit a recovery notification.
-- **FR-023**: An address that has never produced a valid response is UNKNOWN: it is
+  ENROLLED and emit a recovery notification.
+- **FR-023**: An address that has never produced a valid response is UNENROLLED: it is
   probed by the enrolment rotation, it does not accumulate SUSPECT/OFFLINE state, and it
   does not count towards the bus-fault rule.
 
 **Bus fault (§7)**
 
-- **FR-024**: The host MUST declare BUS_FAULT when every enrolled node (state HEALTHY,
-  SUSPECT or OFFLINE — never UNKNOWN) is SUSPECT or worse at the same time. **Ruling
+- **FR-024**: The host MUST declare BUS_FAULT when every enrolled node (state ENROLLED,
+  SUSPECT or OFFLINE — never UNENROLLED) is SUSPECT or worse at the same time. **Ruling
   (human, 2026-08-29; `docs/OPEN-QUESTIONS.md`)**: this is §7's "all nodes fail
   simultaneously"; a single enrolled node counts as all — the fallback re-probe, not the
   node count, is what distinguishes a dead node from a dead bus. BUS_FAULT MUST be
@@ -392,7 +421,7 @@ assert no bus fault.
   notification, and the bit rate that obtained the response MUST become the rate in use
   until the layer above changes it. **Ruling (human, 2026-08-29;
   `docs/OPEN-QUESTIONS.md`)**. Per-node health MUST resume normally afterwards: the
-  answering node becomes HEALTHY; the others keep their SUSPECT/OFFLINE state and timers
+  answering node becomes ENROLLED; the others keep their SUSPECT/OFFLINE state and timers
   (their clocks were not paused by the fault).
 
 **Timing and the clock (§9; CLAUDE.md rules 3–4)**
@@ -456,11 +485,14 @@ assert no bus fault.
   (`T_turn_min`..`T_turn_max`).
 - **Replay buffer**: a node's single stored response — the sequence it answered and the
   exact frame bytes — replayed on a retry of that sequence.
-- **Node health record**: per trunk address — state (UNKNOWN / HEALTHY / SUSPECT /
+- **Node health record**: per trunk address — state (UNENROLLED / ENROLLED / SUSPECT /
   OFFLINE), consecutive failures, SUSPECT-since instant, last-poll instant; drives poll
   eligibility and notifications.
 - **Bus state**: bit rate in use (reference or fallback), BUS_FAULT flag, and the
   notifications it emits (fault, alert, recovery).
+- **Link statistics**: per-address counters (transactions, retries, timeouts, CRC
+  failures, discards, replays served) and per-bus counters (bit-rate changes, bus
+  faults); fixed size, read-only above, resettable.
 - **Clock**: the injected monotonic microsecond time source; the only source of "now".
 - **Transport script step**: one scripted behaviour of the test transport for one node —
   kind (respond / silence / garbage / crc-error / duplicate / babble / rate), delay, size or
@@ -493,8 +525,8 @@ assert no bus fault.
 - **SC-005**: The scripted transport expresses all seven behaviours of FR-030 as data
   steps, and every §7 error/health mode is reachable from a script with no test-specific
   code (a table in the test tree maps each mode to the script that produces it).
-- **SC-006**: The health state machine's every transition (UNKNOWN→HEALTHY,
-  HEALTHY→SUSPECT, SUSPECT→HEALTHY, SUSPECT→OFFLINE, OFFLINE→HEALTHY) and every non-
+- **SC-006**: The health state machine's every transition (UNENROLLED→ENROLLED,
+  ENROLLED→SUSPECT, SUSPECT→ENROLLED, SUSPECT→OFFLINE, OFFLINE→ENROLLED) and every non-
   transition at the boundary (2 failures, 999 ms SUSPECT) has a test, and each
   notification is emitted exactly once per transition.
 - **SC-007**: A bus fault is declared exactly once when the enrolled nodes fail together
@@ -509,8 +541,9 @@ assert no bus fault.
   unlabelled survivors, and `UNIT_TEST_FLOOR` is raised to the new total.
 - **SC-010**: Feature F4 can wire a virtual backplane to the node-side engine and the
   host-core to the host-side engine using only the interfaces this feature documents —
-  verified by a written interface note that names every call F4 needs and by the
-  scenario-schema mapping table of SC-005.
+  verified by a written interface note that names every call F4 needs — the byte-wire
+  interface (FR-013a), the clock, the notifications and the statistics block (FR-011a)
+  — and by the scenario-schema mapping table of SC-005.
 
 ## Assumptions
 
@@ -521,13 +554,12 @@ assert no bus fault.
   poll when (superframe composition, demand slots, enrolment order — F3), does not open a
   UART or any device, and does not implement bridging (§8, F4) — though the node-side
   engine's response-window obligation is what §8's bridge discipline will sit on.
-- **Transport abstraction**: the engines talk to the wire through a byte-oriented
-  transport that can transmit a byte sequence, deliver received bytes with their arrival
-  instants, report the bit rate in use, and change it. The scripted test transport is the
-  first implementation; the simulator's VirtualTransport (F4) is the second. If the
-  repository's planned `OMGPTransport` interface (Spec §41) is defined at a different
-  level (messages rather than bytes), the plan decides whether the link layer sits above
-  or below it; this specification only requires that the engines never touch a device.
+- **Transport layering (clarified 2026-08-29)**: the engines talk to the wire only
+  through the byte-wire interface of FR-013a; the message-level `OMGPTransport` of Spec
+  §42 sits above the master engine, and the host-core never sees bytes. The scripted test
+  transport is the first byte-wire implementation; the simulator's virtual wire (F4) is
+  the second, so `VirtualTransport` exercises the real L2 code and §7's faults are
+  scenario configuration rather than message-level approximations.
 - **Clock**: no injected clock exists in the repository yet; this feature defines the
   minimal monotonic microsecond interface it needs, in a location the plan chooses so that
   `core/` (F3) can share it. Tests drive it explicitly; nothing sleeps.
