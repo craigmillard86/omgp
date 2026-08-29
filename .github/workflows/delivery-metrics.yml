@@ -1,5 +1,10 @@
 name: delivery-metrics
-# Level 3 telemetry: append one JSON line per merged PR to metrics/delivery-log.jsonl.
+# Level 3 telemetry: append one JSON line per merged PR to metrics/delivery-log.jsonl on the
+# unprotected `metrics` branch (RUNBOOK "Routine operations"). main's branch protection
+# rejects the bot's push (GH006); until 2026-08-29 that rejection was masked by
+# `|| echo "nothing to commit"` and every run was green while recording nothing
+# (incident PR fix/metrics-branch). tools/metrics-ledger.sh now distinguishes "nothing to
+# commit" from a rejected push and fails the run on the latter.
 # Authorship is taken from PR labels: agent-authored | human-authored (default human).
 on:
   pull_request:
@@ -10,13 +15,22 @@ permissions:
   pull-requests: read
   actions: read
 
+concurrency:
+  group: metrics-ledger        # shared with task-metrics: appends to the branch serialise
+  cancel-in-progress: false
+
 jobs:
   record:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with: {ref: main, fetch-depth: 0}
+        with: {ref: main}
+
+      - name: Switch to the metrics ledger branch (created from main if absent)
+        run: |
+          cp tools/metrics-ledger.sh "$RUNNER_TEMP/metrics-ledger.sh"   # main's copy survives the branch switch
+          "$RUNNER_TEMP/metrics-ledger.sh" checkout
 
       - name: Collect PR metrics
         uses: actions/github-script@v7
@@ -57,9 +71,7 @@ jobs:
             fs.mkdirSync('metrics', {recursive: true});
             fs.appendFileSync('metrics/delivery-log.jsonl', JSON.stringify(rec) + '\n');
 
-      - name: Commit log entry
+      - name: Commit and push to origin/metrics (a rejected push fails this run)
         run: |
-          git config user.name  "delivery-metrics[bot]"
-          git config user.email "metrics@users.noreply.github.com"
-          git add metrics/delivery-log.jsonl
-          git commit -m "metrics: record PR #${{ github.event.pull_request.number }}" && git push || echo "nothing to commit"
+          "$RUNNER_TEMP/metrics-ledger.sh" commit "delivery-metrics[bot]" \
+            "metrics: record PR #${{ github.event.pull_request.number }}"

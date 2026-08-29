@@ -2,6 +2,9 @@ name: task-metrics
 # Per-task timing telemetry, GitHub-native. Two signals:
 #  - in-progress label add/remove -> active-time intervals (event log)
 #  - issue closed -> summary record with lead time and total active time
+# Records land on the unprotected `metrics` branch via tools/metrics-ledger.sh (RUNBOOK
+# "Routine operations"): main's branch protection rejects the bot's push, and the old
+# `git push || echo` masked that rejection (incident PR fix/metrics-branch, 2026-08-29).
 on:
   issues:
     types: [labeled, unlabeled, closed]
@@ -11,7 +14,7 @@ permissions:
   issues: read
 
 concurrency:
-  group: task-metrics          # serialise appends to the log files
+  group: metrics-ledger        # shared with delivery-metrics: appends to the branch serialise
   cancel-in-progress: false
 
 jobs:
@@ -23,6 +26,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: {ref: main}
+
+      - name: Switch to the metrics ledger branch (created from main if absent)
+        run: |
+          cp tools/metrics-ledger.sh "$RUNNER_TEMP/metrics-ledger.sh"   # main's copy survives the branch switch
+          "$RUNNER_TEMP/metrics-ledger.sh" checkout
 
       - name: Record event / close summary
         uses: actions/github-script@v7
@@ -83,8 +91,7 @@ jobs:
                            : labels.includes('agent-authored') ? 'agent' : 'human'
             }) + '\n');
 
-      - name: Commit
+      - name: Commit and push to origin/metrics (a rejected push fails this run)
         run: |
-          git config user.name "task-metrics[bot]"
-          git config user.email "metrics@users.noreply.github.com"
-          git add metrics/ && git commit -m "metrics: task event (issue #${{ github.event.issue.number }})" && git push || echo "nothing to commit"
+          "$RUNNER_TEMP/metrics-ledger.sh" commit "task-metrics[bot]" \
+            "metrics: task event (issue #${{ github.event.issue.number }})"
