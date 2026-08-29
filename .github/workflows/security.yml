@@ -25,6 +25,12 @@ jobs:
         with:
           languages: c-cpp, python, actions
           queries: security-and-quality
+          # Vendored third-party code (Catch2 amalgamation) is not ours to fix; its alerts
+          # (gmtime, env-derived paths, 0666 files) drowned the signal on PR #15 and failed
+          # the code-scanning check while every alert in first-party code was clean.
+          config: |
+            paths-ignore:
+              - third_party
       - name: Build for analysis
         run: ./pipeline.sh codegen build
       - uses: github/codeql-action/analyze@v3

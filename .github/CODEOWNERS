@@ -16,8 +16,12 @@
 /.github/                       @craigmillard86
 /CLAUDE.md                      @craigmillard86
 /.specify/memory/constitution.md @craigmillard86
+/tools/mutate.cfg               @craigmillard86
 
 # Tier 2 — toolchain pinning & pipeline definition
 /IDF_VERSION                    @craigmillard86
 /pipeline.sh                    @craigmillard86
 /tools/codegen.py               @craigmillard86
+/tools/mutate.sh                @craigmillard86
+/tools/mutate_report.py         @craigmillard86
+/tools/fuzz-smoke.sh            @craigmillard86
