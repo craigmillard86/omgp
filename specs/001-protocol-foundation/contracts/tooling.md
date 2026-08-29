@@ -19,12 +19,28 @@ Every fast/partial path states its blind spot on stdout (CLAUDE.md working agree
    any target exits non-zero or any artifact was written; lists reproducer commands
    (`build/fuzz/<target> <artifact>`).
 
-## `tools/mutate.sh [--diff <ref>] [--require] [--threshold <pct>] [--dry-run]`
+## `tools/mutate.sh [--diff <ref>] [--require] [--dry-run] [--trend-log <file>]`
 
 ```
 ./tools/mutate.sh --diff origin/main --require      # CI deep-verify
 ./tools/mutate.sh --diff HEAD~1                      # local
+./tools/mutate.sh --trend-log metrics/mutation-trend.jsonl   # nightly: whole tree, trend only
 ```
+
+**Gate (ruling 2026-08-29, docs/OPEN-QUESTIONS.md — supersedes the percentage threshold):**
+every surviving mutant on a changed line is triaged into exactly one of (a) missing test —
+the killing test is written; (b) equivalent — labelled on its source line
+`// mutant-ok(equivalent): <one line>`; (c) accepted — error-path minutiae not worth a test,
+`// mutant-ok(accepted): <one line>`. A label may name mutators
+(`mutant-ok(accepted, cxx_gt_to_ge): …`) to cover only those on the line; a label on a
+comment-only line governs the line below it (clang-format reflows long trailing comments).
+Diff-scoped runs exit 1 on any unlabelled survivor (`max_unlabelled_survivors = 0`,
+`label_categories`, both T3 in `tools/mutate.cfg`); whole-tree runs print
+`mutation-trend: {json}` (appended to `--trend-log` when given) and never gate on the score.
+A malformed label (unknown category, empty justification) fails every mode; a label that
+covers no surviving mutant is reported as a *stale label* warning. The merge and gate live
+in `tools/mutate_report.py` (tested on synthetic Elements reports in
+`tools/refimpl/test_tooling.py`). `--threshold` is rejected with exit 2.
 1. `--diff <ref>` must name a commit in the clone; an `origin/<branch>` ref missing from a
    shallow checkout is fetched with `--depth=1` first (a two-tree `git diff` needs no
    merge base), and only if that fails is it an error (exit 2 — never a silent empty
@@ -48,9 +64,14 @@ Every fast/partial path states its blind spot on stdout (CLAUDE.md working agree
    Elements JSON reports by mutant identity (killed if any binary kills it) and keeps
    only mutants under `scope_dirs` on lines `git diff -U0 <ref>` added/changed (whole
    file for new files; everything in scope when `--diff` is omitted).
-5. Prints the Mutation Report (data-model §7) and writes `build/mutate/report.json`.
+5. Prints the Mutation Report (data-model §7) and writes `build/mutate/report.json`:
+   summary line `mutation: mode=diff|trend diff_ref=… mutants=N killed=K survived=S
+   not_covered=C kill_rate=…% labelled[equivalent=… accepted=…] unlabelled=U
+   max_unlabelled=0`, one `UNLABELLED survivor: file:line:col mutator` line each, one
+   `labelled (<category>): … — <justification>` line each, stale-label warnings.
 6. Exit 1 if any runner failed, if no report was produced, if the scope is non-empty but
-   zero mutants were generated, or if `kill_rate < threshold` (`tools/mutate.cfg`, 80).
+   zero mutants were generated, if any label is malformed, or — with `--diff` only — if
+   `unlabelled > max_unlabelled_survivors`.
 
 ## `tools/l3_helper` (built by CMake and by the bootstrap g++ path)
 

@@ -1,0 +1,31 @@
+--- a/.github/CODEOWNERS	2026-08-29 13:29:38.398516916 +0100
++++ b/.github/CODEOWNERS	2026-08-29 13:29:38.431742887 +0100
+@@ -16,8 +16,12 @@
+ /.github/                       @craigmillard86
+ /CLAUDE.md                      @craigmillard86
+ /.specify/memory/constitution.md @craigmillard86
++/tools/mutate.cfg               @craigmillard86
+ 
+ # Tier 2 — toolchain pinning & pipeline definition
+ /IDF_VERSION                    @craigmillard86
+ /pipeline.sh                    @craigmillard86
+ /tools/codegen.py               @craigmillard86
++/tools/mutate.sh                @craigmillard86
++/tools/mutate_report.py         @craigmillard86
++/tools/fuzz-smoke.sh            @craigmillard86
+--- a/.github/workflows/risk-score.yml	2026-08-29 13:29:38.405362342 +0100
++++ b/.github/workflows/risk-score.yml	2026-08-29 13:29:38.431878195 +0100
+@@ -49,11 +49,11 @@
+             let tier = 0, reasons = [];
+             const T = (n, why) => { if (n > tier) tier = n; reasons.push(`T${n}: ${why}`); };
+ 
+-            if (touches(/^(protocol\/|tests\/vectors\/|\.github\/|CLAUDE\.md|docs\/(OPERATING-POLICY|GOVERNANCE|protocol-l3|trunk-link-layer|omgp-spec)|\.specify\/memory\/)/))
++            if (touches(/^(protocol\/|tests\/vectors\/|\.github\/|CLAUDE\.md|docs\/(OPERATING-POLICY|GOVERNANCE|protocol-l3|trunk-link-layer|omgp-spec)|\.specify\/memory\/|tools\/mutate\.cfg)/))
+               T(3, 'touches ground-truth or governance artefacts');
+             if (removedTests) T(3, 'reduces test content');
+             if (touches(/^(core\/|link\/|l3\/)/)) T(2, 'portable protocol-critical code');
+-            if (touches(/^(pipeline\.sh|IDF_VERSION|tools\/codegen\.py)/)) T(2, 'build/toolchain definition');
++            if (touches(/^(pipeline\.sh|IDF_VERSION|tools\/(codegen\.py|mutate\.sh|mutate_report\.py|fuzz-smoke\.sh))/)) T(2, 'build/toolchain definition');
+             if (newDependency) T(2, 'introduces a new dependency');
+             if (pr.additions + pr.deletions > 800) T(2, `large change (${pr.additions + pr.deletions} lines)`);
+             if (touches(/^(sim\/|cli\/|transport\/|tools\/)/)) T(1, 'host-only code');

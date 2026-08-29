@@ -29,6 +29,7 @@ inline Status fixed_len(size_t len, size_t n) {
 }
 
 template <size_t N> inline bool in_codes(const uint8_t (&table)[N], uint8_t v) {
+    // mutant-ok(accepted, cxx_lt_to_le): one-past read of a constexpr table; ASan-only
     for (size_t i = 0; i < N; ++i)
         if (table[i] == v)
             return true;
@@ -36,6 +37,7 @@ template <size_t N> inline bool in_codes(const uint8_t (&table)[N], uint8_t v) {
 }
 
 inline bool valid_event(uint8_t t) { // §3.4 incl. USER_DEFINED 0xF0-0xFF
+    // mutant-ok(equivalent, cxx_ge_to_gt, cxx_le_to_lt): 0xF0 and 0xFF are in EVENT_CODES too
     return in_codes(EVENT_CODES, t) || (t >= EVT_USER_DEFINED_MIN && t <= EVT_USER_DEFINED_MAX);
 }
 

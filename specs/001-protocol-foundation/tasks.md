@@ -191,6 +191,7 @@ later work is T2 or lower. Nothing in later phases may start until this merges
 - [X] T067 Final `UNIT_TEST_FLOOR` raise in `pipeline.sh`; confirm `tests/vectors/` has not been modified since T047 (`git log --oneline -- tests/vectors` shows only the creating commits)
 - [X] T068 Verify SC-001 mechanically: add `tools/refimpl/test_vectors_complete.py` asserting every opcode in `OPCODE_INFO` has a request vector and, where `PAYLOAD_INFO` defines a response, a response vector; plus `status_block` and `descriptor_sample` exist
 - [X] T069 Update `specs/001-protocol-foundation/checklists/requirements.md` notes and `docs/OPEN-QUESTIONS.md` with any ruling the T003 entries received during the Phase 1 review (append-only; supersede, never edit)
+- [ ] T070 (ruling 2026-08-29, human-initiated) Replace the kill-rate threshold with the survivor triage gate: `tools/mutate_report.py` (merge + label gate, tested in `test_tooling.py`), `tools/mutate.sh` (`--trend-log`, `--threshold` rejected), `tools/mutate.cfg [policy]` (`max_unlabelled_survivors = 0`, `label_categories`; T3), whole-`l3/` mutation run with every survivor triaged (a) killed by a new test, (b) `// mutant-ok(equivalent): …`, (c) `// mutant-ok(accepted): …`; triage table in the PR #15 body; docs (GOVERNANCE §2, contracts/tooling.md, data-model §7, spec FR-027, quickstart §7); `specs/001-protocol-foundation/mutate-policy-t3.patch` for CODEOWNERS/risk-score (human-applied, `.github/` is T3)
 
 ---
 

@@ -12,8 +12,9 @@ CXXFLAGS_BOOT="-std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefi
 WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=_Znwm -Wl,--wrap=_Znam"
 
 # raise when tests are added; NEVER lower to get green (that change is itself T3)
-# 133608 = 133613 executed (7 binaries; the seeded property tests dominate) minus 5 slack — feature 001 US4
-UNIT_TEST_FLOOR=133608
+# 133813 = 133818 executed (7 binaries; the seeded property tests dominate) minus 5 slack —
+# feature 001 US4, raised 2026-08-29 with the mutation-triage boundary tests (was 133608)
+UNIT_TEST_FLOOR=133813
 
 stage_codegen() {
   # Constants + vectors header from the YAML, then prove the human-authored docs tables

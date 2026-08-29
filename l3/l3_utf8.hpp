@@ -44,16 +44,19 @@ inline bool utf8_valid(const uint8_t* s, size_t n) {
         } else if (c == kLeadE0) {
             len = 3;
             lo = kE0SecondLo;
+            // mutant-ok(equivalent, cxx_gt_to_ge): c == kLeadE0 is taken by the branch above
         } else if (c > kLeadE0 && c <= kLead3Hi) {
             len = 3;
         } else if (c == kLeadED) {
             len = 3;
             hi = kEDSecondHi;
+            // mutant-ok(equivalent, cxx_gt_to_ge): c == kLeadED is taken by the branch above
         } else if (c > kLeadED && c <= kLead3bHi) {
             len = 3;
         } else if (c == kLeadF0) {
             len = 4;
             lo = kF0SecondLo;
+            // mutant-ok(equivalent, cxx_gt_to_ge): c == kLeadF0 is taken by the branch above
         } else if (c > kLeadF0 && c <= kLead4Hi) {
             len = 4;
         } else if (c == kLeadF4) {

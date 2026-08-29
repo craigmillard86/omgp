@@ -187,8 +187,9 @@ rather than P1 only because it needs Stories 2–3 to have decoders to attack.
 
 **Independent Test**: run the fuzz harness for its CI budget and assert zero findings; then
 plant a known bug (e.g. remove one bounds check) and assert the harness finds it within the
-budget; run the mutation harness scoped to a diff and assert it reports a kill rate and
-exits non-zero when a planted surviving mutant exceeds the threshold.
+budget; run the mutation harness scoped to a diff and assert it reports killed/survived
+counts and exits non-zero when a planted surviving mutant carries no triage label
+(ruling 2026-08-29: the gate is per-survivor triage, not a percentage).
 
 **Acceptance Scenarios**:
 
@@ -200,7 +201,8 @@ exits non-zero when a planted surviving mutant exceeds the threshold.
    harness reaches the decoder, not merely that it runs).
 3. **Given** the mutation harness invoked with `--diff <base>`, **When** run, **Then** it
    mutates only source lines changed relative to `<base>`, reports killed/survived counts,
-   and exits non-zero when survivors exceed the configured threshold.
+   and exits non-zero when any survivor on those lines is neither killed nor labelled
+   `// mutant-ok(equivalent|accepted): <why>` on its source line.
 4. **Given** a pull request that changes no decoder source, **When** deep-verify runs,
    **Then** the mutation stage reports "nothing in scope" and passes in under one minute
    rather than mutating the whole tree.
@@ -374,8 +376,11 @@ exits non-zero when a planted surviving mutant exceeds the threshold.
   under sanitizers, and exit non-zero on any crash, hang, or sanitizer finding.
 - **FR-027**: `tools/mutate.sh --diff <base>` MUST restrict mutation to source lines
   changed relative to `<base>`, report killed and surviving mutants, and exit non-zero when
-  survivors exceed a threshold configured in the repository; with no changed lines in scope
-  it MUST report that and pass quickly.
+  any survivor on those lines lacks a triage label (`// mutant-ok(equivalent|accepted):
+  <one-line justification>`; the allowed count and categories are T3 constants in the
+  repository, never relaxed to get green); without `--diff` it MUST report the whole-tree
+  kill rate as a trend and MUST NOT gate on it; with no changed lines in scope it MUST
+  report that and pass quickly.
 - **FR-028**: The CI `deep-verify` job MUST, after this feature, be able to fail: a planted
   decoder bug MUST be caught by fuzzing within the CI budget, and a planted surviving
   mutant MUST be caught by mutation scoping.
@@ -431,8 +436,8 @@ exits non-zero when a planted surviving mutant exceeds the threshold.
   both implementations must agree.
 - **Fuzz Target**: one decoder entry point exposed to arbitrary-byte input under
   sanitizers.
-- **Mutation Report**: killed/surviving counts for mutants within a diff scope, with the
-  threshold that decides pass/fail.
+- **Mutation Report**: killed/surviving counts for mutants within a diff scope, each
+  survivor with its triage label (or none — which is what decides pass/fail).
 
 ## Success Criteria *(mandatory)*
 

@@ -91,9 +91,11 @@ remains from the Technical Context.
 
 - **Decision**: `tools/mutate.sh --diff <ref>` builds a Mull-instrumented native build
   with clang (`-fpass-plugin` / `mull-runner`), restricted to lines changed relative to
-  `<ref>` via Mull's incremental options, and enforces a survival threshold read from
-  `tools/mutate.cfg` (initial: ≥ 80 % kill rate of *reached* mutants; tune after first
-  real run). Output: killed/survived/not-covered counts and a list of survivors with
+  `<ref>` via Mull's incremental options, and enforces the triage gate read from
+  `tools/mutate.cfg` (ruling 2026-08-29: every survivor on a changed line is killed by a
+  new test or labelled `// mutant-ok(equivalent|accepted): why` — zero unlabelled
+  survivors; the earlier ≥ 80 % kill-rate threshold is superseded, the whole-tree rate is
+  a trend only). Output: killed/survived/not-covered counts and a list of survivors with
   file:line. Behaviour when Mull is absent: print the disclosure `mutation: mull not
   present — skipped (blind spot: no mutation coverage in this environment)` and exit 0,
   **unless** `--require` is given, in which case exit non-zero. CI `deep-verify`
@@ -127,8 +129,9 @@ remains from the Technical Context.
   **adds** (only modified-file hunks survive), so it is not used at all — `mutate.sh`
   runs every mutant (`--workers`) and scopes the report itself from `git diff -U0`,
   new files included, restricted to `l3/ link/ core/`. Measured kill rate on the
-  descriptor commit with the unit binaries as oracle: **76.8 % (265/345)** — threshold
-  ruling queued in `docs/OPEN-QUESTIONS.md`. The "gate can fail" property is
+  descriptor commit with the unit binaries as oracle: **76.8 % (265/345)** — the ruling
+  (2026-08-29, `docs/OPEN-QUESTIONS.md`) replaced the percentage with a per-survivor
+  triage; the whole-`l3/` triage is recorded in PR #15. The "gate can fail" property is
   *demonstrated* by the planted-mutant test in quickstart / `tests/fuzz/README.md`.
 
 ## R-05 — Fuzzing: libFuzzer via a `fuzz` CMake preset

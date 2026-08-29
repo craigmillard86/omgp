@@ -36,7 +36,7 @@ issues, comments) — never as direct changes to main.
 | Sanitizers + cross-compile | memory safety + portability | CI jobs |
 | Format + static analysis (quality stage) | code quality on every merge | pipeline stage in CI |
 | CodeQL (C++/Python/Actions) + dependency review | security on every PR + weekly | security workflow; the `CodeQL` results check, `codeql` and `dependency-review` are required status checks on `main` (ruled 2026-08-28) |
-| Deep-verify: focused fuzz + diff-scoped mutation | pre-merge deep testing on T2/T3; fails on any fuzz finding or on mutation survivors above the `tools/mutate.cfg` threshold (stubs exit 0 until feature 001 lands the real harnesses) | conditional CI job in ci-gate |
+| Deep-verify: focused fuzz + diff-scoped mutation | pre-merge deep testing on T2/T3; fails on any fuzz finding or on any surviving mutant on a changed line that is neither killed by a test nor labelled `// mutant-ok(equivalent\|accepted): <why>` on its source line (triage gate, ruled 2026-08-29; the whole-tree kill rate is a nightly trend, never a gate). `tools/mutate.cfg [policy]` constants are T3 — never relaxed to get green | conditional CI job in ci-gate |
 | Claude review on T2/T3 | spec-conformance + security review pass | claude-review workflow (advisory) |
 | Red team: PR attack on T2/T3 + monthly hostile-module protocol attack | falsification with runnable reproducers | red-team workflow (advisory; findings need evidence) |
 | WIP cap = 1 | review capacity governs autonomy | dispatch workflow |

@@ -227,3 +227,31 @@ force-push settings untouched. Consequence: PRs are blocked by vendored
 third-party alerts until `codeql-ignore-third-party.patch` lands, and
 `--admin` merges still bypass (enforce_admins is off — see §7).
 **Supersedes:** none.
+
+## 2026-08-29 — Mutation gate: per-survivor triage replaces the kill-rate threshold
+
+**Context:** the two 2026-08-28 entries above asked for a percentage
+(60 % / 80 %) to gate `deep-verify`. Measured on the whole of `l3/`
+(Mull 0.34.0, unit binaries as oracle) the survivors split into three
+kinds a percentage cannot tell apart: bounds the tests never place at
+the edge (a missing test), mutations no observable behaviour can
+distinguish (equivalent), and error-path minutiae where a test would
+assert an implementation detail. A threshold passes a PR that adds an
+untested branch as long as the rest of the file is well covered, and
+fails a PR that adds one equivalent mutant to a small file.
+**Recommendation:** none needed — direct human ruling.
+**Ruling:** adopted — human, 2026-08-29. Percentage gating is the wrong
+policy for this codebase. Every surviving mutant on the feature-001
+code is triaged into exactly one of: (a) missing test — write the test
+that kills it; (b) equivalent — labelled on its source line
+`// mutant-ok(equivalent): <one line>`; (c) accepted — error-path
+minutiae not worth a test, `// mutant-ok(accepted): <one line>`. The
+gate is **zero survivors without a label** on changed lines
+(`tools/mutate.cfg [policy] max_unlabelled_survivors = 0`,
+`label_categories = equivalent accepted` — T3 constants, never lowered
+to get green). The whole-repo kill rate is reported as a trend
+(`mutation-trend:` line; nightly) and is never gated. The triage of the
+existing survivors is recorded in the PR #15 body per CLAUDE.md rule 11.
+Implemented in `tools/mutate_report.py` / `tools/mutate.sh`.
+**Supersedes:** both 2026-08-28 "Mutation kill-rate threshold" entries
+(their measurements stand as history; their pending rulings are closed).

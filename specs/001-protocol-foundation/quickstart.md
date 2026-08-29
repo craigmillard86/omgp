@@ -92,13 +92,17 @@ reaching the decoder and step 6 proves nothing.
 MULL_RUNNER=/path/extracted/usr/bin/mull-runner-14 MULL_PLUGIN=/path/extracted/usr/lib/mull-ir-frontend-14 \
   ./tools/mutate.sh --diff HEAD~1 --require
 ```
-Output ends with `mutation: diff_ref=… mutants=N killed=K survived=S not_covered=C
-kill_rate=…% threshold=80%` and one `survivor:` line per surviving mutant
-(`file:line:column mutator`). Zero mutants in a non-empty scope is a **failure**
-(instrumentation not reaching the code), never a pass.
+Output ends with `mutation: mode=diff diff_ref=… mutants=N killed=K survived=S
+not_covered=C kill_rate=…% labelled[equivalent=… accepted=…] unlabelled=U
+max_unlabelled=0`, one `UNLABELLED survivor: file:line:column mutator` line per untriaged
+survivor and one `labelled (<category>): … — <justification>` line per labelled one. The
+gate (ruling 2026-08-29) is `unlabelled == 0`; kill rate is information. Zero mutants in a
+non-empty scope is a **failure** (instrumentation not reaching the code), never a pass.
 **Discriminating check** (do not commit): in `l3/l3_payload.cpp` change
 `value > LIMIT_param_value_max` to `>=` and temporarily delete the 4095-boundary test →
-report lists one survivor, exit 1. Restore both → killed, exit 0.
+report lists one `UNLABELLED survivor`, exit 1. Restore both → killed, exit 0. Adding
+`// mutant-ok(accepted): …` to that line instead also gives exit 0 — the label is the
+reviewable artefact, so it must justify itself in the PR.
 
 ## 8. Both builds green (rule 10)
 

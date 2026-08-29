@@ -30,6 +30,7 @@ const TlvInfo* tlv_info(uint8_t type) {
 }
 
 template <size_t N> inline bool in_codes(const uint8_t (&table)[N], uint8_t v) {
+    // mutant-ok(accepted, cxx_lt_to_le): one-past read of a constexpr table; ASan-only
     for (size_t i = 0; i < N; ++i)
         if (table[i] == v)
             return true;
@@ -337,6 +338,7 @@ Status decode_vendor(const RecordView& v, VendorRec& out) {
 // --- writer --------------------------------------------------------------------------------------
 
 DescriptorWriter::DescriptorWriter(uint8_t* buf, size_t cap)
+    // mutant-ok(equivalent, cxx_lt_to_le): both arms yield kMaxBlob when cap == kMaxBlob
     : buf_(buf), cap_(cap < kMaxBlob ? cap : kMaxBlob), size_(0), seen_{0, 0, 0, 0, 0, 0, 0, 0} {}
 
 Status DescriptorWriter::append(uint8_t type, const uint8_t* value, uint8_t len) {
@@ -392,6 +394,7 @@ Status DescriptorWriter::add_channel(const ChannelRec& r) {
     if (r.name.len > 254)
         return Status::StringTooLong;
     v[0] = r.index;
+    // mutant-ok(accepted, cxx_lt_to_le): one-byte over-read into scratch v[], never emitted
     for (size_t i = 0; i < r.name.len; ++i)
         v[1 + i] = r.name.data[i];
     return append(TLV_CHANNEL, v, static_cast<uint8_t>(1 + r.name.len));
@@ -410,6 +413,7 @@ Status DescriptorWriter::add_param(const ParamRec& r) {
     v[1] = r.scope;
     v[2] = r.kind;
     put16(v + 3, r.default_value);
+    // mutant-ok(accepted, cxx_lt_to_le): one-byte over-read into scratch v[], never emitted
     for (size_t i = 0; i < r.name.len; ++i)
         v[kParamMin + i] = r.name.data[i];
     return append(TLV_PARAM, v, static_cast<uint8_t>(kParamMin + r.name.len));
@@ -420,6 +424,7 @@ Status DescriptorWriter::add_param_enum(const ParamEnumRec& r) {
         return Status::StringTooLong;
     v[0] = r.param_id;
     v[1] = r.index;
+    // mutant-ok(accepted, cxx_lt_to_le): one-byte over-read into scratch v[], never emitted
     for (size_t i = 0; i < r.label.len; ++i)
         v[kParamEnumMin + i] = r.label.data[i];
     return append(TLV_PARAM_ENUM, v, static_cast<uint8_t>(kParamEnumMin + r.label.len));
@@ -457,6 +462,7 @@ Status DescriptorWriter::add_vendor(const VendorRec& r) {
     if (r.data.len > 253)
         return Status::OutOfRange;
     put16(v, r.vendor_id);
+    // mutant-ok(accepted, cxx_lt_to_le): one-byte over-read into scratch v[], never emitted
     for (size_t i = 0; i < r.data.len; ++i)
         v[kVendorMin + i] = r.data.data[i];
     return append(TLV_VENDOR, v, static_cast<uint8_t>(kVendorMin + r.data.len));

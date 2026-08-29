@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 # Diff-scoped mutation testing with Mull (spec 001 FR-027, research R-04; config in
 # tools/mutate.cfg). Only lines changed relative to --diff <ref> under the embedded-path
-# directories are mutated, so the CI deep-verify job runs in bounded time.
+# directories are gated, so the CI deep-verify job runs in bounded time.
+#
+# Gate (ruling docs/OPEN-QUESTIONS.md 2026-08-29): triage, not percentage. With --diff, every
+# surviving mutant on a changed line must be killed by a test or carry a label on its source
+# line — `// mutant-ok(equivalent|accepted[, mutator...]): <justification>` — and the run
+# fails on any unlabelled survivor. Without --diff the whole-tree kill rate is reported as a
+# trend (tools/mutate_report.py) and never gates.
 #
 #   ./tools/mutate.sh --diff origin/main --require     # CI: fail if Mull is missing
 #   ./tools/mutate.sh --diff HEAD~1                    # local: disclosed skip if Mull is missing
 #   ./tools/mutate.sh --diff <ref> --dry-run           # print the scope and stop
+#   ./tools/mutate.sh --trend-log metrics/mutation-trend.jsonl   # whole tree, append trend
 #
 # Overrides: OMGP_CLANG_MAJOR, MULL_RUNNER (path), MULL_PLUGIN (path) — used to run an
 # extracted (not installed) Mull package.
@@ -17,18 +24,20 @@ BUILD=build/mutate
 
 cfg() { sed -n "s/^$1 *= *//p" "$CFG" | head -1 | sed 's/ *#.*//; s/ *$//'; }
 VERSION=$(cfg version)
-THRESHOLD=$(cfg threshold_pct)
+MAX_UNLABELLED=$(cfg max_unlabelled_survivors)
+CATEGORIES=$(cfg label_categories)
 SCOPE_DIRS=$(cfg scope_dirs)
 TIMEOUT_MS=$(cfg timeout_ms)
 GROUPS_=$(cfg groups)
 
-REF=""; REQUIRE=0; DRY=0
+REF=""; REQUIRE=0; DRY=0; TREND_LOG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --diff) REF="$2"; shift 2 ;;
     --require) REQUIRE=1; shift ;;
-    --threshold) THRESHOLD="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
+    --trend-log) TREND_LOG="$2"; shift 2 ;;
+    --threshold) echo "mutate: --threshold was removed — the gate is the survivor triage (tools/mutate.cfg [policy])" >&2; exit 2 ;;
     *) echo "mutate: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -77,7 +86,11 @@ if ! command -v "$RUNNER" >/dev/null 2>&1 || [ ! -f "$PLUGIN" ] || ! command -v 
   echo "mutation: mull not present — skipped (blind spot: no mutation coverage in this environment; CI deep-verify runs it with --require)"
   exit 0
 fi
-echo "mutation: mull $VERSION via $RUNNER (clang $CLANG_MAJOR), threshold ${THRESHOLD}%"
+if [ -n "$REF" ]; then
+  echo "mutation: mull $VERSION via $RUNNER (clang $CLANG_MAJOR); gate: max ${MAX_UNLABELLED} unlabelled survivor(s) on changed lines"
+else
+  echo "mutation: mull $VERSION via $RUNNER (clang $CLANG_MAJOR); whole tree — trend only, no gate"
+fi
 
 # --- configuration is TWO-PHASE ----------------------------------------------------------------
 # The IR frontend plugin reads mull.yml at COMPILE time (mutators, include/exclude paths) and
@@ -138,7 +151,7 @@ else
   echo '{}' > "$BUILD/scope_ranges.json"
 fi
 
-# --- run the unit binaries under the runner and merge the Elements JSON reports ---------------------
+# --- run the unit binaries under the runner ------------------------------------------------------
 # Unit tests are the oracle: the seeded property tests are too slow per mutant at -O0 and
 # assert invariants, not specific values. Reporters (mull-runner --help, 0.34.0): IDE,
 # SQLite, GitHubAnnotations, Patches, Elements (Mutation Testing Elements JSON), Sarif.
@@ -164,61 +177,11 @@ for bin in "$BUILD"/test_l3_header "$BUILD"/test_l3_payload "$BUILD"/test_l3_des
   echo "mutation: $name: $(grep -oE 'Surviving mutants: [0-9]+|No mutants found' "$BUILD/$name.mull.log" | head -1 || echo 'ran')"
 done
 
-python3 - "$REPORTS" "$THRESHOLD" "${REF:-full tree}" "$ROOT" "$SCOPE_DIRS" "$BUILD/scope_ranges.json" <<'EOF' || rc=1
-import json, pathlib, sys
-build, threshold, ref = pathlib.Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
-root, scope_dirs = sys.argv[4], sys.argv[5].split()
-ranges = json.load(open(sys.argv[6]))            # {rel_path: [[start, end], ...]} — empty when no --diff
-def rel_of(path: str) -> str:
-    return path[len(root) + 1:] if path.startswith(root + "/") else path
-def in_scope(path: str, line) -> bool:
-    """Embedded-path source (tests/tools carry mutants too but never count), and — with
-    --diff — on a line the diff added or changed (new files are whole-file ranges)."""
-    rel = rel_of(path)
-    if not any(rel.startswith(d + "/") for d in scope_dirs):
-        return False
-    if not ranges:
-        return True
-    return any(a <= (line or -1) <= b for a, b in ranges.get(rel, []))
-# Mutation Testing Elements report: {"files": {path: {"mutants": [{"mutatorName", "location":
-# {"start": {"line", "column"}}, "status"}]}}}. The same mutant appears in every binary's
-# report; it counts as killed if ANY binary kills it (Killed/Timeout/RuntimeError), survived
-# only if every binary that reached it let it live, not-covered if no binary reached it.
-RANK = {"Killed": 3, "Timeout": 3, "RuntimeError": 3, "CompileError": 3, "Survived": 2,
-        "NoCoverage": 1, "Ignored": 0, "Pending": 0}
-best: dict[tuple, tuple[int, str]] = {}
-reports = sorted(build.glob("*.json"))
-for r in reports:
-    try:
-        doc = json.loads(r.read_text())
-    except json.JSONDecodeError:
-        print(f"mutation: could not parse {r.name}")
-        continue
-    for path, f in (doc.get("files") or {}).items():
-        for m in f.get("mutants", []):
-            loc = (m.get("location") or {}).get("start") or {}
-            if not in_scope(path, loc.get("line")):
-                continue
-            key = (path, loc.get("line"), loc.get("column"), m.get("mutatorName"))
-            rank = RANK.get(m.get("status"), 0)
-            if rank > best.get(key, (-1, ""))[0]:
-                best[key] = (rank, m.get("status", "?"))
-killed = sum(1 for r, _ in best.values() if r == 3)
-survived = sum(1 for r, _ in best.values() if r == 2)
-not_covered = sum(1 for r, _ in best.values() if r == 1)
-survivors = [f"{k[0]}:{k[1]}:{k[2]} {k[3]}" for k, (r, _) in sorted(best.items(), key=lambda kv: (kv[0][0], kv[0][1] or 0)) if r == 2]
-total = killed + survived
-rate = (100.0 * killed / total) if total else 0.0
-print(f"mutation: diff_ref={ref} reports={len(reports)} mutants={total + not_covered} killed={killed} survived={survived} not_covered={not_covered} kill_rate={rate:.1f}% threshold={threshold}%")
-for s in survivors[:50]: print(f"  survivor: {s}")
-(build.parent / "report.json").write_text(json.dumps({"diff_ref": ref, "mutants_total": total + not_covered, "killed": killed, "survived": survived, "not_covered": not_covered, "kill_rate": rate, "threshold": threshold, "survivors": survivors}, indent=2) + "\n")
-if not reports:
-    print("mutation: no Mull reports produced — failing (blind spot: the runner did not execute)")
-    sys.exit(1)
-if total + not_covered == 0:
-    print("mutation: scope is non-empty but Mull generated no mutants — failing (blind spot: instrumentation is not reaching the changed code)")
-    sys.exit(1)
-sys.exit(0 if rate >= threshold else 1)
-EOF
+# --- merge the Elements reports and apply the triage gate (tools/mutate_report.py) ---------------
+TREND=()
+[ -n "$TREND_LOG" ] && TREND=(--trend-log "$TREND_LOG")
+python3 tools/mutate_report.py --reports "$REPORTS" --root "$ROOT" --scope-dirs "$SCOPE_DIRS" \
+  --ranges "$BUILD/scope_ranges.json" --ref "$REF" --out "$BUILD/report.json" \
+  --max-unlabelled "$MAX_UNLABELLED" --categories "$CATEGORIES" "${TREND[@]}" || rc=1
 [ "$rc" -eq 0 ] && echo "mutation: PASS" || echo "mutation: FAIL" >&2
 exit $rc

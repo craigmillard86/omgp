@@ -4,9 +4,11 @@ the disclosure line), scope correctly, and finish fast when nothing is in scope.
 from __future__ import annotations
 
 import configparser
+import json
 import os
 import pathlib
 import subprocess
+import sys
 import time
 
 import pytest
@@ -46,8 +48,135 @@ def test_mutate_cfg_parses_and_pins():
     cp.read(CFG)
     m = cp["mull"]
     assert m["version"] and m["clang_major"].isdigit()
-    assert 0 < int(cp["policy"]["threshold_pct"]) <= 100
+    # Ruling 2026-08-29: triage gate, no percentage. The constant is T3 — this test pins
+    # the value so a relaxation is a visible, reviewable diff, never a quiet config edit.
+    assert int(cp["policy"]["max_unlabelled_survivors"]) == 0
+    assert "threshold_pct" not in cp["policy"]
+    assert set(cp["policy"]["label_categories"].split()) == {"equivalent", "accepted"}
     assert "l3" in cp["policy"]["scope_dirs"].split()
+
+
+# --- tools/mutate_report.py: the triage gate on synthetic Elements reports --------------------
+
+REPORT = ROOT / "tools" / "mutate_report.py"
+
+
+def _mutant(line, col, mutator, status):
+    return {"id": f"{mutator}:{line}:{col}", "mutatorName": mutator, "status": status,
+            "location": {"start": {"line": line, "column": col}, "end": {"line": line, "column": col + 1}}}
+
+
+def _setup(tmp_path, source_lines, mutants, ranges=None):
+    """A fake repo root with l3/x.cpp and one Elements report naming its mutants."""
+    root = tmp_path / "repo"
+    (root / "l3").mkdir(parents=True, exist_ok=True)
+    (root / "l3" / "x.cpp").write_text("\n".join(source_lines) + "\n")
+    reports = tmp_path / "reports"
+    reports.mkdir(exist_ok=True)
+    (reports / "test_x.json").write_text(json.dumps(
+        {"files": {str(root / "l3" / "x.cpp"): {"mutants": mutants}}}))
+    (tmp_path / "ranges.json").write_text(json.dumps(ranges if ranges is not None else {}))
+    return root, reports
+
+
+def _report(tmp_path, root, reports, *extra):
+    r = subprocess.run([sys.executable, str(REPORT), "--reports", str(reports), "--root", str(root),
+                        "--scope-dirs", "l3 link core", "--ranges", str(tmp_path / "ranges.json"),
+                        "--out", str(tmp_path / "report.json"), *extra],
+                       capture_output=True, text=True, cwd=ROOT)
+    doc = json.loads((tmp_path / "report.json").read_text()) if (tmp_path / "report.json").exists() else {}
+    return r.returncode, r.stdout + r.stderr, doc
+
+
+SRC = [
+    "int f(int a) {",                                                      # 1
+    "    if (a >= 4)",                                                     # 2  survivor, no label
+    "        return 1;",                                                   # 3
+    "    if (a < 0) // mutant-ok(equivalent): a is unsigned upstream",     # 4  survivor, labelled
+    "        return 2;",                                                   # 5
+    "    // mutant-ok(accepted, cxx_gt_to_ge): cap check; only detail bytes differ",  # 6 label above
+    "    return a > 9 ? 3 : 4;",                                           # 7  two mutants: one named
+    "}",
+]
+MUTANTS = [_mutant(2, 11, "cxx_ge_to_gt", "Survived"), _mutant(4, 11, "cxx_lt_to_le", "Survived"),
+           _mutant(7, 14, "cxx_gt_to_ge", "Survived"), _mutant(7, 14, "cxx_gt_to_lt", "Killed")]
+
+
+def test_report_diff_mode_fails_on_unlabelled_survivor_and_names_it(tmp_path):
+    root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": [[1, 8]]})
+    rc, out, doc = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1, out
+    assert "UNLABELLED survivor: l3/x.cpp:2:11 cxx_ge_to_gt" in out
+    assert doc["unlabelled"] == 1 and doc["survived"] == 3 and doc["killed"] == 1
+    assert doc["labelled"] == {"equivalent": 1, "accepted": 1}
+    assert "labelled (accepted): l3/x.cpp:7:14 cxx_gt_to_ge" in out   # label on the line above
+
+
+def test_report_diff_mode_passes_when_every_survivor_is_labelled_or_killed(tmp_path):
+    src = list(SRC)
+    src[1] = "    if (a >= 4) // mutant-ok(equivalent): 4 is never reached, callers pass < 4"
+    root, reports = _setup(tmp_path, src, MUTANTS, {"l3/x.cpp": [[1, 8]]})
+    rc, out, doc = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 0, out
+    assert doc["unlabelled"] == 0
+
+
+def test_report_diff_mode_ignores_survivors_outside_changed_lines(tmp_path):
+    root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": [[4, 5]]})
+    rc, out, doc = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 0, out
+    assert doc["survived"] == 1 and doc["unlabelled"] == 0
+
+
+def test_report_named_mutator_label_covers_only_that_mutator(tmp_path):
+    mutants = MUTANTS[:3] + [_mutant(7, 14, "cxx_gt_to_lt", "Survived")]   # now survives too
+    src = list(SRC)
+    src[1] = "    if (a >= 4) // mutant-ok(accepted): boundary is documented, not tested"
+    root, reports = _setup(tmp_path, src, mutants, {"l3/x.cpp": [[1, 8]]})
+    rc, out, doc = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1, out
+    assert "UNLABELLED survivor: l3/x.cpp:7:14 cxx_gt_to_lt" in out
+
+
+def test_report_trend_mode_never_gates_on_survivors(tmp_path):
+    root, reports = _setup(tmp_path, SRC, MUTANTS)
+    log = tmp_path / "trend.jsonl"
+    rc, out, doc = _report(tmp_path, root, reports, "--trend-log", str(log))
+    assert rc == 0, out
+    assert doc["mode"] == "trend" and doc["unlabelled"] == 1
+    line = json.loads(log.read_text().splitlines()[-1])
+    assert line["survived"] == 3 and line["kill_rate"] == 25.0
+    assert "mutation-trend:" in out
+
+
+def test_report_malformed_label_fails_in_every_mode(tmp_path):
+    src = list(SRC)
+    src[3] = "    if (a < 0) // mutant-ok(whatever): not a category"
+    root, reports = _setup(tmp_path, src, MUTANTS)
+    rc, out, _ = _report(tmp_path, root, reports)
+    assert rc == 1 and "unknown label category 'whatever'" in out
+    src[3] = "    if (a < 0) // mutant-ok(equivalent):"
+    root, reports = _setup(tmp_path, src, MUTANTS)
+    rc, out, _ = _report(tmp_path, root, reports)
+    assert rc == 1 and "malformed label" in out
+
+
+def test_report_stale_label_is_a_warning_not_a_survivor(tmp_path):
+    mutants = [_mutant(4, 11, "cxx_lt_to_le", "Killed")]   # the labelled line is now killed
+    root, reports = _setup(tmp_path, SRC, mutants, {"l3/x.cpp": [[4, 4]]})
+    rc, out, doc = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 0, out
+    assert "stale label: l3/x.cpp:4" in out and doc["survived"] == 0
+
+
+def test_report_no_reports_or_no_mutants_is_a_failure(tmp_path):
+    root, reports = _setup(tmp_path, SRC, [])
+    rc, out, _ = _report(tmp_path, root, reports)
+    assert rc == 1 and "no mutants" in out
+    for f in reports.glob("*.json"):
+        f.unlink()
+    rc, out, _ = _report(tmp_path, root, reports)
+    assert rc == 1 and "no Mull reports" in out
 
 
 def test_mutate_nothing_in_scope_is_fast(tmp_path):

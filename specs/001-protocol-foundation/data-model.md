@@ -191,6 +191,12 @@ required records, over-cap blobs, invalid UTF-8) where both sides must emit the 
 - **Fuzz Target**: `{name, entry function, seed corpus dir, budget s}` × 4 (R-05).
   A finding = libFuzzer artefact file + reproducer command; the harness exit code is the
   gate.
-- **Mutation Report**: `{diff_ref, files_in_scope, mutants_total, killed, survived,
-  not_covered, kill_rate, threshold, survivors: [{file, line, mutator}]}` printed by
-  `mutate.sh`; exit 1 when `kill_rate < threshold` or (`--require` and tool missing).
+- **Mutation Report**: `{mode: diff|trend, diff_ref, mutants_total, killed, survived,
+  not_covered, kill_rate, labelled: {equivalent, accepted}, unlabelled, max_unlabelled,
+  survivors: [{file, line, column, mutator, label: null | {category, justification}}],
+  stale_labels, malformed_labels}` written by `tools/mutate_report.py`
+  (`build/mutate/report.json`); exit 1 when `mode = diff` and
+  `unlabelled > max_unlabelled` (T3 constant, 0), on any malformed label, or (`--require`
+  and tool missing). In `trend` mode a `mutation-trend: {measured_at, commit, mutants,
+  killed, survived, not_covered, kill_rate, labelled, unlabelled}` line is printed (and
+  appended to `--trend-log`) and the score never gates (ruling 2026-08-29).

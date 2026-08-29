@@ -5,6 +5,7 @@
 #include "catch_amalgamated.hpp"
 #include "heap_guard.hpp"
 #include "l3/l3_descriptor.hpp"
+#include "l3/l3_utf8.hpp"
 #include "omgp_protocol.h"
 #include "omgp_vectors.h"
 
@@ -263,6 +264,203 @@ TEST_CASE("writer builds the minimal descriptor byte-identically and enforces th
     for (int i = 0; i < 10; ++i)
         REQUIRE(w4.add_raw(0x60, big, 200) == Status::Ok);
     REQUIRE(w4.add_raw(0x60, big, 200) == Status::BlobTooLarge);
+}
+
+// --- boundary tests from the 2026-08-29 mutation triage (docs/OPEN-QUESTIONS.md): each case
+// below names the survivor it kills; the Python reference agrees on every value
+// (test_descriptor.py).
+
+TEST_CASE("record length floors: index-only channel, nameless param, id-only vendor", "[rules]") {
+    // l3_descriptor.cpp:77/84/95/114 (`<`→`<=`, `>=`→`>`): the exact minimum is Ok.
+    REQUIRE(validate(replace_once(MIN, CHANNEL0, tlv(omgp::TLV_CHANNEL, {0}))) == Status::Ok);
+    REQUIRE(validate(replace_once(MIN, PARAM1,
+                                  tlv(omgp::TLV_PARAM, {1, 0xFF, omgp::KIND_CONTINUOUS, 0, 0}))) ==
+            Status::Ok);
+    REQUIRE(validate(with(MIN, tlv(omgp::TLV_PARAM_ENUM, {3, 0}))) == Status::Ok);
+    REQUIRE(validate(with(MIN, tlv(omgp::TLV_PARAM_ENUM, {3}))) == Status::MalformedRecord);
+    REQUIRE(validate(with(MIN, tlv(omgp::TLV_VENDOR, {0x34, 0x12}))) == Status::Ok);
+    // l3_descriptor.cpp:113 (`==`→`!=` on TLV_VENDOR): a one-byte vendor record is malformed.
+    REQUIRE(validate(with(MIN, tlv(omgp::TLV_VENDOR, {0x34}))) == Status::MalformedRecord);
+    // l3_descriptor.cpp:110: power classes T1 and T4 are the inclusive edges.
+    REQUIRE(validate(with(MIN, tlv(omgp::TLV_POWER_TUBE,
+                                   {1, 2, 4, 0x58, 2, 0xBC, 2, 0xFA, 0, 12, 20}))) == Status::Ok);
+    REQUIRE(validate(with(MIN, tlv(omgp::TLV_POWER_TUBE,
+                                   {4, 2, 4, 0x58, 2, 0xBC, 2, 0xFA, 0, 12, 20}))) == Status::Ok);
+}
+
+TEST_CASE("string-tail checks read exactly len bytes: a following 0x90 length byte never leaks in",
+          "[utf8]") {
+    // l3_descriptor.cpp:80/87/98 (`len - k` → `len + k` in the CHANNEL/PARAM/PARAM_ENUM UTF-8
+    // checks): the over-read would land on the next record's length byte. 0x90 is a stray
+    // continuation byte, so a leak is InvalidUtf8 — deterministically, inside the blob (the
+    // baseline "kill" of this mutant came from heap garbage past a std::vector, i.e. luck).
+    const auto spacer = tlv(0x55, std::vector<uint8_t>(0x90, 0));
+    REQUIRE(validate(cat({PROTOCOL, MODULE_TYPE, NAME, MANUFACTURER, MODEL_ID, CHANNEL0, spacer,
+                          SWITCHING, PARAM1, spacer, AUDIO, POWER_LV,
+                          tlv(omgp::TLV_PARAM_ENUM, with({3, 0}, str("Bright"))), spacer})) ==
+            Status::Ok);
+}
+
+TEST_CASE("cursor at the end, on a zero-length record, and on a lone trailing byte", "[cursor]") {
+    RecordCursor c(MIN.data(), MIN.size());
+    RecordView v;
+    while (!c.at_end() && c.next(v) == Status::Ok) {
+    }
+    REQUIRE(c.at_end());
+    v.type = 0xEE;
+    REQUIRE(c.next(v) == Status::Ok); // l3_descriptor.cpp:121: at end → Ok, out untouched
+    REQUIRE(v.type == 0xEE);
+
+    auto z =
+        with(MIN, tlv(0x55, {})); // l3_descriptor.cpp:123 (`< 2`→`<= 2`): 2 bytes left is a record
+    RecordCursor c2(z.data(), z.size());
+    size_t n = 0;
+    Status st = Status::Ok;
+    while (!c2.at_end() && (st = c2.next(v)) == Status::Ok)
+        ++n;
+    REQUIRE(st == Status::Ok);
+    REQUIRE(n == 11);
+    REQUIRE((v.type == 0x55 && v.len == 0));
+
+    auto one = with(MIN, {0x55}); // l3_descriptor.cpp:123 (`-`→`+`) and :124 (pos_ = len_)
+    RecordCursor c3(one.data(), one.size());
+    st = Status::Ok;
+    while (!c3.at_end() && st == Status::Ok)
+        st = c3.next(v);
+    REQUIRE(st == Status::Truncated);
+    REQUIRE(c3.at_end());
+
+    auto cut = MIN; // l3_descriptor.cpp:130 (pos_ = len_ after a value overrun)
+    cut.pop_back();
+    RecordCursor c4(cut.data(), cut.size());
+    st = Status::Ok;
+    while (!c4.at_end() && st == Status::Ok)
+        st = c4.next(v);
+    REQUIRE(st == Status::Truncated);
+    REQUIRE(c4.at_end());
+}
+
+TEST_CASE(
+    "validator: lone trailing byte, zero-length unknown record, value short by less than four",
+    "[unknown]") {
+    DescriptorReport r;
+    // l3_descriptor.cpp:154-157: the header-truncated path names the record.
+    REQUIRE(validate(with(MIN, {0x55}), r) == Status::Truncated);
+    REQUIRE((r.status == Status::Truncated && r.type == 0x55 && r.offset == MIN.size()));
+    // l3_descriptor.cpp:154 (`< 2`→`<= 2`): exactly two bytes left is a complete record.
+    REQUIRE(validate(with(MIN, tlv(0x55, {})), r) == Status::Ok);
+    REQUIRE(r.skipped_unknown == 1);
+    // l3_descriptor.cpp:161 (`- 2`→`+ 2`): a value short by one byte is still truncated.
+    REQUIRE(validate(with(MIN, {0x55, 3, 1, 2}), r) == Status::Truncated);
+    REQUIRE((r.type == 0x55 && r.offset == MIN.size()));
+}
+
+TEST_CASE("report names the offending record on a per-record failure", "[rules]") {
+    // l3_descriptor.cpp:181-183: r.status/type/offset, not just the returned Status.
+    DescriptorReport r;
+    auto blob = replace_once(MIN, SWITCHING, tlv(omgp::TLV_SWITCHING, {1, 0x78, 0, 0}));
+    const size_t off = PROTOCOL.size() + MODULE_TYPE.size() + NAME.size() + MANUFACTURER.size() +
+                       MODEL_ID.size() + CHANNEL0.size();
+    REQUIRE(validate(blob, r) == Status::MalformedRecord);
+    REQUIRE(
+        (r.status == Status::MalformedRecord && r.type == omgp::TLV_SWITCHING && r.offset == off));
+}
+
+TEST_CASE("typed decoders for module type, name, manufacturer and serial", "[cursor]") {
+    // l3_descriptor.cpp:223/225/230/237/253: success fills `out`; the wrong type is refused.
+    auto blob = with(MIN, tlv(omgp::TLV_SERIAL, str("BP-0001")));
+    RecordCursor c(blob.data(), blob.size());
+    RecordView v;
+    auto text = [](Str s) { return std::string(reinterpret_cast<const char*>(s.data), s.len); };
+    REQUIRE(c.next(v) == Status::Ok); // PROTOCOL
+    REQUIRE(c.next(v) == Status::Ok); // MODULE_TYPE
+    ModuleTypeRec mt{0};
+    Str s{nullptr, 0};
+    REQUIRE(decode_module_type(v, mt) == Status::Ok);
+    REQUIRE(mt.type == omgp::MT_TUBE_PREAMP);
+    REQUIRE(decode_name(v, s) == Status::MalformedRecord);
+    REQUIRE(c.next(v) == Status::Ok); // NAME
+    REQUIRE(decode_name(v, s) == Status::Ok);
+    REQUIRE(text(s) == "N");
+    REQUIRE(decode_module_type(v, mt) == Status::MalformedRecord);
+    REQUIRE(c.next(v) == Status::Ok); // MANUFACTURER
+    REQUIRE(decode_manufacturer(v, s) == Status::Ok);
+    REQUIRE(text(s) == "M");
+    REQUIRE(decode_serial(v, s) == Status::MalformedRecord);
+    for (int i = 0; i < 7; ++i) // MODEL_ID … POWER_LV, SERIAL
+        REQUIRE(c.next(v) == Status::Ok);
+    REQUIRE(decode_serial(v, s) == Status::Ok);
+    REQUIRE(text(s) == "BP-0001");
+    REQUIRE(decode_manufacturer(v, s) == Status::MalformedRecord);
+}
+
+TEST_CASE("writer: exact fill never touches the byte after the buffer; longest string records",
+          "[writer]") {
+    // l3_descriptor.cpp:352 (`>`→`>=`) and :356 (copy loop `<`→`<=` writes one past the record).
+    uint8_t b[9];
+    b[8] = 0xA5;
+    DescriptorWriter w(b, 8);
+    const uint8_t two[3] = {1, 2, 0};
+    REQUIRE(w.add_protocol(ProtocolRec{1, 0}) == Status::Ok);
+    REQUIRE(w.add_raw(0x55, two, 2) == Status::Ok); // 4 + 4 == cap
+    REQUIRE(w.size() == 8);
+    REQUIRE(b[8] == 0xA5);
+    REQUIRE(w.add_raw(0x56, two, 0) == Status::BufferTooSmall);
+    // l3_descriptor.cpp:392/407/419/457: the longest value that still fits a u8 record length.
+    std::vector<uint8_t> big(255, 'x');
+    uint8_t buf[2048];
+    DescriptorWriter w2(buf, sizeof buf);
+    REQUIRE(w2.add_channel(ChannelRec{0, Str{big.data(), 254}}) == Status::Ok);
+    REQUIRE(w2.add_channel(ChannelRec{1, Str{big.data(), 255}}) == Status::StringTooLong);
+    REQUIRE(w2.add_param(ParamRec{1, 0xFF, omgp::KIND_CONTINUOUS, 0, Str{big.data(), 250}}) ==
+            Status::Ok);
+    REQUIRE(w2.add_param(ParamRec{2, 0xFF, omgp::KIND_CONTINUOUS, 0, Str{big.data(), 251}}) ==
+            Status::StringTooLong);
+    REQUIRE(w2.add_param_enum(ParamEnumRec{1, 0, Str{big.data(), 253}}) == Status::Ok);
+    REQUIRE(w2.add_param_enum(ParamEnumRec{1, 1, Str{big.data(), 254}}) == Status::StringTooLong);
+    REQUIRE(w2.add_vendor(VendorRec{0x1234, Bytes{big.data(), 253}}) == Status::Ok);
+    REQUIRE(w2.add_vendor(VendorRec{0x1234, Bytes{big.data(), 254}}) == Status::OutOfRange);
+    REQUIRE(w2.size() == 4 * (2 + 255));
+}
+
+TEST_CASE("UTF-8 byte-class boundaries (RFC 3629 §4) at every edge", "[utf8]") {
+    // l3_utf8.hpp:36-72: one case per byte-class bound, both sides. Python's strict
+    // bytes.decode("utf-8") accepts exactly the `ok` set (test_descriptor.py).
+    auto ok = [](std::vector<uint8_t> s) { return utf8_valid(s.data(), s.size()); };
+    REQUIRE(ok({0x7F}));
+    REQUIRE(ok({0xC2, 0x80}));       // U+0080
+    REQUIRE(ok({0xDF, 0xBF}));       // U+07FF
+    REQUIRE(ok({0xE0, 0xA0, 0x80})); // U+0800
+    REQUIRE(ok({0xE1, 0x80, 0x80}));
+    REQUIRE(ok({0xEC, 0xBF, 0xBF}));
+    REQUIRE(ok({0xED, 0x9F, 0xBF})); // U+D7FF
+    REQUIRE(ok({0xEE, 0x80, 0x80}));
+    REQUIRE(ok({0xEF, 0xBF, 0xBF}));       // U+FFFF
+    REQUIRE(ok({0xF0, 0x90, 0x80, 0x80})); // U+10000
+    REQUIRE(ok({0xF1, 0x80, 0x80, 0x80}));
+    REQUIRE(ok({0xF3, 0xBF, 0xBF, 0xBF}));
+    REQUIRE(ok({0xF4, 0x8F, 0xBF, 0xBF})); // U+10FFFF
+    REQUIRE(ok({'a', 'b', 0xE0, 0xA0, 0x80, 'c'}));
+    REQUIRE(ok({0xC3, 0xA9, 0xE0, 0xA0, 0x80}));
+    REQUIRE_FALSE(ok({0x80}));
+    REQUIRE_FALSE(ok({'a', 0xFF}));
+    REQUIRE_FALSE(ok({0xC1, 0xBF}));             // overlong 2-byte
+    REQUIRE_FALSE(ok({0xC3, 0x41}));             // continuation below 0x80
+    REQUIRE_FALSE(ok({0xC3, 0xC0}));             // continuation above 0xBF
+    REQUIRE_FALSE(ok({0xE0, 0x9F, 0xBF}));       // overlong 3-byte
+    REQUIRE_FALSE(ok({0xED, 0xA0, 0x80}));       // surrogate
+    REQUIRE_FALSE(ok({0xF0, 0x8F, 0xBF, 0xBF})); // overlong 4-byte
+    REQUIRE_FALSE(ok({0xF4, 0x90, 0x80, 0x80})); // above U+10FFFF
+    REQUIRE_FALSE(ok({0xF5, 0x80, 0x80, 0x80}));
+    REQUIRE_FALSE(ok({0xE0, 0xA0, 0x41}));
+    REQUIRE_FALSE(ok({0xE0, 0xA0, 0xC0}));
+    REQUIRE_FALSE(ok({0xF0, 0x90, 0x80, 0x41}));
+    REQUIRE_FALSE(ok({'R', 0xC3, 0xA9, 0xFF}));
+    // A sequence cut off by `n` is rejected even when the byte after `n` would complete it.
+    const uint8_t trunc2[] = {'a', 0xC3, 0xA9};
+    REQUIRE_FALSE(utf8_valid(trunc2, 2));
+    const uint8_t trunc3[] = {0xE0, 0xA0, 0x80};
+    REQUIRE_FALSE(utf8_valid(trunc3, 2));
 }
 
 TEST_CASE("descriptor_crc is CRC-16/CCITT-FALSE over the blob", "[crc]") {

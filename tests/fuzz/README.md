@@ -53,5 +53,21 @@ reaching the code and must be fixed before the PR is opened.
       ```
       The survivor names exactly the bound whose test was removed (`>=` → `>`). Sources
       verified identical to HEAD afterwards. Baseline for the descriptor commit
-      (`--diff HEAD~1`): 345 mutants, 265 killed, 80 survived, 76.8 % — ruling on the
-      threshold queued in `docs/OPEN-QUESTIONS.md`.
+      (`--diff HEAD~1`): 345 mutants, 265 killed, 80 survived, 76.8 %. (Recorded under the
+      percentage gate; the 2026-08-29 ruling in `docs/OPEN-QUESTIONS.md` replaced it with
+      the per-survivor triage.)
+- [x] **The triage gate bites end-to-end (unplanned, 2026-08-29).** After the whole-`l3/`
+      triage (123 baseline survivors → 111 killed by new tests, 12 labelled) the CI-form run
+      `./tools/mutate.sh --diff origin/main --require` reported
+      ```
+      mutation: mode=diff diff_ref=origin/main reports=3 mutants=599 killed=586 survived=13
+                not_covered=0 kill_rate=97.8% labelled[equivalent=6 accepted=6] unlabelled=1 max_unlabelled=0
+        UNLABELLED survivor: l3/l3_descriptor.cpp:80:42 cxx_sub_to_add
+      mutation: FAIL   exit 1
+      ```
+      A mutant the baseline had counted as killed (`len - 1` → `len + 1` in the CHANNEL
+      UTF-8 check) survived once the new tests changed the heap layout: its "kill" had been
+      an over-read into garbage past a `std::vector`. The gate refused the run at 97.8 %,
+      which a percentage gate would have passed; the deterministic killing test
+      ("string-tail checks read exactly len bytes") followed, and the re-run is the PASS
+      recorded in the PR #15 body.
