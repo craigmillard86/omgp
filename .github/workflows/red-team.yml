@@ -7,9 +7,12 @@ name: red-team
 #    hostile-module threat model (malicious descriptors, bus babble,
 #    resource exhaustion, power-declaration lies) and file findings.
 # Rule of evidence: a finding without a runnable reproducer is not a finding.
+# PR mode resolves the tier at RUN time (.github/actions/risk-tier): a `labeled`
+# trigger never fired for risk-score's labels because GitHub starts no run for
+# events caused by GITHUB_TOKEN (found 2026-08-29 — PR mode had never run).
 on:
   pull_request:
-    types: [labeled]
+    types: [opened, reopened, ready_for_review]
   schedule:
     - cron: '0 5 1 * *'      # monthly protocol red-team
   workflow_dispatch:
@@ -21,27 +24,41 @@ on:
 permissions:
   id-token: write   # anthropics/claude-code-action exchanges an OIDC token for its App token; without this every run fails "Could not fetch an OIDC token" (found 2026-08-29)
   contents: read
+  checks: read
   issues: write
   pull-requests: write
+
+concurrency:
+  group: red-team-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   attack-pr:
     if: >
       github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      (github.event.label.name == 'risk:t2' || github.event.label.name == 'risk:t3')
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v7
         with: {ref: '${{ github.event.pull_request.head.sha }}', fetch-depth: 0}
+      - id: tier
+        uses: ./.github/actions/risk-tier
+        with: {pr: '${{ github.event.pull_request.number }}'}
+      - name: Below T2 — no attack pass
+        if: steps.tier.outputs.deep != 'true'
+        run: |
+          echo "red-team: PR is ${{ steps.tier.outputs.label }} — attack pass runs for T2/T3 only"
       - uses: actions/setup-python@v7
+        if: steps.tier.outputs.deep == 'true'
         with: {python-version: '3.12'}
       - name: Toolchain
+        if: steps.tier.outputs.deep == 'true'
         run: |
           sudo apt-get update && sudo apt-get install -y cmake ninja-build
           pip install jinja2 pyyaml pytest
       - name: Claude Code — adversarial attack on the change
+        if: steps.tier.outputs.deep == 'true'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
