@@ -133,7 +133,10 @@ virtual-modules/  ts808.json, dual-drive.json, british-preamp.json, ...
 `docs/GOVERNANCE.md` maps decision rights, gates and risk tiers;
 `docs/OPERATING-POLICY.md` governs what agents may do unattended, what
 requires a human, and the standing autonomous loops. Read it at session
-start. PRs you author are labelled `agent-authored` and `feature:<id>` —
+start. PRs you author are labelled `agent-authored` and `feature:<id>`,
+where `<id>` is one of the ids `tools/gh-setup.sh` creates
+(`f1-codecs`, `f2-link`, `f3-core`, `f4-simrig`, `f5-cli`; Spec Kit
+directory `specs/001-protocol-foundation` ↔ `feature:f1-codecs`) —
 delivery telemetry depends on those labels. Tasks are GitHub issues:
 apply `in-progress` when you start one, remove it when you pause, commit
 with `Refs #n`, and close it via `Closes #n` in the PR — the timing
