@@ -8,6 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  id-token: write   # anthropics/claude-code-action exchanges an OIDC token for its App token; without this every run fails "Could not fetch an OIDC token" (found 2026-08-29)
   contents: read
   issues: write
 
