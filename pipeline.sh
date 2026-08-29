@@ -56,9 +56,10 @@ stage_build() {
     if [ ! -f "$BIN/catch2.o" ] || [ third_party/catch2/catch_amalgamated.cpp -nt "$BIN/catch2.o" ]; then
       g++ ${CXXFLAGS_BOOT/-Werror/} -Ithird_party/catch2 -c third_party/catch2/catch_amalgamated.cpp -o "$BIN/catch2.o"
     fi
-    local support l3srcs t name
+    local support l3srcs linksrcs t name
     support="$(ls tests/support/*.cpp) tools/canonical.cpp"   # canonical.cpp: host-only, used by tests + l3_helper
     l3srcs=$(ls l3/*.cpp 2>/dev/null || true)
+    linksrcs=$(ls link/*.cpp 2>/dev/null || true)
     # One binary per tests/unit/test_*.cpp and tests/property/test_*.cpp. test_smoke keeps its
     # own main (linking it with Catch2's main would be a duplicate symbol).
     for t in tests/unit/test_*.cpp tests/property/test_*.cpp; do
@@ -68,11 +69,11 @@ stage_build() {
         g++ $CXXFLAGS_BOOT "$t" -o "$BIN/test_smoke"
       else
         g++ $CXXFLAGS_BOOT -I. -Il3 -Itools -Ithird_party/catch2 -Itests/support \
-          "$t" $support $l3srcs "$BIN/catch2.o" $WRAP_LDFLAGS -o "$BIN/$name"
+          "$t" $support $l3srcs $linksrcs "$BIN/catch2.o" $WRAP_LDFLAGS -o "$BIN/$name"
       fi
     done
     g++ $CXXFLAGS_BOOT tools/crc_helper.cpp -o "$BIN/crc_helper"
-    g++ $CXXFLAGS_BOOT -I. -Il3 -Itools tools/l3_helper.cpp tools/canonical.cpp $l3srcs -o "$BIN/l3_helper"
+    g++ $CXXFLAGS_BOOT -I. -Il3 -Itools tools/l3_helper.cpp tools/canonical.cpp $l3srcs $linksrcs -o "$BIN/l3_helper"
   fi
 }
 
