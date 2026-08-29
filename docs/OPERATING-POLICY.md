@@ -25,7 +25,8 @@ removing `in-progress`.
 
 Agents MAY, unattended:
 - Create branches; commit; open and update pull requests (labelled
-  `agent-authored` and `feature:<id>` where applicable)
+  `agent-authored` and `feature:<id>` where applicable; `<id>` is an id
+  from `tools/gh-setup.sh` — `f1-codecs` … `f5-cli`, ruling 2026-08-29)
 - Run any `./pipeline.sh` stage and any read-only repo analysis
 - File and comment on issues; apply labels `needs-human`, `converge-audit`
 - Add tests, scenarios, and entries to `docs/OPEN-QUESTIONS.md`
@@ -67,8 +68,11 @@ Agents MUST NOT, ever:
 
 Work items are GitHub issues. Spec Kit `tasks.md` is converted to issues
 per feature (`tools/tasks-to-issues.py`, or Spec Kit's taskstoissues
-command), labelled `task` + `feature:<id>`, and tracked on the "OMGP
-Delivery" project board. Working rules, for agents and humans alike:
+command), labelled `task` + `feature:<id>` (the `gh-setup.sh` id of the
+feature, e.g. `feature:f1-codecs` for `specs/001-protocol-foundation`; a
+new feature adds its id to `gh-setup.sh` in the same PR as its spec
+directory), and tracked on the "OMGP Delivery" project board. Working
+rules, for agents and humans alike:
 - Apply `in-progress` when starting a task and remove it when pausing —
   this is the active-time timing signal; work without the label is
   invisible to flow metrics.
