@@ -125,7 +125,7 @@ def build() -> list[dict]:
         import descriptor_vectors  # type: ignore
         out.extend(descriptor_vectors.build())
     except ImportError:
-        pass
+        pass  # before US3 lands there are no descriptor vectors to add — by design, not an error
     return sorted(out, key=lambda e: e["name"])
 
 

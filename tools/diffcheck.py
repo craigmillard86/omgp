@@ -68,7 +68,7 @@ class Helper:
             self.p.stdin.write("QUIT\n")
             self.p.stdin.flush()
         except BrokenPipeError:
-            pass
+            pass  # helper already exited (e.g. after a crash we reported): nothing left to tell it
         self.p.wait(timeout=5)
 
 
@@ -240,7 +240,7 @@ def main(argv=None) -> int:
             if desc < 0:
                 return 1
         except ImportError:
-            pass
+            pass  # descriptor corpus only exists once US3 lands — by design, not an error
     finally:
         helper.close()
     total = crc + msgs + inval + desc

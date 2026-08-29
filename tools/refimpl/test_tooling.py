@@ -26,7 +26,7 @@ def _path_without(tmp_path: pathlib.Path, *names: str) -> str:
             try:
                 (d / f.name).symlink_to(f)
             except OSError:
-                pass
+                pass  # duplicate or unlinkable entry (dangling symlink etc.): the mirror just lacks it
     return str(d)
 
 

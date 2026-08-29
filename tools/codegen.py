@@ -21,7 +21,7 @@ import re
 import sys
 
 import yaml
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / "protocol" / "templates"
@@ -249,8 +249,14 @@ def load_vectors(vectors_dir: pathlib.Path | None) -> list[dict]:
 # --- rendering ---------------------------------------------------------------------------
 
 def render(model: dict) -> dict[str, str]:
+    # The templates render C++ and Python *source* (never HTML), so HTML autoescaping must
+    # stay off — it would mangle quotes and angle brackets in the generated code.
+    # select_autoescape() with no HTML extensions expresses that explicitly (and is the
+    # form CodeQL's py/jinja2/autoescape-false query recognises as deliberate).
     env = Environment(loader=FileSystemLoader(str(TEMPLATES)), trim_blocks=True,
-                      lstrip_blocks=True, keep_trailing_newline=True, undefined=StrictUndefined)
+                      lstrip_blocks=True, keep_trailing_newline=True, undefined=StrictUndefined,
+                      autoescape=select_autoescape(enabled_extensions=(), default_for_string=False,
+                                                   default=False))
     out = {}
     for name in OUTPUTS:
         text = env.get_template(name + ".j2").render(**model)
