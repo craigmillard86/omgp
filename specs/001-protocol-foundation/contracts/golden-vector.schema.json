@@ -20,7 +20,7 @@
     },
     "fields": {
       "type": "object",
-      "description": "Typed input values. For kind=message: opcode (name), node_id, seq, flags, then payload fields in layout order; for kind=descriptor: {\"records\": [ {\"type\": <name|int>, ...fields } ]}.",
+      "description": "Typed input values. For kind=message: opcode (name), node_id, seq, flags, then payload fields in layout order; for kind=descriptor: {\"records\": [ {\"record\": <TLV name or UNKNOWN>, ...dataclass fields } ]} (the key is `record`, not `type`, because MODULE_TYPE and unknown records carry a payload field named `type`).",
       "minProperties": 1
     },
     "canonical": {

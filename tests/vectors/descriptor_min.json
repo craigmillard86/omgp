@@ -6,56 +6,57 @@
       {
         "major": 1,
         "minor": 0,
-        "type": "PROTOCOL"
+        "record": "PROTOCOL"
       },
       {
+        "record": "MODULE_TYPE",
         "type": 1
       },
       {
-        "s": "N",
-        "type": "NAME"
+        "record": "NAME",
+        "s": "N"
       },
       {
-        "s": "M",
-        "type": "MANUFACTURER"
+        "record": "MANUFACTURER",
+        "s": "M"
       },
       {
         "fw_rev": 1,
         "hw_rev": 1,
-        "type": "MODEL_ID",
+        "record": "MODEL_ID",
         "vendor_model": 1
       },
       {
         "index": 0,
         "name": "Clean",
-        "type": "CHANNEL"
+        "record": "CHANNEL"
       },
       {
         "flags": 0,
-        "settle_ms": 0,
-        "type": "SWITCHING"
+        "record": "SWITCHING",
+        "settle_ms": 0
       },
       {
         "default": 0,
         "kind": 0,
         "name": "Gain",
         "param_id": 1,
-        "scope": 255,
-        "type": "PARAM"
+        "record": "PARAM",
+        "scope": 255
       },
       {
         "in_max_mvrms": 500,
         "input_mode": 0,
         "io_flags": 3,
         "out_max_mvrms": 1200,
-        "type": "AUDIO"
+        "record": "AUDIO"
       },
       {
         "n15_ma": 40,
         "p15_ma": 40,
         "p5_ma": 20,
         "p9_ma": 0,
-        "type": "POWER_LV"
+        "record": "POWER_LV"
       }
     ]
   },

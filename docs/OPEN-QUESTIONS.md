@@ -180,3 +180,28 @@ mutants rather than chasing line %"). Enforce on `deep-verify` from
 T062 onward.
 **Ruling:** pending — human, with T062.
 **Supersedes:** the previous entry's measurement and its 60 % suggestion.
+
+## 2026-08-29 — trunk-link-layer.md §8 bridging bullet reads as self-contradictory
+
+**Context:** raised by review on PR #13. `docs/trunk-link-layer.md` §8 says the
+backplane "holds the trunk response until the module answers or its
+module-bus timeout (5 ms) expires, whichever is sooner — but must always
+respond on the trunk within T_resp" (200 µs). Read literally, a response
+cannot both wait up to 5 ms and meet a 200 µs deadline. The intended
+behaviour is unambiguous elsewhere (constitution Principle VII; the same
+bullet's next clause: "if the module transaction is still in flight, the
+backplane answers `ERROR: busy` … MUST NOT stall the trunk"): the backplane
+answers on the trunk within T_resp *every time* — with the module's reply
+if it is already available, otherwise with `ERR_BUSY` — while the module-bus
+transaction continues autonomously under its own 5 ms timeout and the host
+retries later. The "holds the trunk response" phrase is the misleading part.
+**Recommendation:** reword the bullet to: "Frames whose L3 node ID belongs
+to one of the backplane's slots are translated to module-bus transactions.
+The backplane MUST answer on the trunk within T_resp on every poll: with the
+module's reply if it has arrived, otherwise `ERROR: busy` (the host retries
+later). The module-bus transaction proceeds independently under the 5 ms
+module-bus timeout; the backplane never waits on I2C while the trunk is
+waiting on it." No change to timing values or codec behaviour.
+**Ruling:** pending — the trunk document is a human-ruling artefact; not
+edited by the agent.
+**Supersedes:** none.

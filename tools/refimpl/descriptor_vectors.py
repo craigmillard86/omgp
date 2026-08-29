@@ -58,8 +58,11 @@ def min_records() -> list:
 
 
 def _record_fields(rec) -> dict:
+    """{"record": <TLV name or UNKNOWN>, <dataclass fields...>}. The key is "record", not
+    "type": ModuleTypeRec and UnknownRec carry a payload field named `type`, which would
+    otherwise overwrite the record name in the merge (found by review on PR #14)."""
     d = {k: (v.hex() if isinstance(v, bytes) else v) for k, v in dataclasses.asdict(rec).items()}
-    return {"type": G.TLV_NAMES.get(D.TYPE_OF.get(type(rec), getattr(rec, "type", -1)), "UNKNOWN"), **d}
+    return {"record": G.TLV_NAMES.get(D.TYPE_OF.get(type(rec), -1), "UNKNOWN"), **d}
 
 
 def _descriptor_entry(name: str, spec_ref: str, recs: list, note: str | None) -> dict:

@@ -4,6 +4,7 @@
 #include "omgp_protocol.h"
 
 #include <cstddef>
+#include <string>
 
 namespace {
 template <typename T, size_t N> constexpr size_t count_of(const T (&)[N]) {

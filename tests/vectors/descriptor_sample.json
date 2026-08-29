@@ -6,149 +6,150 @@
       {
         "major": 1,
         "minor": 0,
-        "type": "PROTOCOL"
+        "record": "PROTOCOL"
       },
       {
+        "record": "MODULE_TYPE",
         "type": 3
       },
       {
-        "s": "British Preamp",
-        "type": "NAME"
+        "record": "NAME",
+        "s": "British Preamp"
       },
       {
-        "s": "OMGP",
-        "type": "MANUFACTURER"
+        "record": "MANUFACTURER",
+        "s": "OMGP"
       },
       {
         "fw_rev": 259,
         "hw_rev": 2,
-        "type": "MODEL_ID",
+        "record": "MODEL_ID",
         "vendor_model": 257
       },
       {
-        "s": "BP-0001",
-        "type": "SERIAL"
+        "record": "SERIAL",
+        "s": "BP-0001"
       },
       {
         "index": 0,
         "name": "Clean",
-        "type": "CHANNEL"
+        "record": "CHANNEL"
       },
       {
         "index": 1,
         "name": "Crunch",
-        "type": "CHANNEL"
+        "record": "CHANNEL"
       },
       {
         "index": 2,
         "name": "Lead",
-        "type": "CHANNEL"
+        "record": "CHANNEL"
       },
       {
         "index": 3,
         "name": "Solo Boost / High Gain",
-        "type": "CHANNEL"
+        "record": "CHANNEL"
       },
       {
         "flags": 1,
-        "settle_ms": 120,
-        "type": "SWITCHING"
+        "record": "SWITCHING",
+        "settle_ms": 120
       },
       {
         "default": 2048,
         "kind": 0,
         "name": "Gain",
         "param_id": 1,
-        "scope": 255,
-        "type": "PARAM"
+        "record": "PARAM",
+        "scope": 255
       },
       {
         "default": 2048,
         "kind": 0,
         "name": "Bass",
         "param_id": 2,
-        "scope": 255,
-        "type": "PARAM"
+        "record": "PARAM",
+        "scope": 255
       },
       {
         "default": 2048,
         "kind": 0,
         "name": "Middle",
         "param_id": 3,
-        "scope": 255,
-        "type": "PARAM"
+        "record": "PARAM",
+        "scope": 255
       },
       {
         "default": 2048,
         "kind": 0,
         "name": "Treble",
         "param_id": 4,
-        "scope": 255,
-        "type": "PARAM"
+        "record": "PARAM",
+        "scope": 255
       },
       {
         "default": 1024,
         "kind": 0,
         "name": "Presence",
         "param_id": 5,
-        "scope": 255,
-        "type": "PARAM"
+        "record": "PARAM",
+        "scope": 255
       },
       {
         "default": 0,
         "kind": 2,
         "name": "Bright",
         "param_id": 6,
-        "scope": 3,
-        "type": "PARAM"
+        "record": "PARAM",
+        "scope": 3
       },
       {
         "default": 4095,
         "kind": 0,
         "name": "Master Volume",
         "param_id": 7,
-        "scope": 255,
-        "type": "PARAM"
+        "record": "PARAM",
+        "scope": 255
       },
       {
         "default": 0,
         "kind": 5,
         "name": "Heater Current (mA)",
         "param_id": 8,
-        "scope": 255,
-        "type": "PARAM"
+        "record": "PARAM",
+        "scope": 255
       },
       {
         "index": 0,
         "label": "Off",
         "param_id": 6,
-        "type": "PARAM_ENUM"
+        "record": "PARAM_ENUM"
       },
       {
         "index": 1,
         "label": "Bright",
         "param_id": 6,
-        "type": "PARAM_ENUM"
+        "record": "PARAM_ENUM"
       },
       {
         "index": 2,
         "label": "Extra Bright",
         "param_id": 6,
-        "type": "PARAM_ENUM"
+        "record": "PARAM_ENUM"
       },
       {
         "in_max_mvrms": 500,
         "input_mode": 1,
         "io_flags": 3,
         "out_max_mvrms": 1200,
-        "type": "AUDIO"
+        "record": "AUDIO"
       },
       {
         "n15_ma": 40,
         "p15_ma": 40,
         "p5_ma": 20,
         "p9_ma": 0,
-        "type": "POWER_LV"
+        "record": "POWER_LV"
       },
       {
         "bplus_exp_ma": 12,
@@ -157,21 +158,23 @@
         "heater_max_ma": 700,
         "heater_nom_ma": 600,
         "power_class": 2,
+        "record": "POWER_TUBE",
         "sections": 4,
-        "tubes": 2,
-        "type": "POWER_TUBE"
+        "tubes": 2
       },
       {
         "data": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7",
-        "type": "VENDOR",
+        "record": "VENDOR",
         "vendor_id": 4660
       },
       {
         "data": "01020304050607",
+        "record": "UNKNOWN",
         "type": 85
       },
       {
         "data": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "record": "UNKNOWN",
         "type": 86
       }
     ]

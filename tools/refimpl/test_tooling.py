@@ -17,32 +17,26 @@ MUTATE = ROOT / "tools" / "mutate.sh"
 CFG = ROOT / "tools" / "mutate.cfg"
 
 
-def _path_without(tmp_path: pathlib.Path, *names: str) -> str:
-    """A PATH mirroring /usr/bin without the named tools (so the scripts see them absent)."""
-    d = tmp_path / "bin"
-    d.mkdir()
-    for f in pathlib.Path("/usr/bin").iterdir():
-        if f.name not in names and not any(f.name.startswith(n + "-") for n in names):
-            try:
-                (d / f.name).symlink_to(f)
-            except OSError:
-                pass  # duplicate or unlinkable entry (dangling symlink etc.): the mirror just lacks it
-    return str(d)
+# "Tool absent" is simulated through the scripts' own override variables (a nonexistent
+# path), not by rebuilding PATH from /usr/bin — cheap, deterministic, and independent of
+# what happens to be installed on the machine running the tests.
+NO_CLANG = {"OMGP_FUZZ_CXX": "/nonexistent/clang++"}
+NO_MULL = {"MULL_RUNNER": "/nonexistent/mull-runner", "MULL_PLUGIN": "/nonexistent/mull-ir-frontend"}
 
 
-def run(script, *args, path=None, timeout=120):
+def run(script, *args, env_overrides=None, timeout=120):
     env = dict(os.environ)
-    if path is not None:
-        env["PATH"] = path
-    env.pop("OMGP_FUZZ_CXX", None)
+    for k in ("OMGP_FUZZ_CXX", "MULL_RUNNER", "MULL_PLUGIN"):
+        env.pop(k, None)
+    env.update(env_overrides or {})
     t0 = time.monotonic()
     r = subprocess.run(["bash", str(script), *args], capture_output=True, text=True, cwd=ROOT, env=env,
                        timeout=timeout)
     return r.returncode, r.stdout + r.stderr, time.monotonic() - t0
 
 
-def test_fuzz_smoke_without_clang_fails_with_disclosure(tmp_path):
-    rc, out, _ = run(FUZZ, "1", path=_path_without(tmp_path, "clang++", "clang"))
+def test_fuzz_smoke_without_clang_fails_with_disclosure():
+    rc, out, _ = run(FUZZ, "1", env_overrides=NO_CLANG)
     assert rc == 1
     assert "blind spot" in out and "libFuzzer" in out
 
@@ -80,14 +74,14 @@ def test_mutate_bad_ref_is_an_error_not_a_silent_pass():
     assert rc == 2 and "not a commit" in out
 
 
-def test_mutate_require_fails_without_mull(tmp_path):
-    rc, out, _ = run(MUTATE, "--diff", _scoped_ref(), "--require", path=_path_without(tmp_path, "mull-runner", "mull"))
+def test_mutate_require_fails_without_mull():
+    rc, out, _ = run(MUTATE, "--diff", _scoped_ref(), "--require", env_overrides=NO_MULL)
     assert rc == 1
     assert "required but not found" in out
 
 
-def test_mutate_without_require_discloses_and_passes(tmp_path):
-    rc, out, _ = run(MUTATE, "--diff", _scoped_ref(), path=_path_without(tmp_path, "mull-runner", "mull"))
+def test_mutate_without_require_discloses_and_passes():
+    rc, out, _ = run(MUTATE, "--diff", _scoped_ref(), env_overrides=NO_MULL)
     assert rc == 0, out
     assert "not present" in out and "blind spot" in out
 

@@ -5,6 +5,7 @@
 #include "heap_guard.hpp"
 #include "l3/l3_types.hpp"
 
+#include <string>
 #include <type_traits>
 
 using omgp::l3::Status;
