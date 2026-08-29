@@ -272,3 +272,45 @@ and map Spec Kit directories to them (001-protocol-foundation →
 **Ruling:** adopted — human, 2026-08-29 ("use feature:f1-codecs"). PRs
 #15 and #16 relabelled accordingly.
 **Supersedes:** none.
+
+## 2026-08-29 — Trunk §4: a single invalid escape aborts the frame
+
+**Context:** `docs/trunk-link-layer.md` §4 discards a frame at "≥ 8
+consecutive stuffing violations" but never says how fewer than eight
+decode. Feature 002 (trunk link layer) needs the host-core and Python
+frame parsers to agree byte-for-byte, so the rule must be exact.
+**Recommendation:** any invalid escape (`0x7D` followed by anything but
+`0x5E`/`0x5D`) aborts the frame immediately, resynchronising on the next
+FLAG; the "8" is read as a bound on how long a receiver may keep consuming
+a babbling stream before abandoning the current frame, not as a tolerance.
+**Ruling:** adopted — human, 2026-08-29 (feature 002 clarification Q1,
+option A). Spec FR-002. The trunk document's wording could say so
+explicitly; that edit is a human's (T3).
+**Supersedes:** none.
+
+## 2026-08-29 — Trunk §7: BUS_FAULT means every enrolled node SUSPECT at once
+
+**Context:** §7 declares BUS_FAULT "if all nodes fail simultaneously"
+without defining failure or saying whether one enrolled node counts.
+**Recommendation:** BUS_FAULT when every enrolled node (HEALTHY, SUSPECT or
+OFFLINE — never UNKNOWN) is SUSPECT or worse at the same time; a single
+enrolled node counts as all, because the fallback re-probe — not the node
+count — is what distinguishes a dead node from a dead bus. Declared once
+per episode with one alert.
+**Ruling:** adopted — human, 2026-08-29 (feature 002 clarification Q2,
+option A). Spec FR-024.
+**Supersedes:** none.
+
+## 2026-08-29 — Trunk §7: after BUS_FAULT, alternate probe rates; the answering rate wins
+
+**Context:** §7 says the host "re-probes at the fallback bit rate, and
+surfaces a system alert" — nothing about retrying the reference rate, how
+long, or what clears the fault.
+**Recommendation:** while BUS_FAULT is declared, enrolment probes alternate
+between the reference and fallback bit rates; the first valid response at
+either rate clears the fault exactly once (recovery notification) and that
+rate becomes the rate in use until the layer above changes it. Diagnoses
+both "wrong rate" and "cable reconnected" with one policy.
+**Ruling:** adopted — human, 2026-08-29 (feature 002 clarification Q3,
+option A). Spec FR-026.
+**Supersedes:** none.
