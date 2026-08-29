@@ -2,32 +2,54 @@ name: claude-review
 # Risk-scaled automated code review: T2/T3 PRs get a Claude review pass
 # before human review. Advisory — findings are comments, never blocks;
 # the human merge decision remains the gate (GOVERNANCE.md §1).
+#
+# The tier is resolved at RUN time (.github/actions/risk-tier): a `labeled`
+# trigger never fired for risk-score's labels because GitHub starts no run for
+# events caused by GITHUB_TOKEN (found 2026-08-29 — this workflow had never
+# run). Reviews happen once per PR lifecycle event, not per push: an updated
+# head is re-reviewed by reopening or via workflow_dispatch.
 on:
   pull_request:
-    types: [labeled]
+    types: [opened, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'Pull request number to review'
+        required: true
 
 permissions:
   id-token: write   # anthropics/claude-code-action exchanges an OIDC token for its App token; without this every run fails "Could not fetch an OIDC token" (found 2026-08-29)
   contents: read
+  checks: read
   pull-requests: write
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
 
 jobs:
   review:
-    if: >
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      (github.event.label.name == 'risk:t2' || github.event.label.name == 'risk:t3')
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with: {fetch-depth: 0}
+      - id: tier
+        uses: ./.github/actions/risk-tier
+        with: {pr: '${{ github.event.pull_request.number || inputs.pr }}'}
+      - name: Below T2 — no automated review
+        if: steps.tier.outputs.deep != 'true'
+        run: |
+          echo "claude-review: PR is ${{ steps.tier.outputs.label }} — review pass runs for T2/T3 only"
       - name: Claude Code — focused review
+        if: steps.tier.outputs.deep == 'true'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            Review PR #${{ github.event.pull_request.number }} (risk
-            ${{ github.event.label.name }}). Read CLAUDE.md and
+            Review PR #${{ github.event.pull_request.number || inputs.pr }} (risk
+            ${{ steps.tier.outputs.label }}). Read CLAUDE.md and
             docs/GOVERNANCE.md §3 first. Focus, in order:
             1. Conformance to the cited spec sections (docs/protocol-l3.md,
                docs/trunk-link-layer.md) — flag any divergence precisely.

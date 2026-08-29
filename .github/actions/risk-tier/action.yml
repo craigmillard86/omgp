@@ -1,0 +1,63 @@
+name: risk-tier
+description: >
+  Resolve a pull request's risk tier at RUN time: wait for the risk-score `score` check on
+  the PR head, then read the PR's current labels. Needed because GitHub never starts a
+  workflow run for an event caused by GITHUB_TOKEN — risk-score applies `risk:tN` with
+  that token, so a `labeled`-triggered workflow, or an `if:` over the event payload's
+  labels, never sees the tier on a PR's first push (observed on #16/#17/#18, 2026-08-29).
+  Fail-safe: if `score` does not complete within `wait-seconds`, the tier is reported as
+  3 so the caller does the most work, never the least.
+inputs:
+  pr:
+    description: Pull request number
+    required: true
+  wait-seconds:
+    description: How long to wait for the `score` check on the PR head
+    required: false
+    default: "180"
+outputs:
+  tier:
+    description: "0..3 (3 when score never completed — fail-safe)"
+    value: ${{ steps.resolve.outputs.tier }}
+  label:
+    description: "risk:tN label as applied, or 'unscored' when the wait timed out"
+    value: ${{ steps.resolve.outputs.label }}
+  deep:
+    description: "'true' when tier >= 2 (deep-verify / claude-review / red-team should run)"
+    value: ${{ steps.resolve.outputs.deep }}
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR: ${{ inputs.pr }}
+        WAIT: ${{ inputs.wait-seconds }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        sha=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
+        echo "risk-tier: PR #$PR head $sha — waiting up to ${WAIT}s for the 'score' check"
+        deadline=$(( $(date +%s) + WAIT ))
+        scored=no
+        while [ "$(date +%s)" -lt "$deadline" ]; do
+          st=$(gh api "repos/$REPO/commits/$sha/check-runs?check_name=score&per_page=5" \
+                 --jq '[.check_runs[] | select(.status=="completed")] | length')
+          if [ "${st:-0}" -gt 0 ]; then scored=yes; break; fi
+          sleep 10
+        done
+        labels=$(gh api "repos/$REPO/issues/$PR/labels" --jq '[.[].name] | join(" ")')
+        tier=""
+        for t in 3 2 1 0; do
+          case " $labels " in *" risk:t$t "*) tier=$t; break;; esac
+        done
+        if [ "$scored" = yes ] && [ -n "$tier" ]; then
+          label="risk:t$tier"
+          echo "risk-tier: score complete; labels: [$labels] -> $label"
+        else
+          tier=3; label=unscored
+          echo "::warning::risk-tier: 'score' check not completed (scored=$scored, labels: [$labels]) — treating as T3 (fail-safe: do the most work, not the least)"
+        fi
+        deep=false; [ "$tier" -ge 2 ] && deep=true
+        { echo "tier=$tier"; echo "label=$label"; echo "deep=$deep"; } >> "$GITHUB_OUTPUT"
