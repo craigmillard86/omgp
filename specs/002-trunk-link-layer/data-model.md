@@ -65,6 +65,10 @@ Outcome ∈ { Pending, Answered, Failed(Timeout | Crc) }     -- Crc: last attemp
 Master state ∈ { Idle, Transmitting(until tx_end), AwaitResponse(until tx_end + T_resp), Gap(until last_activity + T_gap) }
 ```
 
+- **Receive path**: `poll(now)` first drains `ByteWire::receive()` into the engine's
+  `Deframer` (each byte with its start-bit instant), then evaluates the state machine. It
+  is the only receive path (analysis F1); the same holds for the Responder.
+
 - **Sequence**: per-destination counter `next_seq[16]`; `begin()` uses `next_seq[dst]++ & 0x0F`
   for a new transaction; retries reuse `seq` and set `retry`.
 - **Response acceptance** (all must hold): intact frame; `src == dst_of_request`;
@@ -92,6 +96,9 @@ Responder state ∈ { Listening, Scheduled(response at request_end + turnaround_
   (`src = my_addr`, `dst = request.src`, `response = 1`, `retry` echoed, `seq` echoed);
   store in buffer; schedule.
 - `turnaround_us` clamped to `[T_turn_min, T_turn_max]` at construction.
+- **Late poll** (spec FR-014): if the first `poll(now)` after a request has
+  `now > request_end + T_turn_max`, the response is transmitted at `now` and
+  `AddrStats.late_responses` is incremented; nothing is dropped.
 
 ## 6. Node health record
 
@@ -138,7 +145,7 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
 ## 8. Statistics (FR-011a)
 
 ```
-AddrStats { u32 transactions, retries, timeouts, crc_failures, discards, replays_served }   × 16
+AddrStats { u32 transactions, retries, timeouts, crc_failures, discards, replays_served, late_responses }   × 16
 BusStats  { u32 rate_changes, bus_faults }
 ```
 Readable via `stats(addr)` / `bus_stats()`, `reset_stats()`; incremented at the point the

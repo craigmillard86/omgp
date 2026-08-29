@@ -30,9 +30,10 @@ with the default delay. Steps with `node == 0xFF` apply to every node.
   looks up the addressed node's next step, and enqueues RX bytes with computed start-bit
   instants (`t0 = tx_end + delay`, byte *i* at `t0 + i × byte_time_us(rate)`). Returns
   `now + n × byte_time_us(rate)`.
-- `advance_to(t)` (test helper) sets the `FakeClock`, then hands every queued byte with
-  `start_us ≤ t` to the engine under test via its `feed()`, and calls the engine's
-  `poll(t)`. Tests step time explicitly; nothing sleeps.
+- `advance_to(t)` (test helper) sets the `FakeClock` and calls the engine's `poll(t)`;
+  the engine drains the mock's `receive()` itself, which returns only bytes whose
+  `start_us ≤ t` (bytes "in the future" stay queued). There is no push path into the
+  engines (analysis F1). Tests step time explicitly; nothing sleeps.
 - Capacity: a fixed queue of `4 × kMaxWire` bytes (enough for a response, a duplicate and
   a babble burst); overflow is a test failure (`REQUIRE`), never silent truncation.
 - All randomness from `Step::seed` through an xorshift32 in the mock; the same script

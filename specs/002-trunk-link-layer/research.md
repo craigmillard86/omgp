@@ -69,8 +69,9 @@ from the tree on 2026-08-29; facts about the trunk protocol come from
 - **Decision**: `Master` with states `Idle`, `Transmitting` (until the wire's reported
   `tx_end_us`), `AwaitResponse{attempt}` (until a valid response or `tx_end + T_resp`),
   `Gap` (until `last_activity + T_gap`). API: `begin(dst, payload) → Status`;
-  `feed(byte, start_us)` for every received byte (the wire hands bytes to the engine's
-  deframer); `poll(now) → Event` where `Event ∈ {None, Answered{payload}, Failed{reason}}`;
+  `poll(now) → Event` — which first drains `ByteWire::receive()` into the engine's
+  deframer (the only receive path; there is no public `feed()`, analysis F1) — where
+  `Event ∈ {None, Answered{payload}, Failed{reason}}`;
   `busy()`; `stats(addr)`; `set_bit_rate()` pass-through. Start-bit instants: the wire
   reports each received byte with the instant of its **start bit**; "final stop bit" of
   a frame = last byte start + 10 bit-times at the current rate (FR-012). The response

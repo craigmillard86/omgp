@@ -284,6 +284,10 @@ assert no bus fault.
   transaction in progress fails or succeeds on its own merits; the babbling node's
   health is not adjusted on the host side (attribution is not reliable), and a babble
   script step in the scripted transport lets tests assert both effects.
+- A node-side engine polled late (first given control after `T_turn_max` has passed):
+  it transmits immediately and counts a late response (FR-014); the host, seeing a start
+  bit before `T_resp`, still accepts it — the late poll is the simulator's defect, not
+  the protocol's, and the counter is how a scenario notices.
 - Simulated time that does not advance (a test forgets to step the clock): the engine
   never spins — every wait is a comparison against the injected clock, and a transaction
   cannot time out until time is advanced past the timeout.
@@ -372,7 +376,11 @@ assert no bus fault.
 
 - **FR-014**: The node-side engine MUST transmit only in response to an intact frame
   addressed to it, and MUST schedule the response's first byte no earlier than
-  `T_turn_min` and no later than `T_turn_max` after the request's final stop bit.
+  `T_turn_min` and no later than `T_turn_max` after the request's final stop bit. If the
+  engine is not given control until after that window has closed (a late-polling
+  simulator), it MUST still transmit — at once — and MUST count the occurrence as a late
+  response, so the violation is visible to the layer that caused it rather than hidden
+  by a dropped answer.
 - **FR-015**: The node-side engine MUST keep exactly one replay buffer holding its most
   recent response (sequence, and the complete frame bytes); on receiving a frame with the
   retry bit set and the same sequence as the buffered response it MUST retransmit the
@@ -414,9 +422,10 @@ assert no bus fault.
   simultaneously"; a single enrolled node counts as all — the fallback re-probe, not the
   node count, is what distinguishes a dead node from a dead bus. BUS_FAULT MUST be
   declared once per episode and raise one system alert.
-- **FR-025**: On BUS_FAULT the host MUST re-probe at the fallback bit rate (115.2 kbit/s,
-  from the generated symbol), and the transport abstraction MUST expose the bit-rate
-  change so a scripted transport can observe and react to it.
+- **FR-025**: On BUS_FAULT the host MUST re-probe **starting** at the fallback bit rate
+  (115.2 kbit/s, from the generated symbol) and thereafter alternate per FR-026, and the
+  transport abstraction MUST expose the bit-rate change so a scripted transport can
+  observe and react to it.
 - **FR-026**: While BUS_FAULT is declared, the host MUST alternate its enrolment probes
   between the reference and the fallback bit rate (one probe at each, in turn); the first
   valid response at either rate MUST clear BUS_FAULT exactly once with a recovery
@@ -444,7 +453,8 @@ assert no bus fault.
 
 **Test infrastructure**
 
-- **FR-030**: A scripted transport for tests MUST express, per script step and per node:
+- **FR-030**: A scripted transport for tests (`MockWire` in the plan, research R-07; the
+  "MockTransport" of the feature description) MUST express, per script step and per node:
   respond normally after a stated delay; stay silent; emit garbage bytes (non-frame bytes,
   a stated count); respond with a CRC-corrupted frame; duplicate a response; babble
   (transmit outside the response window, or continuously for a stated duration); and
@@ -592,7 +602,11 @@ assert no bus fault.
 - **Frame transmission time model**: 10 bits per byte at the bit rate in use, no inter-
   byte gaps, measured over the stuffed frame including both FLAGs; this is the model
   §4's "≤ ~1.4 ms" bound uses and it is what the simulator will use until Rev A measurements
-  replace the provisional values.
+  replace the provisional values. Byte time is computed in **integer microseconds**
+  (`10 000 000 / bit_rate`): 10 µs at the reference rate, 86 µs at the fallback rate
+  (true value 86.8 µs — about 1 % short over a worst-case frame, well inside the
+  `T_turn`/`T_resp` margins); tests pin the integer model, and the function is the single
+  place to refine it if Rev A measurements call for sub-microsecond accuracy.
 - **Python reference scope**: the frame codec (stuff/unstuff, CRC, incremental parse and
   resync) gets a reference implementation and differential coverage, as constitution
   Principle III requires of every codec; the engines and health tracker are behavioural,

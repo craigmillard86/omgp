@@ -55,4 +55,7 @@ protected: ~ByteWire() = default;
   `TRUNK_T_gap_us` after the last received byte's final stop bit (Master).
 - The Responder calls `transmit()` only inside `[request_end + T_turn_min, request_end +
   T_turn_max]` and only once per accepted request (or replay).
-- Every `receive()`d byte is consumed in the same `poll()`.
+- `receive()` is the only receive path: each engine drains it at the start of every
+  `poll(now)` until it returns false, and consumes every byte in that same `poll()`. An
+  implementation must return only bytes whose start instant is ≤ the caller's `now`
+  (a virtual wire that knows the future keeps later bytes queued).

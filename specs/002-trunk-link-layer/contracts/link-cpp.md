@@ -25,7 +25,7 @@ struct DeframerStats { uint32_t delivered; uint32_t discarded[static_cast<size_t
 
 enum class HealthState : uint8_t { UNENROLLED, ENROLLED, SUSPECT, OFFLINE };
 enum class Notice : uint8_t { ENROLLED, SUSPECT, OFFLINE, RECOVERED, BUS_FAULT, ALERT, BUS_RECOVERED };
-struct AddrStats { uint32_t transactions, retries, timeouts, crc_failures, discards, replays_served; };
+struct AddrStats { uint32_t transactions, retries, timeouts, crc_failures, discards, replays_served, late_responses; };
 struct BusStats  { uint32_t rate_changes, bus_faults; };
 ```
 
@@ -63,8 +63,9 @@ public:
     Master(ByteWire&, Clock&, uint8_t host_addr = 0x00);
     Status begin(uint8_t dst, const uint8_t* payload, size_t len);   // Busy if a transaction is open;
                                                                      // PayloadTooLong / ReservedAddress as encode_frame
-    void feed(uint8_t byte, uint64_t start_us);   // every byte the wire receives (start-bit instant)
-    MasterEvent poll(uint64_t now_us);            // drives the state machine; at most one terminal event per transaction
+    MasterEvent poll(uint64_t now_us);            // drains ByteWire::receive() into the deframer, then drives the
+                                                  // state machine; at most one terminal event per transaction.
+                                                  // The ONLY receive path — there is no public feed() (analysis F1).
     bool busy() const;
     uint8_t attempts() const;                     // 0..3 for the open/last transaction
     void set_bit_rate(uint32_t bps);              // pass-through to the wire + BusStats.rate_changes
@@ -89,9 +90,11 @@ class Responder {
 public:
     Responder(ByteWire&, Clock&, RequestHandler&, uint8_t my_addr, uint32_t turnaround_us = TRUNK_T_turn_min_us);
     // turnaround_us clamped to [TRUNK_T_turn_min_us, TRUNK_T_turn_max_us]
-    void feed(uint8_t byte, uint64_t start_us);
-    void poll(uint64_t now_us);                   // transmits when the scheduled instant is reached
-    const AddrStats& stats() const;               // replays_served, discards, transactions (requests handled)
+    void poll(uint64_t now_us);                   // drains ByteWire::receive(); transmits when the scheduled instant is
+                                                  // reached. If now_us is already past request_end + T_turn_max when the
+                                                  // response is due (late poll), transmits immediately and increments
+                                                  // stats().late_responses (spec FR-014). No public feed().
+    const AddrStats& stats() const;               // replays_served, discards, transactions (requests handled), late_responses
 };
 ```
 
