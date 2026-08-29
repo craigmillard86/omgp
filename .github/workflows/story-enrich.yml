@@ -1,6 +1,6 @@
 name: story-enrich
 # PRD auto-population: label a task issue `enrich` and Claude fills the
-# story sections from .specify/ artefacts and docs/, predicts a risk tier
+# story sections from the feature's specs/<NNN-feature>/ artefacts and docs/, predicts a risk tier
 # with rationale, then either auto-releases (tier <= auto_ready_max_tier)
 # or queues it for human review. Merge approval is unaffected and always
 # human (GOVERNANCE.md §1).
@@ -34,7 +34,7 @@ jobs:
             .github/agent-config.yml first.
             Target: issue #${{ github.event.issue.number }} (a task issue).
 
-            1. Read the issue, its feature's .specify/ artefacts (spec.md,
+            1. Read the issue, its feature's specs/<NNN-feature>/ artefacts (spec.md,
                plan.md, tasks.md) and the docs/ sections they reference.
             2. Rewrite the issue body to fully satisfy every section of the
                PRD scheme: concrete spec references (doc + section numbers),

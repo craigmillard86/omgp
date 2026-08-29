@@ -3,7 +3,7 @@
 Spec Kit ships an optional taskstoissues command — prefer that if installed;
 this is the dependency-free fallback. Requires gh CLI, authenticated.
 
-Usage: tools/tasks-to-issues.py .specify/features/<feature>/tasks.md feature:f2
+Usage: tools/tasks-to-issues.py specs/<NNN-feature>/tasks.md feature:f2-link
 Idempotent: skips tasks whose title already exists as an open issue.
 """
 import re, subprocess, sys, json, pathlib
@@ -27,7 +27,7 @@ for tid, par, desc in tasks:
 Spec Kit task **{tid}** from `{path}`{' — parallelisable [P]' if par else ''}: {desc.strip()}
 
 ### Spec references
-See the feature's spec.md/plan.md under .specify/ — REPLACE with the concrete doc sections before releasing.
+See the feature's spec.md/plan.md under `{pathlib.Path(path).parent}/` — REPLACE with the concrete doc sections before releasing.
 
 ### Acceptance criteria
 - [ ] {desc.strip()}
