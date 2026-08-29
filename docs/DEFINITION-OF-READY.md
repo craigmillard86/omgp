@@ -38,7 +38,7 @@ on a conforming story. Re-apply after fixing.
 ## Enrichment and auto-release
 
 Labelling a task `enrich` invokes the story-enrichment agent, which
-populates all sections from the feature's .specify/ artefacts and predicts
+populates all sections from the feature's `specs/<NNN-feature>/` artefacts and predicts
 the risk tier. Stories predicted at or below `auto_ready_max_tier`
 (.github/agent-config.yml) are auto-released to dispatch; higher tiers
 queue for human review of the story. The prediction is checked against
