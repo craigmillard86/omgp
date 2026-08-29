@@ -34,9 +34,18 @@ while [ $# -gt 0 ]; do
 done
 
 # --- scope: changed embedded-path sources -------------------------------------------------------
+# A depth-1 CI checkout has no origin/<branch> refs. `git diff <ref>` only needs the ref's
+# tree (no merge base), so a shallow fetch of that one ref is enough to recover.
 if [ -n "$REF" ] && ! git rev-parse --verify --quiet "$REF^{commit}" >/dev/null; then
-  echo "mutate: --diff ref '$REF' is not a commit in this clone (shallow checkout? fetch it first)" >&2
-  exit 2
+  case "$REF" in
+    origin/*)
+      echo "mutate: '$REF' not in this clone — fetching it shallowly"
+      git fetch --quiet --depth=1 origin "${REF#origin/}" 2>/dev/null || true ;;
+  esac
+  if ! git rev-parse --verify --quiet "$REF^{commit}" >/dev/null; then
+    echo "mutate: --diff ref '$REF' is not a commit in this clone and could not be fetched" >&2
+    exit 2
+  fi
 fi
 if [ -n "$REF" ]; then
   # shellcheck disable=SC2086

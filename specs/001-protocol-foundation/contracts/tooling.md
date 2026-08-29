@@ -25,10 +25,12 @@ Every fast/partial path states its blind spot on stdout (CLAUDE.md working agree
 ./tools/mutate.sh --diff origin/main --require      # CI deep-verify
 ./tools/mutate.sh --diff HEAD~1                      # local
 ```
-1. `--diff <ref>` must name a commit in the clone (exit 2 otherwise — a shallow checkout
-   is an error, not a silent empty scope). Scope = files under `l3/ link/ core/` changed
-   relative to `<ref>`; no scope → `mutation: nothing in scope (<ref>)`, exit 0, < 60 s.
-   `--dry-run` prints the scope and stops.
+1. `--diff <ref>` must name a commit in the clone; an `origin/<branch>` ref missing from a
+   shallow checkout is fetched with `--depth=1` first (a two-tree `git diff` needs no
+   merge base), and only if that fails is it an error (exit 2 — never a silent empty
+   scope). Scope = files under `l3/ link/ core/` changed relative to `<ref>`; no scope →
+   `mutation: nothing in scope (<ref>)`, exit 0, < 60 s. `--dry-run` prints the scope and
+   stops.
 2. Tool check: `mull-runner-<N>` and `/usr/lib/mull-ir-frontend-<N>` for the clang major
    in use (`tools/mutate.cfg` pins the Mull version; `MULL_RUNNER`/`MULL_PLUGIN` override
    the paths, e.g. for an extracted package). Absent → with `--require` exit 1 and
