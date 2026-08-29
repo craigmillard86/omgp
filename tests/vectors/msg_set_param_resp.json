@@ -1,0 +1,13 @@
+{
+  "bytes": "12 10 03 01 00",
+  "canonical": "op=SET_PARAM node=0x10 seq=3 flags=0x01",
+  "fields": {
+    "flags": 1,
+    "node_id": 16,
+    "opcode": "SET_PARAM",
+    "seq": 3
+  },
+  "kind": "message",
+  "name": "msg_set_param_resp",
+  "spec_ref": "protocol-l3 \u00a73.1 SET_PARAM accepted"
+}

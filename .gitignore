@@ -3,3 +3,13 @@ esp32-host/build/
 esp32-host/sdkconfig
 __pycache__/
 *.pyc
+# editor / OS / object files
+*.o
+*.swp
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+# harness path bug: nested settings copy is never project content
+.claude/.claude/
+esp32-host/sdkconfig.old

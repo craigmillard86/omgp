@@ -1,0 +1,14 @@
+{
+  "bytes": "01 7F FF 00 00",
+  "canonical": "op=PING node=0x7F seq=255 flags=0x00",
+  "fields": {
+    "flags": 0,
+    "node_id": 127,
+    "opcode": "PING",
+    "seq": 255
+  },
+  "kind": "message",
+  "name": "msg_ping_req_max_node",
+  "note": "boundary: node_id and seq at max",
+  "spec_ref": "protocol-l3 \u00a72 node id 0x7F (last module id)"
+}

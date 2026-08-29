@@ -62,6 +62,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Codegen runs on the host: the espressif/idf image has no Jinja2, and
+      # build/gen/ is mounted into the container by the esp32 pipeline stage.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: tools/requirements.txt
+      - name: Python deps + protocol codegen (host side)
+        run: |
+          pip install -r tools/requirements.txt
+          ./pipeline.sh codegen
+
       - name: Read pinned IDF version
         id: idf
         run: echo "version=$(cat IDF_VERSION)" >> "$GITHUB_OUTPUT"

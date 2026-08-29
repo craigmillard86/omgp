@@ -5,8 +5,22 @@
       "name": "native",
       "binaryDir": "${sourceDir}/build/native",
       "cacheVariables": { "OMGP_SANITIZERS": "ON", "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "fuzz",
+      "displayName": "libFuzzer targets (clang; tools/fuzz-smoke.sh)",
+      "binaryDir": "${sourceDir}/build/fuzz",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "OMGP_SANITIZERS": "ON",
+        "OMGP_FUZZ": "ON"
+      }
     }
   ],
-  "buildPresets": [ { "name": "native", "configurePreset": "native" } ],
+  "buildPresets": [
+    { "name": "native", "configurePreset": "native" },
+    { "name": "fuzz", "configurePreset": "fuzz" }
+  ],
   "testPresets":  [ { "name": "native", "configurePreset": "native", "output": {"outputOnFailure": true} } ]
 }

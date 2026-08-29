@@ -1,0 +1,67 @@
+// GENERATED from protocol/omgp-protocol.yaml by tools/codegen.py -- DO NOT EDIT.
+// Single source of truth for protocol values (CLAUDE.md rule 1). Byte-sized codes are
+// uint8_t; limits and timing are uint32_t; names are const char*. Tables are sorted by
+// code/type so binary search and range checks are valid.
+#pragma once
+#include <cstddef>
+#include <cstdint>
+namespace omgp {
+inline constexpr uint8_t PROTOCOL_MAJOR = {{ protocol.major }};
+inline constexpr uint8_t PROTOCOL_MINOR = {{ protocol.minor }};
+{% for sec in scalar_sections %}
+// --- {{ sec.section }} ---
+{% for it in sec.entries %}
+inline constexpr {{ it.ctype }} {{ it.symbol }} = {{ it.cvalue }};
+{% endfor %}
+{% endfor %}
+// --- reserved_opcode_ranges ---
+{% for r in reserved %}
+inline constexpr uint8_t RESERVED_{{ r.name }}_MIN = {{ r.min }};
+inline constexpr uint8_t RESERVED_{{ r.name }}_MAX = {{ r.max }};
+{% endfor %}
+// --- descriptor (protocol-l3 §4) ---
+inline constexpr uint16_t DESC_MAX_BYTES = LIMIT_max_descriptor_bytes; // alias, not a second YAML value
+inline constexpr const char* DESC_CRC = "{{ descriptor.crc }}";
+
+// --- code tables (sorted; for range checks without literals) ---
+{% for m in name_maps %}
+inline constexpr uint8_t {{ m.csymbol }}[] = { {% for e in m.entries %}{{ e.value }}{% if not loop.last %}, {% endif %}{% endfor %} };
+{% endfor %}
+
+// --- attribute tables ---
+enum class Target : uint8_t { Any, Module, Backplane, ResponseOnly };
+struct OpcodeInfo {
+    uint8_t code;
+    Target target;
+    bool idempotent;
+};
+inline constexpr OpcodeInfo OPCODE_INFO[] = {
+{% for o in opcode_info %}
+    { {{ o.chex }}, Target::{{ o.target_enum }}, {{ o.idempotent_c }} }, // {{ o.name }}
+{% endfor %}
+};
+struct TlvInfo {
+    uint8_t type;
+    bool required;
+    bool repeated;
+    uint8_t max_len; // 0 = no string limit beyond the record length byte
+};
+inline constexpr TlvInfo TLV_INFO[] = {
+{% for t in tlv_info %}
+    { {{ t.thex }}, {{ t.required_c }}, {{ t.repeated_c }}, {{ t.max_len }} }, // {{ t.name }}
+{% endfor %}
+};
+struct PayloadInfo {
+    uint8_t code;
+    uint8_t req_min;
+    uint8_t req_max;
+    uint8_t resp_min;
+    uint8_t resp_max;
+    bool opaque; // format not yet defined: bytes pass through verbatim
+};
+inline constexpr PayloadInfo PAYLOAD_INFO[] = {
+{% for p in payload_info %}
+    { {{ p.chex }}, {{ p.req_min }}, {{ p.req_max }}, {{ p.resp_min }}, {{ p.resp_max }}, {{ p.opaque_c }} }, // {{ p.name }}
+{% endfor %}
+};
+} // namespace omgp

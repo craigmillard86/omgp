@@ -1,0 +1,15 @@
+{
+  "bytes": "03 10 02 00 03 00 00 1C",
+  "canonical": "op=READ_DESC node=0x10 seq=2 flags=0x00 offset=0 max_len=28",
+  "fields": {
+    "flags": 0,
+    "max_len": 28,
+    "node_id": 16,
+    "offset": 0,
+    "opcode": "READ_DESC",
+    "seq": 2
+  },
+  "kind": "message",
+  "name": "msg_read_desc_req",
+  "spec_ref": "protocol-l3 \u00a73.1 READ_DESC (module-bus chunk)"
+}

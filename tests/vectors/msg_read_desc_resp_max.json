@@ -1,0 +1,16 @@
+{
+  "bytes": "03 10 02 01 40 C3 07 3D 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F 10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E 1F 20 21 22 23 24 25 26 27 28 29 2A 2B 2C 2D 2E 2F 30 31 32 33 34 35 36 37 38 39 3A 3B 3C",
+  "canonical": "op=READ_DESC node=0x10 seq=2 flags=0x01 offset=1987 bytes=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c",
+  "fields": {
+    "data": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c",
+    "flags": 1,
+    "node_id": 16,
+    "offset": 1987,
+    "opcode": "READ_DESC",
+    "seq": 2
+  },
+  "kind": "message",
+  "name": "msg_read_desc_resp_max",
+  "note": "boundary: payload_len 64",
+  "spec_ref": "protocol-l3 \u00a73.1 READ_DESC response, 61-byte tail"
+}

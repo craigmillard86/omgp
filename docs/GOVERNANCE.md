@@ -35,8 +35,8 @@ issues, comments) — never as direct changes to main.
 | Immutable golden vectors | tests can't be quietly bent | CLAUDE.md rule 9 + T3 scoring on `tests/vectors/` |
 | Sanitizers + cross-compile | memory safety + portability | CI jobs |
 | Format + static analysis (quality stage) | code quality on every merge | pipeline stage in CI |
-| CodeQL (C++/Python/Actions) + dependency review | security on every PR + weekly | security workflow |
-| Deep-verify: focused fuzz + diff-scoped mutation | pre-merge deep testing on T2/T3 | conditional CI job in ci-gate |
+| CodeQL (C++/Python/Actions) + dependency review | security on every PR + weekly | security workflow; the `CodeQL` results check, `codeql` and `dependency-review` are required status checks on `main` (ruled 2026-08-28) |
+| Deep-verify: focused fuzz + diff-scoped mutation | pre-merge deep testing on T2/T3; fails on any fuzz finding or on any surviving mutant on a changed line that is neither killed by a test nor labelled `// mutant-ok(equivalent\|accepted): <why>` on its source line (triage gate, ruled 2026-08-29; the whole-tree kill rate is a nightly trend, never a gate). `tools/mutate.cfg [policy]` constants are T3 — never relaxed to get green | conditional CI job in ci-gate |
 | Claude review on T2/T3 | spec-conformance + security review pass | claude-review workflow (advisory) |
 | Red team: PR attack on T2/T3 + monthly hostile-module protocol attack | falsification with runnable reproducers | red-team workflow (advisory; findings need evidence) |
 | WIP cap = 1 | review capacity governs autonomy | dispatch workflow |
@@ -113,8 +113,12 @@ Operational detail: docs/RUNBOOK.md.
 
 ## 7. Setup obligations (governance is live only when these are on)
 
-1. Branch protection on `main`: require `ci-gate`, require 1 review,
-   require review from Code Owners, no force pushes, admins included.
+1. Branch protection on `main`: require `ci-gate`, `CodeQL`, `codeql` and
+   `dependency-review` (branch up to date), require 1 review, require review
+   from Code Owners, no force pushes, admins included. (As of 2026-08-28
+   `enforce_admins` is off, which is what lets the sole maintainer merge past
+   the self-review rule with `--admin`; turning it on requires a second
+   reviewer.)
 2. `.github/CODEOWNERS`: replace `@OWNER` with the maintainer's handle.
 3. Run `tools/gh-setup.sh` (labels including `risk:*`, project board).
 4. Secrets: `CLAUDE_CODE_OAUTH_TOKEN`. App: Claude GitHub App on this repo.

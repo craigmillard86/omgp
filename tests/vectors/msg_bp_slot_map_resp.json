@@ -1,0 +1,14 @@
+{
+  "bytes": "20 02 01 01 01 03",
+  "canonical": "op=BP_SLOT_MAP node=0x02 seq=1 flags=0x01 opaque=03",
+  "fields": {
+    "data": "03",
+    "flags": 1,
+    "node_id": 2,
+    "opcode": "BP_SLOT_MAP",
+    "seq": 1
+  },
+  "kind": "message",
+  "name": "msg_bp_slot_map_resp",
+  "spec_ref": "protocol-l3 \u00a73.1 BP_SLOT_MAP response (opaque)"
+}

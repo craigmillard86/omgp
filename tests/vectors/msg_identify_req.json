@@ -1,0 +1,13 @@
+{
+  "bytes": "02 10 05 00 00",
+  "canonical": "op=IDENTIFY node=0x10 seq=5 flags=0x00",
+  "fields": {
+    "flags": 0,
+    "node_id": 16,
+    "opcode": "IDENTIFY",
+    "seq": 5
+  },
+  "kind": "message",
+  "name": "msg_identify_req",
+  "spec_ref": "protocol-l3 \u00a73.1 IDENTIFY"
+}

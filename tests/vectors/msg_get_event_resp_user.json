@@ -1,0 +1,16 @@
+{
+  "bytes": "15 10 0B 01 06 F0 00 DE AD BE EF",
+  "canonical": "op=GET_EVENT node=0x10 seq=11 flags=0x01 evt=0xF0 remaining=0 detail=deadbeef",
+  "fields": {
+    "detail": "deadbeef",
+    "event_type": 240,
+    "flags": 1,
+    "node_id": 16,
+    "opcode": "GET_EVENT",
+    "remaining_count": 0,
+    "seq": 11
+  },
+  "kind": "message",
+  "name": "msg_get_event_resp_user",
+  "spec_ref": "protocol-l3 \u00a73.4 USER_DEFINED 0xF0"
+}

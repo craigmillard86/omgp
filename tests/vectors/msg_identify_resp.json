@@ -1,0 +1,19 @@
+{
+  "bytes": "02 10 05 01 07 01 00 03 6D 02 C6 D9",
+  "canonical": "op=IDENTIFY node=0x10 seq=5 flags=0x01 major=1 minor=0 mt=TUBE_PREAMP desc_len=621 desc_crc=0xD9C6",
+  "fields": {
+    "desc_crc": 55750,
+    "desc_len": 621,
+    "flags": 1,
+    "major": 1,
+    "minor": 0,
+    "module_type": 3,
+    "node_id": 16,
+    "opcode": "IDENTIFY",
+    "seq": 5
+  },
+  "kind": "message",
+  "name": "msg_identify_resp",
+  "note": "desc_len/desc_crc are those of descriptor_sample",
+  "spec_ref": "protocol-l3 \u00a73.1 IDENTIFY response (ruling: docs/OPEN-QUESTIONS.md); desc_crc per \u00a74.1"
+}

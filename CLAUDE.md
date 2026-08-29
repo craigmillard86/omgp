@@ -35,7 +35,7 @@ in your summary rather than silently choosing.
    `T_resp`, `T_gap`, `T_poll`) from the generated header — never inline
    magic numbers.
 5. **No dynamic allocation after init in embedded-path code** (`core/`,
-   `link/`): fixed-size buffers, no exceptions, no RTTI. Host-only code
+   `link/`, `l3/`): fixed-size buffers, no exceptions, no RTTI. Host-only code
    (`sim/`, `cli/`, `tools/`) may use the full language.
 6. **The bridge never stalls the trunk.** Any code modelling or implementing
    backplane bridging must respond within `T_resp` — respond `ERR_BUSY`
@@ -95,6 +95,7 @@ updated if the protocol changed.
 protocol/         omgp-protocol.yaml + codegen templates
 core/             host-core: scheduler, node health, discovery, presets (portable)
 link/             trunk L2: framing, stuffing, CRC16, retry/replay (portable)
+l3/               L3 message + descriptor codecs (portable; shared by host-core, sim, SDK)
 transport/        OMGPTransport interface + Virtual/UDP implementations
 sim/              virtual backplanes, virtual modules (JSON-defined), fault injection
 cli/              omgp command-line tool

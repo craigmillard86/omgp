@@ -52,7 +52,7 @@ jobs:
             if (touches(/^(protocol\/|tests\/vectors\/|\.github\/|CLAUDE\.md|docs\/(OPERATING-POLICY|GOVERNANCE|protocol-l3|trunk-link-layer|omgp-spec)|\.specify\/memory\/)/))
               T(3, 'touches ground-truth or governance artefacts');
             if (removedTests) T(3, 'reduces test content');
-            if (touches(/^(core\/|link\/)/)) T(2, 'portable protocol-critical code');
+            if (touches(/^(core\/|link\/|l3\/)/)) T(2, 'portable protocol-critical code');
             if (touches(/^(pipeline\.sh|IDF_VERSION|tools\/codegen\.py)/)) T(2, 'build/toolchain definition');
             if (newDependency) T(2, 'introduces a new dependency');
             if (pr.additions + pr.deletions > 800) T(2, `large change (${pr.additions + pr.deletions} lines)`);

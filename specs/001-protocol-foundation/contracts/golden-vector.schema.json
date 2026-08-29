@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "omgp/tests/vectors/golden-vector.schema.json",
+  "title": "OMGP golden byte vector",
+  "description": "One immutable vector: the field values, their canonical rendering, and the exact bytes the reference implementation produced from them. Files under tests/vectors/ are never edited to make a test pass (CLAUDE.md rule 9).",
+  "type": "object",
+  "required": ["name", "kind", "spec_ref", "fields", "canonical", "bytes"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^(msg|status|descriptor)_[a-z0-9_]+$",
+      "description": "Also the file stem and the C++ identifier suffix (V_<name>)."
+    },
+    "kind": { "enum": ["message", "status", "descriptor"] },
+    "spec_ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Protocol document section exercised, e.g. 'protocol-l3 §3.1 SET_PARAM'."
+    },
+    "fields": {
+      "type": "object",
+      "description": "Typed input values. For kind=message: opcode (name), node_id, seq, flags, then payload fields in layout order; for kind=descriptor: {\"records\": [ {\"record\": <TLV name or UNKNOWN>, ...dataclass fields } ]} (the key is `record`, not `type`, because MODULE_TYPE and unknown records carry a payload field named `type`).",
+      "minProperties": 1
+    },
+    "canonical": {
+      "type": "string",
+      "pattern": "^[\\x20-\\x7E]+$",
+      "description": "Rendering of fields per contracts/canonical-text.md (ASCII only)."
+    },
+    "bytes": {
+      "type": "string",
+      "pattern": "^([0-9A-F]{2}( [0-9A-F]{2})*)?$",
+      "description": "Upper-case hex octets separated by single spaces; empty string allowed for zero-length payload vectors only when kind=message and payload_len=0 (header bytes are still present, so in practice never empty)."
+    },
+    "note": { "type": "string", "description": "Optional human note (e.g. 'boundary: value at max')." }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "bytes": "01 01 00 00 00",
+  "canonical": "op=PING node=0x01 seq=0 flags=0x00",
+  "fields": {
+    "flags": 0,
+    "node_id": 1,
+    "opcode": "PING",
+    "seq": 0
+  },
+  "kind": "message",
+  "name": "msg_ping_req",
+  "spec_ref": "protocol-l3 \u00a73.1 PING"
+}

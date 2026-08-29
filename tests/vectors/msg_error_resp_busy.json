@@ -1,0 +1,15 @@
+{
+  "bytes": "7F 10 03 03 01 04",
+  "canonical": "op=ERROR node=0x10 seq=3 flags=0x03 err=ERR_BUSY detail=",
+  "fields": {
+    "code": 4,
+    "detail": "",
+    "flags": 3,
+    "node_id": 16,
+    "opcode": "ERROR",
+    "seq": 3
+  },
+  "kind": "message",
+  "name": "msg_error_resp_busy",
+  "spec_ref": "protocol-l3 \u00a73.1 ERROR busy/settling, no detail"
+}

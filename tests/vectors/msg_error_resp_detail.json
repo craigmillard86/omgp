@@ -1,0 +1,15 @@
+{
+  "bytes": "7F 10 03 03 03 02 04 05",
+  "canonical": "op=ERROR node=0x10 seq=3 flags=0x03 err=ERR_BAD_PAYLOAD detail=0405",
+  "fields": {
+    "code": 2,
+    "detail": "0405",
+    "flags": 3,
+    "node_id": 16,
+    "opcode": "ERROR",
+    "seq": 3
+  },
+  "kind": "message",
+  "name": "msg_error_resp_detail",
+  "spec_ref": "protocol-l3 \u00a73.1 ERROR bad payload with detail"
+}

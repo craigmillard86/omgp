@@ -1,0 +1,14 @@
+{
+  "bytes": "21 02 01 01 07 01 FF 00 C8 00 01 00",
+  "canonical": "op=BP_POWER node=0x02 seq=1 flags=0x01 opaque=01ff00c8000100",
+  "fields": {
+    "data": "01ff00c8000100",
+    "flags": 1,
+    "node_id": 2,
+    "opcode": "BP_POWER",
+    "seq": 1
+  },
+  "kind": "message",
+  "name": "msg_bp_power_resp",
+  "spec_ref": "protocol-l3 \u00a73.1 BP_POWER response (opaque readback)"
+}

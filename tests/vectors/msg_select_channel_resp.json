@@ -1,0 +1,13 @@
+{
+  "bytes": "10 10 07 01 00",
+  "canonical": "op=SELECT_CHANNEL node=0x10 seq=7 flags=0x01",
+  "fields": {
+    "flags": 1,
+    "node_id": 16,
+    "opcode": "SELECT_CHANNEL",
+    "seq": 7
+  },
+  "kind": "message",
+  "name": "msg_select_channel_resp",
+  "spec_ref": "protocol-l3 \u00a73.2 accepted (empty)"
+}
