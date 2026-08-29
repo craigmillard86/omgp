@@ -2,6 +2,11 @@ name: ci
 on:
   push: {branches: [main]}
   pull_request:
+    # `labeled` is load-bearing: deep-verify's `if:` reads the labels in the event payload,
+    # and risk-score applies risk:t2/t3 only after the first run has started — without it a
+    # PR's first push could never run deep-verify (observed on #16). The re-run started by
+    # the label cancels the first one via the concurrency group below.
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
 # Superseded runs on the same PR are cancelled — agents push often
