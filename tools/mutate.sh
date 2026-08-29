@@ -39,8 +39,11 @@ done
 if [ -n "$REF" ] && ! git rev-parse --verify --quiet "$REF^{commit}" >/dev/null; then
   case "$REF" in
     origin/*)
+      b=${REF#origin/}
       echo "mutate: '$REF' not in this clone — fetching it shallowly"
-      git fetch --quiet --depth=1 origin "${REF#origin/}" 2>/dev/null || true ;;
+      # Explicit refspec: a --depth clone is --single-branch, so its configured refspec
+      # would not map the fetched branch onto refs/remotes/origin/<branch>.
+      git fetch --quiet --depth=1 origin "+refs/heads/$b:refs/remotes/origin/$b" 2>/dev/null || true ;;
   esac
   if ! git rev-parse --verify --quiet "$REF^{commit}" >/dev/null; then
     echo "mutate: --diff ref '$REF' is not a commit in this clone and could not be fetched" >&2
