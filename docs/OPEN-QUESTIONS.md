@@ -255,3 +255,20 @@ existing survivors is recorded in the PR #15 body per CLAUDE.md rule 11.
 Implemented in `tools/mutate_report.py` / `tools/mutate.sh`.
 **Supersedes:** both 2026-08-28 "Mutation kill-rate threshold" entries
 (their measurements stand as history; their pending rulings are closed).
+
+## 2026-08-29 — Feature label ids: `feature:f1-codecs` … `feature:f5-cli`
+
+**Context:** CLAUDE.md and OPERATING-POLICY §2/§4a say PRs and task
+issues carry `feature:<id>` but never define `<id>`; `tools/gh-setup.sh`
+creates `feature:f1-codecs`, `feature:f2-link`, `feature:f3-core`,
+`feature:f4-simrig`, `feature:f5-cli`, while Spec Kit numbers feature
+directories `specs/001-…`. The first agent PRs used `feature:001` in
+prose and could not be labelled at all because the labels had not been
+created (setup obligation GOVERNANCE §7 item 3, run 2026-08-29).
+**Recommendation:** use the `gh-setup.sh` ids as the canonical labels
+and map Spec Kit directories to them (001-protocol-foundation →
+`feature:f1-codecs`); adding a feature means adding its id to
+`gh-setup.sh` in the same PR as its spec directory.
+**Ruling:** adopted — human, 2026-08-29 ("use feature:f1-codecs"). PRs
+#15 and #16 relabelled accordingly.
+**Supersedes:** none.
