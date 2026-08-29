@@ -1,0 +1,1 @@
+{"issue":19,"title":"T001: Create `link/CMakeLists.txt` (`add_library(omgp_link STATIC …)`, `-fno-exceptions -fno-rtti`, include dirs `link/`","feature":"f2-link","origin":"planned","opened_at":"2026-08-29T20:10:13Z","closed_at":"2026-08-29T21:58:26Z","lead_time_h":1.8,"active_time_h":0,"closing_pr":70,"assignee_type":"agent"}
