@@ -43,6 +43,7 @@ jobs:
           # Subscription auth: token from `claude setup-token` (Pro/Max/Team/Enterprise).
           # Swap to anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} for pay-as-you-go.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: github-actions   # nightly-failure issues are filed by github-actions[bot] (nightly.yml), so the labeled event is bot-initiated
           prompt: |
             You are the triage agent for this repo. Read CLAUDE.md and
             docs/OPERATING-POLICY.md first and stay within agent permissions.
