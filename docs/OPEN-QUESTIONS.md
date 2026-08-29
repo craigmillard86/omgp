@@ -205,3 +205,25 @@ waiting on it." No change to timing values or codec behaviour.
 **Ruling:** pending — the trunk document is a human-ruling artefact; not
 edited by the agent.
 **Supersedes:** none.
+
+## 2026-08-28 — CodeQL and dependency review become required checks
+
+**Context:** GOVERNANCE.md §2 listed "CodeQL + dependency review" as a
+gate, but branch protection on `main` required only `ci-gate`, and the
+security workflow's jobs cannot be wired into `ci-gate` (different
+workflow). On PR #15 the code-scanning results check was red while the
+PR was mergeable — the doc and the mechanism disagreed.
+**Recommendation:** make the checks required in branch protection
+(`CodeQL` = GitHub's code-scanning results check, encoding "no new alert
+at or above the configured severity"; `codeql` and `dependency-review` =
+the security workflow's jobs), accepting that protection now names four
+contexts instead of one. Alternatives considered: moving the security
+jobs into ci.yml (permission and schedule differences); leaving them
+advisory (a security finding would never block a merge).
+**Ruling:** adopted — human, 2026-08-28 ("1"). Applied the same day via the
+API: required contexts `ci-gate, CodeQL, codeql, dependency-review`,
+`strict` (branch up to date) kept `true`; review count, CODEOWNERS and
+force-push settings untouched. Consequence: PRs are blocked by vendored
+third-party alerts until `codeql-ignore-third-party.patch` lands, and
+`--admin` merges still bypass (enforce_admins is off — see §7).
+**Supersedes:** none.
