@@ -2,11 +2,12 @@ name: ci
 on:
   push: {branches: [main]}
   pull_request:
-    # `labeled` is load-bearing: deep-verify's `if:` reads the labels in the event payload,
-    # and risk-score applies risk:t2/t3 only after the first run has started — without it a
-    # PR's first push could never run deep-verify (observed on #16). The re-run started by
-    # the label cancels the first one via the concurrency group below.
-    types: [opened, synchronize, reopened, labeled]
+    # No `labeled` trigger: #16 added one so deep-verify would see risk:t2/t3, but GitHub
+    # never starts a run for an event caused by GITHUB_TOKEN, and risk-score labels with
+    # that token — the trigger only fired for labels humans applied (observed on #17:
+    # no run after `score` labelled it). deep-verify now resolves the tier at run time
+    # via .github/actions/risk-tier instead of reading the event payload.
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 # Superseded runs on the same PR are cancelled — agents push often
@@ -16,6 +17,8 @@ concurrency:
 
 permissions:
   contents: read
+  checks: read          # risk-tier action: wait for the `score` check on the PR head
+  pull-requests: read   # risk-tier action: read the PR's current labels
 
 jobs:
   native:
@@ -111,22 +114,31 @@ jobs:
     # and tools/mutate.sh runs Mull (pinned in tools/mutate.cfg) with --require,
     # so a missing tool fails the job instead of passing silently.
     name: deep-verify (T2/T3 only)
-    if: >
-      github.event_name == 'pull_request' &&
-      (contains(github.event.pull_request.labels.*.name, 'risk:t2') ||
-       contains(github.event.pull_request.labels.*.name, 'risk:t3'))
+    # Runs on every PR; the tier is resolved at run time (see .github/actions/risk-tier)
+    # and the heavy steps are skipped below T2, so the job — and ci-gate — stay green.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with: {fetch-depth: 0}   # mutate.sh scopes against origin/main; a depth-1 clone has no such ref
+      - id: tier
+        uses: ./.github/actions/risk-tier
+        with: {pr: '${{ github.event.pull_request.number }}'}
+      - name: Below T2 — nothing to deep-verify
+        if: steps.tier.outputs.deep != 'true'
+        run: |
+          echo "deep-verify: ${{ steps.tier.outputs.label }} — fuzz and mutation run for T2/T3 only"
       - uses: actions/setup-python@v7
+        if: steps.tier.outputs.deep == 'true'
         with: {python-version: '3.12'}
       - name: Deps
+        if: steps.tier.outputs.deep == 'true'
         run: |
           sudo apt-get update && sudo apt-get install -y cmake ninja-build clang
           pip install jinja2 pyyaml
       - name: Mull (mutation testing, pinned per tools/mutate.cfg)
+        if: steps.tier.outputs.deep == 'true'
         run: |
           # ubuntu-latest (24.04) ships clang 18; the deb must match that LLVM major.
           clang++ --version | head -1
@@ -134,8 +146,10 @@ jobs:
           sudo apt-get install -y ./Mull-18-0.34.0-LLVM-18.1.3-ubuntu-amd64-24.04.deb
           mull-runner-18 -version
       - name: Focused fuzz (10 min, touched targets)
+        if: steps.tier.outputs.deep == 'true'
         run: ./pipeline.sh codegen build && ./tools/fuzz-smoke.sh 600
       - name: Diff-scoped mutation
+        if: steps.tier.outputs.deep == 'true'
         run: ./tools/mutate.sh --diff origin/main --require
 
   # Merge gate: branch protection requires this single check,

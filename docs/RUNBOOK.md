@@ -30,6 +30,13 @@
 - Daily: glance at board + open agent PRs (WIP cap means at most one).
 - Weekly: converge-audit + red-team + nightly issues — disposition each.
 - Monthly: GOVERNANCE §6 review with `tools/metrics-report.py`.
+- Metrics ledger: `delivery-metrics` and `task-metrics` append to
+  `metrics/*.jsonl` on the unprotected `metrics` branch (append-only;
+  `tools/metrics-ledger.sh`), because branch protection rejects a bot push
+  to `main`. A rejected push fails those runs loudly — if the report says
+  "no `metrics` branch yet" after PRs have merged, look at their runs, not
+  at the branch. Merge `metrics` into `main` only if a mainline history of
+  the ledger is wanted; nothing reads it from `main`.
 
 ## Incident response (bad merge on main)
 1. Revert first, diagnose second: `git revert` via PR (goes through

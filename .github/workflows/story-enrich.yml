@@ -9,6 +9,7 @@ on:
     types: [labeled]
 
 permissions:
+  id-token: write   # anthropics/claude-code-action exchanges an OIDC token for its App token; without this every run fails "Could not fetch an OIDC token" (found 2026-08-29)
   contents: read
   issues: write
 
@@ -27,6 +28,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          show_full_output: true   # diagnostic (2026-08-29): runs end is_error:true before any model turn and the hidden output holds the reason; issue text is public anyway
           prompt: |
             You are the story-enrichment agent. Read CLAUDE.md,
             docs/DEFINITION-OF-READY.md, docs/GOVERNANCE.md §3 and
