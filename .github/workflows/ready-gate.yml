@@ -39,7 +39,13 @@ jobs:
             if (!/- \[[ x]\]/i.test(acc))
               problems.push('Acceptance criteria must be checkbox assertions (`- [ ] ...`)');
             const risk = section('Expected risk tier') || '';
-            if (/T3/.test(risk))
+            // The DECLARED tier is the first T0–T3 token in the section (enrichment writes it
+            // first: "**T2** — …"). A bare /T3/ test matched rationale text such as "no T3 task
+            // exists in this feature" and refused T1 stories (#22, 2026-08-29).
+            const declared = (risk.match(/\bT([0-3])\b/) || [])[1];
+            if (declared === undefined)
+              problems.push('Expected risk tier must state a tier as T0/T1/T2/T3 (first token of the section)');
+            else if (declared === '3')
               problems.push('Expected risk **T3**: human-ruling work must not be released to agent dispatch — split the story or do the T3 part first, humanly');
             const deps = section('Dependencies') || '';
             for (const m of deps.matchAll(/#(\d+)/g)) {
@@ -55,5 +61,5 @@ jobs:
                 body: `🚦 **Not ready** — Definition of Ready gaps (docs/DEFINITION-OF-READY.md):\n\n- ${problems.join('\n- ')}\n\nFix and re-apply \`ready\`.`});
             } else {
               await github.rest.issues.createComment({owner, repo, issue_number: iss.number,
-                body: '🚦 Definition of Ready: **passed** — eligible for agent dispatch.'});
+                body: `🚦 Definition of Ready: **passed** (predicted T${declared}) — eligible for agent dispatch.`});
             }
