@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: {python-version: '3.12'}
       - name: Deps
         run: |
@@ -43,7 +43,7 @@ jobs:
       - name: Gate to Mondays for the scheduled trigger
         id: day
         run: echo "run=$([ "$(date -u +%u)" = "1" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: steps.day.outputs.run == 'yes'
         with: {python-version: '3.12'}
       - name: Deps (clang + pinned Mull, as in ci.yml deep-verify)
