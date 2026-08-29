@@ -79,7 +79,7 @@ jobs:
             docs/OPERATING-POLICY.md first; stay strictly within agent
             permissions. Your task is issue #${{ needs.pick.outputs.issue }}.
             1. Read the issue and its Spec Kit feature context under
-               .specify/, plus the relevant docs/ sections it cites.
+               specs/<NNN-feature>/, plus the relevant docs/ sections it cites.
             2. Implement TDD-style: failing tests/scenario first, then code,
                iterating with ./pipeline.sh stages until the FULL local
                pipeline is green.
