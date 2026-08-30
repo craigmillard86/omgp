@@ -88,7 +88,8 @@ echo "mutation: scope: $(echo "$SCOPE" | tr '\n' ' ')"
 # a new test_<dir>_* binary joins the oracle without touching this script; a changed dir with
 # no unit binary can never kill a mutant, so that is a blind spot and fails here, unbuilt.
 CHANGED_DIRS=$(echo "$SCOPE" | cut -d/ -f1 | sort -u)
-UNIT_BINS=$(grep -oE 'omgp_add_catch_test\(test_[A-Za-z0-9_]+ +tests/unit/' CMakeLists.txt | sed -E 's/omgp_add_catch_test\(//; s/ .*//')
+# Comment lines are dropped first: a commented-out registration is not a binary.
+UNIT_BINS=$(grep -vE '^[[:space:]]*#' CMakeLists.txt | grep -oE 'omgp_add_catch_test\(test_[A-Za-z0-9_]+ +tests/unit/' | sed -E 's/omgp_add_catch_test\(//; s/ .*//')
 ORACLE=""
 for d in $CHANGED_DIRS; do
   bins=$(echo "$UNIT_BINS" | grep -E "^test_${d}_" || true)

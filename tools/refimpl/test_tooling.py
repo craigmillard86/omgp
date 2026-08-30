@@ -111,6 +111,20 @@ def test_mutate_diff_oracle_is_the_changed_dirs_unit_tests(tmp_path):
     assert oracle and all(b.startswith("test_link_") for b in oracle), oracle
 
 
+def test_mutate_oracle_ignores_commented_out_registrations(tmp_path):
+    # A `# omgp_add_catch_test(...)` line is not a binary; picking it up would fail the run
+    # later as "oracle binary was not built" — a spurious failure, not a blind spot.
+    clone = shared_clone(tmp_path, "link/zz_probe.cpp", "int zz_probe() { return 1; }\n")
+    cm = clone / "CMakeLists.txt"
+    cm.write_text(cm.read_text() + "\n# omgp_add_catch_test(test_link_phantom tests/unit/test_link_phantom.cpp)\n"
+                  "   #omgp_add_catch_test(test_link_ghost tests/unit/test_link_ghost.cpp)\n")
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 0, out
+    oracle = oracle_line(out)
+    assert "test_link_phantom" not in oracle and "test_link_ghost" not in oracle, oracle
+    assert "test_link_interfaces" in oracle, oracle
+
+
 def test_mutate_diff_with_no_unit_oracle_fails_closed(tmp_path):
     # A scope dir that has no test_<dir>_* unit binary at all can never kill a mutant; that
     # must fail before any build, with the blind spot named, not run and report 0 mutants.
