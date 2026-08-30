@@ -17,7 +17,7 @@ const body = (deps, tier = '**T1** — host-only tooling; no T3 task exists in t
    ['Out of scope', 'everything else'], ['Dependencies', deps], ['Expected risk tier', tier]]
   .map(([n, v]) => (style === 'bold' ? `**${n}**` : `${style}${n}`) + '\n' + v).join('\n');
 
-function world(issues) {
+function world(issues, opts = {}) {
   const log = [];
   const state = new Map(issues.map(i => [i.number, i]));
   const github = {
@@ -30,7 +30,10 @@ function world(issues) {
         addLabels: async ({issue_number, labels}) => { const i = state.get(issue_number); for (const l of labels) i.labels.push({name: l}); log.push(`+${labels.join('+')}@${issue_number}`); },
         createComment: async ({issue_number, body}) => log.push(`comment@${issue_number}: ${body.replace(/\n+/g, ' | ').slice(0, 600)}`),   // whole comment, flattened
       },
-      repos: { createDispatchEvent: async ({event_type, client_payload}) => log.push(`dispatch ${event_type}#${client_payload.issue}`) },
+      repos: { createDispatchEvent: async ({event_type, client_payload}) => {
+        if (opts.dispatchFails) throw new Error('simulated dispatch failure');
+        log.push(`dispatch ${event_type}#${client_payload.issue}`);
+      } },
     },
   };
   const core = { info: () => {}, notice: m => log.push(`notice: ${m}`), warning: m => log.push(`warning: ${m}`) };
@@ -96,7 +99,9 @@ const said = (w, re, n) => w.log.some(l => re.test(l) && (n === undefined || l.s
   check('promote: no dependencies declared -> promoted', has(w, '+ready@5') && said(w, /promoted.*none declared/, 5));
   check('promote: needs-human -> never promoted', !has(w, '+ready@6'));
   check('promote: notice counts', has(w, 'notice: promote-queued: promoted 2 of 4'));
-  await gate(w, 2, undefined, 'repository_dispatch'); check('dispatched final validation passes', said(w, /passed\*\* \(predicted T1\)/, 2));
+  await gate(w, 2, undefined, 'repository_dispatch');
+  check('dispatched final validation passes', said(w, /passed\*\* \(predicted T1\)/, 2));
+  check('dispatched final validation also nudges the dispatcher', has(w, 'dispatch backlog-changed#2'));
   w = world([mk(2, 'open', ['task'], 'None')]);
   await gate(w, 2, undefined, 'repository_dispatch'); check('dispatch on an issue no longer labelled ready is a no-op', w.log.length === 1 && /no longer labelled ready/.test(w.log[0]));
   // --- dependency rule (docs/DEFINITION-OF-READY.md "Dependencies rule") ---
@@ -147,6 +152,12 @@ const said = (w, re, n) => w.log.some(l => re.test(l) && (n === undefined || l.s
   await gate(w, 2, 'queued'); check('queued that waits does NOT nudge the dispatcher', !w.log.some(l => /backlog-changed/.test(l)));
   w = world([mk(1, 'open', ['task']), mk(2, 'open', ['task', 'ready'], '#1')]);
   await gate(w, 2, 'ready'); check('rejected ready does NOT nudge the dispatcher', !w.log.some(l => /backlog-changed/.test(l)));
+  // dispatch is best-effort: a transient createDispatchEvent failure must not turn an
+  // already-passed DoR gate into a red run (review of #93, Copilot + red-team finding 2)
+  w = world([mk(1, 'closed', ['task']), mk(2, 'open', ['task', 'ready'], '#1')], {dispatchFails: true});
+  await gate(w, 2, 'ready');
+  check('dispatch failure does not fail the gate run', said(w, /passed\*\*/, 2));
+  check('dispatch failure is surfaced as a warning, not a thrown error', w.log.some(l => l.startsWith('warning:') && /backlog-changed/.test(l)));
 
   // --- parsing cost on attacker-reachable input (#90 review finding 5): 64 KB adversarial body ---
   const adversarial = ('**Intent**\n' + '**Note**\n'.repeat(3000) + '## x\n'.repeat(3000)).slice(0, 65536);
