@@ -4,9 +4,7 @@ Written from docs/trunk-link-layer.md §4 and the Q1 ruling (2026-08-29,
 docs/OPEN-QUESTIONS.md: a single invalid escape aborts the frame at once) — not from
 the C++ code. Wire bytes below are hand-computed from the same algorithm (stuff/CRC),
 not read back from `omgp_link` itself, so a bug shared between the codec and a
-fixture-builder cannot hide here. `tools/refimpl/omgp_link.py` does not exist yet
-(T018); this file is expected to fail at collection (`ModuleNotFoundError`) until then
-(CLAUDE.md rule 8).
+fixture-builder cannot hide here.
 """
 from __future__ import annotations
 
