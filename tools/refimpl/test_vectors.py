@@ -42,6 +42,11 @@ def test_vector(path: pathlib.Path):
         recs = desc.parse_descriptor(raw)
         assert C.descriptor_to_canonical(recs) == v["canonical"]
         assert desc.build_descriptor(C.canonical_to_descriptor(v["canonical"])) == raw
+    elif v["kind"] == "frame":
+        link = pytest.importorskip("omgp_link")  # arrives with US1, T018/T019 (spec 002)
+        frame = C.canonical_to_frame(v["canonical"])
+        assert link.encode_frame(frame) == raw
+        assert C.frame_to_canonical(link.decode_frame(raw)) == v["canonical"]
     else:
         pytest.fail(f"unknown vector kind {v['kind']!r}")
 

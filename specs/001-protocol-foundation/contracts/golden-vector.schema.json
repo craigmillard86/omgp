@@ -9,10 +9,10 @@
   "properties": {
     "name": {
       "type": "string",
-      "pattern": "^(msg|status|descriptor)_[a-z0-9_]+$",
+      "pattern": "^(msg|status|descriptor|frame)_[a-z0-9_]+$",
       "description": "Also the file stem and the C++ identifier suffix (V_<name>)."
     },
-    "kind": { "enum": ["message", "status", "descriptor"] },
+    "kind": { "enum": ["message", "status", "descriptor", "frame"] },
     "spec_ref": {
       "type": "string",
       "minLength": 1,
@@ -20,7 +20,7 @@
     },
     "fields": {
       "type": "object",
-      "description": "Typed input values. For kind=message: opcode (name), node_id, seq, flags, then payload fields in layout order; for kind=descriptor: {\"records\": [ {\"record\": <TLV name or UNKNOWN>, ...dataclass fields } ]} (the key is `record`, not `type`, because MODULE_TYPE and unknown records carry a payload field named `type`).",
+      "description": "Typed input values. For kind=message: opcode (name), node_id, seq, flags, then payload fields in layout order; for kind=descriptor: {\"records\": [ {\"record\": <TLV name or UNKNOWN>, ...dataclass fields } ]} (the key is `record`, not `type`, because MODULE_TYPE and unknown records carry a payload field named `type`); for kind=frame: dst (int), src (int), response (bool), retry (bool), seq (int), payload (hex string, may be empty).",
       "minProperties": 1
     },
     "canonical": {
