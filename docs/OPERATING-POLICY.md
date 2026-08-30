@@ -79,6 +79,12 @@ rules, for agents and humans alike:
 - Reference the issue in commits (`Refs #n`) and close only via the
   merging PR (`Closes #n`). Never close a task issue manually with
   unmerged work.
+- Two release paths, both a human's judgement and both validated against
+  docs/DEFINITION-OF-READY.md: `ready` releases for dispatch now (its
+  dependencies must be closed); `queued` releases a story whose
+  dependencies are still open — the `promote-queued` workflow swaps it to
+  `ready` when they close. Agents pull `ready` only; `queued` is never
+  pulled and is never applied by an agent.
 - One task, one issue, one PR where practical; `[P]` tasks may share a PR
   when they were planned as parallel.
 - Timing data lands in `metrics/task-log.jsonl` (lead time, active time,

@@ -13,7 +13,7 @@ Amendments to either are Tier 3 changes (see §3).
 | Protocol change (YAML + docs) | Human ruling | T3 PR, CODEOWNERS review |
 | Spec ambiguity resolution | Human ruling (agent may recommend) | OPEN-QUESTIONS.md entry |
 | Golden-vector regeneration | Human ruling with written justification | commit message + T3 review |
-| Releasing backlog to agents | Human, OR auto-release for stories whose enrichment-predicted tier <= `auto_ready_max_tier` (.github/agent-config.yml) | `ready` label (+ auto-release comment) |
+| Releasing backlog to agents | Human, OR auto-release for stories whose enrichment-predicted tier <= `auto_ready_max_tier` (.github/agent-config.yml) | `ready` label (dispatch now; dependencies closed) or `queued` label (batch release; `promote-queued` swaps it to `ready` when dependencies close) — both pass `ready-gate`; (+ auto-release comment) |
 | Revoking an agent claim | Any human | remove `in-progress` |
 | Weakening/removing any test | Human instruction naming the test | PR review |
 | New dependency / toolchain bump | Human | `needs-human` issue then T2 PR |
