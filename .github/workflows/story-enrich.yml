@@ -43,6 +43,8 @@ jobs:
                scenarios), explicit out-of-scope naming adjacent temptations,
                dependencies as issue refs, and an Expected risk tier with a
                one-line rationale predicting the paths this task will touch.
+               Keep the seven section headings exactly as `### <Name>` lines
+               (never bold titles) — ready-gate parses them.
                No REPLACE placeholders may remain. Preserve any content a
                human already wrote — enrich, don't overwrite rulings.
                Update via: gh issue edit.
