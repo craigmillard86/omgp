@@ -1,4 +1,5 @@
-// OMGP trunk L2 — Status names. trunk §4 (errors are values, never exceptions).
+// OMGP trunk L2 — Status names. Errors by return value, never exceptions (embedded-path
+// C++ API convention; see trunk §7 for the L2 retry/error semantics these values encode).
 #include "link_types.hpp"
 
 namespace omgp {

@@ -7,6 +7,7 @@
 
 #include "omgp_protocol.h"
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 
@@ -36,13 +37,20 @@ constexpr size_t kMaxUnstuffed = kHeaderLen + LIMIT_max_l3_payload + kCrcLen; //
 // trunk §4: worst case every unstuffed byte is escaped, plus the two FLAG bytes.
 constexpr size_t kMaxWire = 2 + 2 * kMaxUnstuffed; // 142
 // trunk §5: addresses 0x00 (host) through 0x0F (last backplane slot) are the trunk's
-// addressable node range.
+// addressable node range. Guards the YAML-editable operands (golden rule 1) so a future
+// edit that breaks the ordering fails the build here, not as a wrapped-around array size
+// at some unrelated AddrStats[kAddrCount] declaration.
+static_assert(ADDR_backplane_max >= ADDR_host,
+              "ADDR_backplane_max must be >= ADDR_host or kAddrCount wraps");
 constexpr size_t kAddrCount =
     static_cast<size_t>(ADDR_backplane_max) - static_cast<size_t>(ADDR_host) + 1; // 16
 
 // trunk §9: 10 bits per byte at 8N1 (1 start + 8 data + 1 stop); integer microseconds
-// per second divided by bits/sec, times 10 bits/byte.
+// per second divided by bits/sec, times 10 bits/byte. Precondition: bit_rate != 0 (every
+// caller passes a protocol-defined rate, e.g. TRUNK_bit_rate/TRUNK_bit_rate_fallback);
+// division by zero is UB, so it is asserted rather than silently producing garbage.
 constexpr uint32_t byte_time_us(uint32_t bit_rate) {
+    assert(bit_rate != 0 && "byte_time_us: bit_rate must be nonzero");
     return 10000000u / bit_rate; // 10 bits/byte * 1e6 us/s (not a protocol-defined value)
 }
 
