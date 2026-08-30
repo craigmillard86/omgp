@@ -1,0 +1,178 @@
+name: ci-failure-router
+# CI-failure auto-resolution (GOVERNANCE.md §4, ruled 2026-08-30). When a `ci` or
+# `security` run fails, route by the failed run's head branch:
+#   task/* with an open agent-authored PR  -> bounded auto-fix on that branch: at most two
+#                                             attempts per PR (labels auto-fix-1/auto-fix-2,
+#                                             one attempt per commit), then needs-human
+#   main                                   -> ci-failure + task issue (one open per workflow),
+#                                             handled by agent-triage like nightly-failure
+#   anything else (human work)             -> one short comment on the PR, never a push or label
+# Fork runs are never touched. Kill switch: disable this workflow.
+# The `route` script is executed verbatim by tests/workflows/ci_failure_router_harness.js.
+on:
+  workflow_run:
+    workflows: [ci, security]
+    types: [completed]
+
+permissions:
+  id-token: write   # anthropics/claude-code-action exchanges an OIDC token for its App token (found 2026-08-29)
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: write    # read the failed run's jobs/logs; `gh run rerun` for environmental failures
+
+concurrency:
+  group: ci-failure-router-${{ github.event.workflow_run.head_branch }}   # one router per branch
+  cancel-in-progress: false
+
+jobs:
+  route:
+    # Only real failures, only same-repository heads: a fork's run never reaches a job that
+    # carries secrets (GOVERNANCE.md §4b).
+    if: github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      route: ${{ steps.route.outputs.route }}
+      pr: ${{ steps.route.outputs.pr }}
+      attempt: ${{ steps.route.outputs.attempt }}
+    steps:
+      - name: Route the failure by branch
+        id: route
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const run = context.payload.workflow_run;
+            const out = (route, extra = {}) => { core.setOutput('route', route); for (const [k, v] of Object.entries(extra)) core.setOutput(k, v); };
+            if (run.conclusion !== 'failure') { core.notice(`router: ${run.name} run ${run.id} concluded ${run.conclusion} — nothing to do`); return out('none'); }
+            if (run.head_repository && run.head_repository.full_name !== `${owner}/${repo}`) { core.notice(`router: run ${run.id} is from fork ${run.head_repository.full_name} — never touched (GOVERNANCE.md §4b)`); return out('none'); }
+            const branch = run.head_branch;
+            const runUrl = run.html_url;
+            const routerRun = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            // Where it failed: first failed job and its first failed step (for humans and for the agent prompt).
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {owner, repo, run_id: run.id, per_page: 100});
+            const job = jobs.find(j => j.conclusion === 'failure');
+            const step = job && (job.steps || []).find(s => s.conclusion === 'failure');
+            const where = job ? `job **${job.name}**${step ? `, step **${step.name}**` : ''}` : 'no failed job reported (cancelled or infrastructure failure)';
+            // One router action per commit: a second failed workflow on the same sha (ci then security) is not a
+            // second attempt and not a second comment. The marker is invisible in rendered Markdown.
+            const marker = `<!-- ci-failure-router sha=${run.head_sha} run=${run.id} -->`;
+            const handled = async n => (await github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: n, per_page: 100}))
+              .some(c => (c.body || '').includes(`ci-failure-router sha=${run.head_sha}`));
+
+            // (b) main: one open ci-failure issue per workflow; agent-triage takes it from there.
+            if (branch === 'main') {
+              const open = await github.paginate(github.rest.issues.listForRepo, {owner, repo, state: 'open', labels: 'ci-failure', per_page: 100});
+              const dup = open.find(i => i.title.startsWith(`CI failure on main: ${run.name} `));
+              if (dup) { core.notice(`router: open ci-failure issue #${dup.number} already covers workflow ${run.name} — not filing another (run ${runUrl})`); return out('main'); }
+              const created = await github.rest.issues.create({owner, repo,
+                title: `CI failure on main: ${run.name} run ${run.id}`, labels: ['ci-failure', 'task'],
+                body: `Workflow **${run.name}** failed on \`main\` at ${run.head_sha}: ${runUrl}\n\nFirst failure: ${where}.\n\nFiled by ci-failure-router (${routerRun}); \`ci-failure\` hands it to agent-triage. Close it via the fixing PR (\`Closes #n\`).`});
+              core.notice(`router: filed #${created.data.number} for ${run.name} on main`);
+              return out('main');
+            }
+
+            // Which PR carries this branch (same-repository heads only — see the job guard).
+            const prs = await github.rest.pulls.list({owner, repo, state: 'open', head: `${owner}:${branch}`, per_page: 5});
+            const pr = prs.data[0];
+            const agentPr = pr && /^task\//.test(branch) && pr.labels.some(l => l.name === 'agent-authored');
+
+            // (a) agent branch: bounded auto-fix. The bound is the labels on the PR, nothing else.
+            if (agentPr) {
+              if (pr.labels.some(l => l.name === 'needs-human')) { core.notice(`router: #${pr.number} already needs-human — nothing to do (run ${runUrl})`); return out('none'); }
+              if (await handled(pr.number)) { core.notice(`router: sha ${run.head_sha} on #${pr.number} already handled — one attempt per commit`); return out('none'); }
+              const attempts = ['auto-fix-1', 'auto-fix-2'].filter(l => pr.labels.some(x => x.name === l)).length;
+              if (attempts < 2) {
+                const n = attempts + 1;
+                await github.rest.issues.addLabels({owner, repo, issue_number: pr.number, labels: [`auto-fix-${n}`]});
+                await github.rest.issues.createComment({owner, repo, issue_number: pr.number,
+                  body: `${marker}\n🔧 **${run.name}** failed at ${run.head_sha.slice(0, 7)} (${where}) — ${runUrl}\n\nAuto-fix attempt ${n} of 2 starting on this branch (router run ${routerRun}). Disable the \`ci-failure-router\` workflow to stop it.`});
+                return out('autofix', {pr: pr.number, attempt: n});
+              }
+              // Exhausted: release the claim on the PR and on the task issue the branch names, escalate.
+              const failed = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {owner, repo, branch, status: 'failure', per_page: 20});
+              const links = failed.slice(0, 3).map(r => `- ${r.name} run [${r.id}](${r.html_url})`).join('\n') || `- ${run.name} run [${run.id}](${runUrl})`;
+              const m = branch.match(/^task\/(\d+)$/);
+              const targets = m ? [pr.number, Number(m[1])] : [pr.number];
+              for (const t of targets) {
+                await github.rest.issues.removeLabel({owner, repo, issue_number: t, name: 'in-progress'}).catch(() => {});
+                await github.rest.issues.addLabels({owner, repo, issue_number: t, labels: ['needs-human']}).catch(() => {});
+              }
+              await github.rest.issues.createComment({owner, repo, issue_number: pr.number,
+                body: `${marker}\n🛑 Auto-fix **exhausted** after 2 attempts; CI is still failing (${where}). Escalated \`needs-human\`; \`in-progress\` released${m ? ` on #${m[1]}` : ''}.\n\nFailed runs on this branch:\n${links}`});
+              return out('exhausted', {pr: pr.number});
+            }
+
+            // (c) human branch (or task/* without agent authorship): one comment per commit, never a push or a label.
+            if (!pr) { core.notice(`router: ${branch} has no open PR — nothing to do (run ${runUrl})`); return out('none'); }
+            if (await handled(pr.number)) { core.notice(`router: sha ${run.head_sha} on #${pr.number} already commented`); return out('none'); }
+            await github.rest.issues.createComment({owner, repo, issue_number: pr.number,
+              body: `${marker}\nℹ️ **${run.name}** failed at ${run.head_sha.slice(0, 7)}: ${where} — ${runUrl}`});
+            return out('human', {pr: pr.number});
+
+  autofix:
+    needs: route
+    if: needs.route.outputs.route == 'autofix'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with: {python-version: '3.12'}
+      - name: Toolchain (so the agent can run the pipeline)
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake ninja-build
+          pip install jinja2 pyyaml pytest
+      - name: Claude Code — diagnose and fix on the agent's branch
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: claude,github-actions   # workflow_run's actor is whoever caused the failed run: the Claude App for agent pushes
+          prompt: |
+            You are the CI auto-fix agent. Read CLAUDE.md and
+            docs/OPERATING-POLICY.md first and stay strictly within agent
+            permissions. You are on branch
+            ${{ github.event.workflow_run.head_branch }} of PR
+            #${{ needs.route.outputs.pr }} (auto-fix attempt
+            ${{ needs.route.outputs.attempt }} of 2). Workflow
+            "${{ github.event.workflow_run.name }}" run
+            ${{ github.event.workflow_run.id }} failed on commit
+            ${{ github.event.workflow_run.head_sha }}:
+            ${{ github.event.workflow_run.html_url }}
+            1. Fetch the failure: `gh run view --log-failed ${{ github.event.workflow_run.id }}`.
+               Also `gh run list --commit ${{ github.event.workflow_run.head_sha }} --status failure`
+               in case another workflow failed on the same commit, and read
+               its failed logs too.
+            2. Diagnose the root cause. Fix it ON THIS BRANCH only — never
+               main, never another branch. Where the failure reveals a
+               missing test, work TDD: add the failing test first, then the
+               fix. Never weaken, skip or delete a test, assertion, scenario,
+               gate threshold or policy constant; never touch tests/vectors/
+               or protocol/omgp-protocol.yaml — if the fix needs any of
+               those, change nothing, explain why in a PR comment, and stop.
+            3. Run ./pipeline.sh (the stages the failure names, then the full
+               local set) until green BEFORE pushing. Commit with
+               `Refs #<task issue>` and push to this branch — the push
+               re-runs CI.
+            4. Comment on the PR with `gh pr comment`: root cause, what
+               changed, and the evidence, each claim labelled (demonstrated
+               by <named test/stage>, assumed, or NOT EXAMINED) per CLAUDE.md
+               rule 11.
+            If the failure is environmental or flaky (runner, network,
+            toolchain download, a timeout with no code change involved),
+            change no code: say so in a PR comment with the evidence, and
+            re-run it with `gh run rerun ${{ github.event.workflow_run.id }} --failed`.
+          claude_args: |
+            --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh run view*),Bash(gh run list*),Bash(gh run rerun*),Bash(gh pr comment*),Bash(gh pr view*),Edit,Read,Write,Grep,Glob"
+
+      - name: Record an attempt that did not complete
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = Number('${{ needs.route.outputs.pr }}');
+            await github.rest.issues.createComment({...context.repo, issue_number: pr,
+              body: `⚠️ Auto-fix attempt ${{ needs.route.outputs.attempt }} did not complete (router run ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). It still counts toward the bound of 2.`});
