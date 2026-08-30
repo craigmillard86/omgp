@@ -24,6 +24,12 @@ jobs:
       github.event.label.name == 'ready' || github.event.label.name == 'queued'
     runs-on: ubuntu-latest
     steps:
+      # The dependency parser is shared code in the repo (tools/ci/dep-refs.js); a sparse
+      # checkout of that one directory is all this API-only job needs.
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: tools/ci
+          sparse-checkout-cone-mode: false
       - uses: actions/github-script@v7
         with:
           script: |
@@ -37,16 +43,20 @@ jobs:
             if (dispatched && !has('ready')) { core.notice(`#${iss.number}: no longer labelled ready — nothing to validate`); return; }
             const body = iss.body || '';
             const problems = [];
-            const section = name => {
-              // Headings as `### Name` (h2–h4) or as a bold title line `**Name**`; enrichment on #26
-              // used the bold form and every section read as missing (2026-08-30).
-              const m = body.match(new RegExp(`(?:^|\\n)(?:#{2,4}\\s*|\\*\\*)${name}(?:\\*\\*)?\\s*\\n([\\s\\S]*?)(?=\\n(?:#{2,4}\\s|\\*\\*[A-Z][^*\\n]*\\*\\*\\s*\\n)|$)`, 'i'));
-              return m ? m[1].trim() : null;
-            };
             // --- content validation: identical for both paths ---------------------------
             const required = ['Intent', 'Spec references', 'Acceptance criteria',
                               'Evidence required', 'Out of scope', 'Dependencies',
                               'Expected risk tier'];
+            // Headings as `### Name` (h2–h4, ATX: at least one space) or a bold title line
+            // `**Name**` — enrichment on #26 used the bold form and every section read as
+            // missing (2026-08-30). The boundary matches only one of the seven KNOWN headings,
+            // so a bold aside inside a section (a `**Note**` line) cannot end the section early
+            // and silently drop what follows (review of #90). Tested in tests/workflows/.
+            const HEADING = `(?:#{2,4}\\s+(?:${required.join('|')})|\\*\\*(?:${required.join('|')})\\*\\*)`;
+            const section = name => {
+              const m = body.match(new RegExp(`(?:^|\\n)(?:#{2,4}\\s+|\\*\\*)${name}(?:\\*\\*)?\\s*\\n([\\s\\S]*?)(?=\\n${HEADING}\\s*\\n|$)`, 'i'));
+              return m ? m[1].trim() : null;
+            };
             for (const s of required) {
               const v = section(s);
               if (v === null) problems.push(`missing section: **${s}**`);
@@ -70,11 +80,18 @@ jobs:
             if (/REPLACE:/.test(body))
               problems.push('template placeholders (`REPLACE:`) still present');
             // --- dependencies: blocking for `ready`, informational for `queued` -----------
-            const deps = section('Dependencies') || '';
+            // Blocking dependencies (docs/DEFINITION-OF-READY.md "Dependencies rule"): the parser is
+            // shared with promote-queued.yml as tools/ci/dep-refs.js (unit-tested there). A section
+            // that resolves to more than MAX_REFS issues is UNRESOLVED — a gap, never a truncation
+            // (#92 red-team finding 2: a ref flood must fail closed).
+            const { depRefs, MAX_REFS } = require(`${process.env.GITHUB_WORKSPACE}/tools/ci/dep-refs.js`);
+            const parsed = depRefs(section('Dependencies'));
+            if (parsed.capped)
+              problems.push(`Dependencies resolves to more than ${MAX_REFS} issues — narrow the ranges (treated as unresolved)`);
             const open = [];
-            for (const m of deps.matchAll(/#(\d+)/g)) {
-              const dep = await github.rest.issues.get({owner, repo, issue_number: Number(m[1])}).catch(() => null);
-              if (dep && dep.data.state === 'open') open.push(`#${m[1]}`);
+            for (const n of parsed.refs.filter(n => n !== iss.number)) {   // never itself (a range can include it)
+              const dep = await github.rest.issues.get({owner, repo, issue_number: n}).catch(() => null);
+              if (dep && dep.data.state === 'open') open.push(`#${n}`);
             }
             if (mode === 'ready')                       // defence in depth: unchanged for direct `ready`
               for (const d of open) problems.push(`dependency ${d} is still open`);

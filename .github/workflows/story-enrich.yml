@@ -41,7 +41,12 @@ jobs:
                falsifiable checkbox acceptance criteria derived from spec.md
                acceptance criteria and plan.md, evidence required (name the
                scenarios), explicit out-of-scope naming adjacent temptations,
-               dependencies as issue refs, and an Expected risk tier with a
+               dependencies as issue refs — one `- #N` list item per issue that
+               must be CLOSED before this one starts; mention same-PR test-first
+               siblings and [P] relations in prose or on a line saying "not
+               blocking" (the gate ignores those; if one bullet mixes a blocker
+               and a non-blocking mention, separate the clauses with `;`) — and an
+               Expected risk tier with a
                one-line rationale predicting the paths this task will touch.
                Keep the seven section headings exactly as `### <Name>` lines
                (never bold titles) — ready-gate parses them.

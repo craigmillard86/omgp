@@ -23,6 +23,12 @@ jobs:
   promote:
     runs-on: ubuntu-latest
     steps:
+      # The dependency parser is shared code in the repo (tools/ci/dep-refs.js); a sparse
+      # checkout of that one directory is all this API-only job needs.
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: tools/ci
+          sparse-checkout-cone-mode: false
       - uses: actions/github-script@v7
         with:
           script: |
@@ -31,10 +37,20 @@ jobs:
               {owner, repo, state: 'open', labels: 'queued', per_page: 100});
             core.info(`promote-queued: ${queued.length} queued story(ies) to examine` +
               (context.eventName === 'issues' ? ` after #${context.payload.issue.number} closed` : ''));
+            // Same seven PRD headings and the same boundary rule as ready-gate.yml: the boundary
+            // matches only a KNOWN heading, so a bold aside inside Dependencies cannot hide a
+            // later #ref and promote a story early (review of #90). Tested in tests/workflows/.
+            const PRD_SECTIONS = ['Intent', 'Spec references', 'Acceptance criteria',
+                                  'Evidence required', 'Out of scope', 'Dependencies',
+                                  'Expected risk tier'];
+            const HEADING = `(?:#{2,4}\\s+(?:${PRD_SECTIONS.join('|')})|\\*\\*(?:${PRD_SECTIONS.join('|')})\\*\\*)`;
             const section = (body, name) => {
-              const m = (body || '').match(new RegExp(`(?:^|\\n)(?:#{2,4}\\s*|\\*\\*)${name}(?:\\*\\*)?\\s*\\n([\\s\\S]*?)(?=\\n(?:#{2,4}\\s|\\*\\*[A-Z][^*\\n]*\\*\\*\\s*\\n)|$)`, 'i'));   // same heading tolerance as ready-gate
+              const m = (body || '').match(new RegExp(`(?:^|\\n)(?:#{2,4}\\s+|\\*\\*)${name}(?:\\*\\*)?\\s*\\n([\\s\\S]*?)(?=\\n${HEADING}\\s*\\n|$)`, 'i'));
               return m ? m[1].trim() : '';
             };
+            // Blocking dependencies: shared parser tools/ci/dep-refs.js (see ready-gate.yml). A
+            // capped section is unresolved — the story stays queued (fail closed, #92 finding 2).
+            const { depRefs, MAX_REFS } = require(`${process.env.GITHUB_WORKSPACE}/tools/ci/dep-refs.js`);
             const closedCache = new Map();
             const isClosed = async n => {
               if (!closedCache.has(n)) {
@@ -48,7 +64,9 @@ jobs:
               if (iss.pull_request) continue;
               const held = iss.labels.map(l => l.name).filter(n => ['blocked', 'needs-human', 'in-progress'].includes(n));
               if (held.length) { core.info(`#${iss.number}: still queued — carries ${held.join(', ')}`); continue; }
-              const refs = [...section(iss.body, 'Dependencies').matchAll(/#(\d+)/g)].map(m => Number(m[1]));
+              const parsed = depRefs(section(iss.body, 'Dependencies'));
+              if (parsed.capped) { core.warning(`#${iss.number}: Dependencies resolves to more than ${MAX_REFS} issues — held as unresolved; narrow the ranges`); continue; }
+              const refs = parsed.refs.filter(n => n !== iss.number);   // never itself
               const open = [];
               for (const n of refs) if (!(await isClosed(n))) open.push(`#${n}`);
               if (open.length) { core.info(`#${iss.number}: still queued — waiting on ${open.join(', ')}`); continue; }
