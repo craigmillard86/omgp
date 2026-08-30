@@ -70,6 +70,7 @@ omgp_add_catch_test(test_l3_descriptor tests/unit/test_l3_descriptor.cpp)
 target_link_libraries(test_l3_descriptor PRIVATE omgp_canon)
 omgp_add_catch_test(test_l3_roundtrip tests/property/test_l3_roundtrip.cpp)
 omgp_add_catch_test(test_link_interfaces tests/unit/test_link_interfaces.cpp)
+omgp_add_catch_test(test_link_types tests/unit/test_link_types.cpp)
 
 # --- host-only tools ---
 add_executable(crc_helper tools/crc_helper.cpp)
