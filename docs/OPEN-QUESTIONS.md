@@ -382,3 +382,41 @@ notes amended in the same PR; issue #28 re-queued with `- #40 (T022)` as its blo
 dependency (promote-queued releases it when #40 closes); #29 (T011) already chains
 behind #28. US1 stories no longer list #28/#29 as blockers.
 **Supersedes:** none.
+
+## 2026-08-30 — T013: torture-corpus `Element` shape and `frames` parameter meaning
+
+**Context:** implementing `tools/refimpl/test_torture.py` (T013, issue #31) against
+`torture.py`'s not-yet-written contract surfaced two mismatches between
+`specs/002-trunk-link-layer/contracts/link-python.md` and `data-model.md` §11 that the
+test's exact assertions must pick one reading of:
+(1) contracts/link-python.md types `Element` as a flat 4-tuple `(stream: bytes,
+expected: list[Frame], expected_discards: int, recipe: str)`; data-model.md gives a
+richer shape (`seed`, a `segments: [{kind, bytes}]` list, and `expected_discards:
+{reason: n}` as a per-reason tally). Neither document says the two are the same object
+described at different detail, and the acceptance criteria (issue #31, sourced verbatim
+from contracts/link-python.md's own "pytest" section) name exactly `stream`, `expected`,
+`expected_discards`, `recipe` — never `segments` or a per-reason dict.
+(2) `corpus(seed, frames: int = 10_000, ...)` — whether `frames` bounds the corpus's
+total *element* count (valid + corrupted) or only its count of *valid, deliverable*
+frames (SC-002: "a torture corpus of at least 10,000 frames with at least 1,000
+corruptions of every class" reads corruptions as additional to, not part of, the
+10,000). The issue's own enrichment comment flagged this second point for a human
+second look; the releasing comment accepted the reading below without objecting but
+asked for it to be rechecked at PR time.
+**Recommendation:** (1) `Element` is a flat one-corruption-per-element record with
+exactly the four contract fields — `stream` is the complete byte sequence for that
+element (a lone valid encoded frame, or one corrupted rendering of one), `recipe` is
+either `"valid"` or one of the eight corruption-class names, and `expected_discards` is
+a single int (0 for a valid element, else the discard count that stream produces) —
+matching the differential's own description in data-model.md §11 ("compares … the
+total discard count"), not a per-reason dict. `segments`/per-reason tallying is
+`torture.py`'s (T024) internal generation detail, not part of the public `Element`
+contract this test pins. (2) `frames` counts delivered/valid frames only; total corpus
+size is `frames` valid elements plus at least `per_class` corrupted elements per class
+(≥ 8 × `per_class` beyond `frames`). `test_torture.py` asserts against this reading only
+(sum of `len(element.expected)` ≥ `frames`; per-class tally of `recipe` ≥ `per_class`),
+not against total element count.
+**Ruling:** pending — safe default implemented per CLAUDE.md ("implement nothing
+speculative … proceed only if a safe default exists"); flagged for the human review this
+issue's releasing comment already asked for, at PR time for #31.
+**Supersedes:** none.
