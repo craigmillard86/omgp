@@ -179,6 +179,38 @@ def test_deframer_discards_71_byte_unstuffed_frame_as_too_long_and_resyncs():
     assert d.stats["TooLong"] == 1
 
 
+def test_deframer_toolong_abort_survives_an_escaped_71st_byte():
+    # Review finding on PR #99 (HIGH), reproduced before the fix: when the 71st
+    # unstuffed byte arrives via a valid escape (7D 5E), the Escaped->InFrame
+    # transition clobbered the TooLong abort's Hunting state, so later bytes were
+    # treated as frame content though no FLAG had opened a frame — a frame body
+    # missing its opening FLAG would be delivered. trunk §4: discard silently,
+    # resynchronise on the NEXT FLAG.
+    prefix = bytes([FLAG]) + bytes([0x01]) * 70 + bytes([ESC, FLAG ^ XOR])
+    d = L.Deframer()
+    # The marker frame with its opening FLAG stripped must NOT be delivered: after
+    # the TooLong abort the parser hunts until the next FLAG, which is only the
+    # stripped frame's closing delimiter.
+    assert d.feed_bytes(prefix + MARKER_FULL[1:]) == []
+    assert d.stats["TooLong"] == 1
+    assert d.stats["delivered"] == 0
+    # The genuine next frame, opened by a real FLAG, is still delivered intact.
+    assert d.feed_bytes(MARKER_FULL) == [MARKER_FRAME]
+
+
+def test_deframer_discards_short_body_as_bad_length_and_resyncs():
+    # Review finding on PR #99 (LOW, coverage): bodies of 1..5 unstuffed bytes are
+    # shorter than header (4) + CRC (2), so each is BadLength — never an IndexError
+    # on body[0..3] (rule 7) — and the shared FLAG still opens the next frame.
+    d = L.Deframer()
+    for n in range(1, 6):
+        d.feed_bytes(bytes([FLAG]) + bytes([0x02]) * n)
+    d.feed_bytes(bytes([FLAG]))  # close the last short body (frames share delimiters)
+    assert d.stats["BadLength"] == 5
+    assert d.stats["delivered"] == 0
+    assert d.feed_bytes(MARKER_FULL) == [MARKER_FRAME]
+
+
 def test_deframer_discards_empty_frame_silently_and_delivers_shared_flag_next_frame():
     # Edge case: a FLAG immediately after a FLAG (empty frame) is discarded silently;
     # the shared FLAG still opens the next frame.

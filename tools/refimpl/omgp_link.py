@@ -150,7 +150,13 @@ class Deframer:
             self._state = "Hunting"
             self._buf = bytearray()
             return None
-        self._state = "InFrame"
+        # _append_unstuffed aborts to Hunting when this was the 71st unstuffed byte
+        # (TooLong); that abort must win over the Escaped->InFrame transition, or the
+        # parser would treat later bytes as frame content with no FLAG ever seen
+        # (trunk §4: discard silently, resynchronise on the next FLAG; review finding
+        # on PR #99, 2026-08-30).
+        if self._state != "Hunting":
+            self._state = "InFrame"
         return None
 
     def _on_flag(self) -> Frame | None:
