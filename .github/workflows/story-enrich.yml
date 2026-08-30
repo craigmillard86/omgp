@@ -45,15 +45,17 @@ jobs:
                must be CLOSED before this one starts; mention same-PR test-first
                siblings and [P] relations in prose or on a line saying "not
                blocking" (the gate ignores those; if one bullet mixes a blocker
-               and a non-blocking mention, separate the clauses with `;`). A
-               write-first test task and the implementation task that makes it
-               collect/compile/pass are ONE dispatch unit (ruling 2026-08-30,
-               docs/DEFINITION-OF-READY.md): name the partner as "same PR — one
-               dispatch unit; not blocking" and state in the intent that the
-               unit's PR closes both issues, tests committed first with the
-               recorded failing run — and an
-               Expected risk tier with a
-               one-line rationale predicting the paths this task will touch.
+               and a non-blocking mention, separate the clauses with `;`) — and
+               an Expected risk tier with a one-line rationale predicting the
+               paths this task will touch.
+               One-dispatch-unit rule (ruling 2026-08-30,
+               docs/DEFINITION-OF-READY.md): a write-first test task and the
+               implementation task that makes it collect/compile/pass are ONE
+               dispatch unit. In the Dependencies section, name the partner as
+               "same PR — one dispatch unit; not blocking". In the Intent,
+               state that the unit's single PR closes both issues, with the
+               test commits first and their failing run recorded in the PR
+               body.
                Keep the seven section headings exactly as `### <Name>` lines
                (never bold titles) — ready-gate parses them.
                No REPLACE placeholders may remain. Preserve any content a

@@ -385,7 +385,7 @@ behind #28. US1 stories no longer list #28/#29 as blockers.
 
 ---
 
-## 2026-08-30 — Write-first test tasks split from their implementation merge red
+## 2026-08-30 — Splitting a write-first test task from its implementation turns the merge gate red
 
 **Question:** spec-002's decomposition puts write-first test files and the module they
 import/include in separate issues two phases or several tasks apart (T012 vs T018,
