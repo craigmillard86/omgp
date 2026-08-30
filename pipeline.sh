@@ -12,9 +12,9 @@ CXXFLAGS_BOOT="-std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefi
 WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=_Znwm -Wl,--wrap=_Znam"
 
 # raise when tests are added; NEVER lower to get green (that change is itself T3)
-# 133821 = 133826 executed (8 binaries; the seeded property tests dominate) minus 5 slack —
-# T007 follow-up, raised 2026-08-30 with test_link_interfaces.cpp (was 133813)
-UNIT_TEST_FLOOR=133821
+# 133865 = 133870 executed (9 binaries; the seeded property tests dominate) minus 5 slack —
+# T008/T009 follow-up, raised 2026-08-30 with test_link_types.cpp (was 133821)
+UNIT_TEST_FLOOR=133865
 
 stage_codegen() {
   # Constants + vectors header from the YAML, then prove the human-authored docs tables
