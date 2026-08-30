@@ -42,6 +42,30 @@ jobs:
               const m = (body || '').match(new RegExp(`(?:^|\\n)(?:#{2,4}\\s+|\\*\\*)${name}(?:\\*\\*)?\\s*\\n([\\s\\S]*?)(?=\\n${HEADING}\\s*\\n|$)`, 'i'));
               return m ? m[1].trim() : '';
             };
+            // Blocking dependencies (docs/DEFINITION-OF-READY.md "Dependencies rule"): refs on list
+            // items (`- #N …`, continuation lines joined) that are not marked non-blocking; a section
+            // with no list items counts every ref (prose style); `#A–#B` ranges expand. Enrichment
+            // wrote "not blocking … #27" / "sibling … expected to remain open" mentions that the
+            // old every-ref parser turned into dependency cycles (#26↔#27, 2026-08-30).
+            const NONBLOCK = /\bnot\s+(?:a\s+)?(?:blocking|blocked|dependent)\b|\bnon-blocking\b|\bno ordering dependency\b|\bexpected to remain (?:open|so)\b|\bsame PR\b|\bsiblings?\b/i;
+            const depRefs = text => {
+              const items = []; let cur = null;
+              for (const line of (text || '').split('\n')) {
+                if (/^\s*[-*]\s/.test(line)) { cur = [line]; items.push(cur); }
+                else if (cur && line.trim() && /^\s+\S/.test(line)) cur.push(line);
+                else cur = null;
+              }
+              const sources = items.length ? items.map(i => i.join(' ')).filter(i => !NONBLOCK.test(i)) : [text || ''];
+              const refs = new Set();
+              for (const s of sources) {
+                for (const m of s.matchAll(/#(\d+)\s*[–-]\s*#(\d+)/g)) {
+                  const a = Number(m[1]), b = Number(m[2]);
+                  if (b > a && b - a <= 200) for (let n = a; n <= b; n++) refs.add(n);
+                }
+                for (const m of s.matchAll(/#(\d+)/g)) refs.add(Number(m[1]));
+              }
+              return [...refs].sort((x, y) => x - y);
+            };
             const closedCache = new Map();
             const isClosed = async n => {
               if (!closedCache.has(n)) {
@@ -55,7 +79,7 @@ jobs:
               if (iss.pull_request) continue;
               const held = iss.labels.map(l => l.name).filter(n => ['blocked', 'needs-human', 'in-progress'].includes(n));
               if (held.length) { core.info(`#${iss.number}: still queued — carries ${held.join(', ')}`); continue; }
-              const refs = [...section(iss.body, 'Dependencies').matchAll(/#(\d+)/g)].map(m => Number(m[1]));
+              const refs = depRefs(section(iss.body, 'Dependencies')).filter(n => n !== iss.number);   // never itself
               const open = [];
               for (const n of refs) if (!(await isClosed(n))) open.push(`#${n}`);
               if (open.length) { core.info(`#${iss.number}: still queued — waiting on ${open.join(', ')}`); continue; }

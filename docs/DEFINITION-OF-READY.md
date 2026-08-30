@@ -15,7 +15,7 @@ label owns the judgement half.
 | Acceptance criteria | Checkbox assertions, each mappable to a test or scenario | These BECOME the failing tests written first |
 | Evidence required | Pipeline stages / named scenarios beyond the §5 baseline | Defines green for this story specifically |
 | Out of scope | Explicit exclusions and adjacent temptations | The main defence against helpful overreach |
-| Dependencies | Issue refs; all closed before dispatch | Enforced: open deps block `ready`; `queued` waits for them and auto-promotes |
+| Dependencies | One `- #N` list item per issue that must be **closed** before this one starts (see the Dependencies rule below) | Enforced: open deps block `ready`; `queued` waits for them and auto-promotes |
 | Expected risk tier | T0–T2 for dispatchable work | T3 work is human-ruling work; it is never dispatched |
 
 ## Two release paths
@@ -43,6 +43,23 @@ is a gap. For `queued` open dependencies are reported, not rejected; if all
 are already closed the gate swaps `queued` → `ready` on the spot. Failures
 remove whichever label was applied, with a gap list; a release label only
 sticks on a conforming story. Re-apply after fixing.
+
+## Dependencies rule (what the gate and the promoter count)
+
+- A blocking dependency is an issue ref on a **list item** of the Dependencies
+  section (`- #19 (T001) …`; an item's indented continuation lines belong to
+  it). `#19–#24` ranges expand.
+- A list item that says the relation is **not blocking** — "not blocking",
+  "not blocked by", "not dependent on", "non-blocking", "no ordering
+  dependency", "sibling", "same PR", "expected to remain open" — is ignored,
+  as is any ref in prose paragraphs when the section also has list items.
+  Use those forms for `[P]` siblings and test-first pairs delivered in one
+  PR; the enricher is told to.
+- A section with **no** list items counts every ref in it (prose style).
+- Why: two stories that name each other as dependencies can never be
+  released or promoted. The enricher had correctly written "not a blocking
+  dependency: #27" and "#53 … expected to remain open" — the old every-ref
+  parser made cycles of them (#26↔#27 and seven more, 2026-08-30).
 
 ## Promotion (promote-queued workflow)
 

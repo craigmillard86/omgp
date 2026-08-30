@@ -96,6 +96,30 @@ const said = (w, re, n) => w.log.some(l => re.test(l) && (n === undefined || l.s
   await gate(w, 2, undefined, 'repository_dispatch'); check('dispatched final validation passes', said(w, /passed\*\* \(predicted T1\)/, 2));
   w = world([mk(2, 'open', ['task'], 'None')]);
   await gate(w, 2, undefined, 'repository_dispatch'); check('dispatch on an issue no longer labelled ready is a no-op', w.log.length === 1 && /no longer labelled ready/.test(w.log[0]));
+  // --- dependency rule (docs/DEFINITION-OF-READY.md "Dependencies rule") ---
+  let deps = '- #1 (T001) -- open\n\nNot a blocking dependency, but directly relevant: #4 (T009).';
+  w = world([mk(1, 'closed', ['task']), mk(4, 'open', ['task']), mk(2, 'open', ['task', 'queued'], deps)]);
+  await gate(w, 2, 'queued'); check('prose non-blocking mention is ignored', has(w, '+ready@2'));
+  deps = '- #1 (T001)\n- Not dependent on, and not blocked by, its sibling test tasks #4 (T016)';
+  w = world([mk(1, 'closed', ['task']), mk(4, 'open', ['task']), mk(2, 'open', ['task', 'queued'], deps)]);
+  await gate(w, 2, 'queued'); check('"not blocked by" list item is ignored', has(w, '+ready@2'));
+  deps = '- **#1 (T001)** closed\n- **#4 (T035)** OPEN and expected to remain so while this test is written';
+  w = world([mk(1, 'closed', ['task']), mk(4, 'open', ['task']), mk(2, 'open', ['task', 'queued'], deps)]);
+  await gate(w, 2, 'queued'); check('"expected to remain open" item is ignored', has(w, '+ready@2'));
+  deps = '- Must land first (Phase 1/2): #1 (T001),\n  #4 (T003)';
+  w = world([mk(1, 'closed', ['task']), mk(4, 'open', ['task']), mk(2, 'open', ['task', 'queued'], deps)]);
+  await gate(w, 2, 'queued'); check('ref on a continuation line of a list item counts', said(w, /waiting on #4/, 2));
+  deps = 'Blocked on the full Setup phase, all currently open:\n#1 (T001), #4 (T003).';
+  w = world([mk(1, 'closed', ['task']), mk(4, 'open', ['task']), mk(2, 'open', ['task', 'queued'], deps)]);
+  await gate(w, 2, 'queued'); check('prose-only section counts every ref', said(w, /waiting on #4/, 2));
+  deps = '- #1–#4 (every preceding task)';
+  w = world([mk(1, 'closed', ['task']), mk(3, 'open', ['task']), mk(4, 'closed', ['task']), mk(2, 'open', ['task', 'queued'], deps)]);
+  await gate(w, 2, 'queued'); check('#A–#B range expands to the issues between', said(w, /waiting on #3/, 2));
+  w = world([mk(1, 'closed', ['task']),
+             {...mk(26, 'open', ['task', 'queued'], '- #1 (T001)\n\nNot a blocking dependency, but relevant: #27 (T009).')},
+             {...mk(27, 'open', ['task', 'queued'], '- **#1 (T001)**\n- **#26 (T008)** — no file dependency; [P] siblings, same PR')}]);
+  await promote(w, 1); check('promoter: former #26↔#27 cycle — both promote', has(w, '+ready@26') && has(w, '+ready@27'));
+
   // --- parsing cost on attacker-reachable input (#90 review finding 5): 64 KB adversarial body ---
   const adversarial = ('**Intent**\n' + '**Note**\n'.repeat(3000) + '## x\n'.repeat(3000)).slice(0, 65536);
   w = world([{number: 2, state: 'open', labels: [{name: 'task'}, {name: 'queued'}], body: adversarial}]);
