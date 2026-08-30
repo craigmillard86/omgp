@@ -1,5 +1,5 @@
 name: agent-dispatch
-# Autonomous backlog pull (AI-DLC L3 mode 4). Every 2 hours, and whenever a PR merges: if the WIP cap
+# Autonomous backlog pull (AI-DLC L3 mode 4). Every 2 hours, whenever a PR merges, and whenever a story passes ready-gate: if the WIP cap
 # allows, claim the oldest human-released task (label: task + ready) and
 # implement it, opening a PR for review. Humans release work by applying
 # `ready`; agents NEVER pull from raw `task`. Kill switch: disable this
@@ -8,6 +8,10 @@ on:
   schedule:
     - cron: '15 */2 * * *'
   workflow_dispatch:
+  repository_dispatch:
+    # Sent by ready-gate when a story passes (a human `ready`, or promote-queued's promotion):
+    # the moment a story becomes claimable, not the next tick. `pick` stays a no-op under the cap.
+    types: [backlog-changed]
   pull_request:
     # A merged PR is the moment the WIP cap most likely opens: run `pick` right away instead
     # of waiting for the next tick. `pick` is a no-op whenever the cap is still held, and the
