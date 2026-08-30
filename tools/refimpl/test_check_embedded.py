@@ -75,8 +75,22 @@ def test_missing_citation_flagged_in_l3(tmp_path):
 
 def test_citation_not_required_outside_cite_dirs(tmp_path):
     rc, out = run(tmp_path, {"nocite.cpp": "#include <cstdint>\nuint8_t g() { return 1; }\n"},
-                  dirname="link")
+                  dirname="core")
     assert rc == 0, out
+
+
+def test_missing_citation_flagged_in_link(tmp_path):
+    rc, out = run(tmp_path, {"nocite.cpp": "#include <cstdint>\nuint8_t g() { return 1; }\n"},
+                  dirname="link")
+    assert rc == 1
+    assert "no spec citation" in out
+
+
+def test_flags_restated_trunk_timing_literal_in_link(tmp_path):
+    body = "// trunk §9\nunsigned t_resp_us() { return 200; }\n"
+    rc, out = run(tmp_path, {"timing.cpp": body}, dirname="link")
+    assert rc == 1
+    assert "TRUNK_T_resp_us" in out
 
 
 def test_repo_embedded_dirs_are_clean():

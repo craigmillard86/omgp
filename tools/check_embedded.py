@@ -169,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dirs", nargs="+", default=["l3", "link", "core"],
                     help="directories to scan (relative to repo root or absolute)")
     ap.add_argument("--yaml", default=str(ROOT / "protocol" / "omgp-protocol.yaml"))
-    ap.add_argument("--cite-dirs", nargs="*", default=["l3"],
+    ap.add_argument("--cite-dirs", nargs="*", default=["l3", "link"],
                     help="directory basenames whose files must cite a spec section")
     args = ap.parse_args(argv)
 
