@@ -88,6 +88,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: github-actions   # backlog-changed nudges are sent by ready-gate with GITHUB_TOKEN, so the run's actor is github-actions[bot]; without this the action refuses (run 33332211854 on #28, same class as #77)
           prompt: |
             You are the backlog agent. Read CLAUDE.md and
             docs/OPERATING-POLICY.md first; stay strictly within agent
