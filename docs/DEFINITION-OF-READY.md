@@ -48,18 +48,37 @@ sticks on a conforming story. Re-apply after fixing.
 
 - A blocking dependency is an issue ref on a **list item** of the Dependencies
   section (`- #19 (T001) …`; an item's indented continuation lines belong to
-  it). `#19–#24` ranges expand.
+  it). `#19–#24` ranges expand; the second endpoint's `#` is optional
+  (`#19–24` expands the same way) — write it either way.
 - A list item that says the relation is **not blocking** — "not blocking",
   "not blocked by", "not dependent on", "non-blocking", "no ordering
   dependency", "sibling", "same PR", "expected to remain open" — is ignored,
   as is any ref in prose paragraphs when the section also has list items.
   Use those forms for `[P]` siblings and test-first pairs delivered in one
   PR; the enricher is told to.
+  A bullet can name more than one issue with different blocking status
+  ("- #19 must land first; #20 is a sibling test, not blocking") — split the
+  two on a semicolon so only the excused clause is ignored; a comma inside
+  one clause does not split it.
 - A section with **no** list items counts every ref in it (prose style).
+- A Dependencies section resolving to more than 500 distinct issue numbers
+  (after range expansion) is treated as unresolved, not silently truncated —
+  it blocks `ready` and holds `queued` — because an oversized ref flood must
+  never be able to make a real open dependency pass by exhausting the check
+  instead of failing it. Narrow the ranges instead.
 - Why: two stories that name each other as dependencies can never be
   released or promoted. The enricher had correctly written "not a blocking
   dependency: #27" and "#53 … expected to remain open" — the old every-ref
   parser made cycles of them (#26↔#27 and seven more, 2026-08-30).
+
+Implementation: both `ready-gate.yml` and `promote-queued.yml` are meant to
+share this parser as `tools/ci/dep-refs.js` rather than each carrying its own
+copy (the two copies drifted silently before, see the #92 review) — as of
+this writing the module exists and is unit-tested
+(`tests/workflows/dep_refs.test.js`, `tools/refimpl/test_dep_refs.py`) but the
+two workflow files still carry their own pre-existing inline copy, since
+wiring them to `require()` it is a `.github/workflows/` edit a human needs to
+make (see #92).
 
 ## Promotion (promote-queued workflow)
 
