@@ -86,7 +86,15 @@ green; `./build/native/test_link_frame` and `test_link_resync` green; `python3
 tools/diffcheck.py --frames-only` reports agreement in < 60 s; `./tools/fuzz-smoke.sh 60`
 lists `fuzz_frame` with `findings=0`.
 
-### Tests for User Story 1 (write first, must fail)
+### Tests for User Story 1 (write first, must fail — then land WITH their implementation)
+
+> **One-dispatch-unit rule (ruling 2026-08-30, docs/OPEN-QUESTIONS.md):** a write-first
+> test task and the implementation task that makes it collect/compile/pass are ONE
+> dispatch unit — one PR, test commits first with the recorded failing run in the PR
+> body (that record is CLAUDE.md rule 8's evidence), then the implementation commits;
+> the PR closes both issues and CI is green at every PR boundary. A merged tree is
+> never left red awaiting a later task. Units here: T012+T018 (landed, PR #99),
+> T013+T024 (PR #100), T014–T017+T022 (five issues, one PR).
 
 - [ ] T012 [P] [US1] Write `tools/refimpl/test_link.py` per contracts/link-python.md: stuff/unstuff identities (7E/7D-only payloads), `crc(b"123456789") == 0x29B1`, hand-computed bytes for a PING frame and a 64-byte frame, `PayloadTooLong`/`ReservedAddress` refusals, deframer discard reasons for bad CRC / bad length / bad escape / trailing escape / 71 unstuffed bytes, resync after each corruption class, empty frame and back-to-back FLAG handling
 - [ ] T013 [P] [US1] Write `tools/refimpl/test_torture.py`: `corpus(seed)` deterministic; every class ≥ `per_class`; ≥ 10 000 frames; no element's corrupted segment parses as a frame in isolation
@@ -231,7 +239,13 @@ enrolment rotation and one notification per transition.
 
 ### Within Each User Story
 
-- Tests first; they MUST fail before the implementation task starts (record the failing run in the PR).
+- Tests first; they MUST fail before the implementation lands, and the failing run is
+  recorded in the PR body. Test task + implementation task are one dispatch unit (one
+  PR; ruling 2026-08-30) — "fail first" is commit ordering inside that PR, never a red
+  file merged to await a later task: a bare import/include of a not-yet-written module
+  aborts pytest collection (or the C++ build) for the whole tree, turning the merge
+  gate red by design — observed on PR #99 (T012) and PR #100 (T013), each burning a
+  ci-failure-router auto-fix cycle.
 - Python reference and vectors before C++ (R-11, R-09); the vector commit is human-triggered and justified; afterwards `genvectors.py --check` proves immutability.
 - Each story ends with a full `./pipeline.sh` + `./pipeline.sh esp32`, a `UNIT_TEST_FLOOR` raise and a local mutation run whose survivors are triaged (a/b/c) in the PR body.
 
