@@ -1,10 +1,7 @@
 """Unit tests for the shared blocking-dependency parser (tools/ci/dep-refs.js).
 
-Direct unit tests, not routed through the workflow-extraction harness in
-test_workflow_scripts.py, because ready-gate.yml / promote-queued.yml still carry their own
-old duplicated copy of this logic pending the require() wiring described in the #92 PR thread
-(this module fixes a mixed-blocking-and-excused-ref bullet dropping a real dependency, and a
-range regex that missed the bare-second-endpoint form; see tools/ci/dep-refs.js for detail)."""
+Direct unit tests of the module; test_workflow_scripts.py exercises the same module through the
+wired ready-gate.yml / promote-queued.yml scripts (they require() it from a sparse checkout)."""
 from __future__ import annotations
 
 import pathlib

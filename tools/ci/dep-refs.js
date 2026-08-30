@@ -1,10 +1,8 @@
 'use strict';
 // Shared blocking-dependency parser for ready-gate.yml and promote-queued.yml
-// (docs/DEFINITION-OF-READY.md "Dependencies rule"). Both workflows currently carry a
-// byte-for-byte copy of this logic inline (github-script has no import mechanism of its own);
-// this module is the fix for that duplication — each workflow should
-// `require(`${process.env.GITHUB_WORKSPACE}/tools/ci/dep-refs.js`)` instead. Not yet wired in:
-// see the #92 PR thread for why (this session cannot push to .github/workflows/*.yml).
+// (docs/DEFINITION-OF-READY.md "Dependencies rule"). Both workflows sparse-checkout tools/ci and
+// `require(`${process.env.GITHUB_WORKSPACE}/tools/ci/dep-refs.js`)` — one implementation, one
+// test suite (tests/workflows/dep_refs.test.js directly; story_gate_harness.js through the workflows).
 //
 // Two correctness fixes over the inline copies, both driven by reproducers from the #92 review:
 //

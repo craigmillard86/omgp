@@ -24,6 +24,12 @@ jobs:
       github.event.label.name == 'ready' || github.event.label.name == 'queued'
     runs-on: ubuntu-latest
     steps:
+      # The dependency parser is shared code in the repo (tools/ci/dep-refs.js); a sparse
+      # checkout of that one directory is all this API-only job needs.
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: tools/ci
+          sparse-checkout-cone-mode: false
       - uses: actions/github-script@v7
         with:
           script: |
@@ -74,32 +80,16 @@ jobs:
             if (/REPLACE:/.test(body))
               problems.push('template placeholders (`REPLACE:`) still present');
             // --- dependencies: blocking for `ready`, informational for `queued` -----------
-            // Blocking dependencies (docs/DEFINITION-OF-READY.md "Dependencies rule"): refs on list
-            // items (`- #N …`, continuation lines joined) that are not marked non-blocking; a section
-            // with no list items counts every ref (prose style); `#A–#B` ranges expand. Enrichment
-            // wrote "not blocking … #27" / "sibling … expected to remain open" mentions that the
-            // old every-ref parser turned into dependency cycles (#26↔#27, 2026-08-30).
-            const NONBLOCK = /\bnot\s+(?:a\s+)?(?:blocking|blocked|dependent)\b|\bnon-blocking\b|\bno ordering dependency\b|\bexpected to remain (?:open|so)\b|\bsame PR\b|\bsiblings?\b/i;
-            const depRefs = text => {
-              const items = []; let cur = null;
-              for (const line of (text || '').split('\n')) {
-                if (/^\s*[-*]\s/.test(line)) { cur = [line]; items.push(cur); }
-                else if (cur && line.trim() && /^\s+\S/.test(line)) cur.push(line);
-                else cur = null;
-              }
-              const sources = items.length ? items.map(i => i.join(' ')).filter(i => !NONBLOCK.test(i)) : [text || ''];
-              const refs = new Set();
-              for (const s of sources) {
-                for (const m of s.matchAll(/#(\d+)\s*[–-]\s*#(\d+)/g)) {
-                  const a = Number(m[1]), b = Number(m[2]);
-                  if (b > a && b - a <= 200) for (let n = a; n <= b; n++) refs.add(n);
-                }
-                for (const m of s.matchAll(/#(\d+)/g)) refs.add(Number(m[1]));
-              }
-              return [...refs].sort((x, y) => x - y);
-            };
+            // Blocking dependencies (docs/DEFINITION-OF-READY.md "Dependencies rule"): the parser is
+            // shared with promote-queued.yml as tools/ci/dep-refs.js (unit-tested there). A section
+            // that resolves to more than MAX_REFS issues is UNRESOLVED — a gap, never a truncation
+            // (#92 red-team finding 2: a ref flood must fail closed).
+            const { depRefs, MAX_REFS } = require(`${process.env.GITHUB_WORKSPACE}/tools/ci/dep-refs.js`);
+            const parsed = depRefs(section('Dependencies'));
+            if (parsed.capped)
+              problems.push(`Dependencies resolves to more than ${MAX_REFS} issues — narrow the ranges (treated as unresolved)`);
             const open = [];
-            for (const n of depRefs(section('Dependencies')).filter(n => n !== iss.number)) {   // never itself (a range can include it)
+            for (const n of parsed.refs.filter(n => n !== iss.number)) {   // never itself (a range can include it)
               const dep = await github.rest.issues.get({owner, repo, issue_number: n}).catch(() => null);
               if (dep && dep.data.state === 'open') open.push(`#${n}`);
             }

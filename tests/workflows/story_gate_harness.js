@@ -33,18 +33,21 @@ function world(issues) {
       repos: { createDispatchEvent: async ({event_type, client_payload}) => log.push(`dispatch ${event_type}#${client_payload.issue}`) },
     },
   };
-  const core = { info: () => {}, notice: m => log.push(`notice: ${m}`) };
+  const core = { info: () => {}, notice: m => log.push(`notice: ${m}`), warning: m => log.push(`warning: ${m}`) };
   return {github, core, log, state};
 }
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+// The workflow scripts require() the shared parser from the checked-out repo; github-script
+// supplies `require`, so the harness does too, rooted at the repository (argv[3] or cwd).
+process.env.GITHUB_WORKSPACE = process.argv[3] || process.cwd();
 async function gate(w, issueNo, label, eventName = 'issues') {
   const context = { repo: {owner: 'o', repo: 'r'}, eventName,
     payload: eventName === 'issues' ? {issue: w.state.get(issueNo), label: {name: label}} : {client_payload: {issue: issueNo}} };
-  await new AsyncFunction('github', 'context', 'core', S.gate)(w.github, context, w.core);
+  await new AsyncFunction('github', 'context', 'core', 'require', S.gate)(w.github, context, w.core, require);
 }
 async function promote(w, closedNo) {
   const context = { repo: {owner: 'o', repo: 'r'}, eventName: 'issues', payload: {issue: {number: closedNo}} };
-  await new AsyncFunction('github', 'context', 'core', S.promote)(w.github, context, w.core);
+  await new AsyncFunction('github', 'context', 'core', 'require', S.promote)(w.github, context, w.core, require);
 }
 const mk = (n, st, labels, deps, tier, style) => ({number: n, state: st, labels: labels.map(name => ({name})), body: body(deps, tier, style)});
 const results = [];
@@ -117,8 +120,23 @@ const said = (w, re, n) => w.log.some(l => re.test(l) && (n === undefined || l.s
   await gate(w, 2, 'queued'); check('#A–#B range expands to the issues between', said(w, /waiting on #3/, 2));
   w = world([mk(1, 'closed', ['task']),
              {...mk(26, 'open', ['task', 'queued'], '- #1 (T001)\n\nNot a blocking dependency, but relevant: #27 (T009).')},
-             {...mk(27, 'open', ['task', 'queued'], '- **#1 (T001)**\n- **#26 (T008)** — no file dependency; [P] siblings, same PR')}]);
+             {...mk(27, 'open', ['task', 'queued'], '- **#1 (T001)**\n- **#26 (T008)** — no file dependency, [P] siblings, same PR')}]);
   await promote(w, 1); check('promoter: former #26↔#27 cycle — both promote', has(w, '+ready@26') && has(w, '+ready@27'));
+
+  // --- #92 review fixes, exercised through the WIRED workflows ---
+  deps = '- #4 (T010) must land first; #1 is a sibling test, not blocking';
+  w = world([mk(1, 'closed', ['task']), mk(4, 'open', ['task']), mk(2, 'open', ['task', 'ready'], deps)]);
+  await gate(w, 2, 'ready'); check('mixed bullet: the real blocker still blocks ready', has(w, '-ready@2') && said(w, /dependency #4 is still open/, 2));
+  w = world([mk(1, 'closed', ['task']), mk(4, 'open', ['task']), mk(2, 'open', ['task', 'queued'], deps)]);
+  await promote(w, 1); check('mixed bullet: the promoter does not promote past the real blocker', !has(w, '+ready@2'));
+  deps = '- #1–4 (every preceding task)';
+  w = world([mk(1, 'closed', ['task']), mk(3, 'open', ['task']), mk(4, 'closed', ['task']), mk(2, 'open', ['task', 'queued'], deps)]);
+  await gate(w, 2, 'queued'); check('#A–B range (bare second endpoint) expands', said(w, /waiting on #3/, 2));
+  let flood = ''; for (let n = 1000; flood.length < 40000; n += 201) flood += `- #${n}-${n + 200} (batch)\n`;
+  w = world([mk(2, 'open', ['task', 'ready'], flood)]);
+  await gate(w, 2, 'ready'); check('ref flood: gate treats a capped section as a gap (fails closed)', has(w, '-ready@2') && said(w, /more than 500 issues/, 2));
+  w = world([mk(1, 'closed', ['task']), mk(2, 'open', ['task', 'queued'], flood)]);
+  await promote(w, 1); check('ref flood: promoter holds the story (fails closed)', !has(w, '+ready@2') && w.log.some(l => /warning:.*more than 500/.test(l)));
 
   // --- parsing cost on attacker-reachable input (#90 review finding 5): 64 KB adversarial body ---
   const adversarial = ('**Intent**\n' + '**Note**\n'.repeat(3000) + '## x\n'.repeat(3000)).slice(0, 65536);

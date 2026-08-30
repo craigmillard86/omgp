@@ -71,14 +71,12 @@ sticks on a conforming story. Re-apply after fixing.
   dependency: #27" and "#53 … expected to remain open" — the old every-ref
   parser made cycles of them (#26↔#27 and seven more, 2026-08-30).
 
-Implementation: both `ready-gate.yml` and `promote-queued.yml` are meant to
-share this parser as `tools/ci/dep-refs.js` rather than each carrying its own
-copy (the two copies drifted silently before, see the #92 review) — as of
-this writing the module exists and is unit-tested
-(`tests/workflows/dep_refs.test.js`, `tools/refimpl/test_dep_refs.py`) but the
-two workflow files still carry their own pre-existing inline copy, since
-wiring them to `require()` it is a `.github/workflows/` edit a human needs to
-make (see #92).
+Implementation: `ready-gate.yml` and `promote-queued.yml` share one parser,
+`tools/ci/dep-refs.js` (sparse-checked-out and `require()`d by both), so the
+gate and the promoter can never classify a dependency differently. Tested
+directly (`tests/workflows/dep_refs.test.js`) and through the wired workflow
+scripts (`tests/workflows/story_gate_harness.js`, both run by pytest in the
+`refimpl` stage).
 
 ## Promotion (promote-queued workflow)
 

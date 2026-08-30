@@ -1,8 +1,7 @@
 // Direct unit tests for tools/ci/dep-refs.js — the shared blocking-dependency parser meant to
 // replace the duplicated inline copies in ready-gate.yml and promote-queued.yml (#92 review: the
 // two copies are byte-for-byte duplicated and only cross-tested for 2 of 6 dependency rules).
-// Not routed through story_gate_harness.js because the workflow YAML files still carry their own
-// old inline copy pending the require() wiring described in the #92 PR thread.
+// story_gate_harness.js exercises the same module through the wired workflows; this file tests it directly.
 // Run: node tests/workflows/dep_refs.test.js
 'use strict';
 const path = require('path');

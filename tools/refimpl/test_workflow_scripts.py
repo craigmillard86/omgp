@@ -32,7 +32,7 @@ def test_story_release_scripts_against_mocked_github(tmp_path):
     scripts = {"gate": _script("ready-gate.yml", "validate"), "promote": _script("promote-queued.yml", "promote")}
     f = tmp_path / "scripts.json"
     f.write_text(json.dumps(scripts))
-    r = subprocess.run(["node", str(HARNESS), str(f)], capture_output=True, text=True, cwd=ROOT, timeout=120)
+    r = subprocess.run(["node", str(HARNESS), str(f), str(ROOT)], capture_output=True, text=True, cwd=ROOT, timeout=120)
     print(r.stdout)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "FAIL" not in r.stdout
