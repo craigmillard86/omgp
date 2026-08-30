@@ -39,6 +39,56 @@ def test_story_release_scripts_against_mocked_github(tmp_path):
     assert "cases passed" in r.stdout
 
 
+# --- ci-failure-router.yml (GOVERNANCE.md §4 "CI-failure auto-resolution") ---------------------
+
+ROUTER = ROOT / ".github" / "workflows" / "ci-failure-router.yml"
+ROUTER_HARNESS = ROOT / "tests" / "workflows" / "ci_failure_router_harness.js"
+
+
+@pytest.mark.skipif(shutil.which("node") is None,
+                    reason="node not present (blind spot: workflow scripts not exercised in this environment)")
+def test_ci_failure_router_routing_against_mocked_github(tmp_path):
+    f = tmp_path / "scripts.json"
+    f.write_text(json.dumps({"route": _script("ci-failure-router.yml", "route")}))
+    r = subprocess.run(["node", str(ROUTER_HARNESS), str(f), str(ROOT)], capture_output=True, text=True, cwd=ROOT, timeout=120)
+    print(r.stdout)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "FAIL" not in r.stdout
+    assert "cases passed" in r.stdout
+
+
+def test_ci_failure_router_wiring():
+    """The bounds that make the loop safe live in the YAML, not only in the script."""
+    wf = yaml.safe_load(ROUTER.read_text())
+    on = wf[True] if True in wf else wf["on"]           # PyYAML reads the bare key `on` as True
+    assert set(on["workflow_run"]["workflows"]) == {"ci", "security"}
+    assert on["workflow_run"]["types"] == ["completed"]
+    assert "head_branch" in wf["concurrency"]["group"] and wf["concurrency"]["cancel-in-progress"] is False
+    route, autofix = wf["jobs"]["route"], wf["jobs"]["autofix"]
+    # least privilege per job (review on #96): the always-running router holds no OIDC/contents/actions write
+    assert "permissions" not in wf
+    assert autofix["permissions"]["id-token"] == "write" and autofix["permissions"]["contents"] == "write"
+    assert "id-token" not in route["permissions"] and route["permissions"].get("contents", "read") == "read" and route["permissions"]["actions"] == "read"
+    assert "conclusion == 'failure'" in route["if"] and "head_repository.full_name == github.repository" in route["if"]
+    assert autofix["needs"] == "route" and "route.outputs.route == 'autofix'" in autofix["if"]
+    action = next(s for s in autofix["steps"] if "claude-code-action" in s.get("uses", ""))
+    assert "claude_code_oauth_token" in action["with"]
+    for must in ("CLAUDE.md", "OPERATING-POLICY", "gh run view --log-failed", "./pipeline.sh", "environmental", "gh run rerun"):
+        assert must in action["with"]["prompt"], must
+    tools = action["with"]["claude_args"]
+    assert "Bash(git*)" in tools and "Bash(gh run rerun*)" in tools and "Bash(gh pr create*)" not in tools
+    assert autofix["steps"][0]["with"]["ref"] == "${{ github.event.workflow_run.head_branch }}"
+    # the triage loop also handles main-branch CI failures (same handling as nightly-failure)
+    triage = yaml.safe_load((ROOT / ".github" / "workflows" / "agent-triage.yml").read_text())
+    assert "'ci-failure'" in triage["jobs"]["triage"]["if"] and "'nightly-failure'" in triage["jobs"]["triage"]["if"]
+
+
+def test_router_labels_are_provisioned():
+    setup = (ROOT / "tools" / "gh-setup.sh").read_text()
+    for l in ("auto-fix-1", "auto-fix-2", "ci-failure"):
+        assert f"L {l} " in setup or f'L "{l}"' in setup, l
+
+
 def test_both_workflows_declare_the_same_seven_sections():
     gate = _script("ready-gate.yml", "validate")
     promote = _script("promote-queued.yml", "promote")
