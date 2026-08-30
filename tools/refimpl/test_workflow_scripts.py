@@ -83,6 +83,23 @@ def test_ci_failure_router_wiring():
     assert "'ci-failure'" in triage["jobs"]["triage"]["if"] and "'nightly-failure'" in triage["jobs"]["triage"]["if"]
 
 
+def test_bot_triggered_agent_workflows_allow_their_bot_actors():
+    """A repository_dispatch sent with GITHUB_TOKEN runs as github-actions[bot], and
+    claude-code-action refuses bot actors unless named (first hit: #77 on claude-review;
+    live failure: run 33332211854 — the #93 backlog-changed nudge claimed #28, then
+    implement died 'Workflow initiated by non-human actor: github-actions'). Every
+    workflow whose claude-code-action step can be reached from a bot-caused trigger
+    must declare that bot in allowed_bots."""
+    for workflow, bot in [("agent-dispatch.yml", "github-actions"),   # repository_dispatch: backlog-changed (ready-gate, GITHUB_TOKEN)
+                          ("agent-triage.yml", "github-actions"),     # issues.labeled by nightly/ci-failure-router
+                          ("ci-failure-router.yml", "github-actions")]:  # workflow_run caused by bot pushes/dispatches
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / workflow).read_text())
+        actions = [s for j in wf["jobs"].values() for s in j.get("steps", []) if "claude-code-action" in s.get("uses", "")]
+        assert actions, workflow
+        for a in actions:
+            assert bot in a["with"].get("allowed_bots", ""), (workflow, "allowed_bots must include " + bot)
+
+
 def test_router_labels_are_provisioned():
     setup = (ROOT / "tools" / "gh-setup.sh").read_text()
     for l in ("auto-fix-1", "auto-fix-2", "ci-failure"):
