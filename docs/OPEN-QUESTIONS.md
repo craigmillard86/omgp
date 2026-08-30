@@ -382,3 +382,40 @@ notes amended in the same PR; issue #28 re-queued with `- #40 (T022)` as its blo
 dependency (promote-queued releases it when #40 closes); #29 (T011) already chains
 behind #28. US1 stories no longer list #28/#29 as blockers.
 **Supersedes:** none.
+
+---
+
+## 2026-08-30 — Splitting a write-first test task from its implementation turns the merge gate red
+
+**Question:** spec-002's decomposition puts write-first test files and the module they
+import/include in separate issues two phases or several tasks apart (T012 vs T018,
+T013 vs T024, T014–T017 vs T022). A bare `import`/`#include` of the missing module
+fails pytest collection (or the C++ build) for the WHOLE tree, so the test task's PR
+turns `ci-gate` red by design — incompatible with the green-CI merge gate. Observed
+twice live: PR #99 (T012) and PR #100 (T013), each triggering a ci-failure-router
+auto-fix cycle that resolved it by implementing the partner task in-attempt.
+**Options:** (1) `pytest.importorskip` guards in write-first Python test files —
+Python-only; a C++ test referencing a nonexistent header cannot skip, it cannot
+compile; (2) accept per-pair router bundling as the mechanism — works, but collapses
+the decomposition by accident each time and burns an auto-fix cycle; (3) make each
+test+implementation pair ONE dispatch unit: one PR, test commits first with the
+recorded failing run as rule-8 evidence, then the implementation, closing both issues
+— the pattern PR #94 (T008+T009) already used cleanly, and consistent with CLAUDE.md's
+"prefer small vertical slices" working agreement.
+**Recommendation:** (3).
+**Ruling:** human, 2026-08-30 ("do it", this session): option (3). tasks.md Phase-3
+preamble and "Within Each User Story" amended; DEFINITION-OF-READY gains the
+"Test-first pairs are one dispatch unit" section; the enricher is instructed to mark
+partner stories as same-PR siblings; US1's remaining pair (T014–T017 + T022,
+issues #32–#35 + #40) marked as one unit on the issues.
+The working precedent for option (3) is PR #94 (T008+T009): both commits pushed
+together, green throughout. PR #99 (T012+T018) and PR #100 (T013+T024) are NOT that
+shape — each pushed its test commit alone, went red, and the second commit came from
+an option-(2) router auto-fix cycle, accepted retroactively; they MOTIVATED this
+ruling rather than exemplify it (red-team on PR #101, 2026-08-30). Accordingly the
+unit is pushed ONCE, complete: the failing state exists only in local commit history,
+evidenced by the recorded failing run in the PR body. Pushing the test commits alone
+recreates the incident — and for C++ pairs a missing header aborts the entire native
+build stage (every later pipeline stage with it), a larger blast radius than Python's
+collection error.
+**Supersedes:** none.

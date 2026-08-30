@@ -49,7 +49,7 @@ jobs:
             let tier = 0, reasons = [];
             const T = (n, why) => { if (n > tier) tier = n; reasons.push(`T${n}: ${why}`); };
 
-            if (touches(/^(protocol\/|tests\/vectors\/|\.github\/|CLAUDE\.md|docs\/(OPERATING-POLICY|GOVERNANCE|protocol-l3|trunk-link-layer|omgp-spec)|\.specify\/memory\/|tools\/mutate\.cfg)/))
+            if (touches(/^(protocol\/|tests\/vectors\/|\.github\/|CLAUDE\.md|docs\/(OPERATING-POLICY|GOVERNANCE|DEFINITION-OF-READY|protocol-l3|trunk-link-layer|omgp-spec)|\.specify\/memory\/|tools\/mutate\.cfg)/))
               T(3, 'touches ground-truth or governance artefacts');
             if (removedTests) T(3, 'reduces test content');
             if (touches(/^(core\/|link\/|l3\/)/)) T(2, 'portable protocol-critical code');

@@ -86,7 +86,21 @@ green; `./build/native/test_link_frame` and `test_link_resync` green; `python3
 tools/diffcheck.py --frames-only` reports agreement in < 60 s; `./tools/fuzz-smoke.sh 60`
 lists `fuzz_frame` with `findings=0`.
 
-### Tests for User Story 1 (write first, must fail)
+### Tests for User Story 1 (write first, must fail — then land WITH their implementation)
+
+> **One-dispatch-unit rule (ruling 2026-08-30, docs/OPEN-QUESTIONS.md):** a write-first
+> test task and the implementation task that makes it collect/compile/pass are ONE
+> dispatch unit — one PR, test commits first with the recorded failing run in the PR
+> body (that record is CLAUDE.md rule 8's evidence), then the implementation commits;
+> the PR closes both issues. The invariant is about the merged tree, not every commit:
+> the failing state exists only as ordered commits inside the PR, and the PR merges
+> only once green — main is never left red awaiting a later task. **Push the unit
+> ONCE, complete — never the test commits alone**: an intermediate red push triggers a
+> ci-failure-router cycle (how PR #99/#100 actually got their implementation commits —
+> option-(2) bundles accepted retroactively, not examples of this rule; PR #94 is the
+> real precedent), and for C++ pairs a missing header aborts the whole native build
+> stage. Units here: T012+T018 (PR #99), T013+T024 (PR #100), T014–T017+T022 (five
+> issues, one PR, pushed together).
 
 - [ ] T012 [P] [US1] Write `tools/refimpl/test_link.py` per contracts/link-python.md: stuff/unstuff identities (7E/7D-only payloads), `crc(b"123456789") == 0x29B1`, hand-computed bytes for a PING frame and a 64-byte frame, `PayloadTooLong`/`ReservedAddress` refusals, deframer discard reasons for bad CRC / bad length / bad escape / trailing escape / 71 unstuffed bytes, resync after each corruption class, empty frame and back-to-back FLAG handling
 - [ ] T013 [P] [US1] Write `tools/refimpl/test_torture.py`: `corpus(seed)` deterministic; every class ≥ `per_class`; ≥ 10 000 frames; no element's corrupted segment parses as a frame in isolation
@@ -120,7 +134,7 @@ inter-frame gap and statistics, driven by `MockWire` with every fault kind.
 **Independent Test**: `./build/native/test_link_master` green, including the tagged
 boundary tests for `T_resp`, `T_gap` and `retries`.
 
-### Tests for User Story 2 (write first, must fail)
+### Tests for User Story 2 (write first, must fail — one dispatch unit with their implementation, ruling 2026-08-30)
 
 - [ ] T028 [P] [US2] Extend `tests/unit/test_mock_wire.cpp` for the remaining step kinds (`Garbage` never contains a valid frame; `CrcError` flips the last CRC byte; `Duplicate` schedules the second copy `delay_us` after the first ends; `Babble` emits regardless of addressee; `Rate` makes a wrong-rate request behave as silence or garbage)
 - [ ] T029 [P] [US2] Write `tests/unit/test_link_master.cpp`: happy path (one transmission, `Answered` with the payload, `stats.transactions == 1`); silence → exactly two retries with the same `seq` and `retry` set, then `Failed{Timeout}`, `attempts() == 3`, `stats.retries == 2`, `stats.timeouts == 3` `[timing:retries]`; response first byte at `tx_end + T_resp − 1` accepted and at `tx_end + T_resp` missed `[timing:T_resp]`; CRC-failed response ends the attempt immediately and counts `crc_failures`; late duplicate after success is discarded and does not affect the next transaction; wrong `src`/`dst`/`seq`/response-bit frames discarded and counted; second `begin()` before `last_activity + T_gap` transmits exactly at `+ T_gap` `[timing:T_gap]`; new transactions to one node use seq 0..15 then wrap; `begin()` while busy → `Busy`; 65-byte payload → `PayloadTooLong` with nothing on the wire; `HEAP_FREE_SCOPE` around a full transaction; the engine makes no progress without `poll()` (time not advanced → still `Pending`)
@@ -143,7 +157,7 @@ safety in every position (SC-004) and the §7-mode → script mapping (SC-005).
 
 **Independent Test**: `./build/native/test_link_responder` and `test_link_loop` green.
 
-### Tests for User Story 3 (write first, must fail)
+### Tests for User Story 3 (write first, must fail — one dispatch unit with their implementation, ruling 2026-08-30)
 
 - [ ] T033 [P] [US3] Write `tests/unit/test_link_responder.cpp`: response first byte exactly at `request_end + T_turn_min` by default `[timing:T_turn_min]`; a constructor `turnaround_us` above the maximum is clamped to `T_turn_max` and one below the minimum to `T_turn_min` `[timing:T_turn_max]`; handler invoked once per new seq; retry of the buffered seq → identical bytes retransmitted, handler not invoked, `replays_served == 1`; different seq with retry set → treated as new; retry before any answer → new; frames for other addresses and corrupt frames → nothing transmitted, `discards` counted; never transmits outside a window (no bytes when nothing was addressed to it); first `poll()` after `request_end + T_turn_max` → transmits at once and `late_responses == 1` (spec FR-014); `HEAP_FREE_SCOPE` around handle+respond
 - [ ] T034 [P] [US3] Write `tests/unit/test_link_loop.cpp` (needs T031): real `Master` and real `Responder`s on one `MockWire` (the mock's handler for node *n* is `Responder` *n*); the SC-004 matrix — {drop, duplicate, delay-past-T_resp, corrupt} × {attempt 0, retry 1, retry 2, after give-up} — asserting `handler invocations == 1` per new sequence, `transmissions ≤ 3`, accepted `seq == transaction seq`; plus a comment block mapping each §7 mode (response timeout, CRC-failed response, SUSPECT, OFFLINE, BUS_FAULT, babble, duplicate, wrong-rate probe) to the script that produces it (SC-005; the health rows reference T039/T042 scripts)
@@ -164,7 +178,7 @@ enrolment rotation and one notification per transition.
 
 **Independent Test**: `./build/native/test_link_health` green, including `[timing:T_poll]`.
 
-### Tests for User Story 4 (write first, must fail)
+### Tests for User Story 4 (write first, must fail — one dispatch unit with their implementation, ruling 2026-08-30)
 
 - [ ] T037 [P] [US4] Write `tests/unit/test_link_health.cpp` with a recording `HealthListener`: every transition of data-model.md §6 and every non-transition at the boundary (2 failures stay ENROLLED; SUSPECT at 999 ms stays; `tick()` at 1000 ms → OFFLINE without a result); UNENROLLED never counts failures; `poll_due` for SUSPECT false at `9 × T_poll` after the last poll and true at `10 × T_poll` `[timing:T_poll]`; `next_probe` rotates over UNENROLLED and OFFLINE addresses only and skips 0x00; OFFLINE → ENROLLED on a valid answer with `RECOVERED`; exactly one notice per transition (count equality); `HEAP_FREE_SCOPE` around a full sequence
 
@@ -186,7 +200,7 @@ enrolment rotation and one notification per transition.
 **Independent Test**: `./build/native/test_link_busfault` green, including
 `[timing:bit_rate_fallback]`.
 
-### Tests for User Story 5 (write first, must fail)
+### Tests for User Story 5 (write first, must fail — one dispatch unit with their implementation, ruling 2026-08-30)
 
 - [ ] T041 [P] [US5] Write `tests/unit/test_link_busfault.cpp`: three enrolled nodes all SUSPECT → exactly one `BUS_FAULT` and one `ALERT`, `bus_faults == 1`; two nodes with one ENROLLED → none; a single enrolled node SUSPECT → declared (ruling Q2); `next_probe()` rates alternate fallback, reference, fallback… while faulted, each change counted in `rate_changes` `[timing:bit_rate_fallback]`; first valid answer at the fallback rate → `BUS_RECOVERED` once, `bit_rate() == TRUNK_bit_rate_fallback`, answering node ENROLLED, the others keep SUSPECT/OFFLINE timers (one of them goes OFFLINE at its own 1 s mark afterwards); a second fault after recovery is declared again (once)
 - [ ] T042 [P] [US5] Extend `tests/unit/test_link_loop.cpp` with the wrong-rate script: all nodes `Rate 115200`; host probes at 1 Mbit/s → silence → SUSPECT → BUS_FAULT → the alternating probe at 115 200 gets an answer → recovery, `Master::set_bit_rate` observed on the mock
@@ -231,7 +245,13 @@ enrolment rotation and one notification per transition.
 
 ### Within Each User Story
 
-- Tests first; they MUST fail before the implementation task starts (record the failing run in the PR).
+- Tests first; they MUST fail before the implementation lands, and the failing run is
+  recorded in the PR body. Test task + implementation task are one dispatch unit (one
+  PR; ruling 2026-08-30) — "fail first" is commit ordering inside that PR, never a red
+  file merged to await a later task: a bare import/include of a not-yet-written module
+  aborts pytest collection (or the C++ build) for the whole tree, turning the merge
+  gate red by design — observed on PR #99 (T012) and PR #100 (T013), each burning a
+  ci-failure-router auto-fix cycle.
 - Python reference and vectors before C++ (R-11, R-09); the vector commit is human-triggered and justified; afterwards `genvectors.py --check` proves immutability.
 - Each story ends with a full `./pipeline.sh` + `./pipeline.sh esp32`, a `UNIT_TEST_FLOOR` raise and a local mutation run whose survivors are triaged (a/b/c) in the PR body.
 
