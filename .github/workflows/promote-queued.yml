@@ -1,0 +1,64 @@
+name: promote-queued
+# Batch release for the story pipeline (docs/DEFINITION-OF-READY.md "Two release paths").
+# A human applies `queued` to stories whose dependencies are still open; when an issue
+# closes, every open `queued` story whose Dependencies section refers only to closed issues
+# is promoted: `queued` removed, `ready` added, and ready-gate is asked (repository_dispatch)
+# to run its final validation — a label added with GITHUB_TOKEN never starts a `labeled`
+# run by itself. Stories with no parseable dependency refs ("None") promote immediately.
+# Serialised: one promoter at a time, never cancelled mid-pass.
+on:
+  issues:
+    types: [closed]
+  workflow_dispatch:
+
+permissions:
+  contents: write     # repository_dispatch (createDispatchEvent) requires it
+  issues: write
+
+concurrency:
+  group: promote-queued
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const queued = await github.paginate(github.rest.issues.listForRepo,
+              {owner, repo, state: 'open', labels: 'queued', per_page: 100});
+            core.info(`promote-queued: ${queued.length} queued story(ies) to examine` +
+              (context.eventName === 'issues' ? ` after #${context.payload.issue.number} closed` : ''));
+            const section = (body, name) => {
+              const m = (body || '').match(new RegExp(`###\\s*${name}\\s*\\n([\\s\\S]*?)(?=\\n###|$)`, 'i'));
+              return m ? m[1].trim() : '';
+            };
+            const closedCache = new Map();
+            const isClosed = async n => {
+              if (!closedCache.has(n)) {
+                const r = await github.rest.issues.get({owner, repo, issue_number: n}).catch(() => null);
+                closedCache.set(n, r ? r.data.state !== 'open' : true);   // an unresolvable ref never blocks forever
+              }
+              return closedCache.get(n);
+            };
+            let promoted = 0;
+            for (const iss of queued) {
+              if (iss.pull_request) continue;
+              const held = iss.labels.map(l => l.name).filter(n => ['blocked', 'needs-human', 'in-progress'].includes(n));
+              if (held.length) { core.info(`#${iss.number}: still queued — carries ${held.join(', ')}`); continue; }
+              const refs = [...section(iss.body, 'Dependencies').matchAll(/#(\d+)/g)].map(m => Number(m[1]));
+              const open = [];
+              for (const n of refs) if (!(await isClosed(n))) open.push(`#${n}`);
+              if (open.length) { core.info(`#${iss.number}: still queued — waiting on ${open.join(', ')}`); continue; }
+              await github.rest.issues.removeLabel({owner, repo, issue_number: iss.number, name: 'queued'}).catch(() => {});
+              await github.rest.issues.addLabels({owner, repo, issue_number: iss.number, labels: ['ready']});
+              await github.rest.issues.createComment({owner, repo, issue_number: iss.number,
+                body: `🚦 **promoted**: dependencies complete${refs.length ? ` (${refs.map(n => '#' + n).join(', ')})` : ' (none declared)'} — \`queued\` → \`ready\`; ready-gate runs the final validation.`});
+              // Final validation: a label added with GITHUB_TOKEN starts no `labeled` run, so ask explicitly.
+              await github.rest.repos.createDispatchEvent({owner, repo, event_type: 'ready-gate',
+                client_payload: {issue: iss.number}});
+              promoted++;
+            }
+            core.notice(`promote-queued: promoted ${promoted} of ${queued.length}`);

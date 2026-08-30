@@ -1,38 +1,56 @@
 name: ready-gate
-# Definition-of-Ready enforcement: applying `ready` triggers validation of
-# the story body against the PRD scheme. Non-conforming stories have `ready`
-# removed with a comment listing gaps — the label only sticks if the story
-# is genuinely agent-implementable. See docs/DEFINITION-OF-READY.md.
+# Definition-of-Ready enforcement (docs/DEFINITION-OF-READY.md). Two release paths, both
+# human judgement, both validated here:
+#   `ready`  — dispatch now: content validation + every dependency must be closed.
+#   `queued` — batch release: the SAME content validation, but open dependencies are
+#              allowed; promote-queued.yml swaps queued -> ready when they all close.
+# Non-conforming stories have the label removed with a gap list — a release label only
+# sticks on a story that is genuinely agent-implementable.
+# repository_dispatch(ready-gate): final validation requested by promote-queued.yml after it
+# applied `ready` — a label added with GITHUB_TOKEN never starts a `labeled` run on its own.
 on:
   issues:
     types: [labeled]
+  repository_dispatch:
+    types: [ready-gate]
 
 permissions:
   issues: write
 
 jobs:
   validate:
-    if: github.event.label.name == 'ready'
+    if: >
+      github.event_name == 'repository_dispatch' ||
+      github.event.label.name == 'ready' || github.event.label.name == 'queued'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/github-script@v7
         with:
           script: |
             const {owner, repo} = context.repo;
-            const iss = context.payload.issue;
+            const dispatched = context.eventName === 'repository_dispatch';
+            const iss = dispatched
+              ? (await github.rest.issues.get({owner, repo, issue_number: Number(context.payload.client_payload.issue)})).data
+              : context.payload.issue;
+            const mode = dispatched ? 'ready' : context.payload.label.name;   // 'ready' | 'queued'
+            const has = name => iss.labels.some(l => l.name === name);
+            if (dispatched && !has('ready')) { core.notice(`#${iss.number}: no longer labelled ready — nothing to validate`); return; }
             const body = iss.body || '';
             const problems = [];
             const section = name => {
               const m = body.match(new RegExp(`###\\s*${name}\\s*\\n([\\s\\S]*?)(?=\\n###|$)`, 'i'));
               return m ? m[1].trim() : null;
             };
+            // --- content validation: identical for both paths ---------------------------
             const required = ['Intent', 'Spec references', 'Acceptance criteria',
                               'Evidence required', 'Out of scope', 'Dependencies',
                               'Expected risk tier'];
             for (const s of required) {
               const v = section(s);
               if (v === null) problems.push(`missing section: **${s}**`);
-              else if (v.length < 3 || /^_?no response_?$/i.test(v))
+              // "empty" = no word character or issue ref at all (a Dependencies section of
+              // just "#1" is two characters and perfectly valid; a length threshold rejected it).
+              else if (v.replace(/[^\w#]/g, '').length === 0 || /^_?no response_?$/i.test(v))
                 problems.push(`empty section: **${s}**`);
             }
             const acc = section('Acceptance criteria') || '';
@@ -47,19 +65,38 @@ jobs:
               problems.push('Expected risk tier must state a tier as T0/T1/T2/T3 (first token of the section)');
             else if (declared === '3')
               problems.push('Expected risk **T3**: human-ruling work must not be released to agent dispatch — split the story or do the T3 part first, humanly');
-            const deps = section('Dependencies') || '';
-            for (const m of deps.matchAll(/#(\d+)/g)) {
-              const dep = await github.rest.issues.get({owner, repo, issue_number: Number(m[1])}).catch(() => null);
-              if (dep && dep.data.state === 'open')
-                problems.push(`dependency #${m[1]} is still open`);
-            }
             if (/REPLACE:/.test(body))
               problems.push('template placeholders (`REPLACE:`) still present');
+            // --- dependencies: blocking for `ready`, informational for `queued` -----------
+            const deps = section('Dependencies') || '';
+            const open = [];
+            for (const m of deps.matchAll(/#(\d+)/g)) {
+              const dep = await github.rest.issues.get({owner, repo, issue_number: Number(m[1])}).catch(() => null);
+              if (dep && dep.data.state === 'open') open.push(`#${m[1]}`);
+            }
+            if (mode === 'ready')                       // defence in depth: unchanged for direct `ready`
+              for (const d of open) problems.push(`dependency ${d} is still open`);
+            // --- outcome -----------------------------------------------------------------
             if (problems.length) {
-              await github.rest.issues.removeLabel({owner, repo, issue_number: iss.number, name: 'ready'}).catch(()=>{});
+              await github.rest.issues.removeLabel({owner, repo, issue_number: iss.number, name: mode}).catch(()=>{});
               await github.rest.issues.createComment({owner, repo, issue_number: iss.number,
-                body: `🚦 **Not ready** — Definition of Ready gaps (docs/DEFINITION-OF-READY.md):\n\n- ${problems.join('\n- ')}\n\nFix and re-apply \`ready\`.`});
-            } else {
+                body: `🚦 **Not ${mode}** — Definition of Ready gaps (docs/DEFINITION-OF-READY.md):\n\n- ${problems.join('\n- ')}\n\nFix and re-apply \`${mode}\`.`});
+              return;
+            }
+            if (mode === 'ready') {
               await github.rest.issues.createComment({owner, repo, issue_number: iss.number,
                 body: `🚦 Definition of Ready: **passed** (predicted T${declared}) — eligible for agent dispatch.`});
+              return;
+            }
+            // queued: content passed; dependencies decide whether it waits or goes now.
+            if (open.length) {
+              await github.rest.issues.createComment({owner, repo, issue_number: iss.number,
+                body: `🚦 **queued** (predicted T${declared}): content passed; will auto-promote to \`ready\` when dependencies close — waiting on ${open.join(', ')}.`});
+            } else {
+              // Everything is already closed: this run IS the final validation (content + deps),
+              // so swap the labels here rather than round-tripping through another run.
+              await github.rest.issues.removeLabel({owner, repo, issue_number: iss.number, name: 'queued'}).catch(()=>{});
+              await github.rest.issues.addLabels({owner, repo, issue_number: iss.number, labels: ['ready']});
+              await github.rest.issues.createComment({owner, repo, issue_number: iss.number,
+                body: `🚦 **queued → ready**: dependencies already complete; Definition of Ready **passed** (predicted T${declared}) — eligible for agent dispatch.`});
             }

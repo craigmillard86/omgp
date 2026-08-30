@@ -1,10 +1,10 @@
 # Definition of Ready — stories for AI development
 
-A story may be released to agent development (`ready` label) only when it
-would let a competent agent with no conversation history implement it
-correctly from the issue plus the repo alone. The `ready-gate` workflow
-enforces the mechanical half; the human applying `ready` owns the
-judgement half.
+A story may be released to agent development (`ready` or `queued` label)
+only when it would let a competent agent with no conversation history
+implement it correctly from the issue plus the repo alone. The `ready-gate`
+workflow enforces the mechanical half; the human applying the release
+label owns the judgement half.
 
 ## The PRD scheme (story.yml template sections)
 
@@ -15,15 +15,46 @@ judgement half.
 | Acceptance criteria | Checkbox assertions, each mappable to a test or scenario | These BECOME the failing tests written first |
 | Evidence required | Pipeline stages / named scenarios beyond the §5 baseline | Defines green for this story specifically |
 | Out of scope | Explicit exclusions and adjacent temptations | The main defence against helpful overreach |
-| Dependencies | Issue refs, all closed before release | Enforced: open deps block `ready` |
+| Dependencies | Issue refs; all closed before dispatch | Enforced: open deps block `ready`; `queued` waits for them and auto-promotes |
 | Expected risk tier | T0–T2 for dispatchable work | T3 work is human-ruling work; it is never dispatched |
+
+## Two release paths
+
+Both are the human's release judgement; both run the same content
+validation. They differ only in when dispatch may pull the story:
+
+| Label | Meaning | Dependencies | Dispatch |
+|---|---|---|---|
+| `ready` | dispatch now | must all be closed (open ones are a gap) | eligible immediately |
+| `queued` | batch release | may still be open; `promote-queued` swaps `queued` → `ready` when the last one closes | eligible after promotion |
+
+`queued` exists so a human can release a whole ordered slice (a Spec Kit
+phase) in one sitting without babysitting each dependency; the promotion
+is mechanical and the final `ready` still passes through `ready-gate`.
+Agents pull only `ready`, never `queued`.
 
 ## Mechanical gate (ready-gate workflow)
 
-Applying `ready` triggers validation: all sections present and non-empty,
-acceptance criteria in checkbox form, no open dependencies, expected tier
-not T3. Failures remove the label with a gap list; the label only sticks
-on a conforming story. Re-apply after fixing.
+Applying `ready` or `queued` triggers validation: all sections present and
+non-empty, acceptance criteria in checkbox form, no `REPLACE:` placeholders,
+expected tier not T3 (the declared tier is the first T0–T3 token of the
+section). For `ready` the dependency check is blocking: any open dependency
+is a gap. For `queued` open dependencies are reported, not rejected; if all
+are already closed the gate swaps `queued` → `ready` on the spot. Failures
+remove whichever label was applied, with a gap list; a release label only
+sticks on a conforming story. Re-apply after fixing.
+
+## Promotion (promote-queued workflow)
+
+Whenever an issue closes (and on manual dispatch), every open `queued`
+story whose Dependencies section refers only to closed issues — or
+declares none — is promoted: `queued` removed, `ready` added, a
+"promoted" comment posted, and `ready-gate` asked to run its final
+validation. Stories carrying `blocked`, `needs-human` or `in-progress`
+are never promoted. Because a label applied by a workflow does not start
+`labeled` runs on its own, the promoter requests that validation
+explicitly (`repository_dispatch`); the dependency check it just performed
+is the same one `ready-gate` repeats.
 
 ## Judgement half (the human's checklist before labelling)
 
