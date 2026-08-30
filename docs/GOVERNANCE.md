@@ -71,6 +71,31 @@ the enforcement.
   uninstall the Claude GitHub App.
 - Standing loops (nightly, triage, audit, dispatch, metrics) are enumerated
   in OPERATING-POLICY §4 with their human touchpoints.
+- CI-failure auto-resolution (`ci-failure-router` workflow, ruled
+  2026-08-30). When a `ci` or `security` run fails, the router acts by the
+  failed run's branch and nothing else:
+  - **Scope — agent branches only.** A `task/*` branch with an open
+    `agent-authored` PR gets an auto-fix: a Claude Code run that reads the
+    failed logs, fixes on that branch only (TDD where a test was missing,
+    pipeline green before pushing) and comments root cause + evidence; an
+    environmental failure is re-run, not patched.
+  - **Bound — two attempts, then a human.** Attempts are the PR labels
+    `auto-fix-1` and `auto-fix-2`, one attempt per commit; a failure after
+    the second releases `in-progress` and applies `needs-human` with the
+    failed-run links. The labels are the bound: nothing resets them but a
+    human.
+  - **`main` goes to triage.** A failure on `main` files one open
+    `ci-failure` + `task` issue per workflow, which `agent-triage` handles
+    exactly like `nightly-failure`.
+  - **Human branches are never touched.** At most one comment per commit
+    naming the first failed step; no push, no label. Fork runs get nothing.
+  - **Kill switch:** disable the `ci-failure-router` workflow. The general
+    switches above (revoke the token, uninstall the App) also stop it.
+  - **Not yet in the OPERATING-POLICY §4 table.** This loop is ruled and
+    implemented here, but OPERATING-POLICY.md is a human-ruling artefact
+    agents must not edit (OPERATING-POLICY §2); a human needs to add its
+    row so "standing loops are enumerated in OPERATING-POLICY §4" above is
+    true of all of them, not just the five named there (review on #96).
 
 ## 4b. Public-repo posture
 

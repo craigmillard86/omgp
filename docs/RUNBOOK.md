@@ -57,3 +57,12 @@
 - Trunk-of-truth doubt (vectors/YAML suspected wrong): freeze T3 merges,
   re-derive from the Python reference + published check values, document
   the ruling in OPEN-QUESTIONS.md.
+- CI auto-fix misbehaving (the router's agent pushing bad fixes to its own
+  branch): disable the `ci-failure-router` workflow. The loop is bounded to
+  two attempts per PR regardless (`auto-fix-1`/`auto-fix-2`); remove those
+  labels only to grant a fresh pair of attempts. A router `needs-human`
+  means both attempts failed — its comment links every failed run.
+- `ci-failure` issue on `main`: agent-triage takes it like
+  `nightly-failure`. If the cause was environmental, close the issue with
+  a note; the router files at most one open issue per workflow, so a
+  closed one lets the next failure file again.
