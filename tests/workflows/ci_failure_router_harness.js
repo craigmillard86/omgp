@@ -11,7 +11,7 @@ const fs = require('fs');
 const S = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 
 const REPO = 'o/r';
-function world({prs = [], issues = [], jobs = [], failedRuns = [], comments = {}} = {}) {
+function world({prs = [], issues = [], jobs = [], failedRuns = [], comments = {}, failRemove = null} = {}) {
   const log = [];
   const outputs = {};
   const prState = new Map(prs.map(p => [p.number, p]));
@@ -24,13 +24,14 @@ function world({prs = [], issues = [], jobs = [], failedRuns = [], comments = {}
         list: async ({head, state}) => ({data: [...prState.values()].filter(p => p.state === (state || 'open') && `o:${p.head}` === head)}),
       },
       issues: {
-        get: async ({issue_number}) => { const i = issueState.get(issue_number); if (!i) throw new Error('404'); return {data: i}; },
+        get: async ({issue_number}) => { const i = issueState.get(issue_number); if (!i) throw Object.assign(new Error('Not Found'), {status: 404}); return {data: i}; },
         listForRepo: async ({labels, state}) => ({data: [...issueState.values()].filter(i => i.state === (state || 'open') && (labels || '').split(',').filter(Boolean).every(l => i.labels.some(x => x.name === l)))}),
         listComments: async ({issue_number}) => ({data: (comments[issue_number] || []).map(body => ({body}))}),
         addLabels: async ({issue_number, labels}) => { for (const l of labels) labelsOf(issue_number).push({name: l}); log.push(`+${labels.join('+')}@${issue_number}`); },
         removeLabel: async ({issue_number, name}) => {
+          if (failRemove === issue_number) throw Object.assign(new Error('Server Error'), {status: 500});
           const t = prState.get(issue_number) || issueState.get(issue_number);
-          if (!t || !t.labels.some(l => l.name === name)) throw new Error('404');
+          if (!t || !t.labels.some(l => l.name === name)) throw Object.assign(new Error('Not Found'), {status: 404});
           t.labels = t.labels.filter(l => l.name !== name); log.push(`-${name}@${issue_number}`);
         },
         createComment: async ({issue_number, body}) => log.push(`comment@${issue_number}: ${body.replace(/\n+/g, ' | ').slice(0, 700)}`),
@@ -51,13 +52,13 @@ function world({prs = [], issues = [], jobs = [], failedRuns = [], comments = {}
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 async function route(w, run) {
   const workflow_run = {
-    id: 5001, name: 'ci', conclusion: 'failure', head_branch: 'task/26', head_sha: 'abc123',
+    id: 5001, name: 'ci', conclusion: 'failure', head_branch: 'task/26', head_sha: 'abc123', run_attempt: 1,
     html_url: 'https://gh/o/r/actions/runs/5001', head_repository: {full_name: REPO}, ...run,
   };
   const context = {repo: {owner: 'o', repo: 'r'}, eventName: 'workflow_run', runId: 7777, serverUrl: 'https://gh', payload: {workflow_run}};
   await new AsyncFunction('github', 'context', 'core', 'require', S.route)(w.github, context, w.core, require);
 }
-const pr = (number, head, labels) => ({number, state: 'open', head, labels: labels.map(name => ({name})), html_url: `u/pr/${number}`});
+const pr = (number, head, labels, body = '') => ({number, state: 'open', head, labels: labels.map(name => ({name})), html_url: `u/pr/${number}`, body});
 const issue = (number, labels, title = `T00${number}`) => ({number, state: 'open', title, labels: labels.map(name => ({name}))});
 const JOBS = [{name: 'native (build + full test suite)', conclusion: 'success', steps: []},
               {name: 'deep-verify (T2/T3 only)', conclusion: 'failure', steps: [{name: 'Set up job', conclusion: 'success'}, {name: 'Diff-scoped mutation', conclusion: 'failure'}]}];
@@ -95,7 +96,7 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   check('already needs-human -> no-op', w.outputs.route === 'none' && !w.log.some(l => l.startsWith('comment@')) && !w.log.some(l => /^[+-]/.test(l)));
 
   // --- idempotency per commit: a second failed workflow on the same sha is not a second attempt ---
-  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1'])], jobs: JOBS, comments: {94: ['<!-- ci-failure-router sha=abc123 run=5001 -->\n🔧 earlier']}});
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1'])], jobs: JOBS, comments: {94: ['<!-- ci-failure-router sha=abc123 pass=1 run=5001 -->\n🔧 earlier']}});
   await route(w, {id: 5002, name: 'security'});
   check('same sha already handled -> no second attempt (security after ci)', w.outputs.route === 'none' && !labels(w, 94).includes('auto-fix-2') && !w.log.some(l => l.startsWith('comment@')));
 
@@ -120,7 +121,7 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   w = world({prs: [pr(60, 'ci/thing', ['risk:t3'])], jobs: JOBS});
   await route(w, {head_branch: 'ci/thing', head_sha: 'h1'});
   check('human branch with PR -> one short comment naming the first failed step, no labels', w.outputs.route === 'human' && said(w, /deep-verify.*Diff-scoped mutation/, 60) && !w.log.some(l => /^[+-]/.test(l)));
-  w = world({prs: [pr(60, 'ci/thing', [])], jobs: JOBS, comments: {60: ['<!-- ci-failure-router sha=h1 run=5001 -->\nℹ️ earlier']}});
+  w = world({prs: [pr(60, 'ci/thing', [])], jobs: JOBS, comments: {60: ['<!-- ci-failure-router sha=h1 pass=1 run=5001 -->\nℹ️ earlier']}});
   await route(w, {head_branch: 'ci/thing', head_sha: 'h1', id: 5002, name: 'security'});
   check('human branch: second failed workflow on the same sha -> no second comment', w.outputs.route === 'none' && !w.log.some(l => l.startsWith('comment@')));
   w = world({jobs: JOBS});
@@ -137,6 +138,33 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   w = world({prs: [pr(94, 'task/26', ['agent-authored'])], jobs: [{name: 'x', conclusion: 'cancelled', steps: []}]});
   await route(w, {});
   check('no failed job in the run -> still routes, says so', w.outputs.route === 'autofix' && said(w, /no failed job reported/, 94));
+
+  // --- red-team findings on #96 (2026-08-30) ---
+  // F1: a rerun of the same commit (gh run rerun after an "environmental" diagnosis) is a new pass
+  //     of the same run id and sha — it must count as the next attempt, not be deduped away.
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1'])], jobs: JOBS, comments: {94: ['<!-- ci-failure-router sha=abc123 pass=1 run=5001 -->\n🔧 attempt 1: environmental, re-running']}});
+  await route(w, {run_attempt: 2});
+  check('F1: rerun of the same commit fails again -> counts as attempt 2', w.outputs.route === 'autofix' && labels(w, 94).includes('auto-fix-2') && said(w, /pass=2/, 94));
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'in-progress'])], issues: [issue(26, ['task', 'in-progress'])], jobs: JOBS, failedRuns: runs,
+             comments: {94: ['<!-- ci-failure-router sha=abc123 pass=1 run=5001 -->', '<!-- ci-failure-router sha=abc123 pass=2 run=5001 -->']}});
+  await route(w, {run_attempt: 3});
+  check('F1: third pass on the same commit -> exhausted, not swallowed', w.outputs.route === 'exhausted' && labels(w, 94).includes('needs-human'));
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1'])], jobs: JOBS, comments: {94: ['<!-- ci-failure-router sha=abc123 pass=1 run=5001 -->']}});
+  await route(w, {id: 5002, name: 'security', run_attempt: 1});
+  check('F1: a different workflow failing on the same commit and pass is still one attempt', w.outputs.route === 'none');
+  // F2: a non-404 failure to release the claim is reported, never claimed as done.
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'in-progress'])], issues: [issue(26, ['task', 'in-progress'])], jobs: JOBS, failedRuns: runs, failRemove: 26});
+  await route(w, {head_sha: 'ccc111'});
+  check('F2: removeLabel 500 on the issue -> comment says it could NOT release it, names the issue', w.outputs.route === 'exhausted' && said(w, /could NOT release `in-progress` on #26/, 94) && !said(w, /released on #26/, 94));
+  check('F2: the PR side still got needs-human and its own in-progress released', labels(w, 94).includes('needs-human') && !labels(w, 94).includes('in-progress'));
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: runs});
+  await route(w, {head_sha: 'ccc222'});
+  check('F2: label already absent (404) is not a failure', w.outputs.route === 'exhausted' && !said(w, /could NOT/, 94) && labels(w, 26).includes('needs-human'));
+  // F3: escalation targets the issues the PR actually closes, not the branch name's digits.
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2'], 'Body.\n\nCloses #40\nFixes #41')], issues: [issue(26, ['task', 'in-progress']), issue(40, ['task', 'in-progress']), issue(41, ['task'])], jobs: JOBS, failedRuns: runs});
+  await route(w, {head_sha: 'ddd333'});
+  check('F3: Closes/Fixes targets get needs-human and in-progress released; branch-digit issue untouched', labels(w, 40).includes('needs-human') && !labels(w, 40).includes('in-progress') && labels(w, 41).includes('needs-human') && !labels(w, 26).includes('needs-human') && labels(w, 26).includes('in-progress'));
+  check('F3: comment names the actual issues', said(w, /#40/, 94) && said(w, /#41/, 94));
 
   for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
   console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);

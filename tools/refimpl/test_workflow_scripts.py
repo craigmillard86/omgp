@@ -64,8 +64,11 @@ def test_ci_failure_router_wiring():
     assert set(on["workflow_run"]["workflows"]) == {"ci", "security"}
     assert on["workflow_run"]["types"] == ["completed"]
     assert "head_branch" in wf["concurrency"]["group"] and wf["concurrency"]["cancel-in-progress"] is False
-    assert wf["permissions"]["id-token"] == "write"
     route, autofix = wf["jobs"]["route"], wf["jobs"]["autofix"]
+    # least privilege per job (review on #96): the always-running router holds no OIDC/contents/actions write
+    assert "permissions" not in wf
+    assert autofix["permissions"]["id-token"] == "write" and autofix["permissions"]["contents"] == "write"
+    assert "id-token" not in route["permissions"] and route["permissions"].get("contents", "read") == "read" and route["permissions"]["actions"] == "read"
     assert "conclusion == 'failure'" in route["if"] and "head_repository.full_name == github.repository" in route["if"]
     assert autofix["needs"] == "route" and "route.outputs.route == 'autofix'" in autofix["if"]
     action = next(s for s in autofix["steps"] if "claude-code-action" in s.get("uses", ""))
