@@ -37,16 +37,20 @@ jobs:
             if (dispatched && !has('ready')) { core.notice(`#${iss.number}: no longer labelled ready — nothing to validate`); return; }
             const body = iss.body || '';
             const problems = [];
-            const section = name => {
-              // Headings as `### Name` (h2–h4) or as a bold title line `**Name**`; enrichment on #26
-              // used the bold form and every section read as missing (2026-08-30).
-              const m = body.match(new RegExp(`(?:^|\\n)(?:#{2,4}\\s*|\\*\\*)${name}(?:\\*\\*)?\\s*\\n([\\s\\S]*?)(?=\\n(?:#{2,4}\\s|\\*\\*[A-Z][^*\\n]*\\*\\*\\s*\\n)|$)`, 'i'));
-              return m ? m[1].trim() : null;
-            };
             // --- content validation: identical for both paths ---------------------------
             const required = ['Intent', 'Spec references', 'Acceptance criteria',
                               'Evidence required', 'Out of scope', 'Dependencies',
                               'Expected risk tier'];
+            // Headings as `### Name` (h2–h4, ATX: at least one space) or a bold title line
+            // `**Name**` — enrichment on #26 used the bold form and every section read as
+            // missing (2026-08-30). The boundary matches only one of the seven KNOWN headings,
+            // so a bold aside inside a section (a `**Note**` line) cannot end the section early
+            // and silently drop what follows (review of #90). Tested in tests/workflows/.
+            const HEADING = `(?:#{2,4}\\s+(?:${required.join('|')})|\\*\\*(?:${required.join('|')})\\*\\*)`;
+            const section = name => {
+              const m = body.match(new RegExp(`(?:^|\\n)(?:#{2,4}\\s+|\\*\\*)${name}(?:\\*\\*)?\\s*\\n([\\s\\S]*?)(?=\\n${HEADING}\\s*\\n|$)`, 'i'));
+              return m ? m[1].trim() : null;
+            };
             for (const s of required) {
               const v = section(s);
               if (v === null) problems.push(`missing section: **${s}**`);
