@@ -59,15 +59,20 @@ lands as a vertical slice into a green tree.
 **Purpose**: the `Clock`/`ByteWire` interfaces, the shared types every story uses, and the
 scripted transport skeleton all engine tests are written against.
 
-**⚠️ CRITICAL**: no user-story work can begin until this phase is complete.
+**⚠️ CRITICAL**: no user-story work can begin until T007–T009 are complete. (T010/T011
+are the exception — re-slotted after T022 by ruling 2026-08-30, because
+`MockWire::transmit` deframes with the real `Deframer` per contracts/mock-wire.md; they
+gate US2, not US1. See docs/OPEN-QUESTIONS.md.)
 
 - [ ] T007 [P] Write `link/clock.hpp` (`omgp::Clock`, `now_us()`) and `link/byte_wire.hpp` (`omgp::link::ByteWire`: `transmit`, `receive`, `bit_rate`, `set_bit_rate`) exactly per contracts/byte-wire-and-clock.md, each citing `trunk §3`
 - [ ] T008 [P] Write `link/link_types.hpp` per contracts/link-cpp.md "Types": `Status` + `status_name()`, `kHeaderLen/kCrcLen/kMaxUnstuffed/kMaxWire/kAddrCount` derived from `LIMIT_max_l3_payload` (no literal 70/142 — `check_embedded` would not catch 70/142 but review must), `byte_time_us()`, `FrameFields`, `FrameView`, `Discard`, `DeframerStats`, `HealthState` (UNENROLLED/ENROLLED/SUSPECT/OFFLINE), `Notice`, `AddrStats`, `BusStats`; add `link/link_status.cpp` for `status_name`, and convert `omgp_link` from `INTERFACE` (T001) to `add_library(omgp_link STATIC link_status.cpp)` with `-fno-exceptions -fno-rtti` and the same include dirs now `PUBLIC`
 - [ ] T009 [P] Write `tests/unit/test_link_types.cpp` (write first): `kMaxWire == 2 + 2*(4 + LIMIT_max_l3_payload + 2)` and `== 142` `[timing:max_payload]`; `byte_time_us(TRUNK_bit_rate) == 10` and `byte_time_us(TRUNK_bit_rate_fallback) == 86` `[timing:bit_rate][timing:bit_rate_fallback]`; every `Status` has a distinct non-"?" name; `HealthState` names are the four trunk words; register it in `CMakeLists.txt`
-- [ ] T010 Write `tests/support/fake_clock.hpp` (`FakeClock : Clock` with `advance`, `set`) and the `MockWire` skeleton `tests/support/mock_wire.{hpp,cpp}` per contracts/mock-wire.md: `Step`/`Kind`, per-node step arrays, `transmit()` returning `now + n × byte_time_us(rate)`, RX queue of `4 × kMaxWire` bytes with start-bit instants, `advance_to(t)` setting the clock and calling the engine's `poll(t)` (engines pull via `receive()`; no push path — analysis F1), xorshift32 PRNG, transcript of transmitted frames with `tx_start_us`; kinds `Respond` and `Silence` only for now (others in T030); add `mock_wire.cpp` to `omgp_test_support`
+- [ ] T010 Write `tests/support/fake_clock.hpp` (`FakeClock : Clock` with `advance`, `set`) and the `MockWire` skeleton `tests/support/mock_wire.{hpp,cpp}` per contracts/mock-wire.md: `Step`/`Kind`, per-node step arrays, `transmit()` returning `now + n × byte_time_us(rate)`, RX queue of `4 × kMaxWire` bytes with start-bit instants, `advance_to(t)` setting the clock and calling the engine's `poll(t)` (engines pull via `receive()`; no push path — analysis F1), xorshift32 PRNG, transcript of transmitted frames with `tx_start_us`; kinds `Respond` and `Silence` only for now (others in T030); add `mock_wire.cpp` to `omgp_test_support`. **Runs after T022** (ruling 2026-08-30: `Respond` needs the real `Deframer`, which does not exist until T022; do not stub framing here)
 - [ ] T011 Write `tests/unit/test_mock_wire.cpp` (write first, fails until T010 is complete): `transmit` returns the modelled end instant at both rates; queued bytes are released in start-instant order by `advance_to`; the PRNG is deterministic for a seed; queue overflow is a `REQUIRE` failure not a silent drop
 
-**Checkpoint**: pipeline green with `test_link_types` and `test_mock_wire`; `UNIT_TEST_FLOOR` raised.
+**Checkpoint**: pipeline green with `test_link_types`; `UNIT_TEST_FLOOR` raised.
+(`test_mock_wire` joins the US2 entry checkpoint — T010/T011 re-slotted after T022,
+ruling 2026-08-30.)
 
 ---
 
@@ -212,9 +217,13 @@ enrolment rotation and one notification per transition.
 ### Phase Dependencies
 
 - **Setup (Phase 1)**: no dependencies; T002–T006 parallel after T001.
-- **Foundational (Phase 2)**: depends on Phase 1; T007/T008/T009 parallel; T010 after T007/T008; T011 after T010. BLOCKS all stories.
-- **US1 (Phase 3)**: depends on Phase 2. Python first (T012/T013 → T018 → T019 → T020 human commit → T021), then C++ (T014–T017 tests → T022 → T023 → T024 → T025 → T026 → T027). BLOCKS US2/US3 (they encode/decode frames).
-- **US2 (Phase 4)**: depends on US1 (frame codec) and Phase 2 (`MockWire`); T028/T029 parallel; T030 → T031 → T032.
+- **Foundational (Phase 2)**: depends on Phase 1; T007/T008/T009 parallel. T007–T009
+  BLOCK all stories. T010 after T007/T008 **and T022**, T011 after T010 (ruling
+  2026-08-30: `MockWire::transmit` deframes with the real `Deframer` —
+  contracts/mock-wire.md; found live on #28 by the dispatch agent. T010/T011 gate US2,
+  not US1).
+- **US1 (Phase 3)**: depends on Phase 2 (T007–T009; **not** T010/T011). Python first (T012/T013 → T018 → T019 → T020 human commit → T021), then C++ (T014–T017 tests → T022 → T023 → T024 → T025 → T026 → T027). BLOCKS US2/US3 (they encode/decode frames).
+- **US2 (Phase 4)**: depends on US1 (frame codec) and on T010/T011 (`MockWire`, re-slotted after T022); T028/T029 parallel; T030 → T031 → T032.
 - **US3 (Phase 5)**: depends on US1; T034 additionally depends on T031 (US2). T033/T034 parallel; T035 → T036.
 - **US4 (Phase 6)**: depends on Phase 2 only (a `Clock`); T039 depends on T031 + T038. Can run in parallel with US2/US3 by a second agent — but the WIP cap is one.
 - **US5 (Phase 7)**: depends on US4 (extends `health.cpp`) and US2 (`set_bit_rate`); T042 depends on T034/T039.

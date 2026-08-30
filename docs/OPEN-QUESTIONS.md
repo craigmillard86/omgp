@@ -357,3 +357,28 @@ declaration-only files from `scope_dirs` matching entirely, or a
 tree-wide static check that a file has zero function bodies (removing the
 need for a per-file marker), that should supersede this entry.
 **Supersedes:** none.
+
+---
+
+## 2026-08-30 — T010 (MockWire) is scheduled before the Deframer it must call
+
+**Question:** `specs/002-trunk-link-layer/tasks.md` places T010 (`tests/support/`
+`FakeClock` + `MockWire` skeleton, issue #28) in Phase 2/Foundational, but
+`contracts/mock-wire.md` requires `MockWire::transmit` to deframe every frame "with
+the real `Deframer`" — and the `Deframer` is T022 (issue #40), Phase 3/US1, two
+phases later. T010's own Out-of-scope forbids stubbing framing in `tests/support/`.
+Found live: the dispatch agent claimed #28 (runs 33332211854, 33332538294), verified
+`link/frame.*` does not exist, implemented nothing, and escalated `needs-human` with
+this analysis — the contradiction is in the plan artefacts, not the story content.
+**Options:** (1) pull T022 (and its Python-first US1 predecessors) ahead of T010 —
+drags the whole vector/golden-commit chain before Phase 2 closes; (2) split T010
+(skeleton + `Silence` now, `Respond` after T022) — two PRs and a contract amendment;
+(3) re-slot T010/T011 after T022 — nothing in US1 consumes `MockWire` (its tests are
+codec-level: vectors, torture corpus, fuzz); the first consumer is US2 (T028+).
+**Recommendation:** (3), as the smallest coherent change: no contract edit, no task
+split, US1 critical path unchanged.
+**Ruling:** human, 2026-08-30 ("do it", this session): option (3). tasks.md dependency
+notes amended in the same PR; issue #28 re-queued with `- #40 (T022)` as its blocking
+dependency (promote-queued releases it when #40 closes); #29 (T011) already chains
+behind #28. US1 stories no longer list #28/#29 as blockers.
+**Supersedes:** none.
