@@ -96,7 +96,9 @@ const said = (w, re, n) => w.log.some(l => re.test(l) && (n === undefined || l.s
   check('promote: no dependencies declared -> promoted', has(w, '+ready@5') && said(w, /promoted.*none declared/, 5));
   check('promote: needs-human -> never promoted', !has(w, '+ready@6'));
   check('promote: notice counts', has(w, 'notice: promote-queued: promoted 2 of 4'));
-  await gate(w, 2, undefined, 'repository_dispatch'); check('dispatched final validation passes', said(w, /passed\*\* \(predicted T1\)/, 2));
+  await gate(w, 2, undefined, 'repository_dispatch');
+  check('dispatched final validation passes', said(w, /passed\*\* \(predicted T1\)/, 2));
+  check('dispatched final validation also nudges the dispatcher', has(w, 'dispatch backlog-changed#2'));
   w = world([mk(2, 'open', ['task'], 'None')]);
   await gate(w, 2, undefined, 'repository_dispatch'); check('dispatch on an issue no longer labelled ready is a no-op', w.log.length === 1 && /no longer labelled ready/.test(w.log[0]));
   // --- dependency rule (docs/DEFINITION-OF-READY.md "Dependencies rule") ---
@@ -137,6 +139,16 @@ const said = (w, re, n) => w.log.some(l => re.test(l) && (n === undefined || l.s
   await gate(w, 2, 'ready'); check('ref flood: gate treats a capped section as a gap (fails closed)', has(w, '-ready@2') && said(w, /more than 500 issues/, 2));
   w = world([mk(1, 'closed', ['task']), mk(2, 'open', ['task', 'queued'], flood)]);
   await promote(w, 1); check('ref flood: promoter holds the story (fails closed)', !has(w, '+ready@2') && w.log.some(l => /warning:.*more than 500/.test(l)));
+
+  // --- the gate nudges the dispatcher whenever a story becomes claimable ---
+  w = world([mk(1, 'closed', ['task']), mk(2, 'open', ['task', 'ready'], '#1')]);
+  await gate(w, 2, 'ready'); check('ready pass -> repository_dispatch backlog-changed', has(w, 'dispatch backlog-changed#2'));
+  w = world([mk(1, 'closed', ['task']), mk(2, 'open', ['task', 'queued'], '#1')]);
+  await gate(w, 2, 'queued'); check('queued -> ready swap -> repository_dispatch backlog-changed', has(w, 'dispatch backlog-changed#2'));
+  w = world([mk(1, 'open', ['task']), mk(2, 'open', ['task', 'queued'], '#1')]);
+  await gate(w, 2, 'queued'); check('queued that waits does NOT nudge the dispatcher', !w.log.some(l => /backlog-changed/.test(l)));
+  w = world([mk(1, 'open', ['task']), mk(2, 'open', ['task', 'ready'], '#1')]);
+  await gate(w, 2, 'ready'); check('rejected ready does NOT nudge the dispatcher', !w.log.some(l => /backlog-changed/.test(l)));
 
   // --- parsing cost on attacker-reachable input (#90 review finding 5): 64 KB adversarial body ---
   const adversarial = ('**Intent**\n' + '**Note**\n'.repeat(3000) + '## x\n'.repeat(3000)).slice(0, 65536);
