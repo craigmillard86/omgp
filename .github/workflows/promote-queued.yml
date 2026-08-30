@@ -32,7 +32,7 @@ jobs:
             core.info(`promote-queued: ${queued.length} queued story(ies) to examine` +
               (context.eventName === 'issues' ? ` after #${context.payload.issue.number} closed` : ''));
             const section = (body, name) => {
-              const m = (body || '').match(new RegExp(`###\\s*${name}\\s*\\n([\\s\\S]*?)(?=\\n###|$)`, 'i'));
+              const m = (body || '').match(new RegExp(`(?:^|\\n)(?:#{2,4}\\s*|\\*\\*)${name}(?:\\*\\*)?\\s*\\n([\\s\\S]*?)(?=\\n(?:#{2,4}\\s|\\*\\*[A-Z][^*\\n]*\\*\\*\\s*\\n)|$)`, 'i'));   // same heading tolerance as ready-gate
               return m ? m[1].trim() : '';
             };
             const closedCache = new Map();

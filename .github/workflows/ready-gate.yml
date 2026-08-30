@@ -38,7 +38,9 @@ jobs:
             const body = iss.body || '';
             const problems = [];
             const section = name => {
-              const m = body.match(new RegExp(`###\\s*${name}\\s*\\n([\\s\\S]*?)(?=\\n###|$)`, 'i'));
+              // Headings as `### Name` (h2–h4) or as a bold title line `**Name**`; enrichment on #26
+              // used the bold form and every section read as missing (2026-08-30).
+              const m = body.match(new RegExp(`(?:^|\\n)(?:#{2,4}\\s*|\\*\\*)${name}(?:\\*\\*)?\\s*\\n([\\s\\S]*?)(?=\\n(?:#{2,4}\\s|\\*\\*[A-Z][^*\\n]*\\*\\*\\s*\\n)|$)`, 'i'));
               return m ? m[1].trim() : null;
             };
             // --- content validation: identical for both paths ---------------------------
