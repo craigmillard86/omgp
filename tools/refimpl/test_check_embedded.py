@@ -1,5 +1,6 @@
 """Tests for tools/check_embedded.py (spec 001 T014 — tests first for the tool itself)."""
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -96,3 +97,27 @@ def test_flags_restated_trunk_timing_literal_in_link(tmp_path):
 def test_repo_embedded_dirs_are_clean():
     r = subprocess.run([sys.executable, str(TOOL)], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout
+
+
+INCLUDE_LINE = re.compile(r'#\s*include\s*[<"]([^">]+)[">]')
+
+
+def test_link_never_includes_l3():
+    """FR-013 / CLAUDE.md 'L2 is opaque to L3': link/ must never #include anything from l3/.
+
+    Guard against the direction check_embedded.py's literal/citation scan doesn't cover —
+    this passes today (link/ holds only header-only crc16.hpp) and stays the tripwire for
+    every later engine task (T007-T044) that adds .cpp files under link/.
+    """
+    link_dir = ROOT / "link"
+    violations = []
+    for f in sorted(link_dir.rglob("*")):
+        if f.suffix not in (".cpp", ".hpp", ".h", ".cc"):
+            continue
+        for n, line in enumerate(
+            f.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
+        ):
+            m = INCLUDE_LINE.search(line)
+            if m and "l3/" in m.group(1):
+                violations.append(f"{f.relative_to(ROOT)}:{n}: {line.strip()}")
+    assert not violations, "link/ must not #include l3/ (FR-013): " + "; ".join(violations)
