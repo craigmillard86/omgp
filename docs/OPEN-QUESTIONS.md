@@ -314,3 +314,46 @@ both "wrong rate" and "cable reconnected" with one policy.
 **Ruling:** adopted — human, 2026-08-29 (feature 002 clarification Q3,
 option A). Spec FR-026.
 **Supersedes:** none.
+
+## 2026-08-30 — Deep-verify mutation gate: pure-interface headers can never produce a mutant
+
+**Context:** PR #91 (T007, `link/clock.hpp` + `link/byte_wire.hpp`) failed the
+`deep-verify` / `Diff-scoped mutation` CI job: `tools/mutate.sh --diff
+origin/main --require` reported `mutation: scope: link/byte_wire.hpp
+link/clock.hpp` then `mode=diff ... mutants=0` and failed with "scope is
+non-empty but Mull generated no mutants — failing (blind spot:
+instrumentation is not reaching the code)" (`tools/mutate_report.py`).
+Root cause: both files are pure abstract interfaces — every member is a
+`= 0` pure-virtual declaration, no function body anywhere in either file.
+Mull mutates operators/expressions inside function bodies; a file with none
+can never yield a mutant regardless of which test binaries run, how the
+diff-scoping ranges are computed, or whether a consumer/test includes the
+header (confirmed: PR #91's follow-up commit added
+`tests/unit/test_link_interfaces.cpp`, exercising both interfaces under
+ASan/UBSan, and the gate still failed the same way — the body that would
+need to move is in the *test*, not the *header*). This is structurally
+different from the blind spot the check exists to catch (a real bug or
+misconfiguration silently excluding mutable code from instrumentation) —
+it is a class of file, not a class of bug, and any future PR touching only
+declaration-only interface headers (`link/`, `l3/`, `core/`) hits the same
+wall.
+**Recommendation:** a narrow, explicit, per-file opt-out — `//
+mutation-exempt(no-body): <justification>` anywhere in the file, checked
+by `tools/mutate_report.py` only on the "no mutants in a non-empty scope"
+path and only when every file named in the diff's scope ranges carries the
+marker (any changed file in scope without one still fails the existing
+way, so real blind spots on files that do have executable code stay
+caught). Reviewed like `mutant-ok`, just at file granularity, so a human
+sees and can dispute the claim "this file has no mutable code" in the PR
+diff. Does not touch `tools/mutate.cfg [policy]`'s T3 constants
+(`max_unlabelled_survivors`, `label_categories`) — those are unchanged and
+still gate every file that does contain logic.
+**Ruling:** pending — human. Implemented as the safe default per CLAUDE.md
+("implement nothing speculative... proceed only if a safe default
+exists"): `tools/mutate_report.py` (`NO_BODY_EXEMPT`, `exempt_reason`),
+markers added to `link/clock.hpp` and `link/byte_wire.hpp`, doc comment in
+`tools/mutate.sh`. If a human ruling instead prefers, e.g., excluding
+declaration-only files from `scope_dirs` matching entirely, or a
+tree-wide static check that a file has zero function bodies (removing the
+need for a per-file marker), that should supersede this entry.
+**Supersedes:** none.

@@ -1,6 +1,8 @@
 // trunk §3: media access — the byte-level transport abstraction the Master/Responder
 // engines drive, so the same L2 code runs unmodified over a scripted test wire and the
 // simulator's virtual wire.
+// mutation-exempt(no-body): pure abstract interface, four `= 0` declarations — no function
+// body for Mull to mutate (tools/mutate_report.py; docs/OPEN-QUESTIONS.md 2026-08-30).
 #pragma once
 #include <cstddef>
 #include <cstdint>

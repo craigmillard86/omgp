@@ -27,6 +27,15 @@ Policy (tools/mutate.cfg [policy] — T3 constants, never relaxed to get green):
     no mutants in a non-empty scope, malformed labels.
   * A label whose line has no surviving mutant it could cover is STALE (the test was
     written or the code moved) — reported as a warning, never counted as a survivor.
+  * "No mutants in a non-empty scope" is a tool-failure signal (blind spot: instrumentation
+    not reaching code that exists), UNLESS every changed file in the diff scope carries
+
+        // mutation-exempt(no-body): <one-line justification>
+
+    anywhere in the file — for sources with no function body at all (e.g. a pure abstract
+    interface: only `= 0` declarations), where Mull structurally cannot produce a mutant.
+    Reviewed like mutant-ok, at file granularity: a human sees the marker in the PR diff and
+    judges whether the file truly has no mutable code (docs/OPEN-QUESTIONS.md 2026-08-30).
 
 Every claim here is about the current report: "labelled" means a label was found on the
 reported line, nothing more. The label's justification is reviewed by humans in the PR.
@@ -49,6 +58,13 @@ RANK = {"Killed": 3, "Timeout": 3, "RuntimeError": 3, "CompileError": 3, "Surviv
 
 LABEL = re.compile(r"//\s*mutant-ok\(\s*([A-Za-z_]+)\s*((?:,\s*[A-Za-z0-9_]+\s*)*)\)\s*:\s*(.*\S)")
 LABEL_ANY = re.compile(r"//\s*mutant-ok\b")
+
+# A file-level opt-out from the "no mutants in a non-empty scope" blind-spot check below,
+# for sources Mull can never generate a mutant for (e.g. a pure abstract interface: only
+# `= 0` declarations, no function body to mutate). Explicit and reviewed like mutant-ok —
+# an empty report is otherwise indistinguishable from "instrumentation didn't reach the
+# code", which is exactly the failure mode this check exists to catch.
+NO_BODY_EXEMPT = re.compile(r"//\s*mutation-exempt\(no-body\)\s*:\s*(\S.*)")
 
 
 class Label:
@@ -141,6 +157,13 @@ def main(argv=None) -> int:
     def comment_only(text: str) -> bool:
         return text.lstrip().startswith("//")
 
+    def exempt_reason(rel: str) -> str | None:
+        for text in source_lines(rel):
+            m = NO_BODY_EXEMPT.search(text)
+            if m:
+                return m.group(1).strip()
+        return None
+
     def label_at(rel: str, line) -> Label | None:
         """The label governing `line`: on the line itself, else on a comment-only line
         immediately above it (clang-format reflows long trailing comments, so a label
@@ -224,6 +247,21 @@ def main(argv=None) -> int:
         print("mutation: no Mull reports produced — failing (blind spot: the runner did not execute)")
         return 1
     if total + not_covered == 0:
+        # Every changed file in scope (ranges' keys — diff mode only; whole-tree has no
+        # single file list to check) opting out with `mutation-exempt(no-body)` means the
+        # files genuinely contain no mutable code, not that instrumentation missed them.
+        if diff_mode and ranges:
+            reasons = {rel: exempt_reason(rel) for rel in ranges}
+            unexempted = [rel for rel, reason in reasons.items() if reason is None]
+            if not unexempted:
+                for rel, reason in reasons.items():
+                    print(f"mutation: {rel}: no mutants — mutation-exempt(no-body): {reason}")
+                print("mutation: scope is non-empty but every changed file is mutation-exempt(no-body) — not a blind spot")
+                return 0
+            print("mutation: scope is non-empty but Mull generated no mutants, and the following changed "
+                  "file(s) carry no `mutation-exempt(no-body)` marker — failing (blind spot: instrumentation "
+                  "is not reaching the code): " + ", ".join(sorted(unexempted)))
+            return 1
         print("mutation: scope is non-empty but Mull generated no mutants — failing (blind spot: instrumentation is not reaching the code)")
         return 1
     if malformed:

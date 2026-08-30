@@ -9,6 +9,11 @@
 # fails on any unlabelled survivor. Without --diff the whole-tree kill rate is reported as a
 # trend (tools/mutate_report.py) and never gates.
 #
+# A changed file with no function body at all (e.g. a pure abstract interface) can never
+# produce a mutant; that would otherwise look identical to the "instrumentation isn't
+# reaching the code" blind spot. Opt out per file with `// mutation-exempt(no-body): <why>`
+# (docs/OPEN-QUESTIONS.md 2026-08-30) — reviewed like mutant-ok, just at file granularity.
+#
 #   ./tools/mutate.sh --diff origin/main --require     # CI: fail if Mull is missing
 #   ./tools/mutate.sh --diff HEAD~1                    # local: disclosed skip if Mull is missing
 #   ./tools/mutate.sh --diff <ref> --dry-run           # print the scope and stop
