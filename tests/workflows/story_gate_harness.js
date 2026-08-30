@@ -28,7 +28,7 @@ function world(issues) {
         listForRepo: async ({labels}) => ({data: [...state.values()].filter(i => i.state === 'open' && labels.split(',').every(l => i.labels.some(x => x.name === l)))}),
         removeLabel: async ({issue_number, name}) => { const i = state.get(issue_number); i.labels = i.labels.filter(l => l.name !== name); log.push(`-${name}@${issue_number}`); },
         addLabels: async ({issue_number, labels}) => { const i = state.get(issue_number); for (const l of labels) i.labels.push({name: l}); log.push(`+${labels.join('+')}@${issue_number}`); },
-        createComment: async ({issue_number, body}) => log.push(`comment@${issue_number}: ${body.split('\n')[0].slice(0, 200)}`),
+        createComment: async ({issue_number, body}) => log.push(`comment@${issue_number}: ${body.replace(/\n+/g, ' | ').slice(0, 600)}`),   // whole comment, flattened
       },
       repos: { createDispatchEvent: async ({event_type, client_payload}) => log.push(`dispatch ${event_type}#${client_payload.issue}`) },
     },
