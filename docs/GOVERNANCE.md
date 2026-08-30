@@ -91,6 +91,11 @@ the enforcement.
     naming the first failed step; no push, no label. Fork runs get nothing.
   - **Kill switch:** disable the `ci-failure-router` workflow. The general
     switches above (revoke the token, uninstall the App) also stop it.
+  - **Not yet in the OPERATING-POLICY §4 table.** This loop is ruled and
+    implemented here, but OPERATING-POLICY.md is a human-ruling artefact
+    agents must not edit (OPERATING-POLICY §2); a human needs to add its
+    row so "standing loops are enumerated in OPERATING-POLICY §4" above is
+    true of all of them, not just the five named there (review on #96).
 
 ## 4b. Public-repo posture
 
