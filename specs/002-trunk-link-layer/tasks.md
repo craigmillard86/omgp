@@ -94,8 +94,13 @@ lists `fuzz_frame` with `findings=0`.
 > body (that record is CLAUDE.md rule 8's evidence), then the implementation commits;
 > the PR closes both issues. The invariant is about the merged tree, not every commit:
 > the failing state exists only as ordered commits inside the PR, and the PR merges
-> only once green — main is never left red awaiting a later task. Units here:
-> T012+T018 (landed, PR #99), T013+T024 (PR #100), T014–T017+T022 (five issues, one PR).
+> only once green — main is never left red awaiting a later task. **Push the unit
+> ONCE, complete — never the test commits alone**: an intermediate red push triggers a
+> ci-failure-router cycle (how PR #99/#100 actually got their implementation commits —
+> option-(2) bundles accepted retroactively, not examples of this rule; PR #94 is the
+> real precedent), and for C++ pairs a missing header aborts the whole native build
+> stage. Units here: T012+T018 (PR #99), T013+T024 (PR #100), T014–T017+T022 (five
+> issues, one PR, pushed together).
 
 - [ ] T012 [P] [US1] Write `tools/refimpl/test_link.py` per contracts/link-python.md: stuff/unstuff identities (7E/7D-only payloads), `crc(b"123456789") == 0x29B1`, hand-computed bytes for a PING frame and a 64-byte frame, `PayloadTooLong`/`ReservedAddress` refusals, deframer discard reasons for bad CRC / bad length / bad escape / trailing escape / 71 unstuffed bytes, resync after each corruption class, empty frame and back-to-back FLAG handling
 - [ ] T013 [P] [US1] Write `tools/refimpl/test_torture.py`: `corpus(seed)` deterministic; every class ≥ `per_class`; ≥ 10 000 frames; no element's corrupted segment parses as a frame in isolation

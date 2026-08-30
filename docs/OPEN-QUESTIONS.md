@@ -407,6 +407,15 @@ recorded failing run as rule-8 evidence, then the implementation, closing both i
 preamble and "Within Each User Story" amended; DEFINITION-OF-READY gains the
 "Test-first pairs are one dispatch unit" section; the enricher is instructed to mark
 partner stories as same-PR siblings; US1's remaining pair (T014–T017 + T022,
-issues #32–#35 + #40) marked as one unit on the issues. PR #99 (T012+T018) and
-PR #100 (T013+T024) stand as accepted bundles of the same shape.
+issues #32–#35 + #40) marked as one unit on the issues.
+The working precedent for option (3) is PR #94 (T008+T009): both commits pushed
+together, green throughout. PR #99 (T012+T018) and PR #100 (T013+T024) are NOT that
+shape — each pushed its test commit alone, went red, and the second commit came from
+an option-(2) router auto-fix cycle, accepted retroactively; they MOTIVATED this
+ruling rather than exemplify it (red-team on PR #101, 2026-08-30). Accordingly the
+unit is pushed ONCE, complete: the failing state exists only in local commit history,
+evidenced by the recorded failing run in the PR body. Pushing the test commits alone
+recreates the incident — and for C++ pairs a missing header aborts the entire native
+build stage (every later pipeline stage with it), a larger blast radius than Python's
+collection error.
 **Supersedes:** none.

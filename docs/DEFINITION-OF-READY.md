@@ -84,12 +84,17 @@ A write-first test story and the implementation story that makes it
 collect/compile/pass are released and dispatched as ONE unit: the agent claims
 the test story, delivers one PR — test commits first, with the recorded failing
 run in the PR body (CLAUDE.md rule 8's evidence), then the implementation —
-and the PR closes both issues. Mark the partner story in each Dependencies
-section as "same PR — one dispatch unit; not blocking" (the gate ignores such
-clauses). Never release a test story whose file would merge red awaiting a
-later task: a bare import/include of a missing module fails the whole tree's
-collection or build, and the merge gate stays red by design (observed on
-PR #99/T012 and PR #100/T013).
+and the PR closes both issues. The unit is PUSHED once, complete — commit
+ordering carries the test-first evidence; pushing the test commits alone puts
+the branch red and triggers the ci-failure-router (that is how PR #99/#100
+actually acquired their implementation commits — router bundles accepted
+retroactively; PR #94 is the clean precedent). Mark the partner story in each
+Dependencies section as "same PR — one dispatch unit; not blocking" (the gate
+ignores such clauses). Never release a test story whose file would merge red
+awaiting a later task: a bare import/include of a missing module fails the
+whole tree's collection or build — for C++, the entire native build stage —
+and the merge gate stays red by design (observed on PR #99/T012 and
+PR #100/T013).
 
 ## Promotion (promote-queued workflow)
 
