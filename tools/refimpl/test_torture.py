@@ -78,6 +78,55 @@ def test_no_corrupted_element_parses_as_a_frame_in_isolation():
         )
 
 
+# --- class fidelity (review findings on PR #100, 2026-08-30) ---
+
+def test_every_bad_escape_element_discards_as_BadEscape():
+    # Review finding 1 (HIGH), red before the fix: the fallback branch inserted the ESC
+    # and the bad byte at INDEPENDENT positions, so most short-frame "bad_escape"
+    # elements never contained an invalid escape pair at all — they discarded as
+    # BadLength/BadCrc while their recipe claimed BadEscape. The class label must mean
+    # what it says: every bad_escape stream produces >= 1 BadEscape discard.
+    # Full default class (>= 1000 elements): the pre-fix defect rate was 6/1000
+    # (measured, seed 20260830), so a small sample cannot pin this.
+    checked = 0
+    for element in T.corpus(SEED):
+        if element.recipe != "bad_escape":
+            continue
+        d = L.Deframer()
+        d.feed_bytes(element.stream)
+        assert d.stats["BadEscape"] >= 1, (
+            f"bad_escape element produced no BadEscape discard (stats={d.stats}); "
+            f"stream={element.stream.hex()}"
+        )
+        checked += 1
+    assert checked >= 1_000
+
+
+def test_overlength_class_crosses_the_cap_via_an_escape_at_least_sometimes():
+    # Review finding 2 (MEDIUM), red before the fix: overlength bodies excluded ESC
+    # entirely, so the corpus could never reproduce the escaped-71st-byte bug class
+    # fixed in 1ad9ad3 (PR #99: the TooLong abort clobbered by the Escaped->InFrame
+    # transition). Every overlength element must still discard TooLong, and a fair
+    # share must reach the cap through a valid escape pair.
+    total = escaped = 0
+    for element in T.corpus(SEED):
+        if element.recipe != "overlength":
+            continue
+        d = L.Deframer()
+        d.feed_bytes(element.stream)
+        assert d.stats["TooLong"] >= 1, (
+            f"overlength element produced no TooLong discard (stats={d.stats})"
+        )
+        total += 1
+        if T.ESC in element.stream[1:-1]:
+            escaped += 1
+    assert total >= 1_000
+    assert escaped >= total // 4, (
+        f"only {escaped} of {total} overlength elements contain an escape sequence — "
+        f"the escaped-boundary class (1ad9ad3) is not represented"
+    )
+
+
 # --- parameterization (contract: corpus(seed, frames=..., per_class=...) honours args) ---
 
 def test_corpus_honours_explicit_frames_and_per_class_arguments():

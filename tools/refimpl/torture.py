@@ -27,7 +27,7 @@ from typing import Iterator, List
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from _gen import P  # noqa: E402
-from omgp_link import Deframer, Frame, encode_frame  # noqa: E402
+from omgp_link import _MAX_UNSTUFFED, Deframer, Frame, encode_frame  # noqa: E402
 
 _G = P()
 FLAG = _G.TRUNK_flag_byte
@@ -118,8 +118,13 @@ def _corrupt_bad_escape(rng: random.Random, body: bytearray) -> bool:
         i = rng.choice([p for p in esc_positions if p + 1 < len(body)])
         body[i + 1] = _random_bad_escape_byte(rng)
         return True
-    body.insert(rng.randrange(len(body) + 1), _random_bad_escape_byte(rng))
-    body.insert(rng.randrange(len(body) + 1), ESC)
+    # Fallback (no ESC already in the body): insert the pair ADJACENTLY so the element
+    # always contains a literal invalid escape sequence. Independent insert positions
+    # (review on PR #100, finding 1) left ~0.6% of elements (6/1000 at seed 20260830,
+    # measured pre-fix) whose only ESC happened to precede a valid escape byte —
+    # discarding as BadLength/BadCrc while labelled bad_escape.
+    i = rng.randrange(len(body) + 1)
+    body[i:i] = bytes([ESC, _random_bad_escape_byte(rng)])
     return True
 
 
@@ -130,14 +135,26 @@ def _corrupt_garbage(rng: random.Random, body: bytearray) -> bool:
 
 
 def _corrupt_overlength(rng: random.Random, body: bytearray) -> bool:
-    # 70 unstuffed bytes (4-byte header + 64-byte max payload + 2-byte CRC) is the cap
-    # (trunk §4; docs/trunk-link-layer.md; C++ parity in test_link.py's TooLong test);
-    # bytes here avoid FLAG/ESC so the unstuffed length equals the raw length exactly,
-    # guaranteeing the abort deterministically rather than depending on stuffing.
-    n = rng.randrange(71, 71 + MAX_PAYLOAD)
-    body[:] = bytes(
-        0x00 if b in (FLAG, ESC) else b for b in (rng.randrange(0, 256) for _ in range(n))
-    )
+    # _MAX_UNSTUFFED (4-byte header + 64-byte max payload + 2-byte CRC = 70) unstuffed
+    # bytes is the cap (trunk §4; C++ parity in test_link.py's TooLong test). Two
+    # variants, half each (review on PR #100, finding 2):
+    # - plain: no FLAG/ESC, so unstuffed length equals raw length — deterministic abort;
+    # - escaped boundary: exactly the cap in plain bytes, then a VALID escape pair, so
+    #   the first over-cap byte arrives via the Escaped state — the 1ad9ad3 bug class
+    #   (PR #99: TooLong abort clobbered by the Escaped->InFrame transition), which the
+    #   corpus could not previously express because it excluded ESC entirely.
+    if rng.getrandbits(1):
+        extra = rng.randrange(1, MAX_PAYLOAD)
+        body[:] = bytes(
+            0x00 if b in (FLAG, ESC) else b
+            for b in (rng.randrange(0, 256) for _ in range(_MAX_UNSTUFFED + extra))
+        )
+    else:
+        plain = bytes(
+            0x00 if b in (FLAG, ESC) else b
+            for b in (rng.randrange(0, 256) for _ in range(_MAX_UNSTUFFED))
+        )
+        body[:] = plain + bytes([ESC, rng.choice(_GOOD_ESCAPES)])
     return True
 
 
