@@ -138,6 +138,16 @@ const said = (w, re, n) => w.log.some(l => re.test(l) && (n === undefined || l.s
   w = world([mk(1, 'closed', ['task']), mk(2, 'open', ['task', 'queued'], flood)]);
   await promote(w, 1); check('ref flood: promoter holds the story (fails closed)', !has(w, '+ready@2') && w.log.some(l => /warning:.*more than 500/.test(l)));
 
+  // --- the gate nudges the dispatcher whenever a story becomes claimable ---
+  w = world([mk(1, 'closed', ['task']), mk(2, 'open', ['task', 'ready'], '#1')]);
+  await gate(w, 2, 'ready'); check('ready pass -> repository_dispatch backlog-changed', has(w, 'dispatch backlog-changed#2'));
+  w = world([mk(1, 'closed', ['task']), mk(2, 'open', ['task', 'queued'], '#1')]);
+  await gate(w, 2, 'queued'); check('queued -> ready swap -> repository_dispatch backlog-changed', has(w, 'dispatch backlog-changed#2'));
+  w = world([mk(1, 'open', ['task']), mk(2, 'open', ['task', 'queued'], '#1')]);
+  await gate(w, 2, 'queued'); check('queued that waits does NOT nudge the dispatcher', !w.log.some(l => /backlog-changed/.test(l)));
+  w = world([mk(1, 'open', ['task']), mk(2, 'open', ['task', 'ready'], '#1')]);
+  await gate(w, 2, 'ready'); check('rejected ready does NOT nudge the dispatcher', !w.log.some(l => /backlog-changed/.test(l)));
+
   // --- parsing cost on attacker-reachable input (#90 review finding 5): 64 KB adversarial body ---
   const adversarial = ('**Intent**\n' + '**Note**\n'.repeat(3000) + '## x\n'.repeat(3000)).slice(0, 65536);
   w = world([{number: 2, state: 'open', labels: [{name: 'task'}, {name: 'queued'}], body: adversarial}]);

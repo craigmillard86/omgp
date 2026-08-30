@@ -16,6 +16,7 @@ on:
 
 permissions:
   issues: write
+  contents: write   # repository_dispatch(backlog-changed) to agent-dispatch after a story passes
 
 jobs:
   validate:
@@ -102,9 +103,17 @@ jobs:
                 body: `🚦 **Not ${mode}** — Definition of Ready gaps (docs/DEFINITION-OF-READY.md):\n\n- ${problems.join('\n- ')}\n\nFix and re-apply \`${mode}\`.`});
               return;
             }
+            // A story that just became eligible should be claimable now, not at the next 2-hourly
+            // tick: the dispatcher's own triggers are merges and the clock, and a `ready` label
+            // applied by a human or by promote-queued (GITHUB_TOKEN) starts no run of it.
+            // repository_dispatch is the documented exception (observed 2026-08-30: #26/#27 were
+            // promoted seconds after the merge-triggered pick had reported "nothing ready").
+            const nudgeDispatcher = () => github.rest.repos.createDispatchEvent({owner, repo,
+              event_type: 'backlog-changed', client_payload: {issue: iss.number}});
             if (mode === 'ready') {
               await github.rest.issues.createComment({owner, repo, issue_number: iss.number,
                 body: `🚦 Definition of Ready: **passed** (predicted T${declared}) — eligible for agent dispatch.`});
+              await nudgeDispatcher();
               return;
             }
             // queued: content passed; dependencies decide whether it waits or goes now.
@@ -118,4 +127,5 @@ jobs:
               await github.rest.issues.addLabels({owner, repo, issue_number: iss.number, labels: ['ready']});
               await github.rest.issues.createComment({owner, repo, issue_number: iss.number,
                 body: `🚦 **queued → ready**: dependencies already complete; Definition of Ready **passed** (predicted T${declared}) — eligible for agent dispatch.`});
+              await nudgeDispatcher();
             }
