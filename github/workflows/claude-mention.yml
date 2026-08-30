@@ -1,0 +1,41 @@
+# .github/workflows/claude-mention.yml
+name: claude-mention
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  respond:
+    # Only for @claude, only from users with push access — a public repo's
+    # comment stream is untrusted input (GOVERNANCE §4b)
+    if: >
+      contains(github.event.comment.body, '@claude') &&
+      (github.event.comment.author_association == 'OWNER' ||
+       github.event.comment.author_association == 'MEMBER' ||
+       github.event.comment.author_association == 'COLLABORATOR')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Toolchain
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake ninja-build clang clang-format clang-tidy
+          pip install -r tools/requirements.txt
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # No prompt: the action's mention mode responds to the comment in
+          # its thread context. CLAUDE.md + OPERATING-POLICY still bind it.
+          claude_args: |
+            --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr*),Bash(gh issue*),Bash(g++*),Bash(python3*),Edit,Read,Write,Grep,Glob"
