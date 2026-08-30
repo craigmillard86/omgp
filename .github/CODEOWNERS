@@ -13,10 +13,18 @@
 # Tier 3 — governance itself
 /docs/OPERATING-POLICY.md       @craigmillard86
 /docs/GOVERNANCE.md             @craigmillard86
+/docs/DEFINITION-OF-READY.md    @craigmillard86
 /.github/                       @craigmillard86
 /CLAUDE.md                      @craigmillard86
 /.specify/memory/constitution.md @craigmillard86
 /tools/mutate.cfg               @craigmillard86
+
+# Owner review (not auto-T3): rulings land in OPEN-QUESTIONS.md and task
+# ordering in specs/*/tasks.md, but agents are ALSO sanctioned to append
+# recommendations / produce these via Spec Kit (OPERATING-POLICY §2), so
+# they gate on review rather than tripping the T3 breach signal.
+/docs/OPEN-QUESTIONS.md         @craigmillard86
+/specs/**/tasks.md              @craigmillard86
 
 # Tier 2 — toolchain pinning & pipeline definition
 /IDF_VERSION                    @craigmillard86
