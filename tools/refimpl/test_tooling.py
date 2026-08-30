@@ -7,6 +7,7 @@ import configparser
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -54,6 +55,69 @@ def test_mutate_cfg_parses_and_pins():
     assert "threshold_pct" not in cp["policy"]
     assert set(cp["policy"]["label_categories"].split()) == {"equivalent", "accepted"}
     assert "l3" in cp["policy"]["scope_dirs"].split()
+
+
+# --- tools/mutate.sh: the oracle follows the changed directories -------------------------------
+# PR #94 (2026-08-30, first link/ source): the runner list was hard-coded to the three
+# test_l3_* binaries, so link/ mutants were never executed and the blind-spot rule failed
+# the run. The oracle for a change under <dir> is every tests/unit binary named
+# test_<dir>_* (CMakeLists.txt omgp_add_catch_test); property tests are never used.
+
+def unit_binaries():
+    text = (ROOT / "CMakeLists.txt").read_text()
+    return {m.group(1) for m in re.finditer(r"omgp_add_catch_test\((test_\w+)\s+tests/unit/", text)}
+
+
+def oracle_line(out):
+    lines = [l for l in out.splitlines() if l.startswith("mutation: oracle:")]
+    assert len(lines) == 1, out
+    return lines[0].split(":", 2)[2].split()
+
+
+def test_mutate_dry_run_lists_a_unit_oracle_for_every_scope_dir_with_sources():
+    rc, out, _ = run(MUTATE, "--dry-run")
+    assert rc == 0, out
+    oracle = oracle_line(out)
+    assert oracle and set(oracle) <= unit_binaries(), (oracle, out)
+    scope_dirs = configparser.ConfigParser()
+    scope_dirs.read(CFG)
+    for d in scope_dirs["policy"]["scope_dirs"].split():
+        if any((ROOT / d).rglob("*.cpp")) or any((ROOT / d).rglob("*.hpp")):
+            assert any(b.startswith(f"test_{d}_") for b in oracle), (d, oracle)
+    assert not any("roundtrip" in b for b in oracle), oracle  # property tests are not the oracle
+
+
+def shared_clone(tmp_path, rel_path, content):
+    """A --shared clone with one extra commit touching rel_path (mutate.sh cds to its own root)."""
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", "--shared", "--no-checkout", str(ROOT), str(clone)], check=True)
+    subprocess.run(["git", "checkout", "-q", "HEAD"], cwd=clone, check=True)
+    # The script under test is the working-tree one, not whatever HEAD has committed.
+    for rel in ("tools/mutate.sh", "tools/mutate.cfg", "CMakeLists.txt"):
+        (clone / rel).write_text((ROOT / rel).read_text())
+    p = clone / rel_path
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content)
+    subprocess.run(["git", "add", rel_path], cwd=clone, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"], cwd=clone, check=True)
+    return clone
+
+
+def test_mutate_diff_oracle_is_the_changed_dirs_unit_tests(tmp_path):
+    clone = shared_clone(tmp_path, "link/zz_probe.cpp", "int zz_probe() { return 1; }\n")
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 0, out
+    oracle = oracle_line(out)
+    assert oracle and all(b.startswith("test_link_") for b in oracle), oracle
+
+
+def test_mutate_diff_with_no_unit_oracle_fails_closed(tmp_path):
+    # A scope dir that has no test_<dir>_* unit binary at all can never kill a mutant; that
+    # must fail before any build, with the blind spot named, not run and report 0 mutants.
+    clone = shared_clone(tmp_path, "core/zz_probe.cpp", "int zz_probe() { return 1; }\n")
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 1, out
+    assert "blind spot" in out and "core" in out and "no unit-test oracle" in out, out
 
 
 # --- tools/mutate_report.py: the triage gate on synthetic Elements reports --------------------

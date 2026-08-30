@@ -14,6 +14,11 @@
 # reaching the code" blind spot. Opt out per file with `// mutation-exempt(no-body): <why>`
 # (docs/OPEN-QUESTIONS.md 2026-08-30) — reviewed like mutant-ok, just at file granularity.
 #
+# Oracle: for every scope dir with changed files, the tests/unit binaries named test_<dir>_*
+# (CMakeLists.txt omgp_add_catch_test) run under the runner. It was a hard-coded test_l3_*
+# list until PR #94 (2026-08-30), the first link/ source, produced zero executed mutants and
+# tripped the blind-spot rule. A changed dir with no unit binary fails before any build.
+#
 #   ./tools/mutate.sh --diff origin/main --require     # CI: fail if Mull is missing
 #   ./tools/mutate.sh --diff HEAD~1                    # local: disclosed skip if Mull is missing
 #   ./tools/mutate.sh --diff <ref> --dry-run           # print the scope and stop
@@ -76,6 +81,25 @@ if [ -z "$SCOPE" ]; then
   exit 0
 fi
 echo "mutation: scope: $(echo "$SCOPE" | tr '\n' ' ')"
+
+# --- oracle: the unit binaries of every changed scope dir --------------------------------------
+# Unit tests are the oracle: the seeded property tests (tests/property) are too slow per
+# mutant at -O0 and assert invariants, not specific values. Names come from CMakeLists.txt so
+# a new test_<dir>_* binary joins the oracle without touching this script; a changed dir with
+# no unit binary can never kill a mutant, so that is a blind spot and fails here, unbuilt.
+CHANGED_DIRS=$(echo "$SCOPE" | cut -d/ -f1 | sort -u)
+UNIT_BINS=$(grep -oE 'omgp_add_catch_test\(test_[A-Za-z0-9_]+ +tests/unit/' CMakeLists.txt | sed -E 's/omgp_add_catch_test\(//; s/ .*//')
+ORACLE=""
+for d in $CHANGED_DIRS; do
+  bins=$(echo "$UNIT_BINS" | grep -E "^test_${d}_" || true)
+  if [ -z "$bins" ]; then
+    echo "mutation: no unit-test oracle for changed dir '$d/' (no test_${d}_* under tests/unit in CMakeLists.txt) — failing (blind spot: its mutants could never be executed)" >&2
+    exit 1
+  fi
+  ORACLE="$ORACLE $bins"
+done
+ORACLE=$(echo $ORACLE | tr ' ' '\n' | sort -u | tr '\n' ' ')
+echo "mutation: oracle: $ORACLE"
 [ "$DRY" -eq 1 ] && exit 0
 
 # --- tool presence -------------------------------------------------------------------------------
@@ -123,8 +147,15 @@ rm -rf "$BUILD" && mkdir -p "$BUILD"
 cmake -S . -B "$BUILD" -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug -DOMGP_SANITIZERS=OFF \
   -DCMAKE_CXX_FLAGS="-fpass-plugin=$PLUGIN -g -grecord-command-line -O0" >/dev/null
 cmake --build "$BUILD" --parallel >/dev/null
-embedded=$(nm "$BUILD"/l3/CMakeFiles/omgp_l3.dir/*.o 2>/dev/null | grep -c ' t mull_' || true)
-echo "mutation: instrumented build done (${embedded:-0} mutated functions in l3/)"
+# Library objects only: header-only code (constexpr helpers) is instrumented inside the test
+# TUs and shows up in the report, not in this count — the count is a sanity signal, the gate
+# is mutate_report.py's blind-spot rule.
+embedded=""
+for d in $CHANGED_DIRS; do
+  n=$(nm "$BUILD/$d"/CMakeFiles/*.dir/*.o 2>/dev/null | grep -c ' t mull_' || true)
+  embedded="$embedded $d=${n:-0}"
+done
+echo "mutation: instrumented build done (mutated functions in library objects:$embedded)"
 
 # Phase 2 (run time): mutators + timeout only. Diff scoping is NOT delegated to Mull's
 # gitDiffRef: measured on 0.34.0, its filter keeps mutants in modified files but drops
@@ -156,18 +187,20 @@ else
   echo '{}' > "$BUILD/scope_ranges.json"
 fi
 
-# --- run the unit binaries under the runner ------------------------------------------------------
-# Unit tests are the oracle: the seeded property tests are too slow per mutant at -O0 and
-# assert invariants, not specific values. Reporters (mull-runner --help, 0.34.0): IDE,
-# SQLite, GitHubAnnotations, Patches, Elements (Mutation Testing Elements JSON), Sarif.
+# --- run the oracle binaries under the runner ----------------------------------------------------
+# Reporters (mull-runner --help, 0.34.0): IDE, SQLite, GitHubAnnotations, Patches, Elements
+# (Mutation Testing Elements JSON), Sarif.
 rc=0
 REPORTS="$BUILD/reports"
 rm -rf "$REPORTS" && mkdir -p "$REPORTS"
 EXTRA=()
 [ -n "${GITHUB_ACTIONS:-}" ] && EXTRA=(--reporters GitHubAnnotations)
-for bin in "$BUILD"/test_l3_header "$BUILD"/test_l3_payload "$BUILD"/test_l3_descriptor; do
-  [ -x "$bin" ] || continue
-  name=$(basename "$bin")
+for name in $ORACLE; do
+  bin="$BUILD/$name"
+  if [ ! -x "$bin" ]; then
+    echo "mutation: oracle binary $name was not built — failing (blind spot: CMakeLists.txt names it but the instrumented build did not produce it)" >&2
+    rc=1; continue
+  fi
   # mull-runner exits non-zero whenever survivors exist, so its exit code is not a failure
   # signal; a missing report is. (All mutants run here; the diff scoping happens in the
   # merge below, so per-binary survivor counts are NOT the gate's numbers.)
