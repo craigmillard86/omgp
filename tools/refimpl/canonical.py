@@ -266,6 +266,35 @@ def render_bytes(b: bytes) -> str:
     return message_to_canonical(h, obj)
 
 
+# --- frames (specs/002-trunk-link-layer/contracts/frame-vectors.md "Canonical frame line") ---
+
+import omgp_link as link  # noqa: E402  (after the message half so import order is explicit)
+
+
+def frame_to_canonical(f: link.Frame) -> str:
+    flags = (0x01 if f.response else 0) | (0x02 if f.retry else 0)
+    return f"frame dst={_hex2(f.dst)} src={_hex2(f.src)} flags={_hex2(flags)} seq={f.seq} payload={f.payload.hex()}"
+
+
+def canonical_to_frame(line: str) -> link.Frame:
+    prefix, _, rest = line.strip().partition(" ")
+    if prefix != "frame":
+        raise CanonicalError(f"not a frame line: {line!r}")
+    kv = _tokens(rest)
+    dst, src = _int(_take(kv, "dst")), _int(_take(kv, "src"))
+    flags, seq = _int(_take(kv, "flags")), _int(_take(kv, "seq"))
+    payload = _hexbytes(_take(kv, "payload"))
+    if kv:
+        raise CanonicalError(f"unexpected keys {sorted(kv)}")
+    return link.Frame(dst=dst, src=src, response=bool(flags & 0x01), retry=bool(flags & 0x02), seq=seq,
+                       payload=payload)
+
+
+def frame_error_to_canonical(reason: str) -> str:
+    """Render a Deframer discard reason or an `encode_frame` `FrameError.reason`."""
+    return f"ERR {reason}"
+
+
 # --- descriptors (contracts/canonical-text.md "Descriptors") ---------------------------------
 
 import omgp_descriptor as D  # noqa: E402  (after the message half so import order is explicit)

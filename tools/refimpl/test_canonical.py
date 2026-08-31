@@ -111,3 +111,66 @@ def test_validate_line_error_form():
     assert C.validate_line(b"") == f"ERR MissingRequired type=0x{G.TLV_PROTOCOL:02X} offset=0"
     assert C.render_descriptor_bytes(b"\x01") == "ERR Truncated"
     assert C.descriptor_to_canonical([]) == ""
+
+
+# --- frames (spec 002 T019, contracts/frame-vectors.md "Canonical frame line") --------------
+
+import omgp_link as L  # noqa: E402
+
+FRAME_CASES = [
+    ("all-zero-empty-payload",
+     "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=",
+     L.Frame(dst=0x00, src=0x00, response=False, retry=False, seq=0, payload=b"")),
+    ("response-flag-nonzero-seq",
+     "frame dst=0x00 src=0x01 flags=0x01 seq=5 payload=0101000000",
+     L.Frame(dst=0x00, src=0x01, response=True, retry=False, seq=5, payload=bytes.fromhex("0101000000"))),
+    ("retry-flag-max-seq",
+     "frame dst=0x01 src=0x00 flags=0x02 seq=15 payload=0101000000",
+     L.Frame(dst=0x01, src=0x00, response=False, retry=True, seq=15, payload=bytes.fromhex("0101000000"))),
+    ("max-payload",
+     "frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=" + bytes(range(64)).hex(),
+     L.Frame(dst=0x01, src=0x00, response=False, retry=False, seq=0, payload=bytes(range(64)))),
+]
+
+
+@pytest.mark.parametrize("line,frame", [c[1:] for c in FRAME_CASES], ids=[c[0] for c in FRAME_CASES])
+def test_frame_round_trip(line, frame):
+    assert C.frame_to_canonical(frame) == line
+    assert C.canonical_to_frame(line) == frame
+    assert C.canonical_to_frame(C.frame_to_canonical(frame)) == frame
+    assert C.frame_to_canonical(C.canonical_to_frame(line)) == line
+
+
+# Hand-crafted bad streams and their expected discard, lifted from the same fixtures
+# test_link.py drives the Deframer with (T012/#30), so the reason names round-trip through
+# the renderer exactly as the Deframer actually reports them, not just as literal strings.
+DISCARD_STREAMS = [
+    ("BadCrc", bytes.fromhex("7e020071026869fda17e")),  # last CRC byte flipped: a0 -> a1
+    ("BadLength", bytes.fromhex("7e010000c800007e")),  # len=0xC8 (200) outside 0-64
+    ("BadEscape", bytes.fromhex("7e040020017d00a4b27e")),  # escape's second byte corrupted
+    ("TooLong", bytes([G.TRUNK_flag_byte]) + bytes([0x01]) * 71 + bytes([G.TRUNK_flag_byte])),
+]
+
+
+@pytest.mark.parametrize("reason,stream", DISCARD_STREAMS, ids=[r for r, _ in DISCARD_STREAMS])
+def test_deframer_discard_reason_renders_err(reason, stream):
+    d = L.Deframer()
+    assert d.feed_bytes(stream) == []
+    assert d.stats[reason] == 1
+    assert C.frame_error_to_canonical(reason) == f"ERR {reason}"
+
+
+ENCODE_REFUSALS = [
+    ("PayloadTooLong",
+     L.Frame(dst=0x01, src=0x00, response=False, retry=False, seq=0, payload=bytes(G.LIMIT_max_l3_payload + 1))),
+    ("ReservedAddress",
+     L.Frame(dst=0xFF, src=0x00, response=False, retry=False, seq=0, payload=b"")),
+]
+
+
+@pytest.mark.parametrize("reason,frame", ENCODE_REFUSALS, ids=[r for r, _ in ENCODE_REFUSALS])
+def test_encode_frame_refusal_renders_err(reason, frame):
+    with pytest.raises(L.FrameError) as exc:
+        L.encode_frame(frame)
+    assert exc.value.reason == reason
+    assert C.frame_error_to_canonical(exc.value.reason) == f"ERR {reason}"
