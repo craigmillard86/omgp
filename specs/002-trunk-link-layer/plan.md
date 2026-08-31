@@ -56,7 +56,8 @@ omgp_link`, `main/link_smoke.cpp`). No UART, no device: the byte wire is an inte
 extensions in an existing single repository.
 
 **Performance Goals**: spec SC-002 (≥ 10k-frame torture corpus differential < 60 s on CI);
-worst-case frame 142 bytes / 1.42 ms modelled (SC-008); nothing else is throughput-bound.
+worst-case frame 140 bytes / 1.40 ms (SC-008, corrected 2026-08-31; `kMaxWire = 142`
+is the buffer bound, unreachable on the wire); nothing else is throughput-bound.
 
 **Constraints**: all timing via `Clock` (CLAUDE.md rule 3); symbols only (rule 4,
 `check_embedded`); fixed buffers of `kMaxWire = 2 + 2·(4 + LIMIT_max_l3_payload + 2)`

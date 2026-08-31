@@ -28,7 +28,7 @@ frame dst=0x01 src=0x00 flags=0x00 seq=3 payload=0101000000
 | `frame_response` | dst 0x00, src 0x01, response=1, seq 5, payload = an L3 PING response | response bit, non-zero seq |
 | `frame_retry` | as `frame_ping_req` with retry=1, seq 15 | retry bit; seq at the 4-bit maximum |
 | `frame_max_payload` | 64-byte payload (0x00..0x3F) | `len` at the limit; 72 wire bytes with no stuffing |
-| `frame_worst_stuffing` | 64 × 0x7E payload, dst = src = 0x7D so both header address bytes escape too | 139 wire bytes — the exhaustively verified maximum (SC-008, ruling 2026-08-31); `ctrl`/`len` can never escape, so `kMaxWire = 142` is a sizing bound, not a reachable length |
+| `frame_worst_stuffing` | dst = src = 0x7D, response = 1, retry = 1, seq = 11 (`ctrl` 0xB3), payload = 64-byte 0x7D/0x7E mix `7E7E7E7D 7D7E7E7D 7E7E7E7D 7E7E7E7E 7D7D7E7D 7E7E7E7D 7D7D7D7E 7E7E7E7D 7E7D7D7E 7D7E7D7E 7E7D7D7D 7E7E7D7D 7D7D7E7E 7D7E7D7E 7E7E7D7D 7D7E7E7D` — CRC = 0x7D7E, so every escapable byte escapes | **140 wire bytes** — the structural ceiling, achieved (SC-008, ruling 2026-08-31; demonstrated by execution); `ctrl`/`len` can never escape, so `kMaxWire = 142` is a sizing bound, not a reachable length |
 
 ## `l3_helper` verbs (host-only, `tools/l3_helper.cpp`, `tools/canonical.cpp`)
 

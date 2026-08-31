@@ -33,13 +33,15 @@ from the tree on 2026-08-29; facts about the trunk protocol come from
 - **Decision**: `kMaxUnstuffed = 4 + LIMIT_max_l3_payload + 2 = 70`,
   `kMaxWire = 2 + 2 * kMaxUnstuffed = 142`, both `constexpr` from the generated header;
   every frame buffer (encoder output, deframer accumulator, replay buffer, mock wire
-  queues) is a fixed array of that size. Worst-case frame time at the reference rate is
-  142 × 10 / 1 000 000 s = 1.42 ms — §4's "≤ ~1.4 ms". The spec's SC-008 and story 1
-  scenario 4 said 140 B / 1.4 ms; corrected in the spec during this plan.
+  queues) is a fixed array of that size. The buffer-bound frame time at the reference
+  rate is 142 × 10 / 1 000 000 s = 1.42 ms; the worst ACHIEVABLE frame is 140 bytes /
+  1.40 ms — §4's "≤ ~1.4 ms" (ruling 2026-08-31, docs/OPEN-QUESTIONS.md: `ctrl` and
+  `len` can never require stuffing, so at most 68 of the 70 body bytes escape; this
+  plan's earlier "1.42 ms worst case" conflated the bound with the maximum).
 - **Rationale**: the plan input asks for buffers "sized from limits.max_l3_payload plus
-  worst-case stuffing"; worst case is every byte of dst..crc escaped (payload of all 0x7E
-  or 0x7D plus a header/CRC that happen to need escaping), which doubles 70 to 140, plus
-  the two FLAGs.
+  worst-case stuffing"; the bound assumes every byte of dst..crc escaped — deliberately
+  conservative, since `ctrl` (low nibble ≤ 0x3) and `len` (≤ 0x40) structurally cannot
+  escape — which doubles 70 to 140, plus the two FLAGs.
 - **Alternatives considered**: sizing to 70 + a stuffing allowance (e.g. +16) with a
   "too long" discard — rejects legal worst-case frames; a dynamic buffer — forbidden.
 
@@ -171,7 +173,8 @@ from the tree on 2026-08-29; facts about the trunk protocol come from
   (payload as hex); canonical line `frame dst=0x01 src=0x00 flags=0x.. seq=n payload=<hex>`
   (contract `frame-canonical.md`); `bytes` = the stuffed wire bytes including FLAGs.
   Vectors: `frame_ping_req` (empty payload), `frame_max_payload` (64 B), `frame_worst_stuffing`
-  (payload of 64 × 0x7E → 142 wire bytes), `frame_retry` (retry bit), `frame_response`
+  (mixed 0x7D/0x7E payload pinned in contracts/frame-vectors.md → 140 wire bytes, the
+  achieved maximum; SC-008 corrected 2026-08-31), `frame_retry` (retry bit), `frame_response`
   (response bit + non-zero seq). `genvectors.py`, `codegen.py --vectors` (kind string is
   pass-through), `test_vectors*.py`, `canonical.py` and `tools/canonical.cpp` learn the
   new kind; `omgp_vectors.h.j2` comment lists it.

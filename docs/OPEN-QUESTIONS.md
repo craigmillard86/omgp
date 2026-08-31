@@ -540,10 +540,18 @@ expected length unstated, the exact ambiguity that cost this dispatch cycle;
 (c) make `ctrl`'s reserved bits usable so 142 becomes reachable — a wire-protocol
 change in service of a test vector.
 **Recommendation:** (a).
-**Ruling:** human, 2026-08-31 ("do it", this session): option (a). spec.md SC-008
-rewritten (139 bytes / 1.39 ms, evidence and the bound-vs-maximum distinction stated);
-contracts/frame-vectors.md pins dst = src = 0x7D and the 139 target;
-contracts/byte-wire-and-clock.md's worked example relabelled as the sizing bound.
-Issue #38's acceptance criteria corrected to match and the story re-released; the
-`tests/vectors/` commit remains human-triggered (CLAUDE.md rule 9).
+**Ruling:** human, 2026-08-31 ("do it", this session): option (a), with the number
+settled by two rounds of execution. First pass set the target to 139 (the exhaustive
+maximum for the vector's then-specified all-0x7E payload). The Opus review of PR #104
+(finding 4) conjectured from CRC affinity that 140 — the structural ceiling — is
+reachable with a mixed 0x7D/0x7E payload; confirmed by execution: dst = src = 0x7D,
+response = 1, retry = 1, seq = 11 with the payload recorded in
+contracts/frame-vectors.md yields CRC 0x7D7E (both CRC bytes escape) → exactly
+140 wire bytes. Final ruling: SC-008 says 140 bytes / 1.40 ms with that pinned frame
+as the vector; "legal" is scoped as encoder-legal (dst ≠ 0xFF) — a §5-conformant
+trunk address plan yields less; `kMaxWire = 142` stays the untouched sizing bound.
+tasks.md T014, plan.md and research.md R-02/R-09 stale "142 on the wire" claims
+corrected in the same PR (review findings 1 and 3). Issue #38's acceptance criteria
+pin the same frame; the story is re-released; the `tests/vectors/` commit remains
+human-triggered (CLAUDE.md rule 9).
 **Supersedes:** none.

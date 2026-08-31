@@ -545,16 +545,21 @@ assert no bus fault.
   and never when a strict subset fails; the re-probe bit rate is the fallback symbol; the
   fault clears exactly once on recovery.
 - **SC-008**: Golden vectors exist for the empty, maximum and worst-case-stuffing frames;
-  the worst-case-stuffing vector is exactly **139 bytes** on the wire and its modelled
-  transmission time at the reference rate is **1.39 ms** (within §4's "≤ ~1.4 ms").
-  139 is the exhaustively verified maximum over every legal frame with the vector's
-  64 × 0x7E payload (all 4 177 920 dst/src/flag/seq combinations, two independent
-  implementations agreeing — ruling 2026-08-31, docs/OPEN-QUESTIONS.md); 140 is the
-  structural ceiling for any payload, because trunk §4's layout makes `ctrl` (low
-  nibble ≤ 0x3) and `len` (≤ 0x40) incapable of requiring stuffing. `kMaxWire = 142`
+  the worst-case-stuffing vector is exactly **140 bytes** on the wire — the structural
+  ceiling, achieved — and its modelled transmission time at the reference rate is
+  **1.40 ms** (§4's "≤ ~1.4 ms" met exactly). Trunk §4's layout makes `ctrl` (low
+  nibble ≤ 0x3) and `len` (≤ 0x40) incapable of requiring stuffing, so at most 68 of
+  the 70 body bytes escape: ceiling 2 + 70 + 68 = 140. 140 is demonstrated by
+  execution with the frame pinned in contracts/frame-vectors.md (dst = src = 0x7D,
+  response = 1, retry = 1, seq = 11, a recorded mixed 0x7D/0x7E payload whose CRC is
+  0x7D7E — both CRC bytes escape); an all-0x7E payload maxes out at 139 (exhaustive
+  over all 4 177 920 encoder-legal frames). "Legal" here means encoder-legal (any
+  dst ≠ 0xFF) — on a §5-conformant trunk (addresses 0x00–0x0F) the achievable maximum
+  is lower still; the vector exercises the codec domain. `kMaxWire = 142`
   (2 + 2 × (4 + 64 + 2)) remains the deliberately conservative buffer-sizing BOUND and
-  is unchanged — it is not a reachable wire length. (An earlier revision claimed
-  "exactly 142 bytes / 1.42 ms", conflating the bound with the achievable maximum.)
+  is unchanged — no wire frame reaches it. (Ruling 2026-08-31, docs/OPEN-QUESTIONS.md;
+  an earlier revision claimed "exactly 142 bytes / 1.42 ms", conflating the bound with
+  the achievable maximum.)
 - **SC-009**: Both builds are green with the new code (native with sanitizers, ESP32-S3
   firmware), the embedded-path scan finds zero forbidden constructs or restated literals
   in `link/`, the diff-scoped mutation run on this feature's pull request reports zero
