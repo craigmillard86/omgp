@@ -210,13 +210,17 @@ def decode_frame(raw: bytes) -> Frame:
     # feed would accept inputs weaker than the stated contract. A valid stuffed frame
     # contains no interior FLAG, so "exactly one frame" means exactly two FLAG bytes,
     # first and last.
+    # ValueError, not FrameError: FrameError.reason is contractually the C++ Status/
+    # Discard name set verbatim (contracts/link-python.md, for textual differential
+    # comparison) and "not exactly one frame" is a validator precondition, not a codec
+    # outcome (red-team finding 2 on PR #107).
     if len(raw) < 2 or raw[0] != FLAG or raw[-1] != FLAG or raw.count(FLAG) != 2:
-        raise FrameError("BadVector", "input is not exactly one FLAG-delimited frame")
+        raise ValueError("decode_frame: input is not exactly one FLAG-delimited frame")
     d = Deframer()
     frames = d.feed_bytes(raw)
     discards = sum(v for k, v in d.stats.items() if k != "delivered")
     if len(frames) != 1 or discards:
-        raise FrameError(
-            "BadVector", f"expected exactly one clean frame, got {len(frames)} with {discards} discard(s)"
+        raise ValueError(
+            f"decode_frame: expected exactly one clean frame, got {len(frames)} with {discards} discard(s)"
         )
     return frames[0]

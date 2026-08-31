@@ -44,10 +44,12 @@ def test_no_file_written_under_tests_vectors(tmp_path):
     # (Originally this also asserted the frame_* files did not exist yet; the
     # human-triggered T020 vectors commit — rule 9 justification in its message —
     # created them, so the purity property is what remains asserted.)
-    before = sorted((GV.VECTORS).glob("frame_*.json")) if GV.VECTORS.exists() else []
+    snap = lambda: ({p.name: p.read_bytes() for p in GV.VECTORS.glob("frame_*.json")}
+                    if GV.VECTORS.exists() else {})
+    before = snap()
     GV.build()
-    after = sorted((GV.VECTORS).glob("frame_*.json")) if GV.VECTORS.exists() else []
-    assert before == after
+    after = snap()
+    assert before == after  # CONTENT compare: an in-place overwrite must fail (red-team finding 4 on PR #107)
 
 
 def test_entries_match_schema_contract():
@@ -125,5 +127,5 @@ def test_decode_frame_rejects_padding_and_extra_delimiters():
                 raw + b"\x7e",              # trailing extra FLAG (empty frame)
                 b"\x7e" + raw,              # doubled opening FLAG
                 raw + b"\x00"):             # trailing junk after the closing FLAG
-        with _pytest.raises(link.FrameError):
+        with _pytest.raises(ValueError):
             link.decode_frame(bad)
