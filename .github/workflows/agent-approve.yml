@@ -61,6 +61,30 @@ jobs:
             if (!Number.isInteger(max)) { core.notice('approve: auto_approve_max_tier unreadable — not approving (fail closed)'); return; }
             if (tier >= 3) { core.notice('approve: T3 is never auto-approved'); return; }
             if (tier > max) { core.notice(`approve: risk:t${tier} exceeds auto_approve_max_tier=${max}`); return; }
+            // CODEOWNERS fail-closed (live finding 2026-08-31 on PR #104: a
+            // github-actions[bot] approval SATISFIED require_code_owner_reviews, contrary
+            // to the design assumption). This gate therefore never approves a PR touching
+            // an owned path — those require the owner's own review, and an unreadable
+            // CODEOWNERS refuses too. Patterns come from the DEFAULT-branch checkout.
+            const fs = require('fs');
+            let ownedPatterns;
+            try {
+              ownedPatterns = fs.readFileSync(`${process.env.GITHUB_WORKSPACE}/.github/CODEOWNERS`, 'utf8')
+                .split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#')).map(l => l.split(/\s+/)[0]);
+            } catch (e) { core.notice(`approve: CODEOWNERS unreadable (${e.message}) — not approving (fail closed)`); return; }
+            const ownedBy = (pattern, path) => {
+              const p = pattern.startsWith('/') ? pattern.slice(1) : pattern;
+              if (p.endsWith('/')) return path.startsWith(p);
+              const re = new RegExp('^' + p.split('**').map(seg =>
+                seg.split('*').map(x => x.replace(/[.+^${}()|[\]\\]/g, '\\$&')).join('[^/]*')).join('.*') + '$');
+              return re.test(path) || path.startsWith(p + '/');
+            };
+            const changed = await github.paginate(github.rest.pulls.listFiles, {owner, repo, pull_number: pr.number, per_page: 100});
+            const owned = changed.map(f => f.filename).filter(f => ownedPatterns.some(pat => ownedBy(pat, f)));
+            if (owned.length) {
+              core.notice(`approve: CODEOWNERS-owned path(s) changed — the owner's review is required, not auto-approving: ${owned.join(', ')}`);
+              return;
+            }
             // Dismiss THIS BOT's stale approvals from older heads (belt for
             // dismiss_stale_reviews being off); never touch a human's review.
             const reviews = await github.paginate(github.rest.pulls.listReviews, {owner, repo, pull_number: pr.number, per_page: 100});

@@ -574,3 +574,30 @@ unreachable; 140 is the wire maximum on both paths. The six affected sentences
 (four from round three, two more in research.md R-02 found by review pass 4) are
 now scoped accordingly.
 **Supersedes:** none.
+
+---
+
+## 2026-08-31 — A bot approval satisfied require_code_owner_reviews (live gate bypass)
+
+**Context:** the first live auto-approval (github-actions[bot] on PR #104, per the
+"Agent approval below T3" ruling) produced `reviewDecision: APPROVED` and
+`mergeState: CLEAN` on a PR that changed two CODEOWNERS-listed paths
+(`docs/OPEN-QUESTIONS.md`, `specs/002-trunk-link-layer/tasks.md`) with
+`require_code_owner_reviews: true` on `main`. The design assumption stated across
+that ruling — "a bot approval never satisfies code-owner review" — was falsified by
+the live event: the merge button went green with no human review. Demonstrated, not
+theoretical. (Merge itself still required a human click; auto-merge is disabled.)
+**Recommendation:** make the gate independent of GitHub's approval-counting
+semantics: `agent-approve` refuses to approve any PR whose changed files match any
+CODEOWNERS pattern (patterns read from the default-branch checkout; unreadable
+CODEOWNERS refuses too — fail closed), so owned paths always reach the owner
+unreviewed-by-bots. Also enable `dismiss_stale_reviews` on `main` as the platform
+brace behind the gate's own stale-approval dismissal.
+**Ruling:** human, 2026-08-31 ("do it", this session): adopted.
+`dismiss_stale_reviews` enabled (verified true). The fail-closed check lands in
+`agent-approve.yml` with harness cases for exact, `**`, directory and root-file
+patterns plus the unreadable-file path. The risk-score T3 regex is deliberately NOT
+extended to `specs/` (agents are sanctioned to produce those artefacts; with this
+fix, owned specs paths cannot auto-approve regardless of label — the label gap is
+accepted and revisitable).
+**Supersedes:** none (extends "Agent approval below T3", same date).
