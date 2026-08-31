@@ -32,8 +32,9 @@ from the tree on 2026-08-29; facts about the trunk protocol come from
 
 - **Decision**: `kMaxUnstuffed = 4 + LIMIT_max_l3_payload + 2 = 70`,
   `kMaxWire = 2 + 2 * kMaxUnstuffed = 142`, both `constexpr` from the generated header;
-  every frame buffer (encoder output, deframer accumulator, replay buffer, mock wire
-  queues) is a fixed array of that size. The buffer-bound frame time at the reference
+  every WIRE-byte buffer (encoder output, replay buffer, mock wire queues) is a fixed
+  array of that size — the deframer accumulator is the separate 70-byte UNSTUFFED
+  buffer R-03 defines, not a `kMaxWire` array. The buffer-bound frame time at the reference
   rate is 142 × 10 / 1 000 000 s = 1.42 ms; the worst ACHIEVABLE frame — on encode AND
   receive — is 140 bytes / 1.40 ms, §4's "≤ ~1.4 ms" (ruling 2026-08-31,
   docs/OPEN-QUESTIONS.md: an encoder-emitted `ctrl`/`len` can never require stuffing,
