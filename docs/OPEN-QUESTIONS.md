@@ -534,8 +534,9 @@ execution: an exhaustive sweep of ALL 4,177,920 legal frames with the vector's d
 of **139 bytes** (e.g. dst = src = 0x7D); the agent's own brute force found the same
 number. 142 = `kMaxWire`, the conservative buffer-sizing formula
 `2 + 2 × (4 + 64 + 2)` — a bound, conflated in SC-008 with an achievable length.
-**Options:** (a) correct SC-008 and the contract row to 139 (bound stays 142,
-untouched); (b) keep "142" reworded as the sizing bound only — leaves the vector's
+**Options:** (a) correct SC-008 and the contract row to the measured achievable
+maximum (first measured 139 for the all-0x7E payload; final 140 — see Ruling; bound
+stays 142, untouched); (b) keep "142" reworded as the sizing bound only — leaves the vector's
 expected length unstated, the exact ambiguity that cost this dispatch cycle;
 (c) make `ctrl`'s reserved bits usable so 142 becomes reachable — a wire-protocol
 change in service of a test vector.
@@ -554,4 +555,14 @@ tasks.md T014, plan.md and research.md R-02/R-09 stale "142 on the wire" claims
 corrected in the same PR (review findings 1 and 3). Issue #38's acceptance criteria
 pin the same frame; the story is re-released; the `tests/vectors/` commit remains
 human-triggered (CLAUDE.md rule 9).
+Round three (review pass 3 on PR #104): the review correctly flagged that the
+ceiling sentences were scoped only to encode — a RECEIVED frame may carry reserved
+`ctrl` bits (spec Edge Cases) and an escaping `ctrl` counts 141 escapables naively —
+but its 141 receive-path ceiling overclaimed: CRC-16/CCITT-FALSE's generator has the
+factor x+1, so CRC parity follows message parity, constant across every
+all-escapable body; the four both-CRC-bytes-escaping values are even-weight while
+that class is odd. Demonstrated by execution over all dst/src/ctrl corner
+combinations (24k bodies, one parity class, zero hits): 141 is unreachable, 140 is
+the wire maximum on both paths. The four affected sentences are now scoped
+accordingly.
 **Supersedes:** none.

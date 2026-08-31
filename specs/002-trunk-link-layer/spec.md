@@ -90,9 +90,10 @@ corpus element.
 4. **Given** a message containing only 0x7E and 0x7D bytes (worst-case stuffing), **When**
    it is framed, **Then** the frame fits `kMaxWire` = 142 bytes (2 flags +
    2 × (4 + 64 + 2)), the sizing BOUND; the achievable maximum is **140 bytes / 1.40 ms**
-   per SC-008 (ruling 2026-08-31: `ctrl` and `len` can never require stuffing, and the
-   140-byte frame pinned in contracts/frame-vectors.md demonstrates the ceiling is
-   reached). Within §4's "≤ ~1.4 ms".
+   per SC-008 (ruling 2026-08-31: an encoder-emitted `ctrl`/`len` can never require
+   stuffing, a received frame cannot reach 141 either — CRC parity, see SC-008 — and
+   the 140-byte frame pinned in contracts/frame-vectors.md demonstrates the ceiling
+   is reached). Within §4's "≤ ~1.4 ms".
 5. **Given** the seeded torture corpus, **When** both implementations consume it, **Then**
    they deliver the same frames at the same positions and reject the same corruptions
    (differential agreement), and the host-core receiver runs for the CI fuzz budget on
@@ -548,9 +549,17 @@ assert no bus fault.
 - **SC-008**: Golden vectors exist for the empty, maximum and worst-case-stuffing frames;
   the worst-case-stuffing vector is exactly **140 bytes** on the wire — the structural
   ceiling, achieved — and its modelled transmission time at the reference rate is
-  **1.40 ms** (§4's "≤ ~1.4 ms" met exactly). Trunk §4's layout makes `ctrl` (low
-  nibble ≤ 0x3) and `len` (≤ 0x40) incapable of requiring stuffing, so at most 68 of
-  the 70 body bytes escape: ceiling 2 + 70 + 68 = 140. 140 is demonstrated by
+  **1.40 ms** (§4's "≤ ~1.4 ms" met exactly). On the ENCODE path, trunk §4's layout
+  makes an emitted `ctrl` (low nibble ≤ 0x3) and `len` (≤ 0x40) incapable of requiring
+  stuffing: at most 68 of the 70 body bytes escape, ceiling 2 + 70 + 68 = 140. A
+  RECEIVED frame may carry reserved `ctrl` bits (accepted and ignored — Edge Cases),
+  so an escaping `ctrl` gives a naive receive-path count of 141 — but CRC-16/
+  CCITT-FALSE's generator contains the factor x+1, so CRC parity follows message
+  parity, which is constant across every all-escapable body (0x7D/0x7E and len 0x40
+  fix it); the four both-CRC-bytes-escaping values are all even-weight while that
+  class is odd. 141 is therefore unreachable and **140 is the wire maximum on both
+  paths** (parity argument by construction; all dst/src/ctrl corner combinations
+  demonstrated by execution, 2026-08-31). 140 itself is demonstrated by
   execution with the frame pinned in contracts/frame-vectors.md (dst = src = 0x7D,
   response = 1, retry = 1, seq = 11, a recorded mixed 0x7D/0x7E payload whose CRC is
   0x7D7E — both CRC bytes escape); an all-0x7E payload maxes out at 139 (exhaustive

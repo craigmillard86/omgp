@@ -44,10 +44,12 @@ protected: ~ByteWire() = default;
   `T_turn`, `T_resp` and `T_gap` from it.
 - Received bytes carry their **start-bit** instant; the response window test is
   `first_byte.start_us < tx_end_us + TRUNK_T_resp_us` (exclusive).
-- Worst-case frame (the achieved 140-byte maximum, SC-008 as ruled 2026-08-31):
-  1400 µs at the reference rate, 12 040 µs at the fallback rate. The sizing bound
-  `kMaxWire = 142` (→ 1420 µs / 12 212 µs) is what buffers and time budgets use;
-  no wire frame reaches it.
+- Worst-case wire frame — encode and receive paths alike — is 140 bytes (SC-008,
+  ruled 2026-08-31: a received frame with reserved `ctrl` bits set counts 141
+  escapables naively, but CRC parity makes both CRC bytes escaping unreachable —
+  see SC-008): 1400 µs at the reference rate, 12 040 µs at the fallback. The
+  sizing bound `kMaxWire = 142` (→ 1420 µs / 12 212 µs) is what buffers and time
+  budgets use; no wire frame reaches it.
 - A `set_bit_rate()` takes effect for the next `transmit()`; the mock and the simulator
   decide what a node "hears" at a given rate (contract `mock-wire.md`).
 
