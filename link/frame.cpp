@@ -95,6 +95,7 @@ bool Deframer::on_escaped_byte(uint8_t byte, FrameView& out) {
     // Escaped->InFrame transition, or later bytes would be treated as frame content with
     // no FLAG ever having opened a frame (trunk §4: resynchronise on the NEXT FLAG).
     if (state_ != State::Hunting)
+        // mutant-ok(equivalent, cxx_assign_const): only ==Hunting/==Escaped tested; else = InFrame
         state_ = State::InFrame;
     return false;
 }
@@ -103,6 +104,7 @@ bool Deframer::on_flag(FrameView& out) {
     // An escape byte as the last byte before a FLAG never gets its second byte.
     if (state_ == State::Escaped) {
         stats_.discarded[static_cast<size_t>(Discard::BadEscape)]++;
+        // mutant-ok(equivalent, cxx_assign_const): only ==Hunting/==Escaped tested; else = InFrame
         state_ = State::InFrame;
         len_ = 0;
         return false;
@@ -111,6 +113,7 @@ bool Deframer::on_flag(FrameView& out) {
     // when Hunting, len_ is already 0 so the frame is empty (n == 0).
     const size_t n = len_;
     len_ = 0;
+    // mutant-ok(equivalent, cxx_assign_const): only ==Hunting/==Escaped tested; else = InFrame
     state_ = State::InFrame;
     if (n == 0)
         return false; // empty frame / shared delimiter: discarded silently

@@ -336,6 +336,154 @@ TEST_CASE("a TooLong abort survives an escaped 71st byte (PR #99 regression)", "
     REQUIRE(delivered == 1);
 }
 
+TEST_CASE("Deframer counts BadLength on a runt frame shorter than header+CRC", "[frame]") {
+    // FLAG, 3 body bytes (fewer than kHeaderLen+kCrcLen == 6), FLAG: too short to ever be a
+    // frame, and distinct from the two other BadLength tests above, which both accumulate
+    // exactly 6 or more bytes and so exercise the *declared-length-mismatch* check, never
+    // this shorter-than-any-header-plus-CRC check.
+    const uint8_t bad[] = {0x7e, 0x01, 0x02, 0x03, 0x7e};
+    Deframer d;
+    FrameView view{};
+    int delivered = 0;
+    for (uint8_t b : bad)
+        if (d.feed(b, view))
+            ++delivered;
+    REQUIRE(delivered == 0);
+    REQUIRE(d.stats().delivered == 0);
+    REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::BadLength)] == 1);
+    for (uint8_t b : kMarkerFull)
+        if (d.feed(b, view))
+            ++delivered;
+    REQUIRE(delivered == 1);
+}
+
+TEST_CASE("Deframer::reset() returns to Hunting with an empty accumulator", "[frame]") {
+    // Every other test that recovers from a corrupted stream does so by feeding a
+    // subsequent frame WITH its own opening FLAG — but on_flag() always resynchronises
+    // state_/len_ unconditionally (trunk §4 FR-003), so that pattern can never observe
+    // whether reset() itself did the same. Probe directly instead: get into InFrame with a
+    // nonzero accumulator, reset(), then feed one non-FLAG byte (dropped iff state_ ==
+    // Hunting) followed by one lone FLAG (sees n == 0 iff len_ == 0). Anything left over
+    // from before reset() turns that FLAG into a non-silent discard or delivery.
+    Deframer d;
+    FrameView view{};
+    d.feed(0x7e, view);
+    d.feed(0x01, view);
+    d.feed(0x02, view);
+    d.feed(0x03, view);
+
+    d.reset();
+
+    REQUIRE_FALSE(d.feed(0x09, view));
+    REQUIRE_FALSE(d.feed(0x7e, view));
+
+    REQUIRE(d.stats().delivered == 0);
+    for (size_t i = 0; i < static_cast<size_t>(Discard::COUNT); ++i)
+        REQUIRE(d.stats().discarded[i] == 0);
+}
+
+TEST_CASE("a TooLong abort clears the accumulator, not only the state", "[frame]") {
+    // The existing TooLong tests recover via a subsequent FLAG-opened frame, which (as
+    // above) resynchronises len_ regardless of whether append()'s own reset worked. Probe
+    // with a lone FLAG immediately after the abort: on_flag() runs unconditionally on a
+    // FLAG byte and uses len_ as-is, so a stale nonzero count is visible right there.
+    uint8_t body[71];
+    for (auto& b : body)
+        b = 0x01;
+    Deframer d;
+    FrameView view{};
+    d.feed(0x7e, view);
+    for (uint8_t b : body)
+        d.feed(b, view);
+    REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::TooLong)] == 1);
+
+    REQUIRE_FALSE(d.feed(0x7e, view));
+    REQUIRE(d.stats().delivered == 0);
+    REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::TooLong)] == 1);
+    REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::BadLength)] == 0);
+    REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::BadCrc)] == 0);
+    REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::BadEscape)] == 0);
+    REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::ReservedAddress)] == 0);
+}
+
+TEST_CASE("BadEscape clears state and accumulator, not only the counter", "[frame]") {
+    // Same masking problem as the reset()/TooLong probes above: the existing BadEscape test
+    // (line ~257) recovers via a FLAG-opened kMarkerFull, which cannot tell whether
+    // on_escaped_byte's own state_/len_ reset actually ran. Probe directly instead.
+    const uint8_t bad[] = {0x7e, 0x04, 0x00, 0x20, 0x01, 0x7d, 0x00};
+    Deframer d;
+    FrameView view{};
+    for (uint8_t b : bad)
+        d.feed(b, view);
+    REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::BadEscape)] == 1);
+
+    REQUIRE_FALSE(d.feed(0x09, view));
+    REQUIRE_FALSE(d.feed(0x7e, view));
+
+    REQUIRE(d.stats().delivered == 0);
+    REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::BadEscape)] == 1);
+    REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::BadLength)] == 0);
+    REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::BadCrc)] == 0);
+}
+
+TEST_CASE("a successful unescape returns to InFrame, not stuck at Escaped/Hunting", "[frame]") {
+    // dst=0x02 src=0x00 ctrl=0x00 len=2 payload={0x7E (escaped as 7D 5E), 0x05 (plain, fed
+    // right after the escape completes)}; CRC over the unstuffed body. If the transition
+    // back to InFrame after a successful unescape doesn't happen, the plain byte 0x05 is
+    // either dropped (stuck Hunting) or misread as an escape continuation (stuck Escaped),
+    // and the frame fails to decode.
+    std::vector<uint8_t> body{0x02, 0x00, 0x00, 0x02, 0x7e, 0x05};
+    const uint16_t c = omgp::crc16_ccitt_false(body.data(), body.size());
+    const uint8_t wire[] = {0x7e,
+                             0x02,
+                             0x00,
+                             0x00,
+                             0x02,
+                             0x7d,
+                             0x5e,
+                             0x05,
+                             static_cast<uint8_t>(c & 0xFF),
+                             static_cast<uint8_t>((c >> 8) & 0xFF),
+                             0x7e};
+    Deframer d;
+    FrameView view{};
+    int delivered = 0;
+    for (uint8_t b : wire)
+        if (d.feed(b, view))
+            ++delivered;
+    REQUIRE(delivered == 1);
+    REQUIRE(d.stats().delivered == 1);
+    REQUIRE(view.f.dst == 0x02);
+    REQUIRE(view.f.len == 2);
+    REQUIRE(view.f.payload[0] == 0x7e);
+    REQUIRE(view.f.payload[1] == 0x05);
+    for (size_t i = 0; i < static_cast<size_t>(Discard::COUNT); ++i)
+        REQUIRE(d.stats().discarded[i] == 0);
+}
+
+TEST_CASE("a dangling escape before FLAG still lets that FLAG open the next frame", "[frame]") {
+    // Same shape as "an escape byte as the last byte before FLAG is BadEscape and resyncs"
+    // above, but the recovery frame is fed WITHOUT its own opening FLAG (trunk §4 FR-003:
+    // the FLAG that discards the dangling escape also opens whatever comes next) — a
+    // stronger check than feeding a fully self-opening frame afterward, which would
+    // resynchronise regardless of whether this transition is correct.
+    const uint8_t prefix[] = {0x7e, 0x01, 0x00, 0x00, 0x00, 0x7d, 0x7e};
+    Deframer d;
+    FrameView view{};
+    int delivered = 0;
+    for (uint8_t b : prefix)
+        if (d.feed(b, view))
+            ++delivered;
+    REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::BadEscape)] == 1);
+
+    for (size_t i = 1; i < sizeof(kMarkerFull); ++i)
+        if (d.feed(kMarkerFull[i], view))
+            ++delivered;
+    REQUIRE(delivered == 1);
+    REQUIRE(d.stats().delivered == 1);
+    REQUIRE(view.f.dst == 0x02);
+}
+
 TEST_CASE("Deframer discards a frame addressed to the reserved broadcast dst 0xFF", "[frame]") {
     // trunk §5: dst 0xFF is reserved and MUST NOT be used in v1; encode_frame refuses to
     // originate it (Status::ReservedAddress). A wire frame that arrives addressed there
