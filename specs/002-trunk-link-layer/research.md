@@ -32,14 +32,27 @@ from the tree on 2026-08-29; facts about the trunk protocol come from
 
 - **Decision**: `kMaxUnstuffed = 4 + LIMIT_max_l3_payload + 2 = 70`,
   `kMaxWire = 2 + 2 * kMaxUnstuffed = 142`, both `constexpr` from the generated header;
-  every frame buffer (encoder output, deframer accumulator, replay buffer, mock wire
-  queues) is a fixed array of that size. Worst-case frame time at the reference rate is
-  142 × 10 / 1 000 000 s = 1.42 ms — §4's "≤ ~1.4 ms". The spec's SC-008 and story 1
-  scenario 4 said 140 B / 1.4 ms; corrected in the spec during this plan.
+  every WIRE-byte buffer is sized from it — encoder output and the replay buffer as
+  `kMaxWire` arrays, the mock-wire queues at `4 × kMaxWire` (contracts/mock-wire.md) —
+  while the deframer accumulator is the separate 70-byte UNSTUFFED buffer R-03
+  defines, not a `kMaxWire` array. The buffer-bound frame time at the reference
+  rate is 142 × 10 / 1 000 000 s = 1.42 ms; the worst ACHIEVABLE frame — on encode AND
+  receive — is 140 bytes / 1.40 ms, §4's "≤ ~1.4 ms" (ruling 2026-08-31,
+  docs/OPEN-QUESTIONS.md: an encoder-emitted `ctrl`/`len` can never require stuffing,
+  giving 68 of 70 body bytes; a RECEIVED frame may carry an escaping `ctrl` — reserved
+  bits accepted, spec Edge Cases — for 69 escapables, but CRC parity bars both CRC
+  bytes escaping in that class, so 141 is unreachable; see SC-008. This plan's earlier
+  "1.42 ms worst case" conflated the bound with the maximum).
 - **Rationale**: the plan input asks for buffers "sized from limits.max_l3_payload plus
-  worst-case stuffing"; worst case is every byte of dst..crc escaped (payload of all 0x7E
-  or 0x7D plus a header/CRC that happen to need escaping), which doubles 70 to 140, plus
-  the two FLAGs.
+  worst-case stuffing"; the bound assumes every byte of dst..crc escaped — deliberately
+  conservative: an emitted `ctrl` (low nibble ≤ 0x3) and any `len` (≤ 0x40) cannot
+  escape, and even the received-frame case tops out at 140 (SC-008's parity argument) —
+  which doubles 70 to 140, plus the two FLAGs. Of the buffers R-02 sizes, encoder
+  output and the replay buffer hold encode-path wire bytes and the mock-wire queues
+  hold wire bytes from either path; the deframer accumulator is NOT wire-ceiling-sized
+  at all — R-03 unstuffs into a 70-byte accumulator as bytes arrive. 142 exceeds every
+  wire ceiling on either path (encode max 140; receive max 140 by SC-008's parity
+  argument), with two bytes of slack.
 - **Alternatives considered**: sizing to 70 + a stuffing allowance (e.g. +16) with a
   "too long" discard — rejects legal worst-case frames; a dynamic buffer — forbidden.
 
@@ -171,7 +184,8 @@ from the tree on 2026-08-29; facts about the trunk protocol come from
   (payload as hex); canonical line `frame dst=0x01 src=0x00 flags=0x.. seq=n payload=<hex>`
   (contract `frame-canonical.md`); `bytes` = the stuffed wire bytes including FLAGs.
   Vectors: `frame_ping_req` (empty payload), `frame_max_payload` (64 B), `frame_worst_stuffing`
-  (payload of 64 × 0x7E → 142 wire bytes), `frame_retry` (retry bit), `frame_response`
+  (mixed 0x7D/0x7E payload pinned in contracts/frame-vectors.md → 140 wire bytes, the
+  achieved maximum; SC-008 corrected 2026-08-31), `frame_retry` (retry bit), `frame_response`
   (response bit + non-zero seq). `genvectors.py`, `codegen.py --vectors` (kind string is
   pass-through), `test_vectors*.py`, `canonical.py` and `tools/canonical.cpp` learn the
   new kind; `omgp_vectors.h.j2` comment lists it.

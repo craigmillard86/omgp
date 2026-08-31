@@ -518,3 +518,59 @@ reviews etc", this session): adopted as recommended. Assumed until the first run
 claude-opus-5 is available to the CLAUDE_CODE_OAUTH_TOKEN subscription — if a run
 fails on model access, the flag is the one-line revert.
 **Supersedes:** none.
+
+---
+
+## 2026-08-31 — SC-008's "exactly 142 bytes" worst-case frame is unreachable
+
+**Context:** dispatching #38 (T020, `frame_*` golden vectors), the agent proved the
+`frame_worst_stuffing` acceptance criterion unsatisfiable and escalated `needs-human`
+without landing anything: spec.md SC-008 demanded a 142-byte wire frame, but
+`docs/trunk-link-layer.md` §4's layout makes `ctrl` (low nibble ≤ 0x3: response, retry,
+seq only) and `len` (≤ 0x40) structurally incapable of requiring stuffing — so at most
+68 of the 70 unstuffed body bytes can escape, ceiling 140. Verified independently by
+execution: an exhaustive sweep of ALL 4,177,920 legal frames with the vector's defined
+64 × 0x7E payload (every dst 0x00–0xFE × src × response × retry × seq) gives a maximum
+of **139 bytes** (e.g. dst = src = 0x7D); the agent's own brute force found the same
+number. 142 = `kMaxWire`, the conservative buffer-sizing formula
+`2 + 2 × (4 + 64 + 2)` — a bound, conflated in SC-008 with an achievable length.
+**Options:** (a) correct SC-008 and the contract row to the measured achievable
+maximum (first measured 139 for the all-0x7E payload; final 140 — see Ruling; bound
+stays 142, untouched); (b) keep "142" reworded as the sizing bound only — leaves the vector's
+expected length unstated, the exact ambiguity that cost this dispatch cycle;
+(c) make `ctrl`'s reserved bits usable so 142 becomes reachable — a wire-protocol
+change in service of a test vector.
+**Recommendation:** (a).
+**Ruling:** human, 2026-08-31 ("do it", this session): option (a), with the number
+settled by two rounds of execution. First pass set the target to 139 (the exhaustive
+maximum for the vector's then-specified all-0x7E payload). The Opus review of PR #104
+(finding 4) conjectured from CRC affinity that 140 — the structural ceiling — is
+reachable with a mixed 0x7D/0x7E payload; confirmed by execution: dst = src = 0x7D,
+response = 1, retry = 1, seq = 11 with the payload recorded in
+contracts/frame-vectors.md yields CRC 0x7D7E (both CRC bytes escape) → exactly
+140 wire bytes. Final ruling: SC-008 says 140 bytes / 1.40 ms with that pinned frame
+as the vector; "legal" is scoped as encoder-legal (dst ≠ 0xFF) — a §5-conformant
+trunk address plan yields less; `kMaxWire = 142` stays the untouched sizing bound.
+tasks.md T014, plan.md and research.md R-02/R-09 stale "142 on the wire" claims
+corrected in the same PR (review findings 1 and 3). Issue #38's acceptance criteria
+pin the same frame; the story is re-released; the `tests/vectors/` commit remains
+human-triggered (CLAUDE.md rule 9).
+Round three (review pass 3 on PR #104): the review correctly flagged that the
+ceiling sentences were scoped only to encode — a RECEIVED frame may carry reserved
+`ctrl` bits (spec Edge Cases) and an escaping `ctrl` makes 69 escapable bytes, a
+naive wire length of 141 —
+but its 141 receive-path ceiling overclaimed: CRC-16/CCITT-FALSE's generator has the
+factor x+1, so CRC parity follows message parity, constant across every
+all-escapable body; the four both-CRC-bytes-escaping values are even-weight while
+that class is odd — for EVERY body in the class, by construction (review pass 4
+re-derived the same proof independently: G(1)=0 since 0x1021 has weight 4; the
+0xFFFF init flips 16 bits, preserving message parity; so codeword weight is even and
+CRC parity equals message parity, which is 403 mod 2 = odd for every 141-candidate
+body, while all four both-escape CRC values have popcount 12, even). The 24k-body
+corner-combination run corroborates (one parity class observed, zero hits) but is
+NOT the warrant — at ~1.46 expected unconstrained hits, zero hits would also occur
+~23% of the time if the claim were false. 141 (wire length; 69 escapable bytes) is
+unreachable; 140 is the wire maximum on both paths. The six affected sentences
+(four from round three, two more in research.md R-02 found by review pass 4) are
+now scoped accordingly.
+**Supersedes:** none.

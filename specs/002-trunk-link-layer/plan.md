@@ -15,7 +15,9 @@ turnaround window; (3) a `HealthTracker` implementing UNENROLLED/ENROLLED/SUSPEC
 reduced-rate polling of SUSPECT nodes, the enrolment rotation, BUS_FAULT with
 alternating-rate re-probe, per-address statistics and listener notifications. Every wait
 is a comparison against the injected `Clock`; every constant is a generated `TRUNK_*` /
-`LIMIT_*` symbol; every buffer is a fixed 142-byte array derived from those symbols.
+`LIMIT_*` symbol; every wire-byte buffer is a fixed array derived
+from those symbols (`kMaxWire`; the mock-wire queues at `4 × kMaxWire`), while the
+deframer's accumulator is R-03's separate 70-byte unstuffed buffer.
 Verification reuses the feature-001 machinery: an independent Python framing reference
 and golden `frame_*` vectors, a differential run over a seeded torture corpus through the
 existing helper, a `fuzz_frame` libFuzzer target, Catch2 unit/property tests driven by a
@@ -56,7 +58,8 @@ omgp_link`, `main/link_smoke.cpp`). No UART, no device: the byte wire is an inte
 extensions in an existing single repository.
 
 **Performance Goals**: spec SC-002 (≥ 10k-frame torture corpus differential < 60 s on CI);
-worst-case frame 142 bytes / 1.42 ms modelled (SC-008); nothing else is throughput-bound.
+worst-case frame 140 bytes / 1.40 ms (SC-008, corrected 2026-08-31; `kMaxWire = 142`
+is the buffer bound, unreachable on the wire); nothing else is throughput-bound.
 
 **Constraints**: all timing via `Clock` (CLAUDE.md rule 3); symbols only (rule 4,
 `check_embedded`); fixed buffers of `kMaxWire = 2 + 2·(4 + LIMIT_max_l3_payload + 2)`
