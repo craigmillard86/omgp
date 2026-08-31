@@ -88,10 +88,11 @@ corpus element.
    output, and the very next intact frame is delivered — resynchronisation is on the next
    FLAG, never on a byte count.
 4. **Given** a message containing only 0x7E and 0x7D bytes (worst-case stuffing), **When**
-   it is framed, **Then** the frame is at most 142 bytes (2 flags + 2 × (4 + 64 + 2))
-   and its transmission at the reference bit rate takes no more than 1.42 ms — §4's
-   "≤ ~1.4 ms" bound made exact (corrected 2026-08-29 during planning; the earlier
-   140 / 1.4 ms figures were an arithmetic slip).
+   it is framed, **Then** the frame fits `kMaxWire` = 142 bytes (2 flags +
+   2 × (4 + 64 + 2)), the sizing BOUND; the achievable maximum is **140 bytes / 1.40 ms**
+   per SC-008 (ruling 2026-08-31: `ctrl` and `len` can never require stuffing, and the
+   140-byte frame pinned in contracts/frame-vectors.md demonstrates the ceiling is
+   reached). Within §4's "≤ ~1.4 ms".
 5. **Given** the seeded torture corpus, **When** both implementations consume it, **Then**
    they deliver the same frames at the same positions and reject the same corruptions
    (differential agreement), and the host-core receiver runs for the CI fuzz budget on
