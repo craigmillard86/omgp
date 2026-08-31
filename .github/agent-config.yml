@@ -7,6 +7,13 @@
 # (2 not recommended until telemetry supports it). T3 is never releasable.
 auto_ready_max_tier: 1
 
+# Highest ACTUAL risk tier (risk-score label on the PR) at which a clean
+# machine-readable review verdict may satisfy the required PR approval for
+# agent-authored PRs (claude-review `approve` job; ruling 2026-08-31).
+# T3 is never auto-approved; -1 disables auto-approval entirely. The merge
+# itself is always human, and CODEOWNERS paths always need the owner.
+auto_approve_max_tier: 2
+
 # Backstops that make auto-release safe (do not remove):
 # - ready-gate still validates the enriched story mechanically
 # - risk-score re-rates the ACTUAL diff at PR time; a T2+/T3 outcome from

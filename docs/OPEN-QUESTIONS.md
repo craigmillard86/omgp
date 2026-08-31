@@ -457,3 +457,64 @@ recreates the incident — and for C++ pairs a missing header aborts the entire 
 build stage (every later pipeline stage with it), a larger blast radius than Python's
 collection error.
 **Supersedes:** none.
+
+---
+
+## 2026-08-31 — Agent approval below T3 (verdict-gated)
+
+**Context:** every merge required one human review; with the WIP-cap-1 pipeline the
+human review became the throughput bound for low-risk agent PRs. Green checks alone
+were demonstrably insufficient to replace it: PRs #94, #99 and #100 were fully green
+on every required check while the advisory Claude review then found real HIGH
+defects (byte_time_us(0) UB; the Deframer TooLong-clobber phantom-frame bug; torture
+corpus class mislabeling). In all three, the REVIEW was the control that worked.
+**Recommendation:** allow the required approval to be satisfied mechanically, but
+only by the control that worked: a clean machine-readable review verdict
+(`VERDICT(review): clean @ <head sha>`, plus `VERDICT(red-team)` at T2) for the
+exact pushed head, for `agent-authored` PRs only, fail-closed on anything
+unresolved. Recommended starting tier: 1, extending to 2 after a month of verdict
+accuracy per GOVERNANCE §6.
+**Ruling:** human, 2026-08-31 ("do it at tier 2", this session):
+`auto_approve_max_tier: 2` from the start — the T1 staging recommendation was
+considered and overridden; the accepted risk is a reviewer miss on a clean verdict
+at T2 (protocol-critical paths), named here with #94/#99/#100 as the evidence that
+findings-bearing PRs are NOT approvable under this gate (all three carried
+findings, so none would have auto-approved). Mechanics: claude-review reviews every
+agent PR per push (`synchronize`) and emits the verdict; a separate minimal-
+permission workflow (`agent-approve.yml`) approves as github-actions[bot]
+(distinct from the authoring claude[bot]). Hardened per the Copilot review on
+#103 (2026-08-31): the approval workflow triggers on `issue_comment`, so the
+DEFAULT-BRANCH definition runs and its inputs (risk-tier resolver, the knob)
+come from the default branch — a same-repo PR cannot rewrite the gate in its
+own diff (pull_request-triggered workflows run the PR's version and never hold
+approval logic); verdicts are accepted only from claude[bot] exactly, and only
+as the final non-empty line of the comment (a quoted verdict token mid-comment
+never counts); the bot dismisses its own stale approvals when the head
+moves and never touches a human review; T3 is never auto-approved; CODEOWNERS
+paths still require the owner; the merge click remains human (GOVERNANCE §1).
+Kill switch: `auto_approve_max_tier: -1` or disable the workflow. Monthly review
+(§6) tracks auto-approved PRs later found defective; sustained misses lower the
+tier.
+**Supersedes:** none.
+
+---
+
+## 2026-08-31 — Model tiers for agent workflows
+
+**Context:** every Claude CI workflow ran claude-code-action's default model
+(claude-sonnet-5, verified in run logs; no workflow set a model). With approvals now
+gated on review/red-team verdicts (ruling above), the quality of the judgement loops
+directly bounds what can merge with one human click.
+**Recommendation:** run the judgement-heavy, low-volume loops on claude-opus-5 —
+claude-review (backs approvals), red-team (both modes), story-enrich (planning:
+decomposition + tier prediction), agent-converge-audit (weekly spec drift),
+agent-triage (failure diagnosis) — and keep the high-volume implementation loops
+(agent-dispatch implement, ci-failure-router auto-fix, claude-mention) on the
+default: their output passes through the full mechanical gate stack plus the
+now-opus reviews, so extra model cost buys less there. Pinned per workflow by a
+wiring test so the split is a reviewable diff, not a drift.
+**Ruling:** human, 2026-08-31 ("lets use higher models on critical areas, planning,
+reviews etc", this session): adopted as recommended. Assumed until the first run:
+claude-opus-5 is available to the CLAUDE_CODE_OAUTH_TOKEN subscription — if a run
+fails on model access, the flag is the one-line revert.
+**Supersedes:** none.

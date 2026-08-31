@@ -6,11 +6,14 @@ name: claude-review
 # The tier is resolved at RUN time (.github/actions/risk-tier): a `labeled`
 # trigger never fired for risk-score's labels because GitHub starts no run for
 # events caused by GITHUB_TOKEN (found 2026-08-29 — this workflow had never
-# run). Reviews happen once per PR lifecycle event, not per push: an updated
-# head is re-reviewed by reopening or via workflow_dispatch.
+# run). Reviews run per push (`synchronize`) since the 2026-08-31 approval
+# ruling: the machine-readable verdict must exist for the CURRENT head, and
+# every tier gets a review pass because T0/T1 agent PRs are approvable only
+# on a clean verdict — never on green checks alone (PRs #94/#99/#100 were
+# green with HIGH review findings).
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
+    types: [opened, reopened, ready_for_review, synchronize]
   workflow_dispatch:
     inputs:
       pr:
@@ -38,12 +41,9 @@ jobs:
       - id: tier
         uses: ./.github/actions/risk-tier
         with: {pr: '${{ github.event.pull_request.number || inputs.pr }}'}
-      - name: Below T2 — no automated review
-        if: steps.tier.outputs.deep != 'true'
-        run: |
-          echo "claude-review: PR is ${{ steps.tier.outputs.label }} — review pass runs for T2/T3 only"
       - name: Claude Code — focused review
-        if: steps.tier.outputs.deep == 'true'
+        # Every tier is reviewed (not only T2/T3) since the 2026-08-31 approval ruling:
+        # T0/T1 approvals hang off this verdict, so the verdict must always exist.
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -68,6 +68,16 @@ jobs:
             listing what was out of scope of this pass (files skipped,
             areas not checked, tools not run). If nothing was excluded,
             state that explicitly: "NOT EXAMINED: nothing excluded".
+            After NOT EXAMINED, end with ONE final line, alone and exactly
+            in this machine-readable form (the auto-approval gate parses it):
+            `VERDICT(review): clean @ <head sha>` if and only if you found
+            NO findings of any severity (NOT EXAMINED entries do not count
+            as findings); otherwise `VERDICT(review): findings @ <head sha>`.
+            <head sha> is the full 40-char head commit of the PR:
+            ${{ github.event.pull_request.head.sha }} (if that is blank,
+            use `gh pr view <n> --json headRefOid`).
             Do not approve, request changes, or modify code.
           claude_args: |
+            --model claude-opus-5
             --allowedTools "Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Read,Grep,Glob"
+

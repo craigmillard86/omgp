@@ -83,6 +83,76 @@ def test_ci_failure_router_wiring():
     assert "'ci-failure'" in triage["jobs"]["triage"]["if"] and "'nightly-failure'" in triage["jobs"]["triage"]["if"]
 
 
+# --- model tiers for agent workflows (ruling 2026-08-31) ---------------------------------------
+
+def _claude_steps(workflow):
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / workflow).read_text())
+    return [s for j in wf["jobs"].values() for s in j.get("steps", []) if "claude-code-action" in s.get("uses", "")]
+
+
+def test_model_tiers_judgement_loops_on_opus_volume_loops_on_default():
+    """Ruling 2026-08-31: the judgement-heavy loops (reviews that back approvals, red team,
+    story planning/enrichment, spec-drift audit, failure triage) run claude-opus-5; the
+    high-volume implementation loops (dispatch, router auto-fix, mentions) stay on the
+    action default (claude-sonnet-5) behind their mechanical gates."""
+    OPUS = ["claude-review.yml", "red-team.yml", "story-enrich.yml",
+            "agent-converge-audit.yml", "agent-triage.yml"]
+    DEFAULT = ["agent-dispatch.yml", "ci-failure-router.yml", "claude-mention.yml"]
+    for wfn in OPUS:
+        steps = _claude_steps(wfn)
+        assert steps, wfn
+        for s in steps:
+            assert "--model claude-opus-5" in s["with"].get("claude_args", ""), (wfn, s.get("name"))
+    for wfn in DEFAULT:
+        for s in _claude_steps(wfn):
+            assert "--model" not in s["with"].get("claude_args", ""), (wfn, s.get("name"))
+
+
+# --- agent PR approval below T3 (ruling 2026-08-31) --------------------------------------------
+
+APPROVE_HARNESS = ROOT / "tests" / "workflows" / "agent_approve_harness.js"
+
+
+@pytest.mark.skipif(shutil.which("node") is None,
+                    reason="node not present (blind spot: workflow scripts not exercised in this environment)")
+def test_agent_approval_against_mocked_github(tmp_path):
+    f = tmp_path / "scripts.json"
+    f.write_text(json.dumps({"approve": _script("agent-approve.yml", "approve")}))
+    r = subprocess.run(["node", str(APPROVE_HARNESS), str(f), str(ROOT)], capture_output=True, text=True, cwd=ROOT, timeout=120)
+    print(r.stdout)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "FAIL" not in r.stdout
+    assert "cases passed" in r.stdout
+
+
+def test_agent_approval_wiring():
+    """The safety properties live in the YAML. Hardened per the Copilot review on #103:
+    approval runs from the DEFAULT-BRANCH workflow definition (issue_comment trigger), so a
+    PR cannot rewrite the gate, the tier resolver, or the knob in its own diff — the
+    pull_request-triggered claude-review runs the PR's own workflow version and must
+    therefore never hold the approval logic."""
+    review = yaml.safe_load((ROOT / ".github" / "workflows" / "claude-review.yml").read_text())
+    on = review[True] if True in review else review["on"]
+    assert "synchronize" in on["pull_request"]["types"]          # verdicts must exist for the CURRENT head
+    prompt = next(s for s in review["jobs"]["review"]["steps"] if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
+    assert "VERDICT(review):" in prompt and "head" in prompt
+    assert "approve" not in review["jobs"]                       # never in the PR-controlled workflow
+    approve_wf = yaml.safe_load((ROOT / ".github" / "workflows" / "agent-approve.yml").read_text())
+    aon = approve_wf[True] if True in approve_wf else approve_wf["on"]
+    assert aon["issue_comment"]["types"] == ["created"]          # default-branch definition runs
+    approve = approve_wf["jobs"]["approve"]
+    assert "issue.pull_request" in approve["if"] and "VERDICT(" in approve["if"]
+    assert approve["permissions"] == {"contents": "read", "pull-requests": "write"}
+    steps = approve["steps"]
+    checkout = next(s for s in steps if "actions/checkout" in s.get("uses", ""))
+    assert "ref" not in checkout.get("with", {})                 # issue_comment checks out the DEFAULT branch
+    redteam = yaml.safe_load((ROOT / ".github" / "workflows" / "red-team.yml").read_text())
+    rt_prompt = next(s for s in redteam["jobs"]["attack-pr"]["steps"] if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
+    assert "VERDICT(red-team):" in rt_prompt
+    cfg = (ROOT / ".github" / "agent-config.yml").read_text()
+    assert "auto_approve_max_tier: 2" in cfg
+
+
 def test_bot_triggered_agent_workflows_allow_their_bot_actors():
     """A repository_dispatch sent with GITHUB_TOKEN runs as github-actions[bot], and
     claude-code-action refuses bot actors unless named (first hit: #77 on claude-review;
