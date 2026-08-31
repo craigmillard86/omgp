@@ -616,8 +616,11 @@ mechanism that made the push's `synchronize` actor `github-actions` (the bug PR 
 patches around in allowed_bots) — and GitHub suppresses `workflow_run` chaining off
 runs originating from such pushes. Net effect: the router's core loop (fix → push →
 re-run CI → route the result) silently loses exactly the failures it exists to route.
-Unblocked manually this time by `gh run rerun <ci-run> --failed`, whose completion
-event (human actor) the router does see.
+A manual `gh run rerun <ci-run> --failed` was tried as remediation and DID NOT work:
+the rerun completed (failure, 21:32) and produced no router run either — re-runs are a
+second suppressed delivery path (demonstrated, not hypothesized). With no
+workflow_dispatch trigger on the router, attempt 2 currently cannot fire by any
+existing mechanism.
 **Options:** (a) `persist-credentials: false` on the router autofix job's checkout, so
 the agent's `git push` uses the claude App token — fixing the actor at the source
 (synchronize events then run as claude[bot], already in allowed_bots) AND restoring
@@ -626,6 +629,8 @@ agent PRs for a failing required check with no fresh attempt marker and routes t
 a delivery backstop independent of event semantics; (c) both — (a) as the fix, (b) as
 the belt, mirroring the dispatcher's own nudge+cron pattern.
 **Recommendation:** (c). (a) alone leaves any future event-suppression variant
-undetected; (b) alone leaves the first ~2 hours dark.
+undetected; (b) alone leaves the first ~2 hours dark. After the rerun evidence, (b)'s
+sweep is not a belt but the only delivery path that does not depend on
+`workflow_run` semantics at all.
 **Ruling:** pending — human.
 **Supersedes:** none (extends the PR #109 findings; same date).
