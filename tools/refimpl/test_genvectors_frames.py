@@ -41,10 +41,15 @@ def test_five_frame_vectors_are_generated():
 
 def test_no_file_written_under_tests_vectors(tmp_path):
     # build() must be pure: calling it does not touch the real tests/vectors/ directory.
-    before = sorted((GV.VECTORS).glob("frame_*.json")) if GV.VECTORS.exists() else []
+    # (Originally this also asserted the frame_* files did not exist yet; the
+    # human-triggered T020 vectors commit — rule 9 justification in its message —
+    # created them, so the purity property is what remains asserted.)
+    snap = lambda: ({p.name: p.read_bytes() for p in GV.VECTORS.glob("frame_*.json")}
+                    if GV.VECTORS.exists() else {})
+    before = snap()
     GV.build()
-    after = sorted((GV.VECTORS).glob("frame_*.json")) if GV.VECTORS.exists() else []
-    assert before == after == []
+    after = snap()
+    assert before == after  # CONTENT compare: an in-place overwrite must fail (red-team finding 4 on PR #107)
 
 
 def test_entries_match_schema_contract():
@@ -108,3 +113,19 @@ def test_frame_worst_stuffing_is_exactly_140_wire_bytes():
     assert entry["fields"]["dst"] == entry["fields"]["src"] == 0x7D
     assert entry["fields"]["response"] is True and entry["fields"]["retry"] is True
     assert entry["fields"]["seq"] == 11
+
+
+def test_decode_frame_rejects_padding_and_extra_delimiters():
+    # Copilot review on PR #107: decode_frame must enforce "exactly one wire frame,
+    # both FLAGs included" — leading garbage (silently hunted past) and extra FLAG
+    # delimiters (empty frames, silently ignored) must be rejected, not tolerated.
+    entry = next(e for e in _frame_entries() if e["name"] == "frame_ping_req")
+    raw = bytes(int(b, 16) for b in entry["bytes"].split(" "))
+    assert link.decode_frame(raw)  # the clean vector itself decodes
+    import pytest as _pytest
+    for bad in (b"\x00\x01" + raw,          # leading garbage before the opening FLAG
+                raw + b"\x7e",              # trailing extra FLAG (empty frame)
+                b"\x7e" + raw,              # doubled opening FLAG
+                raw + b"\x00"):             # trailing junk after the closing FLAG
+        with _pytest.raises(ValueError):
+            link.decode_frame(bad)

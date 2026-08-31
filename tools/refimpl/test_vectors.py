@@ -43,10 +43,19 @@ def test_vector(path: pathlib.Path):
         assert C.descriptor_to_canonical(recs) == v["canonical"]
         assert desc.build_descriptor(C.canonical_to_descriptor(v["canonical"])) == raw
     elif v["kind"] == "frame":
-        link = pytest.importorskip("omgp_link")  # arrives with US1, T018/T019 (spec 002)
+        import omgp_link as link  # plain import: since T018 landed, an import failure must FAIL, not skip (red-team finding 5 on PR #107)
         frame = C.canonical_to_frame(v["canonical"])
         assert link.encode_frame(frame) == raw
-        assert C.frame_to_canonical(link.decode_frame(raw)) == v["canonical"]
+        decoded = link.decode_frame(raw)
+        assert C.frame_to_canonical(decoded) == v["canonical"]
+        # Bind the committed `fields` and `spec_ref` to the bytes, as the message branch
+        # does — otherwise the human-readable half of the immutable evidence is unread
+        # (red-team finding 3 on PR #107).
+        assert decoded.dst == v["fields"]["dst"] and decoded.src == v["fields"]["src"]
+        assert decoded.response == v["fields"]["response"] and decoded.retry == v["fields"]["retry"]
+        assert decoded.seq == v["fields"]["seq"]
+        assert decoded.payload.hex() == v["fields"]["payload"]
+        assert v["spec_ref"].startswith("trunk §4")
     else:
         pytest.fail(f"unknown vector kind {v['kind']!r}")
 

@@ -1,0 +1,16 @@
+{
+  "bytes": "7E 7D 5D 7D 5D B3 40 7D 5E 7D 5E 7D 5E 7D 5D 7D 5D 7D 5E 7D 5E 7D 5D 7D 5E 7D 5E 7D 5E 7D 5D 7D 5E 7D 5E 7D 5E 7D 5E 7D 5D 7D 5D 7D 5E 7D 5D 7D 5E 7D 5E 7D 5E 7D 5D 7D 5D 7D 5D 7D 5D 7D 5E 7D 5E 7D 5E 7D 5E 7D 5D 7D 5E 7D 5D 7D 5D 7D 5E 7D 5D 7D 5E 7D 5D 7D 5E 7D 5E 7D 5D 7D 5D 7D 5D 7D 5E 7D 5E 7D 5D 7D 5D 7D 5D 7D 5D 7D 5E 7D 5E 7D 5D 7D 5E 7D 5D 7D 5E 7D 5E 7D 5E 7D 5D 7D 5D 7D 5D 7D 5E 7D 5E 7D 5D 7D 5E 7D 5D 7E",
+  "canonical": "frame dst=0x7D src=0x7D flags=0x03 seq=11 payload=7e7e7e7d7d7e7e7d7e7e7e7d7e7e7e7e7d7d7e7d7e7e7e7d7d7d7d7e7e7e7e7d7e7d7d7e7d7e7d7e7e7d7d7d7e7e7d7d7d7d7e7e7d7e7d7e7e7e7d7d7d7e7e7d",
+  "fields": {
+    "dst": 125,
+    "payload": "7e7e7e7d7d7e7e7d7e7e7e7d7e7e7e7e7d7d7e7d7e7e7e7d7d7d7d7e7e7e7e7d7e7d7d7e7d7e7d7e7e7d7d7d7e7e7d7d7d7d7e7e7d7e7d7e7e7e7d7d7d7e7e7d",
+    "response": true,
+    "retry": true,
+    "seq": 11,
+    "src": 125
+  },
+  "kind": "frame",
+  "name": "frame_worst_stuffing",
+  "note": "140 wire bytes, the structural ceiling, achieved (SC-008, ruling 2026-08-31)",
+  "spec_ref": "trunk \u00a74 worst-case stuffing: dst, src, payload and CRC all escape"
+}

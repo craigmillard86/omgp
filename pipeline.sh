@@ -121,6 +121,7 @@ stage_unit() {
 
 stage_refimpl() {
   python3 tools/refimpl/omgp_crc.py
+  python3 tools/refimpl/genvectors.py --check   # committed vectors byte-identical to the generator (rule 9; red-team finding 3 on PR #107)
   python3 -m pytest -q tools/refimpl   # reference implementation + tool tests (jinja2/pytest: tools/requirements.txt)
 }
 stage_diffcheck() { python3 tools/diffcheck.py; }

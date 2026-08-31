@@ -195,3 +195,32 @@ class Deframer:
             seq=(ctrl >> 4) & 0x0F,
             payload=payload,
         )
+
+
+def decode_frame(raw: bytes) -> Frame:
+    """One-shot decode of exactly one well-formed wire frame (both FLAGs included).
+
+    The interface tools/refimpl/test_vectors.py anticipated for ``kind=frame`` golden
+    vectors (feature 001): a single frame in, its fields out. Anything else — zero or
+    multiple delivered frames, or any discard — raises, because a golden vector's
+    ``bytes`` must be exactly one clean frame.
+    """
+    # Strict delimiting first (Copilot review on PR #107): the deframer silently hunts
+    # past leading garbage and ignores empty frames from extra FLAGs, so a permissive
+    # feed would accept inputs weaker than the stated contract. A valid stuffed frame
+    # contains no interior FLAG, so "exactly one frame" means exactly two FLAG bytes,
+    # first and last.
+    # ValueError, not FrameError: FrameError.reason is contractually the C++ Status/
+    # Discard name set verbatim (contracts/link-python.md, for textual differential
+    # comparison) and "not exactly one frame" is a validator precondition, not a codec
+    # outcome (red-team finding 2 on PR #107).
+    if len(raw) < 2 or raw[0] != FLAG or raw[-1] != FLAG or raw.count(FLAG) != 2:
+        raise ValueError("decode_frame: input is not exactly one FLAG-delimited frame")
+    d = Deframer()
+    frames = d.feed_bytes(raw)
+    discards = sum(v for k, v in d.stats.items() if k != "delivered")
+    if len(frames) != 1 or discards:
+        raise ValueError(
+            f"decode_frame: expected exactly one clean frame, got {len(frames)} with {discards} discard(s)"
+        )
+    return frames[0]
