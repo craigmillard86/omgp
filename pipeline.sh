@@ -14,7 +14,9 @@ WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=
 # raise when tests are added; NEVER lower to get green (that change is itself T3)
 # 133865 = 133870 executed (9 binaries; the seeded property tests dominate) minus 5 slack —
 # T008/T009 follow-up, raised 2026-08-30 with test_link_types.cpp (was 133821)
-UNIT_TEST_FLOOR=133865
+# 197000 = 197100 executed (12 binaries) minus ~100 slack — T014-T017+T022, raised
+# 2026-08-31 with test_link_frame/test_link_stuffing/test_link_resync.cpp (was 133865)
+UNIT_TEST_FLOOR=197000
 
 stage_codegen() {
   # Constants + vectors header from the YAML, then prove the human-authored docs tables
