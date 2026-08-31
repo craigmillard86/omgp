@@ -45,9 +45,12 @@ from the tree on 2026-08-29; facts about the trunk protocol come from
   worst-case stuffing"; the bound assumes every byte of dst..crc escaped — deliberately
   conservative: an emitted `ctrl` (low nibble ≤ 0x3) and any `len` (≤ 0x40) cannot
   escape, and even the received-frame case tops out at 140 (SC-008's parity argument) —
-  which doubles 70 to 140, plus the two FLAGs. The buffers R-02 sizes are receive-path
-  (deframer accumulator, replay buffer, mock-wire queues), so the receive-path ceiling
-  is the operative one; 142 covers it with two bytes of slack.
+  which doubles 70 to 140, plus the two FLAGs. Of the buffers R-02 sizes, encoder
+  output and the replay buffer hold encode-path wire bytes and the mock-wire queues
+  hold wire bytes from either path; the deframer accumulator is NOT wire-ceiling-sized
+  at all — R-03 unstuffs into a 70-byte accumulator as bytes arrive. 142 exceeds every
+  wire ceiling on either path (encode max 140; receive max 140 by SC-008's parity
+  argument), with two bytes of slack.
 - **Alternatives considered**: sizing to 70 + a stuffing allowance (e.g. +16) with a
   "too long" discard — rejects legal worst-case frames; a dynamic buffer — forbidden.
 
