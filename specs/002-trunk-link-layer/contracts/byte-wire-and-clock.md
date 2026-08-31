@@ -45,8 +45,9 @@ protected: ~ByteWire() = default;
 - Received bytes carry their **start-bit** instant; the response window test is
   `first_byte.start_us < tx_end_us + TRUNK_T_resp_us` (exclusive).
 - Worst-case wire frame — encode and receive paths alike — is 140 bytes (SC-008,
-  ruled 2026-08-31: a received frame with reserved `ctrl` bits set has 69 escapable
-  bytes — naive wire length 141 — but within that all-escapable class CRC parity makes
+  ruled 2026-08-31: a received frame whose `ctrl` is itself 0x7D/0x7E — possible only
+  with reserved bits set (accepted on receive) — has 69 escapable bytes, naive wire
+  length 141 — but within that all-escapable class CRC parity makes
   both CRC bytes escaping unreachable (the pinned 140-byte vector, whose `ctrl` 0xB3
   does not escape, shows both CRC bytes CAN escape outside it) —
   see SC-008): 1400 µs at the reference rate, 12 040 µs at the fallback. The

@@ -15,7 +15,9 @@ turnaround window; (3) a `HealthTracker` implementing UNENROLLED/ENROLLED/SUSPEC
 reduced-rate polling of SUSPECT nodes, the enrolment rotation, BUS_FAULT with
 alternating-rate re-probe, per-address statistics and listener notifications. Every wait
 is a comparison against the injected `Clock`; every constant is a generated `TRUNK_*` /
-`LIMIT_*` symbol; every buffer is a fixed 142-byte array derived from those symbols.
+`LIMIT_*` symbol; every wire-byte buffer is a fixed array derived
+from those symbols (`kMaxWire`; the mock-wire queues at `4 × kMaxWire`), while the
+deframer's accumulator is R-03's separate 70-byte unstuffed buffer.
 Verification reuses the feature-001 machinery: an independent Python framing reference
 and golden `frame_*` vectors, a differential run over a seeded torture corpus through the
 existing helper, a `fuzz_frame` libFuzzer target, Catch2 unit/property tests driven by a
