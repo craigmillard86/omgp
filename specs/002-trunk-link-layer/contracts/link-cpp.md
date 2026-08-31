@@ -20,7 +20,7 @@ constexpr uint32_t byte_time_us(uint32_t bit_rate);                             
 struct FrameFields { uint8_t dst, src; bool response, retry; uint8_t seq; uint8_t len; const uint8_t* payload; };
 struct FrameView   { FrameFields f; };            // payload points into the Deframer; valid until next feed()
 
-enum class Discard : uint8_t { BadCrc, BadLength, BadEscape, TooLong, COUNT };
+enum class Discard : uint8_t { BadCrc, BadLength, BadEscape, TooLong, ReservedAddress, COUNT };
 struct DeframerStats { uint32_t delivered; uint32_t discarded[static_cast<size_t>(Discard::COUNT)]; };
 
 enum class HealthState : uint8_t { UNENROLLED, ENROLLED, SUSPECT, OFFLINE };
@@ -47,7 +47,10 @@ public:
 ```
 Guarantees: `feed` never reads memory other than `byte` and its own accumulator; delivered
 payloads are ≤ 64 bytes; after any discard the next FLAG opens a frame; an escape byte
-followed by anything other than 0x5E/0x5D discards the frame (ruling 2026-08-29).
+followed by anything other than 0x5E/0x5D discards the frame (ruling 2026-08-29); a
+frame whose `dst == 0xFF` is discarded as `ReservedAddress` rather than delivered — it
+could never be re-encoded, since `encode_frame` refuses that address (ruling 2026-08-31,
+docs/OPEN-QUESTIONS.md).
 
 ## Byte wire and clock — see `byte-wire-and-clock.md`
 

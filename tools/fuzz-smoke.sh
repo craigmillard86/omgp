@@ -8,7 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 BUDGET=${1:-60}
-TARGETS=(fuzz_header fuzz_payload fuzz_descriptor fuzz_roundtrip)
+TARGETS=(fuzz_header fuzz_payload fuzz_descriptor fuzz_roundtrip fuzz_frame)
 BUILD=build/fuzz
 CXX=${OMGP_FUZZ_CXX:-clang++}
 
@@ -28,7 +28,7 @@ cmake --build --preset fuzz >/dev/null
 python3 - "$BUILD/corpus" <<'EOF'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
-for t in ("fuzz_header", "fuzz_payload", "fuzz_descriptor", "fuzz_roundtrip"):
+for t in ("fuzz_header", "fuzz_payload", "fuzz_descriptor", "fuzz_roundtrip", "fuzz_frame"):
     (root / t).mkdir(parents=True, exist_ok=True)
 for f in sorted(pathlib.Path("tests/vectors").glob("*.json")):
     v = json.loads(f.read_text())
@@ -39,6 +39,8 @@ for f in sorted(pathlib.Path("tests/vectors").glob("*.json")):
         (root / "fuzz_payload" / f.stem).write_bytes(bytes([raw[0], raw[3] & 1]) + raw[5:])
     elif v["kind"] == "descriptor":
         (root / "fuzz_descriptor" / f.stem).write_bytes(raw)
+    elif v["kind"] == "frame":
+        (root / "fuzz_frame" / f.stem).write_bytes(raw)
 EOF
 
 # ASan-instrumented binaries intermittently segfault at startup on WSL2 when ASLR places a

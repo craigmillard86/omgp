@@ -2,6 +2,7 @@
 # file; specs/002-trunk-link-layer/tasks.md T001/T008; contracts/tooling.md "CMake").
 add_library(omgp_link STATIC
   link_status.cpp
+  frame.cpp
 )
 # omgp_link must never target_link_libraries(... omgp_l3): L2 is opaque to L3 (CLAUDE.md
 # "Architecture invariants"; spec 002 FR-013 — the engine hands payload up as opaque bytes

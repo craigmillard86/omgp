@@ -109,7 +109,14 @@ def test_encode_frame_refuses_reserved_dst():
 
 def test_deframer_stats_start_at_zero():
     d = L.Deframer()
-    assert d.stats == {"delivered": 0, "BadCrc": 0, "BadLength": 0, "BadEscape": 0, "TooLong": 0}
+    assert d.stats == {
+        "delivered": 0,
+        "BadCrc": 0,
+        "BadLength": 0,
+        "BadEscape": 0,
+        "TooLong": 0,
+        "ReservedAddress": 0,
+    }
 
 
 def test_deframer_delivers_marker_frame():
@@ -131,6 +138,20 @@ def test_deframer_discards_bad_crc_and_resyncs():
     d = L.Deframer()
     assert d.feed_bytes(corrupt + MARKER_FULL) == [MARKER_FRAME]
     assert d.stats["BadCrc"] == 1
+    assert d.stats["delivered"] == 1
+
+
+def test_deframer_discards_reserved_dst_and_resyncs():
+    # trunk §5: dst 0xFF is reserved and MUST NOT be used in v1; encode_frame refuses to
+    # originate it. A received frame addressed there (bit corruption, or a future sender
+    # that ignores the rule) can never be re-encoded, so it must be discarded like any
+    # other structurally invalid frame (docs/OPEN-QUESTIONS.md 2026-08-31).
+    # dst=0xFF src=0x00 ctrl=0x00 len=0x00 (no payload); CRC-16/CCITT-FALSE over dst..len
+    # computed independently (0xCF63), not via omgp_link itself.
+    bad = bytes.fromhex("7eff00000063cf7e")
+    d = L.Deframer()
+    assert d.feed_bytes(bad + MARKER_FULL) == [MARKER_FRAME]
+    assert d.stats["ReservedAddress"] == 1
     assert d.stats["delivered"] == 1
 
 

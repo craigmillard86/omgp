@@ -19,10 +19,12 @@ def crc(hdr_and_payload: bytes) -> int  # omgp_crc.crc16_ccitt_false
 class Deframer:
     def feed(self, byte: int) -> Frame | None      # same three states and discard reasons as the C++ (R-03)
     def feed_bytes(self, data: bytes) -> list[Frame]
-    stats: dict[str, int]                          # delivered, BadCrc, BadLength, BadEscape, TooLong
+    stats: dict[str, int]                          # delivered, BadCrc, BadLength, BadEscape, TooLong, ReservedAddress
 ```
 `FrameError.reason` uses the C++ `Status`/`Discard` names verbatim so the differential can
-compare reasons textually.
+compare reasons textually. A received frame with `dst == 0xFF` is discarded as
+`ReservedAddress` (never delivered) — it could never be re-encoded, since `encode_frame`
+refuses that address (ruling 2026-08-31, docs/OPEN-QUESTIONS.md).
 
 ## `torture.py` (research R-08)
 
