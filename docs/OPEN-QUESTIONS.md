@@ -601,3 +601,31 @@ extended to `specs/` (agents are sanctioned to produce those artefacts; with thi
 fix, owned specs paths cannot auto-approve regardless of label — the label gap is
 accepted and revisitable).
 **Supersedes:** none (extends "Agent approval below T3", same date).
+
+---
+
+## 2026-08-31 — workflow_run events are not delivered for auto-fix pushes: the router cannot see its own attempt's failure
+
+**Context:** PR #108's auto-fix (attempt 1) pushed commit 58e4e91; the resulting `ci`
+run failed deep-verify (9 unlabelled mutation survivors) at ~21:10 — and NO
+`ci-failure-router` run was created for it, so attempt 2 never fired and the PR
+stalled red at `auto-fix-1`. The only router run near that time was for an unrelated
+`main` event. Root-cause hypothesis (consistent with every observation): the auto-fix
+agent pushed using the checkout's persisted `GITHUB_TOKEN` credentials — the same
+mechanism that made the push's `synchronize` actor `github-actions` (the bug PR #109
+patches around in allowed_bots) — and GitHub suppresses `workflow_run` chaining off
+runs originating from such pushes. Net effect: the router's core loop (fix → push →
+re-run CI → route the result) silently loses exactly the failures it exists to route.
+Unblocked manually this time by `gh run rerun <ci-run> --failed`, whose completion
+event (human actor) the router does see.
+**Options:** (a) `persist-credentials: false` on the router autofix job's checkout, so
+the agent's `git push` uses the claude App token — fixing the actor at the source
+(synchronize events then run as claude[bot], already in allowed_bots) AND restoring
+workflow_run chaining; (b) a scheduled router sweep (e.g. 2-hourly) that scans open
+agent PRs for a failing required check with no fresh attempt marker and routes them —
+a delivery backstop independent of event semantics; (c) both — (a) as the fix, (b) as
+the belt, mirroring the dispatcher's own nudge+cron pattern.
+**Recommendation:** (c). (a) alone leaves any future event-suppression variant
+undetected; (b) alone leaves the first ~2 hours dark.
+**Ruling:** pending — human.
+**Supersedes:** none (extends the PR #109 findings; same date).
