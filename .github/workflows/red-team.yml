@@ -92,6 +92,13 @@ jobs:
             listing what was out of scope of this attack pass. If nothing
             was excluded, state that explicitly: "NOT EXAMINED: nothing
             excluded".
+            After NOT EXAMINED, end with ONE final line, alone and exactly
+            in this machine-readable form (the auto-approval gate parses it):
+            `VERDICT(red-team): clean @ <head sha>` if and only if every
+            attack held (no CONFIRMED findings; speculation does not count);
+            otherwise `VERDICT(red-team): findings @ <head sha>`. <head sha>
+            is the full 40-char head commit:
+            ${{ github.event.pull_request.head.sha }}.
           claude_args: |
             --allowedTools "Bash(./pipeline.sh*),Bash(g++*),Bash(python3*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Read,Write,Grep,Glob"
 

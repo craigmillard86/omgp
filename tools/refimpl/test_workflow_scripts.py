@@ -83,6 +83,41 @@ def test_ci_failure_router_wiring():
     assert "'ci-failure'" in triage["jobs"]["triage"]["if"] and "'nightly-failure'" in triage["jobs"]["triage"]["if"]
 
 
+# --- agent PR approval below T3 (ruling 2026-08-31) --------------------------------------------
+
+APPROVE_HARNESS = ROOT / "tests" / "workflows" / "agent_approve_harness.js"
+
+
+@pytest.mark.skipif(shutil.which("node") is None,
+                    reason="node not present (blind spot: workflow scripts not exercised in this environment)")
+def test_agent_approval_against_mocked_github(tmp_path):
+    f = tmp_path / "scripts.json"
+    f.write_text(json.dumps({"approve": _script("claude-review.yml", "approve")}))
+    r = subprocess.run(["node", str(APPROVE_HARNESS), str(f), str(ROOT)], capture_output=True, text=True, cwd=ROOT, timeout=120)
+    print(r.stdout)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "FAIL" not in r.stdout
+    assert "cases passed" in r.stdout
+
+
+def test_agent_approval_wiring():
+    """The safety properties live in the YAML: verdicts are produced per head, approval is a
+    separate minimal-permission job, and the knob is a T3 config value."""
+    review = yaml.safe_load((ROOT / ".github" / "workflows" / "claude-review.yml").read_text())
+    on = review[True] if True in review else review["on"]
+    assert "synchronize" in on["pull_request"]["types"]          # verdicts must exist for the CURRENT head
+    prompt = next(s for s in review["jobs"]["review"]["steps"] if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
+    assert "VERDICT(review):" in prompt and "head" in prompt
+    approve = review["jobs"]["approve"]
+    assert approve["needs"] == "review"
+    assert "pull_request" in approve["if"] and "head.repo.full_name == github.repository" in approve["if"]
+    redteam = yaml.safe_load((ROOT / ".github" / "workflows" / "red-team.yml").read_text())
+    rt_prompt = next(s for s in redteam["jobs"]["attack-pr"]["steps"] if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
+    assert "VERDICT(red-team):" in rt_prompt
+    cfg = (ROOT / ".github" / "agent-config.yml").read_text()
+    assert "auto_approve_max_tier: 2" in cfg
+
+
 def test_bot_triggered_agent_workflows_allow_their_bot_actors():
     """A repository_dispatch sent with GITHUB_TOKEN runs as github-actions[bot], and
     claude-code-action refuses bot actors unless named (first hit: #77 on claude-review;

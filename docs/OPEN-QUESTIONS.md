@@ -457,3 +457,35 @@ recreates the incident — and for C++ pairs a missing header aborts the entire 
 build stage (every later pipeline stage with it), a larger blast radius than Python's
 collection error.
 **Supersedes:** none.
+
+---
+
+## 2026-08-31 — Agent approval below T3 (verdict-gated)
+
+**Context:** every merge required one human review; with the WIP-cap-1 pipeline the
+human review became the throughput bound for low-risk agent PRs. Green checks alone
+were demonstrably insufficient to replace it: PRs #94, #99 and #100 were fully green
+on every required check while the advisory Claude review then found real HIGH
+defects (byte_time_us(0) UB; the Deframer TooLong-clobber phantom-frame bug; torture
+corpus class mislabeling). In all three, the REVIEW was the control that worked.
+**Recommendation:** allow the required approval to be satisfied mechanically, but
+only by the control that worked: a clean machine-readable review verdict
+(`VERDICT(review): clean @ <head sha>`, plus `VERDICT(red-team)` at T2) for the
+exact pushed head, for `agent-authored` PRs only, fail-closed on anything
+unresolved. Recommended starting tier: 1, extending to 2 after a month of verdict
+accuracy per GOVERNANCE §6.
+**Ruling:** human, 2026-08-31 ("do it at tier 2", this session):
+`auto_approve_max_tier: 2` from the start — the T1 staging recommendation was
+considered and overridden; the accepted risk is a reviewer miss on a clean verdict
+at T2 (protocol-critical paths), named here with #94/#99/#100 as the evidence that
+findings-bearing PRs are NOT approvable under this gate (all three carried
+findings, so none would have auto-approved). Mechanics: claude-review reviews every
+agent PR per push (`synchronize`) and emits the verdict; a separate minimal-
+permission `approve` job approves as github-actions[bot] (distinct from the
+authoring claude[bot]); the bot dismisses its own stale approvals when the head
+moves and never touches a human review; T3 is never auto-approved; CODEOWNERS
+paths still require the owner; the merge click remains human (GOVERNANCE §1).
+Kill switch: `auto_approve_max_tier: -1` or disable the workflow. Monthly review
+(§6) tracks auto-approved PRs later found defective; sustained misses lower the
+tier.
+**Supersedes:** none.

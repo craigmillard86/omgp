@@ -6,11 +6,14 @@ name: claude-review
 # The tier is resolved at RUN time (.github/actions/risk-tier): a `labeled`
 # trigger never fired for risk-score's labels because GitHub starts no run for
 # events caused by GITHUB_TOKEN (found 2026-08-29 — this workflow had never
-# run). Reviews happen once per PR lifecycle event, not per push: an updated
-# head is re-reviewed by reopening or via workflow_dispatch.
+# run). Reviews run per push (`synchronize`) since the 2026-08-31 approval
+# ruling: the machine-readable verdict must exist for the CURRENT head, and
+# every tier gets a review pass because T0/T1 agent PRs are approvable only
+# on a clean verdict — never on green checks alone (PRs #94/#99/#100 were
+# green with HIGH review findings).
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
+    types: [opened, reopened, ready_for_review, synchronize]
   workflow_dispatch:
     inputs:
       pr:
@@ -38,12 +41,9 @@ jobs:
       - id: tier
         uses: ./.github/actions/risk-tier
         with: {pr: '${{ github.event.pull_request.number || inputs.pr }}'}
-      - name: Below T2 — no automated review
-        if: steps.tier.outputs.deep != 'true'
-        run: |
-          echo "claude-review: PR is ${{ steps.tier.outputs.label }} — review pass runs for T2/T3 only"
       - name: Claude Code — focused review
-        if: steps.tier.outputs.deep == 'true'
+        # Every tier is reviewed (not only T2/T3) since the 2026-08-31 approval ruling:
+        # T0/T1 approvals hang off this verdict, so the verdict must always exist.
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -68,6 +68,86 @@ jobs:
             listing what was out of scope of this pass (files skipped,
             areas not checked, tools not run). If nothing was excluded,
             state that explicitly: "NOT EXAMINED: nothing excluded".
+            After NOT EXAMINED, end with ONE final line, alone and exactly
+            in this machine-readable form (the auto-approval gate parses it):
+            `VERDICT(review): clean @ <head sha>` if and only if you found
+            NO findings of any severity (NOT EXAMINED entries do not count
+            as findings); otherwise `VERDICT(review): findings @ <head sha>`.
+            <head sha> is the full 40-char head commit of the PR:
+            ${{ github.event.pull_request.head.sha }} (if that is blank,
+            use `gh pr view <n> --json headRefOid`).
             Do not approve, request changes, or modify code.
           claude_args: |
             --allowedTools "Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Read,Grep,Glob"
+
+  approve:
+    # Ruling 2026-08-31 (docs/OPEN-QUESTIONS.md "Agent approval below T3"): a clean
+    # machine-readable verdict at the CURRENT head may satisfy the required PR approval
+    # for agent-authored PRs at or below auto_approve_max_tier (.github/agent-config.yml,
+    # T3 constant). github-actions[bot] submits the approval — a different identity from
+    # the authoring claude[bot], so no self-approval. Merge remains a human action
+    # (GOVERNANCE.md §1) and CODEOWNERS paths still require the owner: a bot approval
+    # never satisfies code-owner review. T3 is never auto-approved. Kill switch: set
+    # auto_approve_max_tier to -1, or disable this workflow.
+    # The script is executed verbatim by tests/workflows/agent_approve_harness.js.
+    needs: review
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      - id: tier
+        uses: ./.github/actions/risk-tier
+        with: {pr: '${{ github.event.pull_request.number }}'}
+      - id: cfg
+        run: |
+          echo "max=$(sed -n 's/^auto_approve_max_tier: *//p' .github/agent-config.yml)" >> "$GITHUB_OUTPUT"
+      - name: Approve when every required verdict is clean at this head
+        uses: actions/github-script@v7
+        env:
+          TIER_LABEL: ${{ steps.tier.outputs.label }}
+          MAX_TIER: ${{ steps.cfg.outputs.max }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const pr = context.payload.pull_request;
+            const head = pr.head.sha;
+            if (!pr.labels.some(l => l.name === 'agent-authored')) { core.notice('approve: not an agent-authored PR — untouched'); return; }
+            // Tier and knob: anything unresolved fails CLOSED (no approval).
+            const m = (process.env.TIER_LABEL || '').match(/^risk:t([0-3])$/);
+            if (!m) { core.notice('approve: risk tier unresolved — not approving (fail closed)'); return; }
+            const tier = Number(m[1]);
+            const max = Number.parseInt(process.env.MAX_TIER || '', 10);
+            if (!Number.isInteger(max)) { core.notice('approve: auto_approve_max_tier unreadable — not approving (fail closed)'); return; }
+            if (tier >= 3) { core.notice('approve: T3 is never auto-approved'); return; }
+            if (tier > max) { core.notice(`approve: risk:t${tier} exceeds auto_approve_max_tier=${max}`); return; }
+            // Dismiss THIS BOT's stale approvals from older heads (belt for
+            // dismiss_stale_reviews being off); never touch a human's review.
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {owner, repo, pull_number: pr.number, per_page: 100});
+            for (const r of reviews) {
+              if (r.user && r.user.login === 'github-actions[bot]' && r.state === 'APPROVED' && r.commit_id !== head) {
+                await github.rest.pulls.dismissReview({owner, repo, pull_number: pr.number, review_id: r.id,
+                  message: `stale auto-approval: head moved to ${head.slice(0, 7)}`});
+              }
+            }
+            // Verdicts: only from the claude bot, only for THIS head, latest wins.
+            const comments = await github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: pr.number, per_page: 100});
+            const verdictOf = kind => {
+              const re = new RegExp(`VERDICT\\(${kind}\\):\\s*(clean|findings)\\s*@\\s*${head}\\b`);
+              const hits = comments.filter(c => c.user && /^claude(\[bot\])?$/.test(c.user.login) && re.test(c.body || ''));
+              return hits.length ? re.exec(hits[hits.length - 1].body)[1] : null;
+            };
+            const review = verdictOf('review');
+            if (review !== 'clean') { core.notice(review === null ? `approve: no review verdict for ${head.slice(0, 7)} — not approving` : 'approve: review reported findings'); return; }
+            if (tier >= 2) {
+              const rt = verdictOf('red-team');
+              if (rt !== 'clean') { core.notice(rt === null ? `approve: no red-team verdict for ${head.slice(0, 7)} (required at T2) — not approving` : 'approve: red-team reported findings'); return; }
+            }
+            if (reviews.some(r => r.user && r.user.login === 'github-actions[bot]' && r.state === 'APPROVED' && r.commit_id === head)) {
+              core.notice('approve: already approved at this head'); return;
+            }
+            await github.rest.pulls.createReview({owner, repo, pull_number: pr.number, commit_id: head, event: 'APPROVE',
+              body: `🤖 Auto-approval (ruling 2026-08-31, docs/OPEN-QUESTIONS.md): risk:t${tier} <= auto_approve_max_tier=${max}; VERDICT(review): clean @ ${head.slice(0, 7)}${tier >= 2 ? '; VERDICT(red-team): clean' : ''}. CODEOWNERS paths still require the owner's review; the merge itself remains human (GOVERNANCE.md §1).`});
+            core.notice(`approve: auto-approved at ${head.slice(0, 7)}`);
