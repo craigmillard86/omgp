@@ -117,7 +117,7 @@ APPROVE_HARNESS = ROOT / "tests" / "workflows" / "agent_approve_harness.js"
                     reason="node not present (blind spot: workflow scripts not exercised in this environment)")
 def test_agent_approval_against_mocked_github(tmp_path):
     f = tmp_path / "scripts.json"
-    f.write_text(json.dumps({"approve": _script("claude-review.yml", "approve")}))
+    f.write_text(json.dumps({"approve": _script("agent-approve.yml", "approve")}))
     r = subprocess.run(["node", str(APPROVE_HARNESS), str(f), str(ROOT)], capture_output=True, text=True, cwd=ROOT, timeout=120)
     print(r.stdout)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -126,16 +126,26 @@ def test_agent_approval_against_mocked_github(tmp_path):
 
 
 def test_agent_approval_wiring():
-    """The safety properties live in the YAML: verdicts are produced per head, approval is a
-    separate minimal-permission job, and the knob is a T3 config value."""
+    """The safety properties live in the YAML. Hardened per the Copilot review on #103:
+    approval runs from the DEFAULT-BRANCH workflow definition (issue_comment trigger), so a
+    PR cannot rewrite the gate, the tier resolver, or the knob in its own diff — the
+    pull_request-triggered claude-review runs the PR's own workflow version and must
+    therefore never hold the approval logic."""
     review = yaml.safe_load((ROOT / ".github" / "workflows" / "claude-review.yml").read_text())
     on = review[True] if True in review else review["on"]
     assert "synchronize" in on["pull_request"]["types"]          # verdicts must exist for the CURRENT head
     prompt = next(s for s in review["jobs"]["review"]["steps"] if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
     assert "VERDICT(review):" in prompt and "head" in prompt
-    approve = review["jobs"]["approve"]
-    assert approve["needs"] == "review"
-    assert "pull_request" in approve["if"] and "head.repo.full_name == github.repository" in approve["if"]
+    assert "approve" not in review["jobs"]                       # never in the PR-controlled workflow
+    approve_wf = yaml.safe_load((ROOT / ".github" / "workflows" / "agent-approve.yml").read_text())
+    aon = approve_wf[True] if True in approve_wf else approve_wf["on"]
+    assert aon["issue_comment"]["types"] == ["created"]          # default-branch definition runs
+    approve = approve_wf["jobs"]["approve"]
+    assert "issue.pull_request" in approve["if"] and "VERDICT(" in approve["if"]
+    assert approve["permissions"] == {"contents": "read", "pull-requests": "write"}
+    steps = approve["steps"]
+    checkout = next(s for s in steps if "actions/checkout" in s.get("uses", ""))
+    assert "ref" not in checkout.get("with", {})                 # issue_comment checks out the DEFAULT branch
     redteam = yaml.safe_load((ROOT / ".github" / "workflows" / "red-team.yml").read_text())
     rt_prompt = next(s for s in redteam["jobs"]["attack-pr"]["steps"] if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
     assert "VERDICT(red-team):" in rt_prompt

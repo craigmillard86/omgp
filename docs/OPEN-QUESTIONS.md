@@ -481,8 +481,15 @@ at T2 (protocol-critical paths), named here with #94/#99/#100 as the evidence th
 findings-bearing PRs are NOT approvable under this gate (all three carried
 findings, so none would have auto-approved). Mechanics: claude-review reviews every
 agent PR per push (`synchronize`) and emits the verdict; a separate minimal-
-permission `approve` job approves as github-actions[bot] (distinct from the
-authoring claude[bot]); the bot dismisses its own stale approvals when the head
+permission workflow (`agent-approve.yml`) approves as github-actions[bot]
+(distinct from the authoring claude[bot]). Hardened per the Copilot review on
+#103 (2026-08-31): the approval workflow triggers on `issue_comment`, so the
+DEFAULT-BRANCH definition runs and its inputs (risk-tier resolver, the knob)
+come from the default branch — a same-repo PR cannot rewrite the gate in its
+own diff (pull_request-triggered workflows run the PR's version and never hold
+approval logic); verdicts are accepted only from claude[bot] exactly, and only
+as the final non-empty line of the comment (a quoted verdict token mid-comment
+never counts); the bot dismisses its own stale approvals when the head
 moves and never touches a human review; T3 is never auto-approved; CODEOWNERS
 paths still require the owner; the merge click remains human (GOVERNANCE §1).
 Kill switch: `auto_approve_max_tier: -1` or disable the workflow. Monthly review
