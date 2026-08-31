@@ -107,7 +107,14 @@ class Deframer:
     def __init__(self) -> None:
         self._state = "Hunting"  # Hunting | InFrame | Escaped
         self._buf = bytearray()
-        self.stats = {"delivered": 0, "BadCrc": 0, "BadLength": 0, "BadEscape": 0, "TooLong": 0}
+        self.stats = {
+            "delivered": 0,
+            "BadCrc": 0,
+            "BadLength": 0,
+            "BadEscape": 0,
+            "TooLong": 0,
+            "ReservedAddress": 0,
+        }
 
     def feed(self, byte: int) -> Frame | None:
         if byte == FLAG:
@@ -185,6 +192,13 @@ class Deframer:
         actual_crc = crc(body[: n - _CRC_LEN])
         if actual_crc != expected_crc:
             self.stats["BadCrc"] += 1
+            return None
+        # trunk §5: dst 0xFF is reserved and MUST NOT be used in v1; encode_frame refuses
+        # to originate it (FrameError "ReservedAddress"). A received frame addressed there
+        # can never be re-encoded, so it is discarded like any other structurally invalid
+        # frame (docs/OPEN-QUESTIONS.md 2026-08-31).
+        if dst == _RESERVED_DST:
+            self.stats["ReservedAddress"] += 1
             return None
         self.stats["delivered"] += 1
         return Frame(

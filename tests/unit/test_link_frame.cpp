@@ -336,6 +336,30 @@ TEST_CASE("a TooLong abort survives an escaped 71st byte (PR #99 regression)", "
     REQUIRE(delivered == 1);
 }
 
+TEST_CASE("Deframer discards a frame addressed to the reserved broadcast dst 0xFF", "[frame]") {
+    // trunk §5: dst 0xFF is reserved and MUST NOT be used in v1; encode_frame refuses to
+    // originate it (Status::ReservedAddress). A wire frame that arrives addressed there
+    // (bit corruption, or a future sender that ignores the rule) would otherwise be
+    // delivered as a FrameFields that encode_frame can never re-encode, breaking the
+    // codec's own round-trip invariant (caught live by fuzz_frame, docs/OPEN-QUESTIONS.md
+    // 2026-08-31) — discard it like any other structurally invalid frame instead.
+    // Hand-built body dst=0xFF src=0x00 ctrl=0x00 len=0x00 (no payload); CRC-16/CCITT-FALSE
+    // over dst..len computed independently (0xCF63), not via the codec under test.
+    const uint8_t bad[] = {0x7e, 0xff, 0x00, 0x00, 0x00, 0x63, 0xcf, 0x7e};
+    Deframer d;
+    FrameView view{};
+    int delivered = 0;
+    for (uint8_t b : bad)
+        if (d.feed(b, view))
+            ++delivered;
+    for (uint8_t b : kMarkerFull)
+        if (d.feed(b, view))
+            ++delivered;
+    REQUIRE(delivered == 1);
+    REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::ReservedAddress)] == 1);
+    REQUIRE(d.stats().delivered == 1);
+}
+
 TEST_CASE("back-to-back frames sharing one FLAG are both delivered in order", "[frame]") {
     std::vector<uint8_t> stream(kMarkerFull, kMarkerFull + sizeof(kMarkerFull) - 1);
     stream.insert(stream.end(), kMarkerBFull, kMarkerBFull + sizeof kMarkerBFull);

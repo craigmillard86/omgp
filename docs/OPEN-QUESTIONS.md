@@ -601,3 +601,47 @@ extended to `specs/` (agents are sanctioned to produce those artefacts; with thi
 fix, owned specs paths cannot auto-approve regardless of label — the label gap is
 accepted and revisitable).
 **Supersedes:** none (extends "Agent approval below T3", same date).
+
+---
+
+## 2026-08-31 — Deframer must discard, not deliver, a frame addressed to reserved dst 0xFF
+
+**Context:** CI run 33432903844 (PR #108, `ci-failure-router` auto-fix) failed
+`deep-verify`'s `fuzz_frame` target after only 13,618 runs: `fuzz: fuzz_frame ...
+findings=1 exit=77`, `ERROR: libFuzzer: deadly signal`. `tests/fuzz/fuzz_frame.cpp`
+asserts that any frame the `Deframer` delivers must re-encode via `encode_frame` to the
+same fields (round-trip stability) — a property neither the contract nor
+`docs/trunk-link-layer.md` states explicitly but that any frame codec needs to hold, and
+that the vectors/property tests never exercise because they deliberately exclude `dst ==
+0xFF` from every frame they generate (`tests/property/test_link_resync.cpp:34`,
+`test_link_stuffing.cpp:40`, `tools/refimpl/torture.py:53`). Root cause: `encode_frame`
+refuses `dst == 0xFF` (`Status::ReservedAddress`, trunk §5: "MUST NOT be used in v1"),
+but the `Deframer`'s `on_flag()` never checked the address — a wire frame carrying it
+(bit corruption, or a future sender ignoring the rule) was delivered as a `FrameFields`
+that `encode_frame` then refused, tripping the fuzz harness's own
+`__builtin_trap()`. Identical gap in the Python reference (`tools/refimpl/omgp_link.py`
+checked `_RESERVED_DST` only in `encode_frame`, not `_on_flag`), confirming the bug
+predates the C++ port (frame.cpp's own header comment: "Ported 1:1 from ...
+omgp_link.py"). Neither `docs/trunk-link-layer.md` §4's discard list (`BadCrc, BadLength,
+≥8 stuffing violations`) nor §5's reserved-address clause say what a *receiver* must do
+with an incoming `dst == 0xFF` frame — §5 only constrains transmission.
+**Recommendation:** treat receipt of `dst == 0xFF` the same as any other structurally
+invalid frame: discard it silently and count it, mirroring the encode-side refusal
+instead of contradicting it. Add `Discard::ReservedAddress` (new last entry before
+`COUNT`, preserving existing indices 0-3) to both `link/link_types.hpp` and
+`tools/refimpl/omgp_link.py`'s `stats` dict; `Deframer::on_flag`/`_on_flag` check `dst ==
+0xFF` immediately after the CRC check passes (so a corrupted-CRC frame that happens to
+decode to `dst == 0xFF` is still counted `BadCrc`, not `ReservedAddress`) and discard
+before incrementing `delivered`.
+**Ruling:** adopted as the safe default per CLAUDE.md ("implement nothing speculative …
+proceed only if a safe default exists"); this is the minimal change that restores the
+codec's round-trip invariant without touching `protocol/omgp-protocol.yaml`,
+`tests/vectors/`, or the trunk document itself (human-ruling artefacts, untouched).
+Implemented in `link/frame.cpp`, `link/link_types.hpp`,
+`tools/refimpl/omgp_link.py`, with new unit/pytest coverage
+(`tests/unit/test_link_frame.cpp`, `tests/unit/test_link_types.cpp`,
+`tools/refimpl/test_link.py`) written first and confirmed red before the fix. Pending a
+human second look: whether `docs/trunk-link-layer.md` §4's discard list should name this
+reason explicitly (a documentation edit only, no behaviour change) — left to a human as
+that document is a human-ruling artefact.
+**Supersedes:** none.

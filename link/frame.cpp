@@ -132,6 +132,14 @@ bool Deframer::on_flag(FrameView& out) {
         stats_.discarded[static_cast<size_t>(Discard::BadCrc)]++;
         return false;
     }
+    // trunk §5: dst 0xFF is reserved and MUST NOT be used in v1; encode_frame refuses to
+    // originate it (Status::ReservedAddress). A received frame addressed there can never
+    // be re-encoded, so it is discarded like any other structurally invalid frame rather
+    // than delivered as an unrepresentable FrameFields (docs/OPEN-QUESTIONS.md 2026-08-31).
+    if (dst == 0xFF) { // literal-ok: trunk §5 reserved broadcast address, not an L3 event code
+        stats_.discarded[static_cast<size_t>(Discard::ReservedAddress)]++;
+        return false;
+    }
     stats_.delivered++;
     out.f.dst = dst;
     out.f.src = src;
