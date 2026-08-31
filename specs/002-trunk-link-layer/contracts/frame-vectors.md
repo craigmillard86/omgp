@@ -28,7 +28,7 @@ frame dst=0x01 src=0x00 flags=0x00 seq=3 payload=0101000000
 | `frame_response` | dst 0x00, src 0x01, response=1, seq 5, payload = an L3 PING response | response bit, non-zero seq |
 | `frame_retry` | as `frame_ping_req` with retry=1, seq 15 | retry bit; seq at the 4-bit maximum |
 | `frame_max_payload` | 64-byte payload (0x00..0x3F) | `len` at the limit; 72 wire bytes with no stuffing |
-| `frame_worst_stuffing` | 64 × 0x7E payload, dst/src chosen so header and CRC also escape where possible | 142 wire bytes (SC-008) |
+| `frame_worst_stuffing` | 64 × 0x7E payload, dst = src = 0x7D so both header address bytes escape too | 139 wire bytes — the exhaustively verified maximum (SC-008, ruling 2026-08-31); `ctrl`/`len` can never escape, so `kMaxWire = 142` is a sizing bound, not a reachable length |
 
 ## `l3_helper` verbs (host-only, `tools/l3_helper.cpp`, `tools/canonical.cpp`)
 

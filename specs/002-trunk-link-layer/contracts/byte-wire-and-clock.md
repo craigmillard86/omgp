@@ -44,7 +44,8 @@ protected: ~ByteWire() = default;
   `T_turn`, `T_resp` and `T_gap` from it.
 - Received bytes carry their **start-bit** instant; the response window test is
   `first_byte.start_us < tx_end_us + TRUNK_T_resp_us` (exclusive).
-- Worst-case frame: 142 bytes → 1420 µs at the reference rate, 12 212 µs at the
+- Worst-case sizing bound (`kMaxWire`, not reachable by any legal frame — the true
+  maximum is 139 bytes, ruling 2026-08-31): 142 bytes → 1420 µs at the reference rate, 12 212 µs at the
   fallback rate.
 - A `set_bit_rate()` takes effect for the next `transmit()`; the mock and the simulator
   decide what a node "hears" at a given rate (contract `mock-wire.md`).

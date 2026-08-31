@@ -545,8 +545,16 @@ assert no bus fault.
   and never when a strict subset fails; the re-probe bit rate is the fallback symbol; the
   fault clears exactly once on recovery.
 - **SC-008**: Golden vectors exist for the empty, maximum and worst-case-stuffing frames;
-  the worst-case frame is exactly 142 bytes on the wire and its modelled transmission
-  time at the reference rate is 1.42 ms (§4's "≤ ~1.4 ms"; corrected during planning).
+  the worst-case-stuffing vector is exactly **139 bytes** on the wire and its modelled
+  transmission time at the reference rate is **1.39 ms** (within §4's "≤ ~1.4 ms").
+  139 is the exhaustively verified maximum over every legal frame with the vector's
+  64 × 0x7E payload (all 4 177 920 dst/src/flag/seq combinations, two independent
+  implementations agreeing — ruling 2026-08-31, docs/OPEN-QUESTIONS.md); 140 is the
+  structural ceiling for any payload, because trunk §4's layout makes `ctrl` (low
+  nibble ≤ 0x3) and `len` (≤ 0x40) incapable of requiring stuffing. `kMaxWire = 142`
+  (2 + 2 × (4 + 64 + 2)) remains the deliberately conservative buffer-sizing BOUND and
+  is unchanged — it is not a reachable wire length. (An earlier revision claimed
+  "exactly 142 bytes / 1.42 ms", conflating the bound with the achievable maximum.)
 - **SC-009**: Both builds are green with the new code (native with sanitizers, ESP32-S3
   firmware), the embedded-path scan finds zero forbidden constructs or restated literals
   in `link/`, the diff-scoped mutation run on this feature's pull request reports zero

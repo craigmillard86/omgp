@@ -518,3 +518,32 @@ reviews etc", this session): adopted as recommended. Assumed until the first run
 claude-opus-5 is available to the CLAUDE_CODE_OAUTH_TOKEN subscription — if a run
 fails on model access, the flag is the one-line revert.
 **Supersedes:** none.
+
+---
+
+## 2026-08-31 — SC-008's "exactly 142 bytes" worst-case frame is unreachable
+
+**Context:** dispatching #38 (T020, `frame_*` golden vectors), the agent proved the
+`frame_worst_stuffing` acceptance criterion unsatisfiable and escalated `needs-human`
+without landing anything: spec.md SC-008 demanded a 142-byte wire frame, but
+`docs/trunk-link-layer.md` §4's layout makes `ctrl` (low nibble ≤ 0x3: response, retry,
+seq only) and `len` (≤ 0x40) structurally incapable of requiring stuffing — so at most
+68 of the 70 unstuffed body bytes can escape, ceiling 140. Verified independently by
+execution: an exhaustive sweep of ALL 4,177,920 legal frames with the vector's defined
+64 × 0x7E payload (every dst 0x00–0xFE × src × response × retry × seq) gives a maximum
+of **139 bytes** (e.g. dst = src = 0x7D); the agent's own brute force found the same
+number. 142 = `kMaxWire`, the conservative buffer-sizing formula
+`2 + 2 × (4 + 64 + 2)` — a bound, conflated in SC-008 with an achievable length.
+**Options:** (a) correct SC-008 and the contract row to 139 (bound stays 142,
+untouched); (b) keep "142" reworded as the sizing bound only — leaves the vector's
+expected length unstated, the exact ambiguity that cost this dispatch cycle;
+(c) make `ctrl`'s reserved bits usable so 142 becomes reachable — a wire-protocol
+change in service of a test vector.
+**Recommendation:** (a).
+**Ruling:** human, 2026-08-31 ("do it", this session): option (a). spec.md SC-008
+rewritten (139 bytes / 1.39 ms, evidence and the bound-vs-maximum distinction stated);
+contracts/frame-vectors.md pins dst = src = 0x7D and the 139 target;
+contracts/byte-wire-and-clock.md's worked example relabelled as the sizing bound.
+Issue #38's acceptance criteria corrected to match and the story re-released; the
+`tests/vectors/` commit remains human-triggered (CLAUDE.md rule 9).
+**Supersedes:** none.
