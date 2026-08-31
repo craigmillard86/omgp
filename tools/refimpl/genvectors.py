@@ -20,6 +20,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from _gen import P  # noqa: E402
 import canonical as C  # noqa: E402
 import omgp_l3 as l3  # noqa: E402
+import omgp_link as link  # noqa: E402
 
 G = P()
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -94,6 +95,44 @@ STATUS = [
 ]
 
 
+def _ping_req_bytes() -> bytes:
+    return C.encode_message(l3.Header(G.OP_PING, 0x01, 0, 0, 0), None)
+
+
+def _ping_resp_bytes() -> bytes:
+    return C.encode_message(l3.Header(G.OP_PING, 0x01, 0, RESP, 0), None)
+
+
+# contracts/frame-vectors.md "frame_worst_stuffing": every 0x7E/0x7D byte in this 64-byte
+# payload is chosen so that, combined with dst=src=0x7D and the pinned ctrl/len, the CRC
+# also lands on 0x7D7E — every escapable byte in the frame escapes (SC-008, ruling
+# 2026-08-31: 140 wire bytes is the achieved structural ceiling).
+_WORST_STUFFING_PAYLOAD = bytes.fromhex(
+    "7E7E7E7D7D7E7E7D7E7E7E7D7E7E7E7E7D7D7E7D7E7E7E7D7D7D7D7E7E7E7E7D"
+    "7E7D7D7E7D7E7D7E7E7D7D7D7E7E7D7D7D7D7E7E7D7E7D7E7E7E7D7D7D7E7E7D"
+)
+
+# contracts/frame-vectors.md "Vectors" table (T020 agent-dispatchable slice, issue #38):
+# the five frame_* golden vectors, built from the T018 codec (omgp_link.py) and cross
+# checked against the T019 canonical renderer (canonical.py). Generation only — writing
+# these under tests/vectors/ is a separate, human-triggered commit (CLAUDE.md rule 9,
+# OPERATING-POLICY §2).
+FRAMES = [
+    ("frame_ping_req", "trunk §4 minimal frame; payload is the L3 PING request (msg_ping_req)",
+     link.Frame(dst=0x01, src=0x00, response=False, retry=False, seq=0, payload=_ping_req_bytes()), None),
+    ("frame_response", "trunk §4 response bit set, non-zero seq; payload is an L3 PING response",
+     link.Frame(dst=0x00, src=0x01, response=True, retry=False, seq=5, payload=_ping_resp_bytes()), None),
+    ("frame_retry", "trunk §4 retry bit set; seq at the 4-bit maximum",
+     link.Frame(dst=0x01, src=0x00, response=False, retry=True, seq=15, payload=_ping_req_bytes()), None),
+    ("frame_max_payload", "trunk §4 payload at LIMIT_max_l3_payload",
+     link.Frame(dst=0x01, src=0x00, response=False, retry=False, seq=0, payload=bytes(range(64))),
+     "72 wire bytes; CRC 0xE3F2 escapes neither byte (ruling 2026-08-31)"),
+    ("frame_worst_stuffing", "trunk §4 worst-case stuffing: dst, src, payload and CRC all escape",
+     link.Frame(dst=0x7D, src=0x7D, response=True, retry=True, seq=11, payload=_WORST_STUFFING_PAYLOAD),
+     "140 wire bytes, the structural ceiling, achieved (SC-008, ruling 2026-08-31)"),
+]
+
+
 def _fields(obj) -> dict:
     if obj is None:
         return {}
@@ -121,6 +160,16 @@ def build() -> list[dict]:
         out.append({"name": s["name"], "kind": "status", "spec_ref": s["spec_ref"],
                     "fields": _fields(s["obj"]), "canonical": C.status_to_canonical(s["obj"]),
                     "bytes": " ".join(f"{b:02X}" for b in raw)})
+    for name, spec_ref, f, note in FRAMES:
+        raw = link.encode_frame(f)
+        entry = {"name": name, "kind": "frame", "spec_ref": spec_ref,
+                 "fields": {"dst": f.dst, "src": f.src, "response": f.response, "retry": f.retry,
+                            "seq": f.seq, "payload": f.payload.hex()},
+                 "canonical": C.frame_to_canonical(f),
+                 "bytes": " ".join(f"{b:02X}" for b in raw)}
+        if note:
+            entry["note"] = note
+        out.append(entry)
     try:  # descriptor vectors arrive with US3 (omgp_descriptor.py)
         import descriptor_vectors  # type: ignore
         out.extend(descriptor_vectors.build())
