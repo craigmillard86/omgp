@@ -83,6 +83,31 @@ def test_ci_failure_router_wiring():
     assert "'ci-failure'" in triage["jobs"]["triage"]["if"] and "'nightly-failure'" in triage["jobs"]["triage"]["if"]
 
 
+# --- model tiers for agent workflows (ruling 2026-08-31) ---------------------------------------
+
+def _claude_steps(workflow):
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / workflow).read_text())
+    return [s for j in wf["jobs"].values() for s in j.get("steps", []) if "claude-code-action" in s.get("uses", "")]
+
+
+def test_model_tiers_judgement_loops_on_opus_volume_loops_on_default():
+    """Ruling 2026-08-31: the judgement-heavy loops (reviews that back approvals, red team,
+    story planning/enrichment, spec-drift audit, failure triage) run claude-opus-5; the
+    high-volume implementation loops (dispatch, router auto-fix, mentions) stay on the
+    action default (claude-sonnet-5) behind their mechanical gates."""
+    OPUS = ["claude-review.yml", "red-team.yml", "story-enrich.yml",
+            "agent-converge-audit.yml", "agent-triage.yml"]
+    DEFAULT = ["agent-dispatch.yml", "ci-failure-router.yml", "claude-mention.yml"]
+    for wfn in OPUS:
+        steps = _claude_steps(wfn)
+        assert steps, wfn
+        for s in steps:
+            assert "--model claude-opus-5" in s["with"].get("claude_args", ""), (wfn, s.get("name"))
+    for wfn in DEFAULT:
+        for s in _claude_steps(wfn):
+            assert "--model" not in s["with"].get("claude_args", ""), (wfn, s.get("name"))
+
+
 # --- agent PR approval below T3 (ruling 2026-08-31) --------------------------------------------
 
 APPROVE_HARNESS = ROOT / "tests" / "workflows" / "agent_approve_harness.js"

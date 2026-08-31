@@ -78,6 +78,7 @@ jobs:
             use `gh pr view <n> --json headRefOid`).
             Do not approve, request changes, or modify code.
           claude_args: |
+            --model claude-opus-5
             --allowedTools "Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Read,Grep,Glob"
 
   approve:

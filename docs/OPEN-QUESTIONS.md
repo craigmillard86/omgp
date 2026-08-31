@@ -489,3 +489,25 @@ Kill switch: `auto_approve_max_tier: -1` or disable the workflow. Monthly review
 (§6) tracks auto-approved PRs later found defective; sustained misses lower the
 tier.
 **Supersedes:** none.
+
+---
+
+## 2026-08-31 — Model tiers for agent workflows
+
+**Context:** every Claude CI workflow ran claude-code-action's default model
+(claude-sonnet-5, verified in run logs; no workflow set a model). With approvals now
+gated on review/red-team verdicts (ruling above), the quality of the judgement loops
+directly bounds what can merge with one human click.
+**Recommendation:** run the judgement-heavy, low-volume loops on claude-opus-5 —
+claude-review (backs approvals), red-team (both modes), story-enrich (planning:
+decomposition + tier prediction), agent-converge-audit (weekly spec drift),
+agent-triage (failure diagnosis) — and keep the high-volume implementation loops
+(agent-dispatch implement, ci-failure-router auto-fix, claude-mention) on the
+default: their output passes through the full mechanical gate stack plus the
+now-opus reviews, so extra model cost buys less there. Pinned per workflow by a
+wiring test so the split is a reviewable diff, not a drift.
+**Ruling:** human, 2026-08-31 ("lets use higher models on critical areas, planning,
+reviews etc", this session): adopted as recommended. Assumed until the first run:
+claude-opus-5 is available to the CLAUDE_CODE_OAUTH_TOKEN subscription — if a run
+fails on model access, the flag is the one-line revert.
+**Supersedes:** none.

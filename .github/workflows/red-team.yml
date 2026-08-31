@@ -100,6 +100,7 @@ jobs:
             is the full 40-char head commit:
             ${{ github.event.pull_request.head.sha }}.
           claude_args: |
+            --model claude-opus-5
             --allowedTools "Bash(./pipeline.sh*),Bash(g++*),Bash(python3*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Read,Write,Grep,Glob"
 
   attack-protocol:
@@ -145,4 +146,5 @@ jobs:
             excluded".
             Do not modify any repository file.
           claude_args: |
+            --model claude-opus-5
             --allowedTools "Bash(./pipeline.sh*),Bash(python3*),Bash(gh issue*),Read,Write,Grep,Glob"
