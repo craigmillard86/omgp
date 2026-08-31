@@ -111,3 +111,19 @@ def test_frame_worst_stuffing_is_exactly_140_wire_bytes():
     assert entry["fields"]["dst"] == entry["fields"]["src"] == 0x7D
     assert entry["fields"]["response"] is True and entry["fields"]["retry"] is True
     assert entry["fields"]["seq"] == 11
+
+
+def test_decode_frame_rejects_padding_and_extra_delimiters():
+    # Copilot review on PR #107: decode_frame must enforce "exactly one wire frame,
+    # both FLAGs included" — leading garbage (silently hunted past) and extra FLAG
+    # delimiters (empty frames, silently ignored) must be rejected, not tolerated.
+    entry = next(e for e in _frame_entries() if e["name"] == "frame_ping_req")
+    raw = bytes(int(b, 16) for b in entry["bytes"].split(" "))
+    assert link.decode_frame(raw)  # the clean vector itself decodes
+    import pytest as _pytest
+    for bad in (b"\x00\x01" + raw,          # leading garbage before the opening FLAG
+                raw + b"\x7e",              # trailing extra FLAG (empty frame)
+                b"\x7e" + raw,              # doubled opening FLAG
+                raw + b"\x00"):             # trailing junk after the closing FLAG
+        with _pytest.raises(link.FrameError):
+            link.decode_frame(bad)

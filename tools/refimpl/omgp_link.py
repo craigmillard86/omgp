@@ -205,6 +205,13 @@ def decode_frame(raw: bytes) -> Frame:
     multiple delivered frames, or any discard — raises, because a golden vector's
     ``bytes`` must be exactly one clean frame.
     """
+    # Strict delimiting first (Copilot review on PR #107): the deframer silently hunts
+    # past leading garbage and ignores empty frames from extra FLAGs, so a permissive
+    # feed would accept inputs weaker than the stated contract. A valid stuffed frame
+    # contains no interior FLAG, so "exactly one frame" means exactly two FLAG bytes,
+    # first and last.
+    if len(raw) < 2 or raw[0] != FLAG or raw[-1] != FLAG or raw.count(FLAG) != 2:
+        raise FrameError("BadVector", "input is not exactly one FLAG-delimited frame")
     d = Deframer()
     frames = d.feed_bytes(raw)
     discards = sum(v for k, v in d.stats.items() if k != "delivered")
