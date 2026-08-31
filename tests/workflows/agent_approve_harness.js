@@ -10,13 +10,14 @@ const S = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 
 const HEAD = 'a'.repeat(40);
 const OLD = 'b'.repeat(40);
-function world({labels = ['agent-authored'], comments = [], reviews = []} = {}) {
+function world({labels = ['agent-authored'], comments = [], reviews = [], files = null} = {}) {
   const log = [];
   const github = {
     paginate: async (fn, args) => fn(args).then(r => r.data),
     rest: {
       pulls: {
         get: async () => ({data: {number: 7, head: {sha: HEAD}, labels: (world._labels || labels).map(name => ({name}))}}),
+        listFiles: async () => ({data: (world._files || ['tools/refimpl/torture.py']).map(path => ({filename: path}))}),
         listReviews: async () => ({data: reviews}),
         dismissReview: async ({review_id}) => log.push(`dismiss#${review_id}`),
         createReview: async ({event, commit_id, body}) => log.push(`review ${event} @${commit_id.slice(0, 4)}: ${body.replace(/\n+/g, ' ').slice(0, 200)}`),
@@ -27,13 +28,15 @@ function world({labels = ['agent-authored'], comments = [], reviews = []} = {}) 
     },
   };
   world._labels = labels;
+  world._files = files;
   const core = {info: () => {}, notice: m => log.push(`notice: ${m}`), warning: m => log.push(`warning: ${m}`)};
   return {github, core, log};
 }
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-async function approve(w, {tier = 'risk:t1', max = '2', isPr = true, commenter = 'claude[bot]', commentBody = 'VERDICT(review): whatever'} = {}) {
+async function approve(w, {tier = 'risk:t1', max = '2', isPr = true, commenter = 'claude[bot]', commentBody = 'VERDICT(review): whatever', workspace = null} = {}) {
   process.env.TIER_LABEL = tier;
   process.env.MAX_TIER = max;
+  process.env.GITHUB_WORKSPACE = workspace || process.argv[3] || process.cwd();
   const issue = {number: 7, labels: []};
   if (isPr) issue.pull_request = {url: 'x'};
   const context = {
@@ -139,6 +142,31 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
   w = world({comments: [clean('review')]});
   await approve(w, {tier: 'risk:t1', commenter: 'mallory', commentBody: `VERDICT(review): clean @ ${HEAD}`});
   check('triggering comment not authored by claude[bot] -> script exits before any API write', !approved(w) && !w.log.some(l => l.startsWith('dismiss')));
+
+  // --- CODEOWNERS fail-closed (live finding 2026-08-31: a github-actions[bot] approval on
+  // PR #104 SATISFIED the require_code_owner_reviews branch protection — demonstrated, not
+  // theoretical. The gate must therefore never approve a PR touching an owned path.) ---
+  w = world({comments: [clean('review')], files: ['docs/OPEN-QUESTIONS.md', 'tools/x.py']});
+  await approve(w, {tier: 'risk:t0'});
+  check('a changed CODEOWNERS-listed file (exact pattern) -> not approved, file named', !approved(w) && w.log.some(l => /notice.*OPEN-QUESTIONS/.test(l)));
+  w = world({comments: [clean('review')], files: ['specs/002-trunk-link-layer/tasks.md']});
+  await approve(w, {tier: 'risk:t0'});
+  check('a ** CODEOWNERS pattern (specs/**/tasks.md) -> not approved', !approved(w));
+  w = world({comments: [clean('review')], files: ['.github/workflows/ci.yml']});
+  await approve(w, {tier: 'risk:t0'});
+  check('a directory CODEOWNERS pattern (/.github/) -> not approved', !approved(w));
+  w = world({comments: [clean('review')], files: ['pipeline.sh']});
+  await approve(w, {tier: 'risk:t1'});
+  check('a root-file CODEOWNERS pattern (/pipeline.sh) -> not approved', !approved(w));
+  w = world({comments: [clean('review')], files: ['link/frame.cpp', 'tools/refimpl/omgp_link.py', 'specs/002-trunk-link-layer/spec.md']});
+  await approve(w, {tier: 'risk:t2', max: '2'});
+  check('unowned paths only (link/, tools/refimpl/, specs spec.md) -> refused only by other gates, not this one; T2 without red-team verdict stays refused', !approved(w));
+  w = world({comments: [clean('review'), clean('red-team')], files: ['link/frame.cpp', 'tools/refimpl/omgp_link.py']});
+  await approve(w, {tier: 'risk:t2'});
+  check('unowned paths with both verdicts clean -> approved', approved(w));
+  w = world({comments: [clean('review')], files: ['tools/x.py']});
+  await approve(w, {tier: 'risk:t0', workspace: '/nonexistent-workspace'});
+  check('CODEOWNERS unreadable -> not approved (fail closed)', !approved(w) && w.log.some(l => /notice.*CODEOWNERS/.test(l)));
 
   for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
   console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);
