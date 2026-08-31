@@ -557,12 +557,20 @@ pin the same frame; the story is re-released; the `tests/vectors/` commit remain
 human-triggered (CLAUDE.md rule 9).
 Round three (review pass 3 on PR #104): the review correctly flagged that the
 ceiling sentences were scoped only to encode — a RECEIVED frame may carry reserved
-`ctrl` bits (spec Edge Cases) and an escaping `ctrl` counts 141 escapables naively —
+`ctrl` bits (spec Edge Cases) and an escaping `ctrl` makes 69 escapable bytes, a
+naive wire length of 141 —
 but its 141 receive-path ceiling overclaimed: CRC-16/CCITT-FALSE's generator has the
 factor x+1, so CRC parity follows message parity, constant across every
 all-escapable body; the four both-CRC-bytes-escaping values are even-weight while
-that class is odd. Demonstrated by execution over all dst/src/ctrl corner
-combinations (24k bodies, one parity class, zero hits): 141 is unreachable, 140 is
-the wire maximum on both paths. The four affected sentences are now scoped
-accordingly.
+that class is odd — for EVERY body in the class, by construction (review pass 4
+re-derived the same proof independently: G(1)=0 since 0x1021 has weight 4; the
+0xFFFF init flips 16 bits, preserving message parity; so codeword weight is even and
+CRC parity equals message parity, which is 403 mod 2 = odd for every 141-candidate
+body, while all four both-escape CRC values have popcount 12, even). The 24k-body
+corner-combination run corroborates (one parity class observed, zero hits) but is
+NOT the warrant — at ~1.46 expected unconstrained hits, zero hits would also occur
+~23% of the time if the claim were false. 141 (wire length; 69 escapable bytes) is
+unreachable; 140 is the wire maximum on both paths. The six affected sentences
+(four from round three, two more in research.md R-02 found by review pass 4) are
+now scoped accordingly.
 **Supersedes:** none.

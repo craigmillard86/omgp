@@ -34,14 +34,20 @@ from the tree on 2026-08-29; facts about the trunk protocol come from
   `kMaxWire = 2 + 2 * kMaxUnstuffed = 142`, both `constexpr` from the generated header;
   every frame buffer (encoder output, deframer accumulator, replay buffer, mock wire
   queues) is a fixed array of that size. The buffer-bound frame time at the reference
-  rate is 142 × 10 / 1 000 000 s = 1.42 ms; the worst ACHIEVABLE frame is 140 bytes /
-  1.40 ms — §4's "≤ ~1.4 ms" (ruling 2026-08-31, docs/OPEN-QUESTIONS.md: `ctrl` and
-  `len` can never require stuffing, so at most 68 of the 70 body bytes escape; this
-  plan's earlier "1.42 ms worst case" conflated the bound with the maximum).
+  rate is 142 × 10 / 1 000 000 s = 1.42 ms; the worst ACHIEVABLE frame — on encode AND
+  receive — is 140 bytes / 1.40 ms, §4's "≤ ~1.4 ms" (ruling 2026-08-31,
+  docs/OPEN-QUESTIONS.md: an encoder-emitted `ctrl`/`len` can never require stuffing,
+  giving 68 of 70 body bytes; a RECEIVED frame may carry an escaping `ctrl` — reserved
+  bits accepted, spec Edge Cases — for 69 escapables, but CRC parity bars both CRC
+  bytes escaping in that class, so 141 is unreachable; see SC-008. This plan's earlier
+  "1.42 ms worst case" conflated the bound with the maximum).
 - **Rationale**: the plan input asks for buffers "sized from limits.max_l3_payload plus
   worst-case stuffing"; the bound assumes every byte of dst..crc escaped — deliberately
-  conservative, since `ctrl` (low nibble ≤ 0x3) and `len` (≤ 0x40) structurally cannot
-  escape — which doubles 70 to 140, plus the two FLAGs.
+  conservative: an emitted `ctrl` (low nibble ≤ 0x3) and any `len` (≤ 0x40) cannot
+  escape, and even the received-frame case tops out at 140 (SC-008's parity argument) —
+  which doubles 70 to 140, plus the two FLAGs. The buffers R-02 sizes are receive-path
+  (deframer accumulator, replay buffer, mock-wire queues), so the receive-path ceiling
+  is the operative one; 142 covers it with two bytes of slack.
 - **Alternatives considered**: sizing to 70 + a stuffing allowance (e.g. +16) with a
   "too long" discard — rejects legal worst-case frames; a dynamic buffer — forbidden.
 
