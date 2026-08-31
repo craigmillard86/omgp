@@ -1,0 +1,15 @@
+{
+  "bytes": "7E 01 00 F2 05 01 01 00 00 00 CE 23 7E",
+  "canonical": "frame dst=0x01 src=0x00 flags=0x02 seq=15 payload=0101000000",
+  "fields": {
+    "dst": 1,
+    "payload": "0101000000",
+    "response": false,
+    "retry": true,
+    "seq": 15,
+    "src": 0
+  },
+  "kind": "frame",
+  "name": "frame_retry",
+  "spec_ref": "trunk \u00a74 retry bit set; seq at the 4-bit maximum"
+}

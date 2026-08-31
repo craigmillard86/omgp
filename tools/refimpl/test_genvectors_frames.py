@@ -41,10 +41,13 @@ def test_five_frame_vectors_are_generated():
 
 def test_no_file_written_under_tests_vectors(tmp_path):
     # build() must be pure: calling it does not touch the real tests/vectors/ directory.
+    # (Originally this also asserted the frame_* files did not exist yet; the
+    # human-triggered T020 vectors commit — rule 9 justification in its message —
+    # created them, so the purity property is what remains asserted.)
     before = sorted((GV.VECTORS).glob("frame_*.json")) if GV.VECTORS.exists() else []
     GV.build()
     after = sorted((GV.VECTORS).glob("frame_*.json")) if GV.VECTORS.exists() else []
-    assert before == after == []
+    assert before == after
 
 
 def test_entries_match_schema_contract():

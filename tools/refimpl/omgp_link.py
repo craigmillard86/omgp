@@ -195,3 +195,21 @@ class Deframer:
             seq=(ctrl >> 4) & 0x0F,
             payload=payload,
         )
+
+
+def decode_frame(raw: bytes) -> Frame:
+    """One-shot decode of exactly one well-formed wire frame (both FLAGs included).
+
+    The interface tools/refimpl/test_vectors.py anticipated for ``kind=frame`` golden
+    vectors (feature 001): a single frame in, its fields out. Anything else — zero or
+    multiple delivered frames, or any discard — raises, because a golden vector's
+    ``bytes`` must be exactly one clean frame.
+    """
+    d = Deframer()
+    frames = d.feed_bytes(raw)
+    discards = sum(v for k, v in d.stats.items() if k != "delivered")
+    if len(frames) != 1 or discards:
+        raise FrameError(
+            "BadVector", f"expected exactly one clean frame, got {len(frames)} with {discards} discard(s)"
+        )
+    return frames[0]

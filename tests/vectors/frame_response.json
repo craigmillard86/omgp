@@ -1,0 +1,15 @@
+{
+  "bytes": "7E 00 01 51 05 01 01 00 01 00 82 A1 7E",
+  "canonical": "frame dst=0x00 src=0x01 flags=0x01 seq=5 payload=0101000100",
+  "fields": {
+    "dst": 0,
+    "payload": "0101000100",
+    "response": true,
+    "retry": false,
+    "seq": 5,
+    "src": 1
+  },
+  "kind": "frame",
+  "name": "frame_response",
+  "spec_ref": "trunk \u00a74 response bit set, non-zero seq; payload is an L3 PING response"
+}
