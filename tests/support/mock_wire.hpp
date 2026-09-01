@@ -11,6 +11,7 @@
 
 #include "fake_clock.hpp"
 #include "link/byte_wire.hpp"
+#include "link/frame.hpp"
 #include "link/link_types.hpp"
 #include "omgp_protocol.h"
 
@@ -107,6 +108,20 @@ class MockWire : public omgp::link::ByteWire {
 
     FakeClock& clock_;
     uint32_t bit_rate_ = omgp::TRUNK_bit_rate;
+
+    // Persists across transmit() calls (byte-at-a-time parser state), not a per-call
+    // local: a frame split across two transmit() calls must still be recognised. A local
+    // Deframer would silently drop it (no transcript entry, no scheduled response, no
+    // diagnostic) since its Hunting/InFrame/Escaped state would reset every call.
+    omgp::link::Deframer parser_;
+
+    // Set instead of REQUIRE-ing at the point of failure: transmit() runs on the call
+    // stack of the engine under test (Master/Responder, T028/T031), which link/CMakeLists.txt
+    // builds with -fno-exceptions — a REQUIRE thrown there would unwind through those
+    // frames, which is not defined behaviour, losing the diagnostic exactly when it fires.
+    // Drained by a REQUIRE in advance_to(), which only ever runs on the test's own call
+    // stack (tests/support and test TUs build with exceptions enabled).
+    const char* fault_ = nullptr;
 
     const Step* scripts_[omgp::link::kAddrCount] = {};
     size_t script_len_[omgp::link::kAddrCount] = {};

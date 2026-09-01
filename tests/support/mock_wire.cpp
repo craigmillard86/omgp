@@ -11,6 +11,13 @@
 namespace omgp_test {
 
 uint32_t xorshift32_next(uint32_t& state) {
+    // xorshift32 has a fixed point at state == 0 (every subsequent call returns 0). A
+    // Step left with the default seed == 0 (every step authored so far) would otherwise
+    // yield a constant all-zero stream once Garbage/Babble (T030) start consuming this —
+    // deterministic, but degenerate, and seed != 0 is also given a separate meaning for
+    // Kind::Rate (contracts/mock-wire.md). Re-seed to a fixed nonzero constant instead.
+    if (state == 0)
+        state = 0x9E3779B9u;
     state ^= state << 13;
     state ^= state >> 17;
     state ^= state << 5;
@@ -57,7 +64,15 @@ const Step* MockWire::next_step(uint8_t node) {
 }
 
 void MockWire::enqueue(uint8_t byte, uint64_t start_us) {
-    REQUIRE(rx_count_ < kRxCapacity); // contracts/mock-wire.md "Capacity": never a silent drop
+    // contracts/mock-wire.md "Capacity": never a SILENT drop — but this runs on the
+    // engine-under-test's call stack (transmit() -> schedule_respond()), so the failure
+    // is recorded and REQUIRE'd later, at the test's own advance_to() call, rather than
+    // thrown here (see fault_'s declaration in mock_wire.hpp).
+    if (rx_count_ >= kRxCapacity) {
+        if (fault_ == nullptr)
+            fault_ = "MockWire: RX queue capacity exceeded (4 * kMaxWire)";
+        return;
+    }
     // Insertion-sort by start_us (stable: only strictly-later entries shift right) so
     // receive() can always take index 0 in start-instant order, per byte-wire-and-clock.md,
     // even when a later transmit() schedules an earlier-firing response (e.g. a short
@@ -72,7 +87,13 @@ void MockWire::enqueue(uint8_t byte, uint64_t start_us) {
 }
 
 void MockWire::record_transcript(const omgp::link::FrameFields& f, uint64_t tx_start_us) {
-    REQUIRE(transcript_count_ < kTranscriptCapacity);
+    // Same deferred-fault reasoning as enqueue(): this runs on transmit()'s (engine) call
+    // stack, so a capacity overrun is recorded, not thrown, here.
+    if (transcript_count_ >= kTranscriptCapacity) {
+        if (fault_ == nullptr)
+            fault_ = "MockWire: transcript capacity exceeded (kTranscriptCapacity)";
+        return;
+    }
     TxRecord& rec = transcript_[transcript_count_++];
     rec.dst = f.dst;
     rec.src = f.src;
@@ -109,10 +130,17 @@ void MockWire::schedule_respond(const omgp::link::FrameFields& request, uint64_t
     size_t written = 0;
     // response.dst == request.src. A well-formed request from a real Master/Responder
     // never carries src == 0xFF (trunk addresses are 0x00..0x0F, kAddrCount), so
-    // encode_frame is not expected to refuse this response; REQUIRE turns a script/engine
-    // bug that violates that into a loud failure instead of a silent, Silence-indistinguishable
-    // no-response (contracts/mock-wire.md "Capacity": dropped bytes are never silent here either).
-    REQUIRE(encode_frame(response, buf, sizeof buf, written) == Status::Ok);
+    // encode_frame is not expected to refuse this response. This still runs on
+    // transmit()'s (engine) call stack though, so a refusal is recorded via fault_
+    // rather than REQUIRE'd here — see fault_'s declaration in mock_wire.hpp — turning a
+    // script/engine bug that violates the assumption into a loud failure (at the next
+    // advance_to()) instead of a silent, Silence-indistinguishable no-response
+    // (contracts/mock-wire.md "Capacity": dropped bytes are never silent here either).
+    if (encode_frame(response, buf, sizeof buf, written) != Status::Ok) {
+        if (fault_ == nullptr)
+            fault_ = "MockWire: encode_frame refused a Respond answer (response.dst == 0xFF?)";
+        return;
+    }
 
     const uint64_t t0 = tx_end + delay_us;
     for (size_t i = 0; i < written; ++i)
@@ -121,23 +149,31 @@ void MockWire::schedule_respond(const omgp::link::FrameFields& request, uint64_t
 
 uint64_t MockWire::transmit(const uint8_t* bytes, size_t n, uint64_t now_us) {
     using omgp::link::byte_time_us;
-    using omgp::link::Deframer;
     using omgp::link::FrameView;
 
     const uint64_t tx_end = now_us + static_cast<uint64_t>(n) * byte_time_us(bit_rate_);
 
-    Deframer parser;
     FrameView view{};
+    // Byte offset (within this call) of the frame currently being accumulated; advances
+    // to just past each decoded frame's closing FLAG, so a second frame in the same call
+    // gets its own tx_start/tx_end instants instead of inheriting the whole burst's.
+    size_t frame_start_idx = 0;
     // Act on each decoded frame immediately, inside the feed loop: view.f.payload points
-    // into the Deframer's own accumulator and is valid only until the next feed() call
+    // into parser_'s own accumulator and is valid only until the next feed() call
     // (link/frame.hpp), so deferring to after the loop would read a payload already
     // overwritten (or, for a call carrying several concatenated frames, would silently
     // drop every frame but the last — no transcript entry, no scheduled response).
     for (size_t i = 0; i < n; ++i) {
-        if (!parser.feed(bytes[i], view))
+        if (!parser_.feed(bytes[i], view))
             continue;
 
-        record_transcript(view.f, now_us);
+        const uint64_t frame_tx_start =
+            now_us + static_cast<uint64_t>(frame_start_idx) * byte_time_us(bit_rate_);
+        const uint64_t frame_tx_end =
+            now_us + static_cast<uint64_t>(i + 1) * byte_time_us(bit_rate_);
+        frame_start_idx = i + 1;
+
+        record_transcript(view.f, frame_tx_start);
 
         // contracts/mock-wire.md scopes every Kind to "the next request addressed to
         // node"; a response frame transmitted by the engine under test (Responder, from
@@ -151,7 +187,7 @@ uint64_t MockWire::transmit(const uint8_t* bytes, size_t n, uint64_t now_us) {
 
         switch (kind) {
         case Kind::Respond:
-            schedule_respond(view.f, tx_end, delay_us);
+            schedule_respond(view.f, frame_tx_end, delay_us);
             break;
         case Kind::Silence:
             break;
@@ -160,7 +196,15 @@ uint64_t MockWire::transmit(const uint8_t* bytes, size_t n, uint64_t now_us) {
         case Kind::Duplicate:
         case Kind::Babble:
         case Kind::Rate:
-            break; // T030 (tasks.md): not implemented by this skeleton
+            // T030 (tasks.md): not implemented by this skeleton. Recorded via fault_
+            // (not REQUIRE'd here — this runs on the engine-under-test's call stack, see
+            // fault_'s declaration) rather than silently behaving as Silence: a T028/T029
+            // script that schedules one of these would otherwise go green while asserting
+            // nothing about the behaviour it names.
+            if (fault_ == nullptr)
+                fault_ = "MockWire: Kind::Garbage/CrcError/Duplicate/Babble/Rate not "
+                         "implemented until T030";
+            break;
         }
     }
 
@@ -192,6 +236,15 @@ void MockWire::set_bit_rate(uint32_t bps) {
 }
 
 void MockWire::advance_to(uint64_t t) {
+    // Drains a fault recorded by transmit()'s call stack (see fault_'s declaration in
+    // mock_wire.hpp) — this call, unlike transmit(), always runs on the test's own stack,
+    // so REQUIRE-ing here is safe.
+    INFO((fault_ != nullptr ? fault_ : ""));
+    REQUIRE(fault_ == nullptr);
+    // byte-wire-and-clock.md: the clock is monotonic and never goes backwards; setting it
+    // earlier than its current instant would also silently make already-due RX bytes
+    // future again (receive() gates on start_us <= now_us()).
+    REQUIRE(t >= clock_.now_us());
     clock_.set(t);
 }
 
