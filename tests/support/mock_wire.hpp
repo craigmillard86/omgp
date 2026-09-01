@@ -28,9 +28,21 @@ enum class Kind : uint8_t { Respond, Silence, Garbage, CrcError, Duplicate, Babb
 struct Step {
     uint8_t node;
     Kind kind;
-    uint32_t delay_us;
-    uint16_t count;
-    uint32_t seed;
+    // Default member initializer, not zero: contracts/mock-wire.md's "an exhausted or
+    // unset script behaves as Respond with delay_us == TRUNK_T_turn_min_us" is otherwise
+    // unreachable for any *authored* step — Step{.node = n, .kind = Kind::Respond} would
+    // silently mean a 0us turnaround, a physically impossible response no conformant node
+    // can produce (docs/trunk-link-layer.md §3/§9: T_turn = 20-100us). An explicit 0
+    // stays available for deliberately-early-response tests.
+    uint32_t delay_us = omgp::TRUNK_T_turn_min_us;
+    // Defaulted (not just left to designated-init's implicit zero-init) so that
+    // Step{.node = n, .kind = Kind::Respond} — the pattern the delay_us default above
+    // exists to make legal — actually compiles: -Wmissing-field-initializers (part of
+    // -Wextra, and this project builds -Werror) flags a trailing designated-init member
+    // with no default member initializer even though its zero-initialized value is the
+    // same either way. Only Garbage/Babble/Rate (T030) read count/seed at all.
+    uint16_t count = 0;
+    uint32_t seed = 0;
 };
 
 // research R-07: all script-driven randomness (Garbage/Babble byte content, T030) goes
@@ -44,6 +56,10 @@ uint32_t xorshift32_next(uint32_t& state);
 class MockWire : public omgp::link::ByteWire {
   public:
     explicit MockWire(FakeClock& clock);
+    // Drains any fault_ raised since the last check (see fault_'s declaration): a fault
+    // recorded by the final transmit()/receive() of a test, with no subsequent
+    // advance_to() to REQUIRE it, would otherwise never fail the test case.
+    ~MockWire();
 
     // Configure the step script consumed, in order, for one node's requests
     // (0x00..0x0F, per omgp::link::kAddrCount) — or, for node == 0xFF, the shared

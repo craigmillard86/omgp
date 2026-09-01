@@ -26,6 +26,16 @@ uint32_t xorshift32_next(uint32_t& state) {
 
 MockWire::MockWire(FakeClock& clock) : clock_(clock) {}
 
+MockWire::~MockWire() {
+    // Non-throwing (CHECK, not REQUIRE): a destructor is the last chance to catch a fault
+    // recorded by a transmit()/receive() that ran after the test's final advance_to() —
+    // transcript_size()/transcript() only see faults raised before they're called, and
+    // nothing else drains fault_ once the test stops calling advance_to(). Throwing here
+    // would risk std::terminate if already unwinding, so this reports rather than aborts.
+    INFO((fault_ != nullptr ? fault_ : ""));
+    CHECK(fault_ == nullptr);
+}
+
 void MockWire::set_script(uint8_t node, const Step* steps, size_t count) {
     // Step::node documents which node a step was authored for; require it to agree with
     // the array's registered node so a mismatch (e.g. a Step{.node = 5, ...} registered
@@ -181,6 +191,20 @@ uint64_t MockWire::transmit(const uint8_t* bytes, size_t n, uint64_t now_us) {
         if (view.f.response)
             continue;
 
+        // docs/trunk-link-layer.md §5: only 0x00..0x0F (kAddrCount) are node addresses.
+        // encode_frame/Deframer reject only dst == 0xFF, so a request mis-addressed to
+        // 0x10..0xFE would otherwise still resolve via next_step()'s default-Respond
+        // fallback (next_step only checks node < kAddrCount to *look up* a script, not
+        // whether the address is real) and get answered as if that node existed — hiding
+        // exactly the mis-addressing bug the mock exists to expose. Silence is the
+        // faithful wire behaviour (no such node to answer); also surfaced via fault_ so a
+        // test can't pass by relying on it.
+        if (view.f.dst >= omgp::link::kAddrCount) {
+            if (fault_ == nullptr)
+                fault_ = "MockWire: request addressed to dst >= kAddrCount (not a node)";
+            continue;
+        }
+
         const Step* step = next_step(view.f.dst);
         const Kind kind = step != nullptr ? step->kind : Kind::Respond;
         const uint32_t delay_us = step != nullptr ? step->delay_us : omgp::TRUNK_T_turn_min_us;
@@ -249,10 +273,18 @@ void MockWire::advance_to(uint64_t t) {
 }
 
 size_t MockWire::transcript_size() const {
+    // Drains fault_ here too, not just in advance_to(): this and transcript() are the
+    // conclusion-drawing surfaces a test actually asserts through, so a fault raised by
+    // the last transmit() of a test (with no advance_to() afterward) must still fail the
+    // test case here rather than passing silently (see fault_'s declaration).
+    INFO((fault_ != nullptr ? fault_ : ""));
+    REQUIRE(fault_ == nullptr);
     return transcript_count_;
 }
 
 const MockWire::TxRecord& MockWire::transcript(size_t i) const {
+    INFO((fault_ != nullptr ? fault_ : ""));
+    REQUIRE(fault_ == nullptr);
     REQUIRE(i < transcript_count_);
     return transcript_[i];
 }
