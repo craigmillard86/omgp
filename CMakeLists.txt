@@ -31,9 +31,11 @@ target_compile_options(catch2_amalgamated PRIVATE -Wno-error) # third-party warn
 
 # tests/support: linked into every Catch2 test, never a test itself. OBJECT library so the
 # listener's static registrar and the --wrap symbols are always pulled into the link.
-add_library(omgp_test_support OBJECT tests/support/catch_listener.cpp tests/support/heap_guard.cpp)
+# mock_wire.cpp needs omgp_link (Deframer/encode_frame/link_types) — T010.
+add_library(omgp_test_support OBJECT tests/support/catch_listener.cpp tests/support/heap_guard.cpp
+                                      tests/support/mock_wire.cpp)
 target_include_directories(omgp_test_support PUBLIC tests/support)
-target_link_libraries(omgp_test_support PUBLIC catch2_amalgamated)
+target_link_libraries(omgp_test_support PUBLIC catch2_amalgamated omgp_link)
 
 # Counting heap guard (tests/support/heap_guard.hpp): wrap the allocators our objects call.
 set(OMGP_WRAP_LDFLAGS -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc
