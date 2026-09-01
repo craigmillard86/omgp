@@ -147,6 +147,11 @@ def test_agent_approval_wiring():
     checkout = next(s for s in steps if "actions/checkout" in s.get("uses", ""))
     assert "ref" not in checkout.get("with", {})                 # issue_comment checks out the DEFAULT branch
     redteam = yaml.safe_load((ROOT / ".github" / "workflows" / "red-team.yml").read_text())
+    rt_on = redteam[True] if True in redteam else redteam["on"]
+    # At T2 approval needs a red-team verdict for the CURRENT head, so red-team must re-run
+    # per push exactly as claude-review does (live gap: no red-team run existed for #108's
+    # auto-fixed head 58e4e91, 2026-08-31).
+    assert "synchronize" in rt_on["pull_request"]["types"]
     rt_prompt = next(s for s in redteam["jobs"]["attack-pr"]["steps"] if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
     assert "VERDICT(red-team):" in rt_prompt
     cfg = (ROOT / ".github" / "agent-config.yml").read_text()
@@ -162,7 +167,11 @@ def test_bot_triggered_agent_workflows_allow_their_bot_actors():
     must declare that bot in allowed_bots."""
     for workflow, bot in [("agent-dispatch.yml", "github-actions"),   # repository_dispatch: backlog-changed (ready-gate, GITHUB_TOKEN)
                           ("agent-triage.yml", "github-actions"),     # issues.labeled by nightly/ci-failure-router
-                          ("ci-failure-router.yml", "github-actions")]:  # workflow_run caused by bot pushes/dispatches
+                          ("ci-failure-router.yml", "github-actions"),  # workflow_run caused by bot pushes/dispatches
+                          ("claude-review.yml", "claude"),            # agent PRs are opened by the Claude App
+                          ("claude-review.yml", "github-actions"),    # synchronize from a router auto-fix push runs as github-actions (live: run 33435939888 on #108)
+                          ("red-team.yml", "claude"),
+                          ("red-team.yml", "github-actions")]:        # same synchronize path once red-team gains it; opened-by-bot today
         wf = yaml.safe_load((ROOT / ".github" / "workflows" / workflow).read_text())
         actions = [s for j in wf["jobs"].values() for s in j.get("steps", []) if "claude-code-action" in s.get("uses", "")]
         assert actions, workflow

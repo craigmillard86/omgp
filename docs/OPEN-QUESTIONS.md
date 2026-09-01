@@ -645,3 +645,36 @@ human second look: whether `docs/trunk-link-layer.md` §4's discard list should 
 reason explicitly (a documentation edit only, no behaviour change) — left to a human as
 that document is a human-ruling artefact.
 **Supersedes:** none.
+
+---
+
+## 2026-08-31 — workflow_run events are not delivered for auto-fix pushes: the router cannot see its own attempt's failure
+
+**Context:** PR #108's auto-fix (attempt 1) pushed commit 58e4e91; the resulting `ci`
+run failed deep-verify (9 unlabelled mutation survivors) at ~21:10 — and NO
+`ci-failure-router` run was created for it, so attempt 2 never fired and the PR
+stalled red at `auto-fix-1`. The only router run near that time was for an unrelated
+`main` event. Root-cause hypothesis (consistent with every observation): the auto-fix
+agent pushed using the checkout's persisted `GITHUB_TOKEN` credentials — the same
+mechanism that made the push's `synchronize` actor `github-actions` (the bug PR #109
+patches around in allowed_bots) — and GitHub suppresses `workflow_run` chaining off
+runs originating from such pushes. Net effect: the router's core loop (fix → push →
+re-run CI → route the result) silently loses exactly the failures it exists to route.
+A manual `gh run rerun <ci-run> --failed` was tried as remediation and DID NOT work:
+the rerun completed (failure, 21:32) and produced no router run either — re-runs are a
+second suppressed delivery path (demonstrated, not hypothesized). With no
+workflow_dispatch trigger on the router, attempt 2 currently cannot fire by any
+existing mechanism.
+**Options:** (a) `persist-credentials: false` on the router autofix job's checkout, so
+the agent's `git push` uses the claude App token — fixing the actor at the source
+(synchronize events then run as claude[bot], already in allowed_bots) AND restoring
+workflow_run chaining; (b) a scheduled router sweep (e.g. 2-hourly) that scans open
+agent PRs for a failing required check with no fresh attempt marker and routes them —
+a delivery backstop independent of event semantics; (c) both — (a) as the fix, (b) as
+the belt, mirroring the dispatcher's own nudge+cron pattern.
+**Recommendation:** (c). (a) alone leaves any future event-suppression variant
+undetected; (b) alone leaves the first ~2 hours dark. After the rerun evidence, (b)'s
+sweep is not a belt but the only delivery path that does not depend on
+`workflow_run` semantics at all.
+**Ruling:** pending — human.
+**Supersedes:** none (extends the PR #109 findings; same date).

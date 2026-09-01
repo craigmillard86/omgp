@@ -12,7 +12,10 @@ name: red-team
 # events caused by GITHUB_TOKEN (found 2026-08-29 — PR mode had never run).
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
+    # synchronize since 2026-08-31: at T2 the approval gate needs a red-team verdict for
+    # the CURRENT head, so the attack pass re-runs per push exactly as claude-review does
+    # (live gap: no red-team run existed for #108's auto-fixed head).
+    types: [opened, reopened, ready_for_review, synchronize]
   schedule:
     - cron: '0 5 1 * *'      # monthly protocol red-team
   workflow_dispatch:
@@ -62,7 +65,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_bots: claude   # same as claude-review: agent PRs are opened by the Claude App bot
+          allowed_bots: claude,github-actions   # claude: agent PRs are opened by the Claude App. github-actions: router auto-fix pushes arrive as synchronize events with that actor (same class as claude-review run 33435939888)
           prompt: |
             You are the red team. Your stance: PR
             #${{ github.event.pull_request.number }} is WRONG and your job
@@ -121,6 +124,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: claude,github-actions   # schedule/dispatch actors are usually human; named for parity with attack-pr (regression test covers every step)
           prompt: |
             You are the protocol red team for an OPEN hardware platform:
             assume module firmware is written by adversaries. Read

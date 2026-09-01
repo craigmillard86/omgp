@@ -47,7 +47,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_bots: claude   # PRs opened by the Claude GitHub App (agent-dispatch) are bot-initiated; the action refuses bots unless named (found on #76, 2026-08-29)
+          allowed_bots: claude,github-actions   # claude: agent PRs are opened by the Claude App (found on #76). github-actions: a ci-failure-router auto-fix push arrives as a synchronize event with that actor (live: run 33435939888 on #108, 2026-08-31)
           prompt: |
             Review PR #${{ github.event.pull_request.number || inputs.pr }} (risk
             ${{ steps.tier.outputs.label }}). Read CLAUDE.md and
