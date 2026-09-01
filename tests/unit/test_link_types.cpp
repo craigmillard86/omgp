@@ -58,13 +58,14 @@ TEST_CASE("HealthState uses the trunk document's own four words", "[link]") {
     STATIC_REQUIRE(static_cast<int>(HealthState::OFFLINE) == 3);
 }
 
-TEST_CASE("Discard has exactly the four documented reasons, in data-model order", "[link]") {
+TEST_CASE("Discard has exactly the five documented reasons, in data-model order", "[link]") {
     using omgp::link::Discard;
-    STATIC_REQUIRE(static_cast<size_t>(Discard::COUNT) == 4);
+    STATIC_REQUIRE(static_cast<size_t>(Discard::COUNT) == 5);
     STATIC_REQUIRE(static_cast<int>(Discard::BadCrc) == 0);
     STATIC_REQUIRE(static_cast<int>(Discard::BadLength) == 1);
     STATIC_REQUIRE(static_cast<int>(Discard::BadEscape) == 2);
     STATIC_REQUIRE(static_cast<int>(Discard::TooLong) == 3);
+    STATIC_REQUIRE(static_cast<int>(Discard::ReservedAddress) == 4);
 }
 
 TEST_CASE("DeframerStats.discarded is sized to Discard::COUNT and zero-initializes", "[link]") {

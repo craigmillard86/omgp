@@ -71,7 +71,7 @@ struct FrameView {
 
 // Deframer discard reasons (data-model.md §3); counted, never returned to a caller —
 // a discard is silent per trunk §4.
-enum class Discard : uint8_t { BadCrc, BadLength, BadEscape, TooLong, COUNT };
+enum class Discard : uint8_t { BadCrc, BadLength, BadEscape, TooLong, ReservedAddress, COUNT };
 
 struct DeframerStats {
     uint32_t delivered;

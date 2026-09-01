@@ -40,7 +40,9 @@ wire         = FLAG stuff(unstuffed) FLAG
   `ReservedAddress`; caller buffer `< needed` → `BufferTooSmall` (nothing written).
 - **Validation on decode** (discard reasons, counted, never reported per frame): `BadCrc`,
   `BadLength` (accumulated < 6, or `len ≠ accumulated − 6`, or > 70 unstuffed), `BadEscape`
-  (escape followed by anything but 0x5E/0x5D; also escape immediately before FLAG).
+  (escape followed by anything but 0x5E/0x5D; also escape immediately before FLAG),
+  `ReservedAddress` (`dst == 0xFF`; a delivered frame there could never be re-encoded, since
+  encode refuses that address — ruling 2026-08-31, docs/OPEN-QUESTIONS.md).
 - **FrameView** (decoded): fields + `const uint8_t* payload` into the deframer's
   accumulator, valid until the next byte is fed.
 
@@ -184,6 +186,6 @@ Schema amendment (feature-001 contract): `kind: "frame"`, `name: frame_*`, `fiel
 ## 13. Status vocabulary (`omgp::link::Status`, separate from `omgp::l3::Status`)
 
 `Ok, PayloadTooLong, ReservedAddress, BufferTooSmall, Busy` (engine already has a
-transaction), `NotIdle`; deframer discard reasons `BadCrc, BadLength, BadEscape, TooLong`
-are counters, not return values (a discard is silent by §4). `status_name()` mirrors the
-L3 helper for tools and tests.
+transaction), `NotIdle`; deframer discard reasons `BadCrc, BadLength, BadEscape, TooLong,
+ReservedAddress` are counters, not return values (a discard is silent by §4).
+`status_name()` mirrors the L3 helper for tools and tests.
