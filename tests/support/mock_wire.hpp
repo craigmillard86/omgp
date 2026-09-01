@@ -113,10 +113,17 @@ class MockWire : public omgp::link::ByteWire {
     size_t script_pos_[omgp::link::kAddrCount] = {};
     const Step* wildcard_script_ = nullptr;
     size_t wildcard_len_ = 0;
-    size_t wildcard_pos_ = 0;
+    // One cursor per node (not one shared cursor): contracts/mock-wire.md "Steps with
+    // node == 0xFF apply to every node" means each node draws its own sequence of
+    // fallback effects, not that the rig-wide first taker exhausts it for everyone else.
+    size_t wildcard_pos_[omgp::link::kAddrCount] = {};
 
+    // Sorted by start_us (ascending), not a FIFO: byte-wire-and-clock.md requires
+    // receive() to release the earliest-start-instant byte first, and interleaved delays
+    // (a late Respond queued behind an on-time one from a different node) make insertion
+    // order and start-instant order diverge. enqueue() insertion-sorts; receive() always
+    // takes rx_queue_[0].
     QueuedByte rx_queue_[kRxCapacity] = {};
-    size_t rx_head_ = 0;
     size_t rx_count_ = 0;
 
     TxRecord transcript_[kTranscriptCapacity] = {};

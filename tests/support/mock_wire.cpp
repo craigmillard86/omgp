@@ -20,10 +20,17 @@ uint32_t xorshift32_next(uint32_t& state) {
 MockWire::MockWire(FakeClock& clock) : clock_(clock) {}
 
 void MockWire::set_script(uint8_t node, const Step* steps, size_t count) {
+    // Step::node documents which node a step was authored for; require it to agree with
+    // the array's registered node so a mismatch (e.g. a Step{.node = 5, ...} registered
+    // via set_script(3, ...)) fails loudly here instead of the step being silently
+    // unreachable with no compiler or runtime diagnostic.
+    for (size_t i = 0; i < count; ++i)
+        REQUIRE(steps[i].node == node);
     if (node == 0xFF) {
         wildcard_script_ = steps;
         wildcard_len_ = count;
-        wildcard_pos_ = 0;
+        for (size_t& pos : wildcard_pos_)
+            pos = 0;
         return;
     }
     REQUIRE(node < omgp::link::kAddrCount);
@@ -37,15 +44,30 @@ const Step* MockWire::next_step(uint8_t node) {
         script_pos_[node] < script_len_[node]) {
         return &scripts_[node][script_pos_[node]++];
     }
-    if (wildcard_script_ != nullptr && wildcard_pos_ < wildcard_len_) {
-        return &wildcard_script_[wildcard_pos_++];
+    // Own script exhausted or never set: draw from the shared 0xFF fallback script next,
+    // each node at its own cursor; only once that is also exhausted (or unset) does the
+    // default Respond apply. contracts/mock-wire.md's "an exhausted script behaves as
+    // Respond with the default delay" is read here as the combined own+wildcard sequence
+    // for a node, not "own-script exhaustion skips straight past the wildcard".
+    if (node < omgp::link::kAddrCount && wildcard_script_ != nullptr &&
+        wildcard_pos_[node] < wildcard_len_) {
+        return &wildcard_script_[wildcard_pos_[node]++];
     }
     return nullptr; // exhausted/unset: default Respond, TRUNK_T_turn_min_us delay
 }
 
 void MockWire::enqueue(uint8_t byte, uint64_t start_us) {
     REQUIRE(rx_count_ < kRxCapacity); // contracts/mock-wire.md "Capacity": never a silent drop
-    rx_queue_[(rx_head_ + rx_count_) % kRxCapacity] = QueuedByte{byte, start_us};
+    // Insertion-sort by start_us (stable: only strictly-later entries shift right) so
+    // receive() can always take index 0 in start-instant order, per byte-wire-and-clock.md,
+    // even when a later transmit() schedules an earlier-firing response (e.g. a short
+    // default delay for one node queued after a long "late response" delay for another).
+    size_t pos = rx_count_;
+    while (pos > 0 && rx_queue_[pos - 1].start_us > start_us) {
+        rx_queue_[pos] = rx_queue_[pos - 1];
+        --pos;
+    }
+    rx_queue_[pos] = QueuedByte{byte, start_us};
     ++rx_count_;
 }
 
@@ -85,10 +107,12 @@ void MockWire::schedule_respond(const omgp::link::FrameFields& request, uint64_t
     response.payload = request.payload;
     uint8_t buf[kMaxWire];
     size_t written = 0;
-    // request.dst was accepted by the real Deframer, so it is never 0xFF (Reserved
-    // Address is discarded, never delivered) and encode_frame cannot refuse this frame.
-    if (encode_frame(response, buf, sizeof buf, written) != Status::Ok)
-        return;
+    // response.dst == request.src. A well-formed request from a real Master/Responder
+    // never carries src == 0xFF (trunk addresses are 0x00..0x0F, kAddrCount), so
+    // encode_frame is not expected to refuse this response; REQUIRE turns a script/engine
+    // bug that violates that into a loud failure instead of a silent, Silence-indistinguishable
+    // no-response (contracts/mock-wire.md "Capacity": dropped bytes are never silent here either).
+    REQUIRE(encode_frame(response, buf, sizeof buf, written) == Status::Ok);
 
     const uint64_t t0 = tx_end + delay_us;
     for (size_t i = 0; i < written; ++i)
@@ -104,13 +128,22 @@ uint64_t MockWire::transmit(const uint8_t* bytes, size_t n, uint64_t now_us) {
 
     Deframer parser;
     FrameView view{};
-    bool decoded = false;
-    for (size_t i = 0; i < n; ++i)
-        if (parser.feed(bytes[i], view))
-            decoded = true;
+    // Act on each decoded frame immediately, inside the feed loop: view.f.payload points
+    // into the Deframer's own accumulator and is valid only until the next feed() call
+    // (link/frame.hpp), so deferring to after the loop would read a payload already
+    // overwritten (or, for a call carrying several concatenated frames, would silently
+    // drop every frame but the last — no transcript entry, no scheduled response).
+    for (size_t i = 0; i < n; ++i) {
+        if (!parser.feed(bytes[i], view))
+            continue;
 
-    if (decoded) {
         record_transcript(view.f, now_us);
+
+        // contracts/mock-wire.md scopes every Kind to "the next request addressed to
+        // node"; a response frame transmitted by the engine under test (Responder, from
+        // T031) must not itself consume a script step or be echoed an answer.
+        if (view.f.response)
+            continue;
 
         const Step* step = next_step(view.f.dst);
         const Kind kind = step != nullptr ? step->kind : Kind::Respond;
@@ -137,12 +170,15 @@ uint64_t MockWire::transmit(const uint8_t* bytes, size_t n, uint64_t now_us) {
 bool MockWire::receive(uint8_t& byte, uint64_t& start_us) {
     if (rx_count_ == 0)
         return false;
-    const QueuedByte& front = rx_queue_[rx_head_];
+    // rx_queue_ is kept sorted by start_us (enqueue()), so index 0 is always the
+    // earliest-start-instant pending byte, matching byte-wire-and-clock.md's release order.
+    const QueuedByte& front = rx_queue_[0];
     if (front.start_us > clock_.now_us())
         return false; // "in the future": stays queued (byte-wire-and-clock.md)
     byte = front.byte;
     start_us = front.start_us;
-    rx_head_ = (rx_head_ + 1) % kRxCapacity;
+    for (size_t i = 1; i < rx_count_; ++i)
+        rx_queue_[i - 1] = rx_queue_[i];
     --rx_count_;
     return true;
 }
