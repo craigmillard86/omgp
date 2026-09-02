@@ -177,7 +177,12 @@ jobs:
           sudo apt-get update && sudo apt-get install -y cmake ninja-build
           pip install jinja2 pyyaml pytest
       - name: Claude Code — address the review findings on the agent's branch
-        uses: anthropics/claude-code-action@v1
+        # Pinned to the commit v1 resolved to on 2026-09-02, not the moving `v1` tag:
+        # CodeQL's actions/unpinned-tag flagged this file (alert 187 on #113) and the
+        # `CodeQL` results check is a required check (GOVERNANCE.md §2, ruled 2026-08-28).
+        # Bump deliberately; the other workflows still track `v1` and are the older,
+        # already-alerted-or-accepted pattern.
+        uses: anthropics/claude-code-action@8251c103ac8c1d761882c86aba1412c7f583c844   # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: claude,github-actions   # the triggering comment is claude[bot]'s verdict; a github-actions dispatch is the manual path
