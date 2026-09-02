@@ -85,6 +85,15 @@ class MockWire : public omgp::link::ByteWire {
     // 2, before Master/Responder exist).
     void advance_to(uint64_t t);
 
+    // Test helper (PR #112 review, finding 1): returns the fault recorded since the last
+    // take_fault() call (or nullptr if none), and clears it. A test that deliberately drives
+    // MockWire into a specific fault (e.g. RX-queue overflow) uses this, plus its own
+    // ordinary REQUIRE on the message, to assert *which* fault fired — rather than relying
+    // on the destructor's/advance_to()'s/transcript_size()'s own REQUIRE/CHECK(fault_ ==
+    // nullptr), which exist to catch a fault nobody has looked at, not one the test has
+    // already inspected. Non-throwing: safe to call regardless of what fault_ holds.
+    const char* take_fault();
+
     // Test helper: sets the clock, then lets `engine` drain receive() via poll(t) — the
     // only receive path (data-model.md §4, analysis F1); returns whatever poll()
     // returns, so this works for both Master::poll (MasterEvent) and Responder::poll
