@@ -1,0 +1,185 @@
+name: agent-merge
+# Autonomous merge of completed agent work (ruling 2026-09-02). Closes the last human step
+# in the L3 cycle: dispatch -> implement -> review -> fix -> approve -> MERGE. T3 is never
+# merged by an agent, and neither is anything a human still owns (see the CODEOWNERS rule
+# below). Everything else that is agent-authored, clean at its current head and green on
+# every check merges without a human.
+#
+# The trigger is `issue_comment` DELIBERATELY, the same reason agent-approve uses it: those
+# runs use the DEFAULT-BRANCH workflow definition and check out the default branch, so a
+# same-repo PR can never rewrite this gate, the CODEOWNERS exception list or
+# auto_merge_max_tier in its own diff. The 20-minute sweep and the manual dispatch enter the
+# same script, because the merge-ready moment is usually the LAST CHECK going green, not the
+# verdict comment — and workflow_run delivery is not trustworthy for this repo
+# (docs/OPEN-QUESTIONS.md 2026-08-31).
+#
+# The merge is pinned to the sha the verdicts were issued for (`sha` on the merge API): if a
+# push lands between this run's checks and the merge call, GitHub refuses with 409 and
+# nothing merges. That is what makes this safe while branch protection has
+# dismiss_stale_reviews OFF — a stale approval can never carry an unreviewed head to main.
+#
+# Kill switch: auto_merge_max_tier to -1 in .github/agent-config.yml, or disable this
+# workflow. The general switches (revoke the token, uninstall the App) stop the agents that
+# produce the PRs, but NOT this workflow — it merges with GITHUB_TOKEN.
+# The script is executed verbatim by tests/workflows/agent_merge_harness.js.
+on:
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: '*/20 * * * *'   # the last check going green is not an event this workflow can subscribe to
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'Pull request number to consider (blank = sweep every open agent PR)'
+        required: false
+
+concurrency:
+  group: agent-merge-${{ github.event.issue.number || inputs.pr || 'sweep' }}
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    if: >
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request &&
+       github.event.comment.user.login == 'claude[bot]' &&
+       contains(github.event.comment.body, 'VERDICT('))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # the merge itself
+      pull-requests: write
+      issues: write          # comments on the PR
+      checks: read           # every check run at the head must be green
+      statuses: read
+    steps:
+      - uses: actions/checkout@v7   # issue_comment/schedule: this is the DEFAULT branch — never PR content
+      - name: Merge every agent PR that is complete at its current head
+        uses: actions/github-script@v7
+        env:
+          DISPATCH_PR: ${{ inputs.pr }}
+        with:
+          script: |
+            const fs = require('fs');
+            const {owner, repo} = context.repo;
+            const ws = process.env.GITHUB_WORKSPACE || '.';
+
+            // CODEOWNERS-owned paths stay human EXCEPT the two that OPERATING-POLICY §2
+            // already sanctions agents to write (rulings they append, and Spec Kit task
+            // ordering). Everything else owned — protocol, vectors, spec docs, governance,
+            // .github/, CLAUDE.md, the constitution, pipeline/toolchain definitions — is the
+            // owner's call and is never merged here, whatever tier it scores.
+            const SANCTIONED = ['/docs/OPEN-QUESTIONS.md', '/specs/**/tasks.md'];
+
+            // Config and CODEOWNERS come from the DEFAULT-branch checkout. Anything
+            // unreadable refuses the merge — never merges more because it read less.
+            let max, ownedPatterns;
+            try {
+              max = Number.parseInt(/^auto_merge_max_tier: *(-?\d+)/m.exec(fs.readFileSync(`${ws}/.github/agent-config.yml`, 'utf8'))[1], 10);
+            } catch (e) { core.notice(`merge: auto_merge_max_tier unreadable (${e.message}) — merging nothing (fail closed)`); return; }
+            if (!Number.isInteger(max)) { core.notice('merge: auto_merge_max_tier is not an integer — merging nothing (fail closed)'); return; }
+            if (max < 0) { core.notice(`merge: auto_merge_max_tier=${max} — autonomous merge is disabled`); return; }
+            try {
+              ownedPatterns = fs.readFileSync(`${ws}/.github/CODEOWNERS`, 'utf8')
+                .split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#')).map(l => l.split(/\s+/)[0])
+                .filter(p => !SANCTIONED.includes(p));
+            } catch (e) { core.notice(`merge: CODEOWNERS unreadable (${e.message}) — merging nothing (fail closed)`); return; }
+            const ownedBy = (pattern, path) => {
+              const p = pattern.startsWith('/') ? pattern.slice(1) : pattern;
+              if (p.endsWith('/')) return path.startsWith(p);
+              const re = new RegExp('^' + p.split('**').map(seg =>
+                seg.split('*').map(x => x.replace(/[.+^${}()|[\]\\]/g, '\\$&')).join('[^/]*')).join('.*') + '$');
+              return re.test(path) || path.startsWith(p + '/');
+            };
+
+            // Candidates: the commented-on PR, the dispatched one, or every open PR on a sweep.
+            // `Number('')` is 0, not NaN: an absent input must read as "sweep", never as PR #0.
+            const raw = (process.env.DISPATCH_PR || '').trim();
+            const dispatched = raw ? Number(raw) : NaN;
+            const only = context.payload.issue ? context.payload.issue.number : (Number.isInteger(dispatched) ? dispatched : null);
+            if (context.payload.issue && !context.payload.issue.pull_request) { core.notice('merge: comment is on a plain issue — untouched'); return; }
+            const numbers = only !== null ? [only]
+              : (await github.paginate(github.rest.pulls.list, {owner, repo, state: 'open', per_page: 100})).map(p => p.number);
+
+            const skip = (n, why) => core.notice(`merge: #${n} not merged — ${why}`);
+            let merged = 0;
+            for (const number of numbers) {
+              // Fresh PR state from the API — never from any checkout.
+              const pr = (await github.rest.pulls.get({owner, repo, pull_number: number})).data;
+              if (pr.state !== 'open' || pr.draft) { skip(number, `${pr.draft ? 'draft' : pr.state}`); continue; }
+              if (pr.head.repo && pr.head.repo.full_name !== `${owner}/${repo}`) { skip(number, 'fork head — never merged by an agent (GOVERNANCE.md §4b)'); continue; }
+              const has = l => pr.labels.some(x => x.name === l);
+              if (!has('agent-authored')) { skip(number, 'not agent-authored — human PRs are merged by their author'); continue; }
+              if (has('needs-human') || has('blocked')) { skip(number, 'labelled needs-human/blocked'); continue; }
+              if (!/^task\//.test(pr.head.ref)) { skip(number, `head ${pr.head.ref} is not a task/* branch`); continue; }
+              const head = pr.head.sha;
+
+              // Tier: the label AND the `score` check that produced it must both exist at THIS
+              // head. An unscored head is treated as T3 by every other workflow (fail-safe);
+              // here the same rule means: not merged.
+              const checks = await github.paginate(github.rest.checks.listForRef, {owner, repo, ref: head, per_page: 100});
+              const scored = checks.some(c => c.name === 'score' && c.status === 'completed');
+              const m = /^risk:t([0-3])$/.exec((pr.labels.find(l => /^risk:t[0-3]$/.test(l.name)) || {}).name || '');
+              if (!scored || !m) { skip(number, `risk tier unresolved at ${head.slice(0, 7)} (scored=${scored}) — fail closed`); continue; }
+              const tier = Number(m[1]);
+              if (tier >= 3) { skip(number, 'T3 is never merged by an agent'); continue; }
+              if (tier > max) { skip(number, `risk:t${tier} exceeds auto_merge_max_tier=${max}`); continue; }
+
+              // Human-owned paths stay human, at any tier.
+              const changed = await github.paginate(github.rest.pulls.listFiles, {owner, repo, pull_number: number, per_page: 100});
+              const owned = changed.map(f => f.filename).filter(f => ownedPatterns.some(p => ownedBy(p, f)));
+              if (owned.length) { skip(number, `CODEOWNERS-owned path(s) need the owner: ${owned.join(', ')}`); continue; }
+
+              // Verdicts: claude[bot] only, FINAL line only, THIS head only (agent-approve's rule).
+              const comments = await github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: number, per_page: 100});
+              const verdictOf = kind => {
+                const re = new RegExp(`^VERDICT\\(${kind}\\):\\s*(clean|findings)\\s*@\\s*${head}$`);
+                let latest = null;
+                for (const cm of comments) {
+                  if (!cm.user || cm.user.login !== 'claude[bot]') continue;
+                  const lines = (cm.body || '').trim().split('\n');
+                  const hit = re.exec(lines[lines.length - 1].trim());
+                  if (hit) latest = hit[1];
+                }
+                return latest;
+              };
+              const review = verdictOf('review');
+              if (review !== 'clean') { skip(number, review === null ? `no review verdict for ${head.slice(0, 7)}` : 'review reported findings'); continue; }
+              if (tier >= 2) {
+                const rt = verdictOf('red-team');
+                if (rt !== 'clean') { skip(number, rt === null ? `no red-team verdict for ${head.slice(0, 7)} (required at T2)` : 'red-team reported findings'); continue; }
+              }
+
+              // Every check at this head must have finished green. A check still running is a
+              // reason to wait for the next sweep, never to merge.
+              const pending = checks.filter(c => c.status !== 'completed').map(c => c.name);
+              if (pending.length) { skip(number, `checks still running: ${pending.join(', ')}`); continue; }
+              const bad = checks.filter(c => !['success', 'neutral', 'skipped'].includes(c.conclusion)).map(c => `${c.name}=${c.conclusion}`);
+              if (bad.length) { skip(number, `checks not green: ${bad.join(', ')}`); continue; }
+              const status = (await github.rest.repos.getCombinedStatusForRef({owner, repo, ref: head})).data;
+              if (status.total_count > 0 && status.state !== 'success') { skip(number, `commit status ${status.state}`); continue; }
+              if (pr.mergeable === false) { skip(number, `not mergeable (${pr.mergeable_state}) — rebase needed`); continue; }
+
+              // One complaint per head, so a PR that cannot merge does not comment every 20 minutes.
+              const marker = `<!-- agent-merge sha=${head} -->`;
+              const complained = comments.some(c => (c.body || '').includes(`agent-merge sha=${head}`));
+              try {
+                await github.rest.pulls.merge({owner, repo, pull_number: number, sha: head, merge_method: 'merge',
+                  commit_title: `Merge pull request #${number} from ${pr.head.ref}`,
+                  commit_message: `${pr.title}\n\n🤖 Autonomous merge (ruling 2026-09-02, GOVERNANCE.md §1): risk:t${tier} <= auto_merge_max_tier=${max}; VERDICT(review): clean @ ${head.slice(0, 7)}${tier >= 2 ? '; VERDICT(red-team): clean' : ''}; every check green at this head. No CODEOWNERS-owned path outside the agent-sanctioned set.`});
+                core.notice(`merge: #${number} merged at ${head.slice(0, 7)} (risk:t${tier})`);
+                merged++;
+              } catch (e) {
+                // 409: the head moved between the checks above and this call — exactly the
+                // stale-approval race this design exists to lose safely. 405: branch
+                // protection refused (missing approval, required check, or a rule this
+                // workflow cannot see) — a human decides, so say so once and move on.
+                const why = e.status === 409 ? `head moved since ${head.slice(0, 7)} — will re-evaluate the new head`
+                  : `GitHub refused the merge (${e.status || ''} ${e.message || e})`;
+                skip(number, why);
+                if (e.status !== 409 && !complained) {
+                  await github.rest.issues.createComment({owner, repo, issue_number: number,
+                    body: `${marker}\n🤝 Autonomous merge was due at ${head.slice(0, 7)} (risk:t${tier}, clean verdicts, checks green) but ${why}. Left for a human — nothing was changed.`});
+                }
+              }
+            }
+            core.notice(`merge: ${merged} PR(s) merged of ${numbers.length} considered`);

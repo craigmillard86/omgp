@@ -9,7 +9,7 @@ Amendments to either are Tier 3 changes (see §3).
 
 | Decision | Who | How recorded |
 |---|---|---|
-| Merge to main | Human clicks merge. The required PR approval may be satisfied by a clean machine-readable agent verdict for `agent-authored` PRs at or below `auto_approve_max_tier` (T2; ruling 2026-08-31) — CODEOWNERS paths always need the owner, T3 always needs a human review | PR approval + `ci-gate`; agent-approve workflow |
+| Merge to main | Autonomous for `agent-authored` PRs at or below `auto_merge_max_tier` (T2; ruling 2026-09-02): approval comes from a clean machine-readable verdict at the exact head (`auto_approve_max_tier`, ruling 2026-08-31) and the merge itself is made by `agent-merge` when every check is green at that same head. A human clicks merge for everything else: T3 always, any CODEOWNERS-owned path except `docs/OPEN-QUESTIONS.md` and `specs/**/tasks.md`, any human-authored PR, and anything labelled `needs-human` | PR approval + `ci-gate`; agent-approve then agent-merge workflow |
 | Protocol change (YAML + docs) | Human ruling | T3 PR, CODEOWNERS review |
 | Spec ambiguity resolution | Human ruling (agent may recommend) | OPEN-QUESTIONS.md entry |
 | Golden-vector regeneration | Human ruling with written justification | commit message + T3 review |
@@ -38,6 +38,7 @@ issues, comments) — never as direct changes to main.
 | CodeQL (C++/Python/Actions) + dependency review | security on every PR + weekly | security workflow; the `CodeQL` results check, `codeql` and `dependency-review` are required status checks on `main` (ruled 2026-08-28) |
 | Deep-verify: focused fuzz + diff-scoped mutation | pre-merge deep testing on T2/T3; fails on any fuzz finding or on any surviving mutant on a changed line that is neither killed by a test nor labelled `// mutant-ok(equivalent\|accepted): <why>` on its source line (triage gate, ruled 2026-08-29; the whole-tree kill rate is a nightly trend, never a gate). `tools/mutate.cfg [policy]` constants are T3 — never relaxed to get green | conditional CI job in ci-gate |
 | Claude review on every agent PR | spec-conformance + security review pass, per pushed head | claude-review workflow (advisory findings; machine-readable verdict) |
+| Autonomous merge ≤ T2 | merge only when the tier, the verdicts, every check and the changed paths all clear at ONE head; T3 and human-owned paths never | agent-merge workflow — the merge API call is pinned to that head's sha, so a push landing mid-run makes GitHub refuse (409) rather than merge an unreviewed head; `auto_merge_max_tier: -1` returns the click to a human |
 | Verdict-gated auto-approval ≤ T2 | approval only on a clean review (and, at T2, red-team) verdict for the exact head; stale bot approvals self-dismissed; fail-closed on any unresolved input | agent-approve workflow — `issue_comment` trigger, so the DEFAULT-BRANCH definition and inputs run and a PR cannot rewrite the gate in its own diff (ruling 2026-08-31; hardened per Copilot review on #103) |
 | Red team: PR attack on T2/T3 + monthly hostile-module protocol attack | falsification with runnable reproducers | red-team workflow (advisory; findings need evidence) |
 | WIP cap = 1 | review capacity governs autonomy | dispatch workflow |
@@ -97,6 +98,70 @@ the enforcement.
     agents must not edit (OPERATING-POLICY §2); a human needs to add its
     row so "standing loops are enumerated in OPERATING-POLICY §4" above is
     true of all of them, not just the five named there (review on #96).
+
+- Review-finding auto-resolution (`review-fix` workflow, ruled 2026-09-02).
+  `claude-review` and `red-team` are read-only, and the only consumer of
+  their verdict (`agent-approve`) merely withholds approval — so an
+  agent PR with green CI and open findings had no agent able to act on
+  it and stalled until a human intervened. This loop closes that edge:
+  - **Trigger and scope.** A `claude[bot]` verdict comment of the form
+    `VERDICT(review|red-team): findings @ <current head>` on an open
+    `agent-authored` `task/*` PR. The trigger is `issue_comment`, so the
+    loop runs from the DEFAULT-branch definition and a PR cannot rewrite
+    its own bounds. Fork heads, human PRs and `needs-human` PRs are never
+    touched.
+  - **Severity policy.** HIGH and MEDIUM findings are fixed. A LOW finding
+    is fixed only where the agent is already changing that code;
+    otherwise it is listed as consciously deferred. If every finding is
+    LOW, no code changes at all. Deferred LOWs keep the verdict at
+    `findings`, so the PR is not auto-approved and a human merges it —
+    accepted deliberately: relaxing the verdict would be a T3 change to
+    the approval gate, not a property of this loop.
+  - **Bound — two attempts, then a human.** `review-fix-1`/`review-fix-2`,
+    at most one attempt per head commit (a red-team verdict arriving after
+    a review verdict on the same commit is the same attempt). Exhaustion
+    releases `in-progress` and applies `needs-human`, exactly as the CI
+    router does. Nothing resets the labels but a human.
+  - **Never.** No approval, no merge, no weakened test or gate, no edit to
+    `.github/workflows/` — the loop may not touch its own bounds.
+  - **Kill switch:** disable the `review-fix` workflow. The general
+    switches above also stop it.
+- Autonomous merge (`agent-merge` workflow, ruled 2026-09-02). With the
+  review, fix and approval loops closed, the merge click was the last
+  human step in the cycle; it is now made by the agent for work that is
+  complete, clean and low-risk:
+  - **Every condition is evaluated at ONE head.** Tier label plus a
+    completed `score` check, clean `VERDICT(review)` (and `VERDICT(red-team)`
+    at T2+), every check run finished green, no failing commit status, and
+    the PR mergeable. Any one unresolved refuses the merge — this gate
+    never merges more because it read less.
+  - **The merge is pinned to that head.** `sha` is passed to the merge
+    API, so a push landing between the checks and the call makes GitHub
+    refuse (409) instead of merging a head nobody reviewed. This is what
+    makes autonomous merge safe while branch protection has
+    `dismiss_stale_reviews` off.
+  - **Never merged by an agent:** T3 (any tier above
+    `auto_merge_max_tier`), human-authored PRs, forks, drafts, `needs-human`
+    or `blocked`, and any CODEOWNERS-owned path other than
+    `docs/OPEN-QUESTIONS.md` and `specs/**/tasks.md` — the two OPERATING-POLICY
+    §2 already sanctions agents to write. Ground truth and governance keep
+    their owner regardless of the tier the diff happens to score.
+  - **Trigger.** The verdict comment, plus a 20-minute sweep, because the
+    moment a PR becomes merge-ready is usually the last check going green
+    rather than any event this workflow can subscribe to.
+  - **Kill switch:** `auto_merge_max_tier: -1`, or disable the
+    `agent-merge` workflow. Note that revoking the Claude token or
+    uninstalling the App does NOT stop this one: it merges with
+    `GITHUB_TOKEN` and runs no agent.
+  - **Not yet in the OPERATING-POLICY §4 table** — same as the CI router
+    above: a human needs to add its row, as agents must not edit that
+    document.
+- Both fix loops push with `persist-credentials: false` so the agent's
+  commit carries the Claude App token, not `GITHUB_TOKEN`: pushes made
+  with the latter suppress the follow-on `workflow_run`/re-review delivery,
+  which is how the CI router lost its own attempts' failures
+  (docs/OPEN-QUESTIONS.md 2026-08-31). The router additionally runs a
+  2-hourly `sweep` that re-dispatches failures no router run ever saw.
 
 ## 4b. Public-repo posture
 

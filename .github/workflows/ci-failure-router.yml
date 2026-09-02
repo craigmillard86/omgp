@@ -9,10 +9,25 @@ name: ci-failure-router
 #   anything else (human work)             -> one short comment on the PR, never a push or label
 # Fork runs are never touched. Kill switch: disable this workflow.
 # The `route` script is executed verbatim by tests/workflows/ci_failure_router_harness.js.
+# Delivery: `workflow_run` is NOT a reliable trigger for this loop. GitHub suppresses
+# workflow_run chaining off runs that originate from a GITHUB_TOKEN push, and re-runs of
+# such a run are a second suppressed path (both demonstrated on PR #108, 2026-08-31 —
+# docs/OPEN-QUESTIONS.md). Fix (a): the autofix job checks out with persist-credentials:
+# false so the agent's push carries the Claude App token, restoring chaining. Belt (b): a
+# 2-hourly `sweep` scans open agent PRs for a failed ci/security run with no attempt marker
+# and dispatches the router itself — a delivery path that does not depend on workflow_run
+# semantics at all. Both, per the recommendation on that entry.
 on:
   workflow_run:
     workflows: [ci, security]
     types: [completed]
+  schedule:
+    - cron: '17 */2 * * *'   # sweep: delivery backstop, offset off the hour to miss the runner rush
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Failed ci/security run to route (blank = run the sweep)'
+        required: false
 
 # Permissions are per job (review on #96): `route` runs on every failed run on every branch and
 # holds only what labels and comments need; the OIDC/contents/actions write scopes exist only
@@ -22,14 +37,70 @@ concurrency:
   # One router per branch. GitHub keeps at most one running and one pending run per group; a
   # third failure arriving while one is pending replaces the pending one — the NEWEST failure
   # on the branch is always routed, an older one may be skipped (never an extra attempt).
-  group: ci-failure-router-${{ github.event.workflow_run.head_branch }}
+  # Every sweep collapses to ONE group (not `github.run_id`, which is unique per run and so
+  # serialized nothing): two overlapping sweeps would otherwise race between the marker check
+  # and the dispatch and route the same failure twice (Copilot review on #113).
+  group: ci-failure-router-${{ github.event.workflow_run.head_branch || inputs.run_id || 'sweep' }}
   cancel-in-progress: false
 
 jobs:
+  # (b) Delivery backstop. Scans open agent PRs for a failed ci/security run at the current
+  # head that the router never acted on, and dispatches the router for it. It decides
+  # NOTHING about the failure: routing, bounds and escalation stay in `route`, reached
+  # through the same code path as an event-delivered failure.
+  sweep:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.run_id)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: write   # read the branch's runs; dispatch this workflow for the ones missed
+    steps:
+      - name: Dispatch the router for failures it never saw
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const prs = await github.paginate(github.rest.pulls.list, {owner, repo, state: 'open', per_page: 100});
+            let dispatched = 0;
+            for (const pr of prs) {
+              const has = n => pr.labels.some(l => l.name === n);
+              if (!has('agent-authored') || has('needs-human')) continue;
+              if (!/^task\//.test(pr.head.ref)) continue;
+              if (pr.head.repo && pr.head.repo.full_name !== `${owner}/${repo}`) continue;
+              if (['auto-fix-1', 'auto-fix-2'].filter(l => has(l)).length >= 2) continue;
+              const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo,
+                {owner, repo, branch: pr.head.ref, head_sha: pr.head.sha, per_page: 100});
+              // Newest failed ci/security run at this head, and only if it is still the
+              // latest attempt of that workflow (a later success means it was already fixed).
+              const relevant = runs.filter(r => ['ci', 'security'].includes(r.name));
+              const latestOf = new Map();
+              for (const r of relevant) {
+                const prev = latestOf.get(r.name);
+                if (!prev || new Date(r.created_at) > new Date(prev.created_at)) latestOf.set(r.name, r);
+              }
+              const failed = [...latestOf.values()].filter(r => r.status === 'completed' && r.conclusion === 'failure')
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+              if (!failed) continue;
+              const pass = failed.run_attempt || 1;
+              const comments = await github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: pr.number, per_page: 100});
+              if (comments.some(c => (c.body || '').includes(`ci-failure-router sha=${pr.head.sha} pass=${pass}`))) continue;
+              core.notice(`sweep: #${pr.number} has an unrouted ${failed.name} failure (run ${failed.id}, pass ${pass}) — dispatching the router`);
+              await github.rest.actions.createWorkflowDispatch({owner, repo, workflow_id: 'ci-failure-router.yml',
+                ref: context.payload.repository.default_branch, inputs: {run_id: String(failed.id)}});
+              dispatched++;
+            }
+            core.notice(`sweep: dispatched ${dispatched} router run(s)`);
+
   route:
     # Only real failures, only same-repository heads: a fork's run never reaches a job that
-    # carries secrets (GOVERNANCE.md §4b).
-    if: github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_repository.full_name == github.repository
+    # carries secrets (GOVERNANCE.md §4b). Two entry paths, one decision procedure: the
+    # workflow_run event, and a dispatch carrying the failed run's id (the sweep, or a human
+    # routing a suppressed failure by hand).
+    if: >
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_id)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -40,14 +111,27 @@ jobs:
       route: ${{ steps.route.outputs.route }}
       pr: ${{ steps.route.outputs.pr }}
       attempt: ${{ steps.route.outputs.attempt }}
+      branch: ${{ steps.route.outputs.branch }}
+      sha: ${{ steps.route.outputs.sha }}
+      run_id: ${{ steps.route.outputs.run_id }}
+      run_name: ${{ steps.route.outputs.run_name }}
+      run_url: ${{ steps.route.outputs.run_url }}
     steps:
       - name: Route the failure by branch
         id: route
         uses: actions/github-script@v7
+        env:
+          DISPATCH_RUN_ID: ${{ inputs.run_id }}
         with:
           script: |
             const {owner, repo} = context.repo;
-            const run = context.payload.workflow_run;
+            // The failed run comes from the event when one was delivered, and from the API
+            // when it was not (dispatch path — see the delivery note at the top of the file).
+            // Everything downstream reads THIS object, never the event context, so both
+            // paths route identically.
+            const run = context.payload.workflow_run ||
+              (await github.rest.actions.getWorkflowRun({owner, repo, run_id: Number(process.env.DISPATCH_RUN_ID)})).data;
+            for (const [k, v] of Object.entries({branch: run.head_branch, sha: run.head_sha, run_id: run.id, run_name: run.name, run_url: run.html_url})) core.setOutput(k, v);
             const out = (route, extra = {}) => { core.setOutput('route', route); for (const [k, v] of Object.entries(extra)) core.setOutput(k, v); };
             if (run.conclusion !== 'failure') { core.notice(`router: ${run.name} run ${run.id} concluded ${run.conclusion} — nothing to do`); return out('none'); }
             if (run.head_repository && run.head_repository.full_name !== `${owner}/${repo}`) { core.notice(`router: run ${run.id} is from fork ${run.head_repository.full_name} — never touched (GOVERNANCE.md §4b)`); return out('none'); }
@@ -144,8 +228,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.workflow_run.head_branch }}
+          ref: ${{ needs.route.outputs.branch }}
           fetch-depth: 0
+          # (a) from docs/OPEN-QUESTIONS.md 2026-08-31: with credentials persisted, the
+          # agent's `git push` used GITHUB_TOKEN — which made the resulting `synchronize`
+          # actor `github-actions` AND suppressed workflow_run delivery for the CI run it
+          # started, so the router never saw its own attempt's failure and attempt 2 could
+          # not fire. Unpersisted, the push uses the Claude App token and chaining works.
+          persist-credentials: false
       - uses: actions/setup-python@v7
         with: {python-version: '3.12'}
       - name: Toolchain (so the agent can run the pipeline)
@@ -161,15 +251,15 @@ jobs:
             You are the CI auto-fix agent. Read CLAUDE.md and
             docs/OPERATING-POLICY.md first and stay strictly within agent
             permissions. You are on branch
-            ${{ github.event.workflow_run.head_branch }} of PR
+            ${{ needs.route.outputs.branch }} of PR
             #${{ needs.route.outputs.pr }} (auto-fix attempt
             ${{ needs.route.outputs.attempt }} of 2). Workflow
-            "${{ github.event.workflow_run.name }}" run
-            ${{ github.event.workflow_run.id }} failed on commit
-            ${{ github.event.workflow_run.head_sha }}:
-            ${{ github.event.workflow_run.html_url }}
-            1. Fetch the failure: `gh run view --log-failed ${{ github.event.workflow_run.id }}`.
-               Also `gh run list --commit ${{ github.event.workflow_run.head_sha }} --status failure`
+            "${{ needs.route.outputs.run_name }}" run
+            ${{ needs.route.outputs.run_id }} failed on commit
+            ${{ needs.route.outputs.sha }}:
+            ${{ needs.route.outputs.run_url }}
+            1. Fetch the failure: `gh run view --log-failed ${{ needs.route.outputs.run_id }}`.
+               Also `gh run list --commit ${{ needs.route.outputs.sha }} --status failure`
                in case another workflow failed on the same commit, and read
                its failed logs too.
             2. Diagnose the root cause. Fix it ON THIS BRANCH only — never
@@ -190,7 +280,7 @@ jobs:
             If the failure is environmental or flaky (runner, network,
             toolchain download, a timeout with no code change involved),
             change no code: say so in a PR comment with the evidence, and
-            re-run it with `gh run rerun ${{ github.event.workflow_run.id }} --failed`.
+            re-run it with `gh run rerun ${{ needs.route.outputs.run_id }} --failed`.
           claude_args: |
             --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh run view*),Bash(gh run list*),Bash(gh run rerun*),Bash(gh pr comment*),Bash(gh pr view*),Edit,Read,Write,Grep,Glob"
 

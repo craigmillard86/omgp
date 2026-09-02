@@ -87,7 +87,9 @@ jobs:
             ./pipeline.sh stages and direct execution. Iterate.
             REPORT: one PR comment. For each finding: the runnable
             reproducer (inline, copy-pasteable), observed vs expected, and
-            severity. If everything you tried passed, say exactly what you
+            severity as one of `[HIGH]`, `[MEDIUM]` or `[LOW]`, exactly
+            those tokens — the review-fix loop routes on them.
+            If everything you tried passed, say exactly what you
             attacked and concede: "attacked N vectors, change held."
             Never file style opinions. Never modify the PR. A finding
             without a reproducer must be labelled speculation and last.

@@ -14,6 +14,16 @@ auto_ready_max_tier: 1
 # itself is always human, and CODEOWNERS paths always need the owner.
 auto_approve_max_tier: 2
 
+# Highest ACTUAL risk tier (risk-score label on the PR) at which a complete
+# agent PR is MERGED without a human (agent-merge workflow; ruling
+# 2026-09-02). T3 is never merged by an agent; -1 disables autonomous merge
+# entirely and returns the merge click to a human. A merge additionally
+# requires, at the exact head being merged: clean review verdict (plus
+# red-team at T2+), every check finished green, and NO CODEOWNERS-owned path
+# outside the agent-sanctioned set (docs/OPEN-QUESTIONS.md,
+# specs/**/tasks.md) — ground truth and governance always need their owner.
+auto_merge_max_tier: 2
+
 # Backstops that make auto-release safe (do not remove):
 # - ready-gate still validates the enriched story mechanically
 # - risk-score re-rates the ACTUAL diff at PR time; a T2+/T3 outcome from

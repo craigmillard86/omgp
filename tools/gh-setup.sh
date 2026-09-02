@@ -23,6 +23,8 @@ L incident        "B60205" "Bad merge reached main; postmortem required"
 L ci-failure      "D93F0B" "Filed by ci-failure-router for a failed ci/security run on main; triaged like nightly-failure"
 L auto-fix-1      "FBCA04" "CI auto-fix attempt 1 of 2 taken on this agent PR (ci-failure-router)"
 L auto-fix-2      "FBCA04" "CI auto-fix attempt 2 of 2 taken; the next failure escalates to needs-human"
+L review-fix-1    "FBCA04" "Review-finding fix attempt 1 of 2 taken on this agent PR (review-fix)"
+L review-fix-2    "FBCA04" "Review-finding fix attempt 2 of 2 taken; the next findings verdict escalates to needs-human"
 L dependencies    "0366D6" "Dependency currency PR (Dependabot)"
 L spec-question   "0052CC" "Ambiguity needing a spec ruling"
 # risk tiers (applied automatically by risk-score workflow)
