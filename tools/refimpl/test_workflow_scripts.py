@@ -203,8 +203,8 @@ def test_bot_triggered_agent_workflows_allow_their_bot_actors():
                           ("claude-review.yml", "claude"),            # agent PRs are opened by the Claude App
                           ("claude-review.yml", "github-actions"),    # synchronize from a router auto-fix push runs as github-actions (live: run 33435939888 on #108)
                           ("red-team.yml", "claude"),
-                          ("red-team.yml", "github-actions"),
-                          ("review-fix.yml", "claude")]:          # the trigger is claude[bot]'s own findings verdict        # same synchronize path once red-team gains it; opened-by-bot today
+                          ("red-team.yml", "github-actions"),     # same synchronize path once red-team gains it; opened-by-bot today
+                          ("review-fix.yml", "claude")]:          # the trigger is claude[bot]'s own findings verdict
         wf = yaml.safe_load((ROOT / ".github" / "workflows" / workflow).read_text())
         actions = [s for j in wf["jobs"].values() for s in j.get("steps", []) if "claude-code-action" in s.get("uses", "")]
         assert actions, workflow
