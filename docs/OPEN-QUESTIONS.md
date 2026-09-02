@@ -842,3 +842,39 @@ kill switch is now split — revoking the Claude token stops the agents but NOT 
 **Supersedes:** extends the 2026-08-31 approval ruling (auto-approval ≤ T2); does not change
 it.
 
+---
+
+## 2026-09-02 — CodeQL on review-fix.yml: privileged checkout accepted, moving tag pinned
+
+**Context:** CodeQL's Actions pack raised two alerts against the new `review-fix.yml` on
+PR #113, failing the required `CodeQL` results check (GOVERNANCE.md §2, ruled 2026-08-28):
+alert 187 (medium, `actions/unpinned-tag`) for `anthropics/claude-code-action@v1`, and
+alert 186 (high, `actions/untrusted-checkout`) for the `fix` job checking out the PR's own
+branch in a privileged, secret-holding workflow triggered by `issue_comment`.
+The high alert describes a real and DELIBERATE exposure, not a defect: a fixer that cannot
+check out the branch it is fixing cannot run `./pipeline.sh` on it or push the fix.
+`ci-failure-router`'s `autofix` job does exactly the same thing and is not flagged only
+because its trigger is `workflow_run` rather than `issue_comment` — the exposure is
+identical, the query's heuristic differs.
+**Options:** (a) dismiss 186 as accepted, keeping the explicit `ref:` checkout; (b)
+restructure to `claude-mention`'s shape — check out the default branch, then switch to the
+branch in a controlled `run:` step — which stops the query matching WITHOUT changing what
+the agent then executes; (c) leave the check red pending a repo-wide pinning and
+untrusted-checkout pass covering both fix loops at once.
+**Recommendation:** (a). (b) buys a green check by moving the same code past the heuristic,
+which is worse than recording the decision: the alert becomes invisible instead of judged.
+**Ruling:** (a), 2026-09-02 — human. Alert 186 dismissed as "won't fix" citing this entry.
+Alert 187 fixed properly instead of dismissed: the action is pinned to commit 8251c103 (the
+commit `v1` resolved to on this date) in `review-fix.yml` only.
+The mitigation that makes (a) acceptable is the `gate` job, which runs from the
+DEFAULT-branch definition and refuses forks, non-`agent-authored` PRs, non-`task/*` heads
+and `needs-human` PRs BEFORE the privileged job starts — so the checked-out code is always
+claude[bot]'s own work inside this repository, never a fork contributor's.
+NOT EXAMINED: the other workflows still track the moving `v1` tag and still carry the same
+untrusted-checkout shape; neither was touched here because they are not new code on this PR.
+A repo-wide pinning pass and a single ruling covering `ci-failure-router`'s `autofix` under
+the same reasoning are still open — option (c) reduced to a follow-up rather than a blocker.
+If the dismissal is ever reverted, the required check fails again and this entry is the
+place to re-argue it.
+**Supersedes:** none.
+
