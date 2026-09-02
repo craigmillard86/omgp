@@ -16,8 +16,12 @@ uint32_t xorshift32_next(uint32_t& state) {
     // yield a constant all-zero stream once Garbage/Babble (T030) start consuming this —
     // deterministic, but degenerate, and seed != 0 is also given a separate meaning for
     // Kind::Rate (contracts/mock-wire.md). Re-seed to a fixed nonzero constant instead.
+    // 0xFFFFFFFF, not a "known good" PRNG seed constant (unlike e.g. the golden ratio),
+    // so a script author picking their own nonzero seed is unlikely to land on the exact
+    // value this repair uses and get an accidental collision with the unset (0) case —
+    // see mock_wire.hpp.
     if (state == 0)
-        state = 0x9E3779B9u;
+        state = 0xFFFFFFFFu;
     state ^= state << 13;
     state ^= state >> 17;
     state ^= state << 5;
@@ -164,24 +168,33 @@ uint64_t MockWire::transmit(const uint8_t* bytes, size_t n, uint64_t now_us) {
     const uint64_t tx_end = now_us + static_cast<uint64_t>(n) * byte_time_us(bit_rate_);
 
     FrameView view{};
-    // Byte offset (within this call) of the frame currently being accumulated; advances
-    // to just past each decoded frame's closing FLAG, so a second frame in the same call
-    // gets its own tx_start/tx_end instants instead of inheriting the whole burst's.
-    size_t frame_start_idx = 0;
     // Act on each decoded frame immediately, inside the feed loop: view.f.payload points
     // into parser_'s own accumulator and is valid only until the next feed() call
     // (link/frame.hpp), so deferring to after the loop would read a payload already
     // overwritten (or, for a call carrying several concatenated frames, would silently
     // drop every frame but the last — no transcript entry, no scheduled response).
     for (size_t i = 0; i < n; ++i) {
-        if (!parser_.feed(bytes[i], view))
+        const uint64_t byte_us = now_us + static_cast<uint64_t>(i) * byte_time_us(bit_rate_);
+        const bool is_flag = (bytes[i] == omgp::TRUNK_flag_byte);
+        // The instant of whichever FLAG most recently opened the accumulation now in
+        // progress — persisted in open_flag_us_ across transmit() calls (mock_wire.hpp),
+        // so a frame whose opening FLAG arrived in an earlier call still gets that call's
+        // instant as its tx_start_us, not this call's.
+        const uint64_t frame_tx_start = open_flag_us_;
+
+        const bool delivered = parser_.feed(bytes[i], view);
+
+        // on_flag() (link/frame.cpp) unconditionally resets accumulation on every FLAG
+        // byte, whichever branch it takes, so this FLAG now opens the next frame either
+        // way — update after feed() so frame_tx_start above still reads the *previous*
+        // opening FLAG's instant for a frame delivered on this very byte.
+        if (is_flag)
+            open_flag_us_ = byte_us;
+
+        if (!delivered)
             continue;
 
-        const uint64_t frame_tx_start =
-            now_us + static_cast<uint64_t>(frame_start_idx) * byte_time_us(bit_rate_);
-        const uint64_t frame_tx_end =
-            now_us + static_cast<uint64_t>(i + 1) * byte_time_us(bit_rate_);
-        frame_start_idx = i + 1;
+        const uint64_t frame_tx_end = byte_us + byte_time_us(bit_rate_);
 
         record_transcript(view.f, frame_tx_start);
 

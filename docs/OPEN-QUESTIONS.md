@@ -723,3 +723,27 @@ nothing speculative … proceed only if a safe default exists"); T011 (#29) and 
 should be written against these three readings, or a superseding entry should replace
 them first.
 **Supersedes:** none.
+
+---
+
+## 2026-09-02 — `Step::count` (`uint16_t`) cannot represent `Kind::Rate`'s bit-rate values
+
+**Context:** review on PR #111 (T010, `tests/support/mock_wire.hpp`) flagged that
+`contracts/mock-wire.md`'s `Step` struct (and `data-model.md` §10, `research.md` R-07,
+which all agree with each other) types `count` as `uint16_t`, but the same contract
+defines `Kind::Rate` as "the node now hears only at `count` interpreted as bit rate
+(1 000 000 or 115 200)" — neither value fits in `uint16_t` (max 65 535). The
+inconsistency is in the spec artefacts themselves, not introduced by this PR's code,
+which copies the documented width verbatim. Not yet load-bearing: `Rate` is
+unimplemented until T030 (surfaced as a loud `fault_` if scripted today, per the
+2026-09-01 MockWire entry above), so no script has attempted to author a `Rate` step's
+`count` yet.
+**Recommendation:** widen `count` to `uint32_t` in `contracts/mock-wire.md`,
+`data-model.md` §10, `research.md` R-07 and `tests/support/mock_wire.hpp::Step`
+together, in the T030 change that first gives `Rate` a body — a struct-layout change
+across three human-ruling documents plus code is a single T3 slice, not a T010 fix.
+Until then `count` stays `uint16_t` (matches every current spec artefact); a future
+`Rate` step's `count` cannot yet be authored at either documented bit rate, which is a
+pre-existing spec gap, not a new one.
+**Ruling:** pending — human, to land with T030.
+**Supersedes:** none.

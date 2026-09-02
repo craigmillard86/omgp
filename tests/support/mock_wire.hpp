@@ -47,7 +47,14 @@ struct Step {
 
 // research R-07: all script-driven randomness (Garbage/Babble byte content, T030) goes
 // through this xorshift32 so a given Step::seed reproduces the same byte stream.
-// `state` must be nonzero (xorshift32's fixed point); seed it from Step::seed.
+// `state`'s only fixed point is 0 (every subsequent call would then return 0 forever);
+// xorshift32_next() repairs an all-zero input by substituting 0xFFFFFFFF before
+// advancing, rather than requiring every caller to guarantee a nonzero Step::seed —
+// Step::seed defaults to 0 (below). 0xFFFFFFFF is deliberately not a value anyone would
+// pick as a "good" seed (unlike, say, a golden-ratio constant), so an accidental
+// collision between an unset (0) and an explicit seed is unlikely; it remains possible
+// only for a seed of exactly 0xFFFFFFFF — pick any other value if two steps must
+// produce distinguishable streams.
 uint32_t xorshift32_next(uint32_t& state);
 
 // Scripted ByteWire (contracts/mock-wire.md). `clock` is shared with the engine(s) under
@@ -130,6 +137,15 @@ class MockWire : public omgp::link::ByteWire {
     // Deframer would silently drop it (no transcript entry, no scheduled response, no
     // diagnostic) since its Hunting/InFrame/Escaped state would reset every call.
     omgp::link::Deframer parser_;
+
+    // Absolute instant of the most recent FLAG byte fed to parser_ — the byte that opens
+    // the frame accumulation now in progress (on_flag() unconditionally resets len_ to 0
+    // on every FLAG, whichever branch it takes). Persisted across transmit() calls, same
+    // reason as parser_: a frame whose opening FLAG arrived in an earlier transmit() call
+    // must still get that call's instant as its tx_start_us, not the instant of whichever
+    // call happens to deliver it (a per-call local would silently understate tx_start_us
+    // for any frame split across two transmit() calls).
+    uint64_t open_flag_us_ = 0;
 
     // Set instead of REQUIRE-ing at the point of failure: transmit() runs on the call
     // stack of the engine under test (Master/Responder, T028/T031), which link/CMakeLists.txt
