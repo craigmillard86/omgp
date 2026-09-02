@@ -147,7 +147,7 @@ TEST_CASE("MockWire::receive releases queued RX bytes strictly in ascending star
     bool got = false;
 
     // Nothing is due yet: neither response's first byte has reached its start instant.
-    HEAP_FREE_SCOPE({ wire.advance_to(tx_end2); });
+    wire.advance_to(tx_end2);
     HEAP_FREE_SCOPE({ got = wire.receive(byte, start_us); });
     REQUIRE_FALSE(got);
 
@@ -155,25 +155,32 @@ TEST_CASE("MockWire::receive releases queued RX bytes strictly in ascending star
     // exclusive boundary — receive() gates on `start_us > now`, not `>=` — the same way the
     // drains below already pin the inclusive one (PR #112 review finding: previously
     // unchecked, so a byte released one microsecond early would have survived undetected).
-    HEAP_FREE_SCOPE({ wire.advance_to(t0_2 - 1); });
+    wire.advance_to(t0_2 - 1);
     HEAP_FREE_SCOPE({ got = wire.receive(byte, start_us); });
     REQUIRE_FALSE(got);
 
     // Advance to exactly node 2's last byte's start instant: all of node 2's response is
     // due, none of node 1's (t0_1 is still well in the future - checked above).
-    HEAP_FREE_SCOPE({ wire.advance_to(t0_2 + (resp2.size() - 1) * byte_us); });
+    wire.advance_to(t0_2 + (resp2.size() - 1) * byte_us);
     std::vector<uint8_t> drained;
     uint64_t last_start = 0;
     bool have_last = false;
+    size_t idx = 0;
     for (;;) {
         HEAP_FREE_SCOPE({ got = wire.receive(byte, start_us); });
         if (!got)
             break;
         if (have_last)
             REQUIRE(start_us > last_start); // strictly ascending start-instant order
+        // Pins the exact schedule, not just its ordering and outer bounds
+        // (contracts/mock-wire.md §Scheduling: byte i fires at t0 + i * byte_time_us(rate);
+        // PR #112 review finding — a schedule at any other spacing than byte_us previously
+        // survived undetected as long as it stayed ordered).
+        REQUIRE(start_us == t0_2 + idx * byte_us);
         last_start = start_us;
         have_last = true;
         drained.push_back(byte);
+        ++idx;
     }
     REQUIRE(drained == resp2); // node 2's bytes only
     // node 1's bytes stay queued (in the future)
@@ -181,18 +188,21 @@ TEST_CASE("MockWire::receive releases queued RX bytes strictly in ascending star
     REQUIRE_FALSE(got);
 
     // Advance past node 1's response too; it drains next, still in ascending order.
-    HEAP_FREE_SCOPE({ wire.advance_to(t0_1 + (resp1.size() - 1) * byte_us); });
+    wire.advance_to(t0_1 + (resp1.size() - 1) * byte_us);
     drained.clear();
     have_last = false;
+    idx = 0;
     for (;;) {
         HEAP_FREE_SCOPE({ got = wire.receive(byte, start_us); });
         if (!got)
             break;
         if (have_last)
             REQUIRE(start_us > last_start);
+        REQUIRE(start_us == t0_1 + idx * byte_us);
         last_start = start_us;
         have_last = true;
         drained.push_back(byte);
+        ++idx;
     }
     REQUIRE(drained == resp1);
 }
