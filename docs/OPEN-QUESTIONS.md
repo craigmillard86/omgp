@@ -676,7 +676,20 @@ the belt, mirroring the dispatcher's own nudge+cron pattern.
 undetected; (b) alone leaves the first ~2 hours dark. After the rerun evidence, (b)'s
 sweep is not a belt but the only delivery path that does not depend on
 `workflow_run` semantics at all.
-**Ruling:** pending — human.
+**Ruling:** (c), 2026-09-02 — human, both parts implemented in `ci-failure-router.yml`.
+(a) the `autofix` checkout takes `persist-credentials: false`, so the agent's push carries
+the Claude App token. (b) a `sweep` job on a 2-hourly cron scans open agent PRs for a
+failed `ci`/`security` run at the current head with no `ci-failure-router sha=<sha>
+pass=<n>` marker and re-dispatches the router for it via `workflow_dispatch`
+(input `run_id`), which doubles as the manual path for a suppressed failure. The sweep
+decides NOTHING: `route` holds the bounds and escalation for both entry paths, which is
+why `route` now reads the failed run from the API when no event delivered one, and
+`autofix` reads the branch/sha/run from `route`'s outputs rather than the event context.
+Regression cover: `test_ci_failure_router_delivery_backstop` and the persist-credentials
+assertion in `test_ci_failure_router_wiring` (tools/refimpl/test_workflow_scripts.py).
+NOT EXAMINED: neither part is demonstrated against live GitHub — the delivery semantics
+that caused this entry cannot be exercised in the mocked harness, so the first real
+auto-fix push after this change is the evidence that (a) works.
 **Supersedes:** none (extends the PR #109 findings; same date).
 
 ---
@@ -747,3 +760,85 @@ Until then `count` stays `uint16_t` (matches every current spec artefact); a fut
 pre-existing spec gap, not a new one.
 **Ruling:** pending — human, to land with T030.
 **Supersedes:** none.
+
+---
+
+## 2026-09-02 — review findings had no fix loop: the L3 cycle stopped at "findings"
+
+**Context:** `claude-review` and `red-team` are read-only by design and end in a
+machine-readable verdict; the only consumer of that verdict, `agent-approve`, merely
+WITHHOLDS approval when it reads `findings`. Nothing anywhere was triggered by a findings
+verdict. The single Claude-writes-code loop in the repository, `ci-failure-router`'s
+`autofix`, fires on `workflow_run` completion of `ci`/`security` — CI failures only. Net
+effect: an agent PR with green CI and open review findings could not be advanced by any
+agent, and sat until a human either fixed it or closed it. The review pass ran, the verdict
+was correct, and the cycle simply had no edge leading out of it.
+**Options:** (a) leave it — a human addresses every finding, and the review pass is
+advisory only; (b) let `claude-review` fix what it finds in the same run — rejected: the
+authoring and reviewing passes must stay separate, and a reviewer that edits the code it is
+judging cannot produce an independent verdict; (c) a separate bounded `review-fix` loop
+triggered by the findings verdict, on the agent's own branch, with the same shape of bounds
+and escalation as the CI router.
+**Recommendation:** (c).
+**Ruling:** (c), 2026-09-02 — human. Implemented as `.github/workflows/review-fix.yml`;
+GOVERNANCE.md §4 records the loop. Two decisions worth naming:
+1. **Severity policy (human direction):** HIGH and MEDIUM findings are fixed; a LOW finding
+   is fixed only where the agent is already changing that code, otherwise it is listed as
+   consciously deferred. LOW-only churn burns attempts and re-review cycles for no risk
+   reduction. `claude-review` and `red-team` now emit `[HIGH]`/`[MEDIUM]`/`[LOW]` prefixes
+   so the policy has something to route on.
+2. **Accepted consequence:** a deferred LOW keeps the verdict at `findings`, so
+   `agent-approve` will never auto-approve that PR and a human merges it. Making deferred
+   LOWs read as clean would change the meaning of the verdict the approval gate parses —
+   a T3 change to the 2026-08-31 approval ruling — and is NOT done here. If the deferral
+   turns out to block enough PRs to matter, that is the question to reopen.
+Regression cover: `tests/workflows/review_fix_harness.js` (24 cases: verdict discipline,
+who may be pushed to, one attempt per head commit, the two-attempt bound and its
+escalation) plus `test_review_fix_wiring`.
+NOT EXAMINED: the loop has not run live; the severity policy's effect on how many PRs
+reach `needs-human` is unmeasured, and `delivery-metrics` does not yet record review-fix
+attempts.
+**Supersedes:** none.
+
+---
+
+## 2026-09-02 — the merge click was the last human step: autonomous merge below T3
+
+**Context:** with `review-fix` closing the findings edge (entry above), every step of the
+cycle except one was autonomous: dispatch, implement, review, red team, fix, approve. The
+merge itself still waited on a human, so a PR could sit complete, approved and green for as
+long as it took someone to click — the queue, not the work, became the constraint.
+**Options:** (a) keep the human merge click (GOVERNANCE.md §1 as written); (b) GitHub native
+auto-merge — enable it on approval and let GitHub merge when checks pass; (c) a workflow that
+performs the merge itself, pinned to the head the verdicts were issued for.
+**Ruling:** (c) with a T2 ceiling, 2026-09-02 — human. Implemented as
+`.github/workflows/agent-merge.yml`, knob `auto_merge_max_tier: 2`; GOVERNANCE.md §1, §2
+and §4 updated.
+Why NOT (b): branch protection has `dismiss_stale_reviews` OFF (the reason `agent-approve`
+dismisses its own stale approvals). Under native auto-merge a push landing after approval
+could be merged on the older head's approval — an unreviewed head reaching main through a
+mechanism nobody watched. (c) passes `sha` to the merge API, so exactly that race ends in a
+409 and no merge. Native auto-merge becomes viable if `dismiss_stale_reviews` is ever turned
+on, and would then be the simpler mechanism.
+**CODEOWNERS scope (human direction):** the owner keeps every owned path EXCEPT
+`docs/OPEN-QUESTIONS.md` and `specs/**/tasks.md` — the two OPERATING-POLICY §2 already
+sanctions agents to write. Without that exception nearly every PR recording a spec ambiguity
+would still have waited for a human, and the loop would have been autonomous in name only.
+The alternative offered — merging owner paths too, relying on the PR #104 finding that a
+github-actions[bot] approval satisfies `require_code_owner_reviews` — was declined: it would
+leave the risk label as the only thing between an agent and `protocol/` or `.github/`.
+Regression cover: `tests/workflows/agent_merge_harness.js` (37 cases, including one per
+protected CODEOWNERS class, the 409 race, and every fail-closed refusal) plus
+`test_agent_merge_wiring` and `test_codeowners_still_protects_ground_truth_and_governance`,
+which fails if the exemption list ever widens or an owned path is dropped.
+NOT EXAMINED, and worth watching on the first live merges: (1) whether `GITHUB_TOKEN` is
+permitted to merge under the current branch-protection rules at all — if it is not, the
+workflow comments once per head and leaves the PR, it never retries around the rule; (2) the
+check-completeness rule assumes every required check appears as a check RUN at the head — a
+required check that only ever appears as a legacy commit status is covered by the combined
+status call, but a required check that has not started at all reads as "no such check", not
+as "pending", so a protection rule requiring it is the backstop, not this workflow; (3) the
+kill switch is now split — revoking the Claude token stops the agents but NOT the merger.
+**Supersedes:** extends the 2026-08-31 approval ruling (auto-approval ≤ T2); does not change
+it.
+

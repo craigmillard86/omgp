@@ -62,6 +62,19 @@
   two attempts per PR regardless (`auto-fix-1`/`auto-fix-2`); remove those
   labels only to grant a fresh pair of attempts. A router `needs-human`
   means both attempts failed — its comment links every failed run.
+- Stop autonomous merging (a bad change reached main, or you want the
+  click back): set `auto_merge_max_tier: -1` in `.github/agent-config.yml`,
+  or disable the `agent-merge` workflow. NOTE the general agent kill
+  switches do NOT cover this one — revoking `CLAUDE_CODE_OAUTH_TOKEN` or
+  uninstalling the App stops the agents that produce PRs, but `agent-merge`
+  runs no agent and merges with `GITHUB_TOKEN`, so already-clean PRs would
+  keep merging.
+- Review findings not being fixed (the `review-fix` agent pushing bad
+  fixes, or looping): disable the `review-fix` workflow. It is bounded to
+  two attempts per PR (`review-fix-1`/`review-fix-2`), one per head commit;
+  remove those labels only to grant a fresh pair. LOW-severity findings are
+  deferred by design, which keeps the verdict at `findings` — such a PR
+  never auto-approves or auto-merges and is yours to merge.
 - `ci-failure` issue on `main`: agent-triage takes it like
   `nightly-failure`. If the cause was environmental, close the issue with
   a note; the router files at most one open issue per workflow, so a

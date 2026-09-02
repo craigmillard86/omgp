@@ -1,0 +1,241 @@
+name: review-fix
+# Review-finding auto-resolution (companion to ci-failure-router's CI-failure loop).
+# Gap this closes: claude-review and red-team are READ-ONLY — they post findings and a
+# machine-readable verdict, and the ONLY consumer of that verdict (agent-approve) merely
+# WITHHOLDS approval. A green-CI agent PR carrying review findings therefore stalled
+# forever with no agent able to act on it. This workflow is the missing edge: findings ->
+# bounded fix attempt on the agent's own branch -> new push -> re-review.
+#
+# The trigger is `issue_comment` DELIBERATELY, for the same reason agent-approve uses it:
+# those runs use the DEFAULT-BRANCH workflow definition, so a same-repo PR can never
+# rewrite this loop's own bounds in its own diff.
+#
+# Severity policy (ruled 2026-09-02): fix HIGH and MEDIUM findings. A LOW finding is
+# addressed ONLY when it sits in code the agent is already changing for a HIGH/MEDIUM fix;
+# otherwise it is listed as deliberately deferred and left alone. Rationale: LOW-only churn
+# burns attempts and re-review cycles for no risk reduction. CONSEQUENCE, deliberately
+# accepted: a PR whose only remaining findings are LOW keeps `VERDICT(review): findings`
+# and is therefore never auto-approved — a human merges it (GOVERNANCE.md §1 already makes
+# the merge human). Changing verdict semantics so deferred LOWs read as clean would be a
+# T3 governance change and is NOT done here.
+#
+# Bound — two attempts per PR (`review-fix-1`/`review-fix-2`), at most one per head commit.
+# Nothing resets the labels but a human. Exhaustion escalates `needs-human` exactly as the
+# CI router does. Kill switch: disable this workflow.
+# The `gate` script is executed verbatim by tests/workflows/review_fix_harness.js.
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'Pull request number to act on'
+        required: true
+
+concurrency:
+  group: review-fix-${{ github.event.issue.number || inputs.pr }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    # Cheap pre-filter so the vast majority of comments never start a job body. The real
+    # decision (agent-authored, bounds, verdict-at-head) is the script's, and every
+    # unresolved condition fails CLOSED — no fix attempt.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request &&
+       github.event.comment.user.login == 'claude[bot]' &&
+       contains(github.event.comment.body, 'VERDICT('))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    outputs:
+      go: ${{ steps.gate.outputs.go }}
+      pr: ${{ steps.gate.outputs.pr }}
+      branch: ${{ steps.gate.outputs.branch }}
+      head: ${{ steps.gate.outputs.head }}
+      attempt: ${{ steps.gate.outputs.attempt }}
+      kinds: ${{ steps.gate.outputs.kinds }}
+    steps:
+      - uses: actions/checkout@v7   # issue_comment: this is the DEFAULT branch — never PR content
+      - name: Decide whether a bounded fix attempt is due
+        id: gate
+        uses: actions/github-script@v7
+        env:
+          DISPATCH_PR: ${{ inputs.pr }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const out = (go, extra = {}) => { core.setOutput('go', go); for (const [k, v] of Object.entries(extra)) core.setOutput(k, v); };
+            const number = Number(context.payload.issue ? context.payload.issue.number : process.env.DISPATCH_PR);
+            if (!Number.isInteger(number)) { core.notice('review-fix: no PR number — nothing to do'); return out('no'); }
+            if (context.payload.issue && !context.payload.issue.pull_request) { core.notice('review-fix: comment is on a plain issue — untouched'); return out('no'); }
+            if (context.payload.comment) {
+              const c = context.payload.comment;
+              if (!c.user || c.user.login !== 'claude[bot]' || !(c.body || '').includes('VERDICT(')) {
+                core.notice('review-fix: trigger comment is not a claude[bot] verdict — untouched'); return out('no');
+              }
+            }
+            // Fresh PR state from the API — never from any checkout.
+            const pr = (await github.rest.pulls.get({owner, repo, pull_number: number})).data;
+            if (pr.state !== 'open') { core.notice(`review-fix: #${number} is ${pr.state} — nothing to do`); return out('no'); }
+            if (pr.head.repo && pr.head.repo.full_name !== `${owner}/${repo}`) { core.notice(`review-fix: #${number} is from fork ${pr.head.repo.full_name} — never touched (GOVERNANCE.md §4b)`); return out('no'); }
+            const has = n => pr.labels.some(l => l.name === n);
+            if (!has('agent-authored')) { core.notice(`review-fix: #${number} is not agent-authored — human PRs are never pushed to`); return out('no'); }
+            if (has('needs-human')) { core.notice(`review-fix: #${number} already needs-human — nothing to do`); return out('no'); }
+            if (!/^task\//.test(pr.head.ref)) { core.notice(`review-fix: head ${pr.head.ref} is not a task/* branch — untouched`); return out('no'); }
+            const head = pr.head.sha;
+
+            // Verdicts: only from claude[bot], only as the FINAL non-empty line, only at the
+            // CURRENT head (same rule as agent-approve — a verdict token quoted mid-comment,
+            // or one left over from an older head, must never trigger a push).
+            const comments = await github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: number, per_page: 100});
+            const verdictOf = kind => {
+              const re = new RegExp(`^VERDICT\\(${kind}\\):\\s*(clean|findings)\\s*@\\s*${head}$`);
+              let latest = null;
+              for (const cm of comments) {
+                if (!cm.user || cm.user.login !== 'claude[bot]') continue;
+                const lines = (cm.body || '').trim().split('\n');
+                const hit = re.exec(lines[lines.length - 1].trim());
+                if (hit) latest = hit[1];
+              }
+              return latest;
+            };
+            const kinds = ['review', 'red-team'].filter(k => verdictOf(k) === 'findings');
+            if (!kinds.length) { core.notice(`review-fix: no findings verdict at ${head.slice(0, 7)} — nothing to fix`); return out('no'); }
+
+            // One attempt per head commit: a red-team findings verdict arriving after a review
+            // one on the SAME commit is not a second attempt (mirrors the router's sha marker).
+            // The marker is invisible in rendered Markdown.
+            const marker = `<!-- review-fix sha=${head} -->`;
+            if (comments.some(c => (c.body || '').includes(`review-fix sha=${head}`))) {
+              core.notice(`review-fix: ${head.slice(0, 7)} already attempted — one attempt per commit`); return out('no');
+            }
+            const attempts = ['review-fix-1', 'review-fix-2'].filter(l => has(l)).length;
+            if (attempts >= 2) {
+              // Exhausted: release the claim on the PR and on the issues it closes, then
+              // escalate — the same shape as ci-failure-router's exhaustion path, including
+              // its rule that only a 404 ("label already absent") is a non-event.
+              const closes = [...new Set([...(pr.body || '').matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi)].map(x => Number(x[1])))];
+              const m = pr.head.ref.match(/^task\/(\d+)$/);
+              const issues = closes.length ? closes : (m ? [Number(m[1])] : []);
+              const attempt = async (what, fn) => { try { await fn(); return null; } catch (e) { return e.status === 404 ? null : `${what} (${e.status || ''} ${e.message || e})`; } };
+              const problems = [], released = [];
+              for (const t of [number, ...issues]) {
+                const r = await attempt(`could NOT release \`in-progress\` on #${t}`, () => github.rest.issues.removeLabel({owner, repo, issue_number: t, name: 'in-progress'}));
+                if (r) problems.push(r); else released.push(`#${t}`);
+                const a = await attempt(`could NOT apply \`needs-human\` on #${t}`, () => github.rest.issues.addLabels({owner, repo, issue_number: t, labels: ['needs-human']}));
+                if (a) problems.push(a);
+              }
+              const status = [`\`in-progress\` released on ${released.join(', ')}`, ...problems.map(p => `⚠️ ${p} — do it by hand`)].join('; ');
+              await github.rest.issues.createComment({owner, repo, issue_number: number,
+                body: `${marker}\n🛑 Review-fix **exhausted** after 2 attempts; ${kinds.join(' + ')} findings remain at ${head.slice(0, 7)}. Escalated \`needs-human\`${issues.length ? ` on ${issues.map(n => `#${n}`).join(', ')}` : ''}; ${status}.`});
+              // The PR's own needs-human is the escalation signal humans watch: if it could not be applied, fail loudly.
+              if (problems.some(p => p.includes(`\`needs-human\` on #${number}`))) throw new Error(`review-fix: escalation incomplete — ${problems.join('; ')}`);
+              return out('no');
+            }
+            const n = attempts + 1;
+            await github.rest.issues.addLabels({owner, repo, issue_number: number, labels: [`review-fix-${n}`]});
+            await github.rest.issues.createComment({owner, repo, issue_number: number,
+              body: `${marker}\n🔧 ${kinds.join(' + ')} findings at ${head.slice(0, 7)} — review-fix attempt ${n} of 2 starting on \`${pr.head.ref}\` (run ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}).\n\nPolicy: HIGH/MEDIUM findings are fixed; a LOW finding is fixed only where the agent is already changing that code, otherwise it is listed as deferred. Disable the \`review-fix\` workflow to stop this loop.`});
+            return out('yes', {pr: number, branch: pr.head.ref, head, attempt: n, kinds: kinds.join(',')});
+
+  fix:
+    needs: gate
+    if: needs.gate.outputs.go == 'yes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      id-token: write   # anthropics/claude-code-action exchanges an OIDC token for its App token (found 2026-08-29)
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.branch }}
+          fetch-depth: 0
+          # The agent's push must NOT carry GITHUB_TOKEN credentials: pushes made with them
+          # are suppressed as workflow_run/re-review event sources, which is exactly how the
+          # CI router lost its own attempts' failures (docs/OPEN-QUESTIONS.md 2026-08-31).
+          # With credentials unpersisted the push uses the Claude App token, so the resulting
+          # `synchronize` re-review and CI chaining actually fire.
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with: {python-version: '3.12'}
+      - name: Toolchain (so the agent can run the pipeline)
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake ninja-build
+          pip install jinja2 pyyaml pytest
+      - name: Claude Code — address the review findings on the agent's branch
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: claude,github-actions   # the triggering comment is claude[bot]'s verdict; a github-actions dispatch is the manual path
+          prompt: |
+            You are the review-fix agent. Read CLAUDE.md and
+            docs/OPERATING-POLICY.md first and stay strictly within agent
+            permissions. You are on branch ${{ needs.gate.outputs.branch }}
+            of PR #${{ needs.gate.outputs.pr }} at head
+            ${{ needs.gate.outputs.head }} (review-fix attempt
+            ${{ needs.gate.outputs.attempt }} of 2). The
+            ${{ needs.gate.outputs.kinds }} pass reported findings.
+            1. Read the findings: `gh pr view ${{ needs.gate.outputs.pr }} --comments`.
+               The authoritative set is the LATEST claude[bot] comment for
+               each of ${{ needs.gate.outputs.kinds }} whose final line is
+               `VERDICT(<kind>): findings @ ${{ needs.gate.outputs.head }}`.
+               Ignore older comments from earlier heads — they may already
+               be fixed. Also read `gh pr diff ${{ needs.gate.outputs.pr }}`.
+            2. SEVERITY POLICY — this is the rule, not a preference:
+               - Fix every HIGH and MEDIUM finding.
+               - Fix a LOW finding ONLY if it is in code you are already
+                 editing for a HIGH/MEDIUM fix. Otherwise leave it alone.
+               - If a finding carries no severity label, judge it: if it
+                 could produce wrong behaviour, a spec divergence, a
+                 security hole, or a weakened test, treat it as MEDIUM or
+                 above. Style, naming, comment wording and preference
+                 opinions are LOW.
+               - If EVERY finding is LOW, change no code at all: post the
+                 comment from step 5 saying exactly that, and stop.
+            3. Fix ON THIS BRANCH only — never main, never another branch.
+               Where a finding reveals a missing test, work TDD: add the
+               failing test first, then the fix. Never weaken, skip or
+               delete a test, assertion, scenario, gate threshold or policy
+               constant; never touch tests/vectors/ or
+               protocol/omgp-protocol.yaml — if a fix needs any of those,
+               change nothing, explain why in a PR comment, and stop.
+               A finding you believe is WRONG is not fixed by silencing it:
+               rebut it in the comment with evidence and leave the code.
+               Spec ambiguity is recorded in docs/OPEN-QUESTIONS.md, never
+               resolved in a code comment.
+            4. Run ./pipeline.sh (the stages your change touches, then the
+               full local set) until green BEFORE pushing. Commit with
+               `Refs #<task issue>` and push to this branch — the push
+               re-runs review and CI.
+            5. Comment on the PR with `gh pr comment`, containing exactly:
+               (a) each finding you FIXED, with file:line and what changed;
+               (b) each finding DEFERRED as LOW, listed verbatim so a human
+               can see what was consciously left; (c) each finding you
+               REBUTTED, with the evidence; (d) evidence for every claim,
+               labelled (demonstrated by <named test/stage>, assumed, or
+               NOT EXAMINED) per CLAUDE.md rule 11.
+            Do not approve the PR, do not merge it, and do not change any
+            file under .github/workflows/ — this loop's own bounds are not
+            yours to edit.
+          # No --model: this is an implementation loop behind a mechanical gate, so it stays
+          # on the action default like agent-dispatch and the router's auto-fix (model-tier
+          # ruling 2026-08-31). The judgement that produced the findings was already made on
+          # opus by claude-review/red-team.
+          claude_args: |
+            --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Edit,Read,Write,Grep,Glob"
+
+      - name: Record an attempt that did not complete
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = Number('${{ needs.gate.outputs.pr }}');
+            await github.rest.issues.createComment({...context.repo, issue_number: pr,
+              body: `⚠️ Review-fix attempt ${{ needs.gate.outputs.attempt }} did not complete (run ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). It still counts toward the bound of 2.`});

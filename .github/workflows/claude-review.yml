@@ -64,6 +64,13 @@ jobs:
                changes.
             Post ONE review comment: findings with file:line references,
             severity-ordered, or an explicit "no findings" — never pad.
+            Prefix EVERY finding with its severity as one of `[HIGH]`,
+            `[MEDIUM]` or `[LOW]`, exactly those tokens — the review-fix
+            loop routes on them: HIGH/MEDIUM are fixed, LOW is fixed only
+            where the agent is already changing that code. LOW is for
+            style, naming and preference; anything that could produce wrong
+            behaviour, a spec divergence, a security hole or a weakened
+            test is MEDIUM or above.
             End the comment with a required final section "NOT EXAMINED:"
             listing what was out of scope of this pass (files skipped,
             areas not checked, tools not run). If nothing was excluded,

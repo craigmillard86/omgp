@@ -77,8 +77,40 @@ def test_ci_failure_router_wiring():
         assert must in action["with"]["prompt"], must
     tools = action["with"]["claude_args"]
     assert "Bash(git*)" in tools and "Bash(gh run rerun*)" in tools and "Bash(gh pr create*)" not in tools
-    assert autofix["steps"][0]["with"]["ref"] == "${{ github.event.workflow_run.head_branch }}"
-    # the triage loop also handles main-branch CI failures (same handling as nightly-failure)
+    assert autofix["steps"][0]["with"]["ref"] == "${{ needs.route.outputs.branch }}"
+    # docs/OPEN-QUESTIONS.md 2026-08-31 fix (a): a push carrying GITHUB_TOKEN credentials
+    # suppresses the workflow_run delivery for the CI run it starts, so the router never saw
+    # its own attempt's failure. The agent must push with the Claude App token instead.
+    assert autofix["steps"][0]["with"]["persist-credentials"] is False
+    # ...and the autofix job must read the failure from the router's outputs, so the
+    # dispatch path (belt (b)) routes through exactly the same code as the event path.
+    assert "github.event.workflow_run" not in yaml.dump(autofix)
+
+
+def test_ci_failure_router_delivery_backstop():
+    """Belt (b) from the same entry: workflow_run delivery is not trustworthy for this loop,
+    so a scheduled sweep re-dispatches failures the router never saw. Demonstrated on #108:
+    neither the auto-fix push's CI failure nor a manual `gh run rerun` produced a router run,
+    and attempt 2 could not fire by any existing mechanism."""
+    wf = yaml.safe_load(ROUTER.read_text())
+    on = wf[True] if True in wf else wf["on"]
+    assert "schedule" in on and on["schedule"], "no scheduled sweep"
+    assert "run_id" in on["workflow_dispatch"]["inputs"], "no manual routing path for a suppressed failure"
+    sweep = wf["jobs"]["sweep"]
+    assert sweep["permissions"]["actions"] == "write"           # dispatching the router
+    assert sweep["permissions"].get("contents", "read") == "read"   # the sweep never writes code
+    assert "schedule" in sweep["if"] and "inputs.run_id" in sweep["if"]
+    script = next(s for s in sweep["steps"] if "actions/github-script" in s.get("uses", ""))["with"]["script"]
+    # The sweep decides nothing about the failure: it re-delivers, the bounds stay in `route`.
+    for must in ("agent-authored", "needs-human", "auto-fix-1", "ci-failure-router sha=", "createWorkflowDispatch"):
+        assert must in script, must
+    assert "addLabels" not in script and "claude" not in script.lower()
+    route = wf["jobs"]["route"]
+    assert "workflow_dispatch" in route["if"] and "inputs.run_id" in route["if"]
+
+
+def test_main_ci_failures_reach_triage():
+    """The router files the issue; agent-triage handles it exactly like nightly-failure."""
     triage = yaml.safe_load((ROOT / ".github" / "workflows" / "agent-triage.yml").read_text())
     assert "'ci-failure'" in triage["jobs"]["triage"]["if"] and "'nightly-failure'" in triage["jobs"]["triage"]["if"]
 
@@ -93,11 +125,11 @@ def _claude_steps(workflow):
 def test_model_tiers_judgement_loops_on_opus_volume_loops_on_default():
     """Ruling 2026-08-31: the judgement-heavy loops (reviews that back approvals, red team,
     story planning/enrichment, spec-drift audit, failure triage) run claude-opus-5; the
-    high-volume implementation loops (dispatch, router auto-fix, mentions) stay on the
+    high-volume implementation loops (dispatch, router auto-fix, mentions, review-fix) stay on the
     action default (claude-sonnet-5) behind their mechanical gates."""
     OPUS = ["claude-review.yml", "red-team.yml", "story-enrich.yml",
             "agent-converge-audit.yml", "agent-triage.yml"]
-    DEFAULT = ["agent-dispatch.yml", "ci-failure-router.yml", "claude-mention.yml"]
+    DEFAULT = ["agent-dispatch.yml", "ci-failure-router.yml", "claude-mention.yml", "review-fix.yml"]
     for wfn in OPUS:
         steps = _claude_steps(wfn)
         assert steps, wfn
@@ -171,7 +203,8 @@ def test_bot_triggered_agent_workflows_allow_their_bot_actors():
                           ("claude-review.yml", "claude"),            # agent PRs are opened by the Claude App
                           ("claude-review.yml", "github-actions"),    # synchronize from a router auto-fix push runs as github-actions (live: run 33435939888 on #108)
                           ("red-team.yml", "claude"),
-                          ("red-team.yml", "github-actions")]:        # same synchronize path once red-team gains it; opened-by-bot today
+                          ("red-team.yml", "github-actions"),
+                          ("review-fix.yml", "claude")]:          # the trigger is claude[bot]'s own findings verdict        # same synchronize path once red-team gains it; opened-by-bot today
         wf = yaml.safe_load((ROOT / ".github" / "workflows" / workflow).read_text())
         actions = [s for j in wf["jobs"].values() for s in j.get("steps", []) if "claude-code-action" in s.get("uses", "")]
         assert actions, workflow
@@ -181,8 +214,65 @@ def test_bot_triggered_agent_workflows_allow_their_bot_actors():
 
 def test_router_labels_are_provisioned():
     setup = (ROOT / "tools" / "gh-setup.sh").read_text()
-    for l in ("auto-fix-1", "auto-fix-2", "ci-failure"):
+    for l in ("auto-fix-1", "auto-fix-2", "ci-failure", "review-fix-1", "review-fix-2"):
         assert f"L {l} " in setup or f'L "{l}"' in setup, l
+
+
+# --- review-finding auto-resolution (review-fix.yml) -------------------------------------------
+
+REVIEW_FIX = ROOT / ".github" / "workflows" / "review-fix.yml"
+REVIEW_FIX_HARNESS = ROOT / "tests" / "workflows" / "review_fix_harness.js"
+
+
+@pytest.mark.skipif(shutil.which("node") is None,
+                    reason="node not present (blind spot: workflow scripts not exercised in this environment)")
+def test_review_fix_gate_against_mocked_github(tmp_path):
+    f = tmp_path / "scripts.json"
+    f.write_text(json.dumps({"gate": _script("review-fix.yml", "gate")}))
+    r = subprocess.run(["node", str(REVIEW_FIX_HARNESS), str(f), str(ROOT)], capture_output=True, text=True, cwd=ROOT, timeout=120)
+    print(r.stdout)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "FAIL" not in r.stdout
+    assert "cases passed" in r.stdout
+
+
+def test_review_fix_wiring():
+    """The loop that closes the review-findings gap: claude-review and red-team are
+    read-only and agent-approve only WITHHOLDS approval, so before this workflow a
+    green-CI agent PR carrying findings stalled with no agent able to act. Its safety
+    properties live in the YAML, like the CI router's."""
+    wf = yaml.safe_load(REVIEW_FIX.read_text())
+    on = wf[True] if True in wf else wf["on"]
+    # Default-branch definition runs (same rationale as agent-approve): a PR cannot rewrite
+    # this loop's own bounds in its own diff.
+    assert on["issue_comment"]["types"] == ["created"]
+    gate, fix = wf["jobs"]["gate"], wf["jobs"]["fix"]
+    assert "claude[bot]" in gate["if"] and "VERDICT(" in gate["if"]
+    checkout = next(s for s in gate["steps"] if "actions/checkout" in s.get("uses", ""))
+    assert "ref" not in checkout.get("with", {})            # issue_comment checks out the DEFAULT branch
+    # least privilege: only the fix job may write code
+    assert gate["permissions"].get("contents", "read") == "read" and "id-token" not in gate["permissions"]
+    assert fix["permissions"]["contents"] == "write" and fix["permissions"]["id-token"] == "write"
+    assert fix["needs"] == "gate" and "gate.outputs.go == 'yes'" in fix["if"]
+    assert fix["steps"][0]["with"]["ref"] == "${{ needs.gate.outputs.branch }}"
+    assert fix["steps"][0]["with"]["persist-credentials"] is False   # the push must re-trigger review/CI
+    action = next(s for s in fix["steps"] if "claude-code-action" in s.get("uses", ""))
+    prompt = action["with"]["prompt"]
+    for must in ("CLAUDE.md", "OPERATING-POLICY", "./pipeline.sh", "tests/vectors/",
+                 "protocol/omgp-protocol.yaml", "HIGH and MEDIUM", "DEFERRED"):
+        assert must in prompt, must
+    # The severity policy is the point of the loop: LOW findings are not chased on their own.
+    assert "Fix a LOW finding ONLY if it is in code you are already" in prompt
+    assert "If EVERY finding is LOW, change no code at all" in prompt
+    # The fixer must not touch the loop's own bounds, open PRs, or approve anything.
+    assert ".github/workflows/" in prompt and "Do not approve" in prompt
+    tools = action["with"]["claude_args"]
+    assert "Bash(gh pr create*)" not in tools and "Bash(gh pr review*)" not in tools and "Bash(gh pr merge*)" not in tools
+    # Both reviewers must emit the severity tokens the policy routes on.
+    for wfn, job in (("claude-review.yml", "review"), ("red-team.yml", "attack-pr")):
+        p = next(s for s in yaml.safe_load((ROOT / ".github" / "workflows" / wfn).read_text())["jobs"][job]["steps"]
+                 if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
+        assert "`[HIGH]`" in p and "`[MEDIUM]`" in p and "`[LOW]`" in p, wfn
 
 
 def test_both_workflows_declare_the_same_seven_sections():
@@ -192,3 +282,61 @@ def test_both_workflows_declare_the_same_seven_sections():
              "Out of scope", "Dependencies", "Expected risk tier"]
     for n in names:
         assert f"'{n}'" in gate and f"'{n}'" in promote, n
+
+
+# --- autonomous merge (agent-merge.yml; ruling 2026-09-02) --------------------------------------
+
+MERGE = ROOT / ".github" / "workflows" / "agent-merge.yml"
+MERGE_HARNESS = ROOT / "tests" / "workflows" / "agent_merge_harness.js"
+
+
+@pytest.mark.skipif(shutil.which("node") is None,
+                    reason="node not present (blind spot: workflow scripts not exercised in this environment)")
+def test_agent_merge_against_mocked_github(tmp_path):
+    f = tmp_path / "scripts.json"
+    f.write_text(json.dumps({"merge": _script("agent-merge.yml", "merge")}))
+    r = subprocess.run(["node", str(MERGE_HARNESS), str(f), str(ROOT)], capture_output=True, text=True, cwd=ROOT, timeout=120)
+    print(r.stdout)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "FAIL" not in r.stdout
+    assert "cases passed" in r.stdout
+
+
+def test_agent_merge_wiring():
+    """This is the only gate between agent work and `main` with no human in the loop, so its
+    safety properties are asserted in the YAML as well as exercised in the harness."""
+    wf = yaml.safe_load(MERGE.read_text())
+    on = wf[True] if True in wf else wf["on"]
+    # Default-branch definition runs (agent-approve's rationale): a PR cannot rewrite the
+    # gate, the CODEOWNERS exception list or the tier knob in its own diff.
+    assert on["issue_comment"]["types"] == ["created"]
+    assert "schedule" in on and on["schedule"], "no sweep: the merge-ready moment is a check going green, not a comment"
+    job = wf["jobs"]["merge"]
+    checkout = next(s for s in job["steps"] if "actions/checkout" in s.get("uses", ""))
+    assert "ref" not in checkout.get("with", {})
+    assert job["permissions"]["contents"] == "write" and job["permissions"]["checks"] == "read"
+    assert "id-token" not in job["permissions"]        # no agent runs here: this workflow only merges
+    assert not [s for s in job["steps"] if "claude-code-action" in s.get("uses", "")]
+    script = next(s for s in job["steps"] if "actions/github-script" in s.get("uses", ""))["with"]["script"]
+    # The merge is pinned to the head the verdicts were issued for: with dismiss_stale_reviews
+    # off, this is what stops an approval from carrying an unreviewed head to main.
+    assert "sha: head" in script and "merge_method: 'merge'" in script
+    assert "tier >= 3" in script                        # T3 never
+    assert "auto_merge_max_tier" in script
+    for must in ("agent-authored", "needs-human", "VERDICT", "listForRef", "getCombinedStatusForRef", "CODEOWNERS"):
+        assert must in script, must
+    # Only the two paths OPERATING-POLICY §2 sanctions agents to write are exempt from the
+    # CODEOWNERS refusal — nothing may be added here without a T3 ruling.
+    assert "const SANCTIONED = ['/docs/OPEN-QUESTIONS.md', '/specs/**/tasks.md'];" in script
+    cfg = (ROOT / ".github" / "agent-config.yml").read_text()
+    assert "auto_merge_max_tier: 2" in cfg
+
+
+def test_codeowners_still_protects_ground_truth_and_governance():
+    """agent-merge exempts two owner paths; every other owned path must still be owned, or
+    the exemption list silently widens as CODEOWNERS changes."""
+    owned = [l.split()[0] for l in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
+             if l.strip() and not l.strip().startswith("#")]
+    for must in ("/protocol/", "/tests/vectors/", "/docs/protocol-l3.md", "/docs/GOVERNANCE.md",
+                 "/docs/OPERATING-POLICY.md", "/.github/", "/CLAUDE.md", "/pipeline.sh"):
+        assert must in owned, must
