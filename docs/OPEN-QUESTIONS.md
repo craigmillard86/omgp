@@ -678,3 +678,72 @@ sweep is not a belt but the only delivery path that does not depend on
 `workflow_run` semantics at all.
 **Ruling:** pending — human.
 **Supersedes:** none (extends the PR #109 findings; same date).
+
+---
+
+## 2026-09-01 — MockWire (T010) design choices: Respond's answer, wildcard-script ordering, and deferred-REQUIRE capacity checks
+
+**Context:** review on PR #111 (T010, `tests/support/mock_wire.{hpp,cpp}`) flagged three
+`MockWire` decisions as unrecorded interpretations rather than code defects, per
+CLAUDE.md's rule that spec ambiguity is resolved here, not in a code comment.
+(1) `contracts/mock-wire.md`'s `Kind::Respond` says "the node's `RequestHandler`
+(usually a real `Responder`) answers" — but neither `RequestHandler` nor `Responder`
+exists yet (`Responder` is US2/T031). `schedule_respond()` instead echoes the request
+payload back to the sender as its own deterministic answer.
+(2) `next_step()` reads an exhausted per-node script as falling through to the shared
+`node == 0xFF` wildcard script before the documented default (`Respond`,
+`TRUNK_T_turn_min_us`) applies; the contract's "an exhausted script behaves as Respond
+with the default delay" is also readable as own-script exhaustion going straight to the
+default, with `0xFF` only covering nodes that never had a script at all.
+(3) Three "never a silent drop" checks that used to be plain `REQUIRE` at the point of
+failure (RX-queue capacity, transcript capacity, `encode_frame` refusing a `Respond`
+answer) all run on the call stack of `transmit()` — which `Master`/`Responder`
+(T028/T031) call, and which `link/CMakeLists.txt` builds with `-fno-exceptions`. A
+`REQUIRE` thrown from there would unwind through those frames, which is undefined
+behaviour and loses the diagnostic exactly when it fires. Fixed by recording a
+`fault_` message instead and `REQUIRE`-ing it drained at the next `advance_to()` call
+(always on the test's own stack) — but this defers the failure by up to one
+`advance_to()` step rather than reporting the instant an overflow occurs, which
+pressures the contract's "overflow is a REQUIRE failure" wording.
+**Recommendation:** (1) keep the echo as the interim `Respond` answer — it is the
+smallest thing that makes `Respond` usable before `Responder` exists, and T034 already
+plans to replace the mock's per-node handling with a real `Responder`; no contract
+change needed, just this record of the interim behaviour. (2) keep own-script →
+wildcard → default as the combined per-node sequence (implemented, `mock_wire.cpp`'s
+`next_step()`) — it lets a wildcard script express rig-wide default behaviour (e.g. "every
+node responds late unless scripted otherwise") without every test authoring a
+17-element per-node script; if a future test needs "wildcard applies only to
+never-scripted nodes", that is a distinguishable, additive change (an `own_script_set`
+flag), not a revert. (3) accept the deferred-REQUIRE reading of "overflow is a REQUIRE
+failure" — a failure that fires with a one-`advance_to()`-call lag but before the test
+draws any conclusion from the wire's state is still "the test fails and says why", which
+is what the contract clause protects against (a silent drop the test never notices).
+**Ruling:** pending — human. Implemented as the safe default per CLAUDE.md ("implement
+nothing speculative … proceed only if a safe default exists"); T011 (#29) and T028/T031
+should be written against these three readings, or a superseding entry should replace
+them first.
+**Supersedes:** none.
+
+---
+
+## 2026-09-02 — `Step::count` (`uint16_t`) cannot represent `Kind::Rate`'s bit-rate values
+
+**Context:** review on PR #111 (T010, `tests/support/mock_wire.hpp`) flagged that
+`contracts/mock-wire.md`'s `Step` struct (and `data-model.md` §10, `research.md` R-07,
+which all agree with each other) types `count` as `uint16_t`, but the same contract
+defines `Kind::Rate` as "the node now hears only at `count` interpreted as bit rate
+(1 000 000 or 115 200)" — neither value fits in `uint16_t` (max 65 535). The
+inconsistency is in the spec artefacts themselves, not introduced by this PR's code,
+which copies the documented width verbatim. Not yet load-bearing: `Rate` is
+unimplemented until T030 (surfaced as a loud `fault_` if scripted today, per the
+2026-09-01 MockWire entry above), so no script has attempted to author a `Rate` step's
+`count` yet.
+**Recommendation:** widen `count` to `uint32_t` in `contracts/mock-wire.md`,
+`data-model.md` §10, `research.md` R-07 and `tests/support/mock_wire.hpp::Step`
+together, in the T030 change that first gives `Rate` a body — a struct-layout change
+across three human-ruling documents plus code is a single T3 slice, not a T010 fix.
+Until then `count` stays `uint16_t` (matches every current spec artefact); a future
+`Rate` step's `count` cannot yet be authored at either documented bit rate, which is a
+pre-existing spec gap, not a new one.
+**Ruling:** pending — human, to land with T030.
+**Supersedes:** none.
