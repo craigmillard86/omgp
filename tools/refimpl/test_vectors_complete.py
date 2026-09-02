@@ -43,6 +43,15 @@ def test_status_block_and_descriptor_vectors_exist():
     assert (VECTORS / "descriptor_sample.json").exists() and (VECTORS / "descriptor_min.json").exists()
 
 
+def test_frame_vectors_exist():
+    names = ("frame_ping_req", "frame_response", "frame_retry", "frame_max_payload",
+              "frame_worst_stuffing")
+    for name in names:
+        f = VECTORS / f"{name}.json"
+        assert f.exists(), f"missing golden vector {f}"
+        assert json.loads(f.read_text())["kind"] == "frame"
+
+
 def test_vector_names_match_files_and_schema_fields():
     for f in sorted(VECTORS.glob("*.json")):
         v = json.loads(f.read_text())
