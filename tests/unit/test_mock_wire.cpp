@@ -5,13 +5,14 @@
 // tests/support/mock_wire.{hpp,cpp} directly (T010, #28).
 #include "catch_amalgamated.hpp"
 #include "fake_clock.hpp"
+#include "heap_guard.hpp"
 #include "link/frame.hpp"
 #include "link/link_types.hpp"
 #include "mock_wire.hpp"
 #include "omgp_protocol.h"
 
 #include <algorithm>
-#include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <vector>
 
@@ -56,29 +57,20 @@ std::vector<uint8_t> expected_respond_answer(const std::vector<uint8_t>& req) {
     return std::vector<uint8_t>(out, out + written);
 }
 
-// The single max-payload request the RX-overflow case below retransmits unchanged: seq
-// and content don't affect whether the RX queue overflows, only total byte volume does,
-// so one encode suffices. Built at static-init time — before Catch2's runner (and so
-// before *any* TEST_CASE, including the [!shouldfail] one below) starts — specifically so
-// a regression here can never be misattributed to whichever test case happens to call it
-// (PR #112 review, finding 1: a REQUIRE(encode_frame(...)) inside a [!shouldfail] case
-// reports the case as passing on any failure, including this one, not just the intended
-// RX-capacity fault). A REQUIRE would be unsafe this early (no test case is running yet to
-// report to), so this hard-aborts instead. kMaxWire is sized for exactly this worst case
-// (2 + 2*(kHeaderLen + LIMIT_max_l3_payload + kCrcLen) == kMaxWire), so encode_frame cannot
-// refuse it while that invariant holds.
-std::vector<uint8_t> make_max_payload_request() {
+// The single max-payload request the RX-overflow case below retransmits unchanged: seq and
+// content don't affect whether the RX queue overflows, only total byte volume does, so one
+// encode suffices. kMaxWire is sized for exactly this worst case (2 + 2*(kHeaderLen +
+// LIMIT_max_l3_payload + kCrcLen) == kMaxWire), so encode_frame cannot refuse it while that
+// invariant holds.
+std::vector<uint8_t> encode_max_payload_request() {
     uint8_t big_payload[omgp::LIMIT_max_l3_payload];
     std::fill(std::begin(big_payload), std::end(big_payload), uint8_t{0x11});
     FrameFields f{0x01, omgp::ADDR_host, false, false, 0, sizeof big_payload, big_payload};
     uint8_t out[kMaxWire];
     size_t written = 0;
-    if (encode_frame(f, out, sizeof out, written) != Status::Ok || written == 0)
-        std::abort();
+    REQUIRE(encode_frame(f, out, sizeof out, written) == Status::Ok);
     return std::vector<uint8_t>(out, out + written);
 }
-
-const std::vector<uint8_t> kMaxPayloadRequest = make_max_payload_request();
 
 } // namespace
 
@@ -90,7 +82,8 @@ TEST_CASE("MockWire::transmit reports the modelled timing at the reference bit r
 
     const std::vector<uint8_t> req = encode_request(0x01, 0);
     const uint64_t now = 1000;
-    const uint64_t end = wire.transmit(req.data(), req.size(), now);
+    uint64_t end = 0;
+    HEAP_FREE_SCOPE({ end = wire.transmit(req.data(), req.size(), now); });
 
     // contracts/byte-wire-and-clock.md: transmit() returns now + n * byte_time_us(rate).
     REQUIRE(end == now + req.size() * byte_time_us(omgp::TRUNK_bit_rate));
@@ -106,7 +99,8 @@ TEST_CASE("MockWire::transmit reports the modelled timing at the fallback bit ra
 
     const std::vector<uint8_t> req = encode_request(0x01, 0);
     const uint64_t now = 2000;
-    const uint64_t end = wire.transmit(req.data(), req.size(), now);
+    uint64_t end = 0;
+    HEAP_FREE_SCOPE({ end = wire.transmit(req.data(), req.size(), now); });
 
     REQUIRE(end == now + req.size() * byte_time_us(omgp::TRUNK_bit_rate_fallback));
     REQUIRE(end == now + req.size() * 86); // 86us/byte at 115.2kbit/s (integer model)
@@ -116,20 +110,29 @@ TEST_CASE("MockWire::receive releases queued RX bytes strictly in ascending star
           "order, and never before their start instant",
           "[link][mock_wire]") {
     FakeClock clock;
-    MockWire wire(clock);
 
     // Node 0x01 gets a long ("late response") turnaround; node 0x02 keeps the default
     // (TRUNK_T_turn_min_us) short one. Node 1 is transmitted to first, but because its
     // delay is much longer, its response bytes start *later* than node 2's, which is
     // transmitted to second — exercising real reordering, not just FIFO/insertion order.
-    const Step slow[] = {{.node = 0x01, .kind = Kind::Respond, .delay_us = 500}};
+    // Positional init (node, kind, delay_us; count/seed take their defaults): Step is a
+    // C++17 aggregate and this project builds C++17, so `.node = ...` designated init (a
+    // C++20 feature; PR #112 review finding) is avoided here.
+    const Step slow[] = {{0x01, Kind::Respond, 500}};
+    // Declared after `slow` (not before): mock_wire.hpp documents that `steps` must outlive
+    // the MockWire pointing at it. With the opposite order, ~MockWire() would run against
+    // an already-destroyed `slow` (PR #112 review finding — benign today only because the
+    // destructor never reads scripts_, but not something to rely on).
+    MockWire wire(clock);
     wire.set_script(0x01, slow, 1);
 
     const std::vector<uint8_t> req1 = encode_request(0x01, 1);
-    const uint64_t tx_end1 = wire.transmit(req1.data(), req1.size(), 0);
+    uint64_t tx_end1 = 0;
+    HEAP_FREE_SCOPE({ tx_end1 = wire.transmit(req1.data(), req1.size(), 0); });
 
     const std::vector<uint8_t> req2 = encode_request(0x02, 2);
-    const uint64_t tx_end2 = wire.transmit(req2.data(), req2.size(), tx_end1);
+    uint64_t tx_end2 = 0;
+    HEAP_FREE_SCOPE({ tx_end2 = wire.transmit(req2.data(), req2.size(), tx_end1); });
 
     const std::vector<uint8_t> resp1 = expected_respond_answer(req1);
     const std::vector<uint8_t> resp2 = expected_respond_answer(req2);
@@ -141,18 +144,31 @@ TEST_CASE("MockWire::receive releases queued RX bytes strictly in ascending star
 
     uint8_t byte;
     uint64_t start_us;
+    bool got = false;
 
     // Nothing is due yet: neither response's first byte has reached its start instant.
-    wire.advance_to(tx_end2);
-    REQUIRE_FALSE(wire.receive(byte, start_us));
+    HEAP_FREE_SCOPE({ wire.advance_to(tx_end2); });
+    HEAP_FREE_SCOPE({ got = wire.receive(byte, start_us); });
+    REQUIRE_FALSE(got);
+
+    // One microsecond before node 2's first byte's start instant: still not due. Pins the
+    // exclusive boundary — receive() gates on `start_us > now`, not `>=` — the same way the
+    // drains below already pin the inclusive one (PR #112 review finding: previously
+    // unchecked, so a byte released one microsecond early would have survived undetected).
+    HEAP_FREE_SCOPE({ wire.advance_to(t0_2 - 1); });
+    HEAP_FREE_SCOPE({ got = wire.receive(byte, start_us); });
+    REQUIRE_FALSE(got);
 
     // Advance to exactly node 2's last byte's start instant: all of node 2's response is
     // due, none of node 1's (t0_1 is still well in the future - checked above).
-    wire.advance_to(t0_2 + (resp2.size() - 1) * byte_us);
+    HEAP_FREE_SCOPE({ wire.advance_to(t0_2 + (resp2.size() - 1) * byte_us); });
     std::vector<uint8_t> drained;
     uint64_t last_start = 0;
     bool have_last = false;
-    while (wire.receive(byte, start_us)) {
+    for (;;) {
+        HEAP_FREE_SCOPE({ got = wire.receive(byte, start_us); });
+        if (!got)
+            break;
         if (have_last)
             REQUIRE(start_us > last_start); // strictly ascending start-instant order
         last_start = start_us;
@@ -161,13 +177,17 @@ TEST_CASE("MockWire::receive releases queued RX bytes strictly in ascending star
     }
     REQUIRE(drained == resp2); // node 2's bytes only
     // node 1's bytes stay queued (in the future)
-    REQUIRE_FALSE(wire.receive(byte, start_us));
+    HEAP_FREE_SCOPE({ got = wire.receive(byte, start_us); });
+    REQUIRE_FALSE(got);
 
     // Advance past node 1's response too; it drains next, still in ascending order.
-    wire.advance_to(t0_1 + (resp1.size() - 1) * byte_us);
+    HEAP_FREE_SCOPE({ wire.advance_to(t0_1 + (resp1.size() - 1) * byte_us); });
     drained.clear();
     have_last = false;
-    while (wire.receive(byte, start_us)) {
+    for (;;) {
+        HEAP_FREE_SCOPE({ got = wire.receive(byte, start_us); });
+        if (!got)
+            break;
         if (have_last)
             REQUIRE(start_us > last_start);
         last_start = start_us;
@@ -212,32 +232,33 @@ TEST_CASE("MockWire's xorshift32 PRNG is byte-for-byte reproducible for a given 
 }
 
 TEST_CASE("MockWire's RX queue capacity overflow is a hard test failure, never a silent drop",
-          "[link][mock_wire][!shouldfail]") {
+          "[link][mock_wire]") {
     // contracts/mock-wire.md "Capacity": the RX queue is a fixed 4*kMaxWire bytes; enqueueing
     // past it must fail loudly, never truncate or drop silently. This test drives enough
     // Respond-scheduled answers through the queue - with nothing ever draining it via
-    // receive() - to exceed that capacity, and confirms the resulting failure via Catch2's
-    // [!shouldfail] tag (the test is *expected* to fail; an unexpected pass fails the run
-    // instead) rather than by catching from inside the test: the REQUIRE that fires
-    // (mock_wire.cpp's advance_to()) reports its failure to the currently running test case
-    // before any exception could be caught, so there is no way to observe it as "did not
-    // fail" from within a passing test case.
+    // receive() - to exceed that capacity, then asserts the *specific* RX-capacity fault via
+    // MockWire::take_fault() with an ordinary REQUIRE.
     //
-    // This case makes no REQUIRE of its own before the final advance_to(): kMaxPayloadRequest
-    // is validated once, at static-init time, before this (or any) test case runs (PR #112
-    // review, finding 1), so the only way this case can pass is the one advance_to() REQUIRE
-    // the [!shouldfail] tag exists to catch — not some unrelated assertion earlier in the body.
+    // PR #112 review, finding 1: the previous version used Catch2's [!shouldfail] tag, which
+    // inverts pass/fail at whole-case granularity — any failure anywhere in the case
+    // (including an unrelated encode_frame regression, of which this case used to make ~12)
+    // reported the case as passing, without ever reaching MockWire::enqueue()'s capacity
+    // guard. take_fault() lets this case assert the *specific* fault message with a normal
+    // REQUIRE instead, so it can only pass for the reason it claims to.
     FakeClock clock;
     MockWire wire(clock);
     constexpr size_t kRxCapacity = 4 * kMaxWire;
 
-    uint64_t now = 0;
-    // Each Respond answer enqueues roughly kMaxPayloadRequest.size() RX bytes; send enough
-    // more to exceed the fixed-size queue regardless of exact stuffed length (never drained
-    // via receive()).
-    const size_t iterations = kRxCapacity / kMaxPayloadRequest.size() + 5;
-    for (size_t i = 0; i < iterations; ++i)
-        now = wire.transmit(kMaxPayloadRequest.data(), kMaxPayloadRequest.size(), now);
+    const std::vector<uint8_t> req = encode_max_payload_request();
 
-    wire.advance_to(now); // the overflow fault raised by enqueue() above must fail here
+    uint64_t now = 0;
+    // Each Respond answer enqueues roughly req.size() RX bytes; send enough more to exceed
+    // the fixed-size queue regardless of exact stuffed length (never drained via receive()).
+    const size_t iterations = kRxCapacity / req.size() + 5;
+    for (size_t i = 0; i < iterations; ++i)
+        HEAP_FREE_SCOPE({ now = wire.transmit(req.data(), req.size(), now); });
+
+    const char* fault = wire.take_fault();
+    REQUIRE(fault != nullptr);
+    REQUIRE(std::strcmp(fault, "MockWire: RX queue capacity exceeded (4 * kMaxWire)") == 0);
 }

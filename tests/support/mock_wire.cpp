@@ -272,6 +272,12 @@ void MockWire::set_bit_rate(uint32_t bps) {
     bit_rate_ = bps;
 }
 
+const char* MockWire::take_fault() {
+    const char* f = fault_;
+    fault_ = nullptr;
+    return f;
+}
+
 void MockWire::advance_to(uint64_t t) {
     // Drains a fault recorded by transmit()'s call stack (see fault_'s declaration in
     // mock_wire.hpp) — this call, unlike transmit(), always runs on the test's own stack,
