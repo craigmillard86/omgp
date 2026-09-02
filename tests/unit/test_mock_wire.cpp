@@ -11,6 +11,7 @@
 #include "omgp_protocol.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <functional>
 #include <vector>
 
@@ -54,6 +55,30 @@ std::vector<uint8_t> expected_respond_answer(const std::vector<uint8_t>& req) {
     REQUIRE(encode_frame(resp, out, sizeof out, written) == Status::Ok);
     return std::vector<uint8_t>(out, out + written);
 }
+
+// The single max-payload request the RX-overflow case below retransmits unchanged: seq
+// and content don't affect whether the RX queue overflows, only total byte volume does,
+// so one encode suffices. Built at static-init time — before Catch2's runner (and so
+// before *any* TEST_CASE, including the [!shouldfail] one below) starts — specifically so
+// a regression here can never be misattributed to whichever test case happens to call it
+// (PR #112 review, finding 1: a REQUIRE(encode_frame(...)) inside a [!shouldfail] case
+// reports the case as passing on any failure, including this one, not just the intended
+// RX-capacity fault). A REQUIRE would be unsafe this early (no test case is running yet to
+// report to), so this hard-aborts instead. kMaxWire is sized for exactly this worst case
+// (2 + 2*(kHeaderLen + LIMIT_max_l3_payload + kCrcLen) == kMaxWire), so encode_frame cannot
+// refuse it while that invariant holds.
+std::vector<uint8_t> make_max_payload_request() {
+    uint8_t big_payload[omgp::LIMIT_max_l3_payload];
+    std::fill(std::begin(big_payload), std::end(big_payload), uint8_t{0x11});
+    FrameFields f{0x01, omgp::ADDR_host, false, false, 0, sizeof big_payload, big_payload};
+    uint8_t out[kMaxWire];
+    size_t written = 0;
+    if (encode_frame(f, out, sizeof out, written) != Status::Ok || written == 0)
+        std::abort();
+    return std::vector<uint8_t>(out, out + written);
+}
+
+const std::vector<uint8_t> kMaxPayloadRequest = make_max_payload_request();
 
 } // namespace
 
@@ -173,6 +198,17 @@ TEST_CASE("MockWire's xorshift32 PRNG is byte-for-byte reproducible for a given 
 
     // Not vacuously true: a degenerate (constant) stream would also be "reproducible".
     REQUIRE(std::adjacent_find(run1.begin(), run1.end(), std::not_equal_to<>()) != run1.end());
+
+    // seed == 0 is Step::seed's default (every step that doesn't set one explicitly) and
+    // xorshift32_next()'s one fixed point; mock_wire.cpp repairs it (substituting
+    // 0xFFFFFFFF before advancing) rather than letting it emit a constant all-zero stream
+    // forever. Cover that repaired path directly, not just the explicit 0xC0FFEE seed
+    // above — it's the one every default-seed Garbage/Babble script (T030) will take.
+    const std::vector<uint8_t> zero_run1 = byte_stream(0, 32);
+    const std::vector<uint8_t> zero_run2 = byte_stream(0, 32);
+    REQUIRE(zero_run1 == zero_run2);
+    REQUIRE(std::adjacent_find(zero_run1.begin(), zero_run1.end(), std::not_equal_to<>()) !=
+            zero_run1.end());
 }
 
 TEST_CASE("MockWire's RX queue capacity overflow is a hard test failure, never a silent drop",
@@ -186,34 +222,22 @@ TEST_CASE("MockWire's RX queue capacity overflow is a hard test failure, never a
     // (mock_wire.cpp's advance_to()) reports its failure to the currently running test case
     // before any exception could be caught, so there is no way to observe it as "did not
     // fail" from within a passing test case.
+    //
+    // This case makes no REQUIRE of its own before the final advance_to(): kMaxPayloadRequest
+    // is validated once, at static-init time, before this (or any) test case runs (PR #112
+    // review, finding 1), so the only way this case can pass is the one advance_to() REQUIRE
+    // the [!shouldfail] tag exists to catch — not some unrelated assertion earlier in the body.
     FakeClock clock;
     MockWire wire(clock);
     constexpr size_t kRxCapacity = 4 * kMaxWire;
 
-    uint8_t big_payload[omgp::LIMIT_max_l3_payload];
-    std::fill(std::begin(big_payload), std::end(big_payload), uint8_t{0x11});
-
-    auto send_one = [&](uint64_t now, uint8_t seq) {
-        FrameFields f{0x01, omgp::ADDR_host, false, false, seq, sizeof big_payload, big_payload};
-        uint8_t out[kMaxWire];
-        size_t written = 0;
-        REQUIRE(encode_frame(f, out, sizeof out, written) == Status::Ok);
-        return std::make_pair(wire.transmit(out, written, now), written);
-    };
-
     uint64_t now = 0;
-    uint8_t seq = 0;
-    auto [end0, written0] = send_one(now, seq++);
-    now = end0;
-
-    // Each Respond answer enqueues roughly `written0` RX bytes; send enough more to exceed
-    // the fixed-size queue regardless of exact stuffed length (never drained via receive()).
-    const size_t iterations = kRxCapacity / written0 + 4;
-    for (size_t i = 0; i < iterations; ++i) {
-        auto [end, written] = send_one(now, seq++);
-        now = end;
-        (void)written;
-    }
+    // Each Respond answer enqueues roughly kMaxPayloadRequest.size() RX bytes; send enough
+    // more to exceed the fixed-size queue regardless of exact stuffed length (never drained
+    // via receive()).
+    const size_t iterations = kRxCapacity / kMaxPayloadRequest.size() + 5;
+    for (size_t i = 0; i < iterations; ++i)
+        now = wire.transmit(kMaxPayloadRequest.data(), kMaxPayloadRequest.size(), now);
 
     wire.advance_to(now); // the overflow fault raised by enqueue() above must fail here
 }
