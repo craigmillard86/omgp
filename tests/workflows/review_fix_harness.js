@@ -166,6 +166,16 @@ const quiet = w => !w.log.some(l => l.startsWith('comment@') || /^[+-]/.test(l))
   })();
   check('workflow_dispatch with a PR number -> same decision, no comment required', w.outputs.go === 'yes' && labels(w, 94).includes('review-fix-1'));
 
+  // Copilot review on #113: `Number('')` is 0, so a blank dispatch input must not act on PR #0.
+  w = world({pr: PR(['agent-authored']), comments: [verdict('review', 'findings', HEAD)]});
+  await (async () => {
+    const context = {repo: {owner: 'o', repo: 'r'}, eventName: 'workflow_dispatch', runId: 7777, serverUrl: 'https://gh', payload: {}};
+    process.env.DISPATCH_PR = '   ';
+    await new AsyncFunction('github', 'context', 'core', 'require', S.gate)(w.github, context, w.core, require);
+    delete process.env.DISPATCH_PR;
+  })();
+  check('blank workflow_dispatch input -> fails closed, never acts on PR #0', w.outputs.go === 'no' && quiet(w) && w.log.some(l => /no usable PR number/.test(l)));
+
   for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
   console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);
 })();

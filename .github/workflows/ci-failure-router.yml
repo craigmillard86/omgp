@@ -37,7 +37,10 @@ concurrency:
   # One router per branch. GitHub keeps at most one running and one pending run per group; a
   # third failure arriving while one is pending replaces the pending one — the NEWEST failure
   # on the branch is always routed, an older one may be skipped (never an extra attempt).
-  group: ci-failure-router-${{ github.event.workflow_run.head_branch || inputs.run_id || github.run_id }}
+  # Every sweep collapses to ONE group (not `github.run_id`, which is unique per run and so
+  # serialized nothing): two overlapping sweeps would otherwise race between the marker check
+  # and the dispatch and route the same failure twice (Copilot review on #113).
+  group: ci-failure-router-${{ github.event.workflow_run.head_branch || inputs.run_id || 'sweep' }}
   cancel-in-progress: false
 
 jobs:

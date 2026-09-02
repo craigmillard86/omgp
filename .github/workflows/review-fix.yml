@@ -50,7 +50,11 @@ jobs:
     permissions:
       contents: read
       issues: write
-      pull-requests: write
+      pull-requests: write   # NOT reducible to read (raised by Copilot on #113): this job WRITES to the
+                             # PR — attempt labels, the marker comment, and the needs-human/in-progress
+                             # label moves on exhaustion. Labels and comments on a pull request go
+                             # through the issues API but are governed by the pull-requests scope, which
+                             # is why ci-failure-router's `route` job carries the same pair.
     outputs:
       go: ${{ steps.gate.outputs.go }}
       pr: ${{ steps.gate.outputs.pr }}
@@ -69,8 +73,11 @@ jobs:
           script: |
             const {owner, repo} = context.repo;
             const out = (go, extra = {}) => { core.setOutput('go', go); for (const [k, v] of Object.entries(extra)) core.setOutput(k, v); };
-            const number = Number(context.payload.issue ? context.payload.issue.number : process.env.DISPATCH_PR);
-            if (!Number.isInteger(number)) { core.notice('review-fix: no PR number — nothing to do'); return out('no'); }
+            // `Number('')` is 0, not NaN: a blank dispatch input must fail closed, never act on
+            // PR #0 (Copilot review on #113 — the same class of bug the merge harness caught).
+            const raw = String(context.payload.issue ? context.payload.issue.number : (process.env.DISPATCH_PR || '')).trim();
+            const number = Number(raw);
+            if (!raw || !Number.isInteger(number) || number <= 0) { core.notice('review-fix: no usable PR number — nothing to do'); return out('no'); }
             if (context.payload.issue && !context.payload.issue.pull_request) { core.notice('review-fix: comment is on a plain issue — untouched'); return out('no'); }
             if (context.payload.comment) {
               const c = context.payload.comment;
