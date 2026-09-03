@@ -49,7 +49,8 @@ ROUTER_HARNESS = ROOT / "tests" / "workflows" / "ci_failure_router_harness.js"
                     reason="node not present (blind spot: workflow scripts not exercised in this environment)")
 def test_ci_failure_router_routing_against_mocked_github(tmp_path):
     f = tmp_path / "scripts.json"
-    f.write_text(json.dumps({"route": _script("ci-failure-router.yml", "route")}))
+    f.write_text(json.dumps({"route": _script("ci-failure-router.yml", "route"),
+                             "sweep": _script("ci-failure-router.yml", "sweep")}))
     r = subprocess.run(["node", str(ROUTER_HARNESS), str(f), str(ROOT)], capture_output=True, text=True, cwd=ROOT, timeout=120)
     print(r.stdout)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -70,9 +71,12 @@ def test_ci_failure_router_wiring():
     assert autofix["permissions"]["id-token"] == "write" and autofix["permissions"]["contents"] == "write"
     assert "id-token" not in route["permissions"] and route["permissions"].get("contents", "read") == "read" and route["permissions"]["actions"] == "read"
     assert "conclusion == 'failure'" in route["if"] and "head_repository.full_name == github.repository" in route["if"]
-    for _job in ("route", "sweep"):
-        _st = next(st for st in wf["jobs"][_job]["steps"] if "actions/github-script" in st.get("uses", ""))
-        assert "MAX_ATTEMPTS" in _st.get("env", {}), _job   # bound is the agent-config knob (ruling 2026-09-03)
+    _st = next(st for st in wf["jobs"]["route"]["steps"] if "actions/github-script" in st.get("uses", ""))
+    assert "MAX_ATTEMPTS" in _st.get("env", {})   # bound is the agent-config knob (ruling 2026-09-03)
+    # red-team #120 F1: the sweep holds NO bound — it re-delivers even at/after exhaustion,
+    # because the escalation is the router decision that needs the delivery backstop most.
+    _sw = next(st for st in wf["jobs"]["sweep"]["steps"] if "actions/github-script" in st.get("uses", ""))
+    assert "MAX_ATTEMPTS" not in _sw.get("env", {})
     assert "auto_fix_max_attempts: 4" in (ROOT / ".github" / "agent-config.yml").read_text()
     assert autofix["needs"] == "route" and "route.outputs.route == 'autofix'" in autofix["if"]
     action = next(s for s in autofix["steps"] if "claude-code-action" in s.get("uses", ""))
@@ -105,9 +109,11 @@ def test_ci_failure_router_delivery_backstop():
     assert sweep["permissions"].get("contents", "read") == "read"   # the sweep never writes code
     assert "schedule" in sweep["if"] and "inputs.run_id" in sweep["if"]
     script = next(s for s in sweep["steps"] if "actions/github-script" in s.get("uses", ""))["with"]["script"]
-    # The sweep decides nothing about the failure: it re-delivers, the bounds stay in `route`.
-    for must in ("agent-authored", "needs-human", "auto-fix-", "ci-failure-router sha=", "createWorkflowDispatch"):
+    # The sweep decides nothing about the failure: it re-delivers, the bounds stay in `route`
+    # (red-team #120 F1: it must NOT stop at the bound — exhaustion needs delivery too).
+    for must in ("agent-authored", "needs-human", "ci-failure-router sha=", "createWorkflowDispatch"):
         assert must in script, must
+    assert "MAX_ATTEMPTS" not in script
     assert "addLabels" not in script and "claude" not in script.lower()
     route = wf["jobs"]["route"]
     assert "workflow_dispatch" in route["if"] and "inputs.run_id" in route["if"]

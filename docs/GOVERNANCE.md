@@ -83,10 +83,15 @@ the enforcement.
     environmental failure is re-run, not patched.
   - **Bound — `auto_fix_max_attempts` (agent-config; 4 since ruling
     2026-09-03, was 2), then a human.** Attempts are the `auto-fix-<n>` PR
-    labels, one attempt per commit; a failure after the last releases
-    `in-progress` and applies `needs-human` with the complete failed-run
-    list. The labels are the bound: nothing resets them but a human; an
-    unreadable knob fails closed to 2.
+    labels, one attempt per commit (written to the first free index, so the
+    bound stays reachable after a human removes a label); a failure after
+    the last releases `in-progress` and applies `needs-human` with the
+    complete non-successful-run list. The labels are the bound: nothing
+    resets them but a human. Knob semantics: 0 (or < 1) disables auto-fix,
+    an unreadable value fails closed to 2, values above 10 are clamped —
+    and the sweep carries NO bound: it re-delivers at every attempt count,
+    since exhaustion/escalation needs the delivery backstop most (red-team
+    on #120).
   - **`main` goes to triage.** A failure on `main` files one open
     `ci-failure` + `task` issue per workflow, which `agent-triage` handles
     exactly like `nightly-failure`.

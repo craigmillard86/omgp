@@ -1,7 +1,7 @@
-// Executes the `route` github-script body of .github/workflows/ci-failure-router.yml VERBATIM
-// against a mocked GitHub API, so the routing rules (GOVERNANCE.md §4 "CI-failure
+// Executes the `route` AND `sweep` github-script bodies of .github/workflows/ci-failure-router.yml
+// VERBATIM against a mocked GitHub API, so the routing rules (GOVERNANCE.md §4 "CI-failure
 // auto-resolution") are tested on every push instead of only on real failed runs. Driven by
-// tools/refimpl/test_workflow_scripts.py, which extracts the script into a JSON file (argv[2]).
+// tools/refimpl/test_workflow_scripts.py, which extracts the scripts into a JSON file (argv[2]).
 //
 // Each case builds a small world (open PRs, issues, the failed run's jobs, prior failed runs),
 // runs the script with a synthetic workflow_run payload, and asserts on the API calls it made
@@ -22,30 +22,35 @@ function world({prs = [], issues = [], jobs = [], failedRuns = [], comments = {}
     paginate: async (fn, args) => fn(args).then(r => Array.isArray(r.data) ? r.data : r.data.workflow_runs),
     rest: {
       pulls: {
-        list: async ({head, state}) => ({data: [...prState.values()].filter(p => p.state === (state || 'open') && `o:${p.head}` === head)}),
+        // No `head` filter (the sweep's whole-repo listing) returns every open PR.
+        list: async ({head, state}) => ({data: [...prState.values()].filter(p => p.state === (state || 'open') && (!head || `o:${p.head.ref}` === head))}),
       },
       issues: {
         get: async ({issue_number}) => { const i = issueState.get(issue_number); if (!i) throw Object.assign(new Error('Not Found'), {status: 404}); return {data: i}; },
         listForRepo: async ({labels, state}) => ({data: [...issueState.values()].filter(i => i.state === (state || 'open') && (labels || '').split(',').filter(Boolean).every(l => i.labels.some(x => x.name === l)))}),
         listComments: async ({issue_number}) => ({data: (comments[issue_number] || []).map(body => ({body}))}),
-        addLabels: async ({issue_number, labels}) => { for (const l of labels) labelsOf(issue_number).push({name: l}); log.push(`+${labels.join('+')}@${issue_number}`); },
+        // GitHub labels are a SET: re-adding an existing one is a no-op. Fidelity here is
+        // load-bearing (red-team on #120 F5): the push-duplicates version could not observe
+        // the unreachable-bound trap of a non-prefix label set.
+        addLabels: async ({issue_number, labels}) => { const c = labelsOf(issue_number); for (const l of labels) if (!c.some(x => x.name === l)) c.push({name: l}); log.push(`+${labels.join('+')}@${issue_number}`); },
         removeLabel: async ({issue_number, name}) => {
           if (failRemove === issue_number) throw Object.assign(new Error('Server Error'), {status: 500});
           const t = prState.get(issue_number) || issueState.get(issue_number);
           if (!t || !t.labels.some(l => l.name === name)) throw Object.assign(new Error('Not Found'), {status: 404});
           t.labels = t.labels.filter(l => l.name !== name); log.push(`-${name}@${issue_number}`);
         },
-        createComment: async ({issue_number, body}) => log.push(`comment@${issue_number}: ${body.replace(/\n+/g, ' | ').slice(0, 700)}`),
+        createComment: async ({issue_number, body}) => log.push(`comment@${issue_number}: ${body.replace(/\n+/g, ' | ').slice(0, 2000)}`),
         create: async ({title, labels, body}) => { const n = 900 + issueState.size; issueState.set(n, {number: n, state: 'open', title, labels: labels.map(name => ({name})), body}); log.push(`create#${n}: ${title} [${labels.join(',')}]`); return {data: {number: n, html_url: `u/${n}`}}; },
       },
       actions: {
         listJobsForWorkflowRun: async () => ({data: jobs}),
         // Real response shape: {total_count, workflow_runs} honouring per_page — the exhaustion
-        // path reads it directly (one call, no pagination); the sweep still goes via paginate.
+        // path reads it directly (one call, no pagination); the sweep goes via paginate.
         listWorkflowRunsForRepo: async ({branch, status, per_page}) => {
           const all = failedRuns.filter(r => r.head_branch === branch && (!status || r.conclusion === status));
           return {data: {total_count: all.length, workflow_runs: all.slice(0, per_page || 30)}};
         },
+        createWorkflowDispatch: async ({inputs, ref}) => log.push(`dispatch run=${inputs.run_id} ref=${ref}`),
       },
     },
   };
@@ -65,7 +70,12 @@ async function route(w, run, maxAttempts = '4') {
   const context = {repo: {owner: 'o', repo: 'r'}, eventName: 'workflow_run', runId: 7777, serverUrl: 'https://gh', payload: {workflow_run}};
   await new AsyncFunction('github', 'context', 'core', 'require', S.route)(w.github, context, w.core, require);
 }
-const pr = (number, head, labels, body = '') => ({number, state: 'open', head, labels: labels.map(name => ({name})), html_url: `u/pr/${number}`, body});
+async function sweep(w) {
+  const context = {repo: {owner: 'o', repo: 'r'}, eventName: 'schedule', payload: {repository: {default_branch: 'main'}}};
+  await new AsyncFunction('github', 'context', 'core', 'require', S.sweep)(w.github, context, w.core, require);
+}
+// `head` carries the real nested shape (ref/sha/repo) — the sweep reads it; `route` never does.
+const pr = (number, head, labels, body = '') => ({number, state: 'open', head: {ref: head, sha: 'aaa111', repo: {full_name: REPO}}, labels: labels.map(name => ({name})), html_url: `u/pr/${number}`, body});
 const issue = (number, labels, title = `T00${number}`) => ({number, state: 'open', title, labels: labels.map(name => ({name}))});
 const JOBS = [{name: 'native (build + full test suite)', conclusion: 'success', steps: []},
               {name: 'deep-verify (T2/T3 only)', conclusion: 'failure', steps: [{name: 'Set up job', conclusion: 'success'}, {name: 'Diff-scoped mutation', conclusion: 'failure'}]}];
@@ -88,11 +98,11 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   await route(w, {head_sha: 'def456'});
   check('one prior attempt -> auto-fix-2 + route autofix', w.outputs.route === 'autofix' && labels(w, 94).includes('auto-fix-2') && w.outputs.attempt === '2');
 
-  const runs = [{id: 5001, name: 'ci', head_branch: 'task/26', conclusion: 'failure', html_url: 'https://gh/r/5001'},
-                {id: 4900, name: 'ci', head_branch: 'task/26', conclusion: 'failure', html_url: 'https://gh/r/4900'},
-                {id: 4800, name: 'ci', head_branch: 'task/26', conclusion: 'failure', html_url: 'https://gh/r/4800'},
-                {id: 4750, name: 'security', head_branch: 'task/26', conclusion: 'failure', html_url: 'https://gh/r/4750'},
-                {id: 4700, name: 'ci', head_branch: 'task/99', conclusion: 'failure', html_url: 'https://gh/r/4700'}];
+  const runs = [{id: 5001, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'failure', html_url: 'https://gh/r/5001'},
+                {id: 4900, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'failure', html_url: 'https://gh/r/4900'},
+                {id: 4800, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'failure', html_url: 'https://gh/r/4800'},
+                {id: 4750, name: 'security', head_branch: 'task/26', status: 'completed', conclusion: 'failure', html_url: 'https://gh/r/4750'},
+                {id: 4700, name: 'ci', head_branch: 'task/99', status: 'completed', conclusion: 'failure', html_url: 'https://gh/r/4700'}];
   w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'in-progress'])], issues: [issue(26, ['task', 'in-progress', 'agent-authored'])], jobs: JOBS, failedRuns: runs});
   await route(w, {head_sha: 'aaa999'});
   check('two prior attempts, bound 4 -> attempt 3, not exhaustion (ruling 2026-09-03)', w.outputs.route === 'autofix' && labels(w, 94).includes('auto-fix-3') && w.outputs.attempt === '3');
@@ -113,11 +123,77 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   // 3 of 4 failed runs as if complete. ALL of this branch's failed runs must appear (a
   // security failure included), up to a sane cap with an explicit "and N more" tail beyond it.
   check('exhausted comment lists ALL four failed runs on the branch', said(w, /gh\/r\/4800/, 94) && said(w, /gh\/r\/4750/, 94));
-  const many = Array.from({length: 14}, (_, k) => ({id: 6000 + k, name: 'ci', head_branch: 'task/26', conclusion: 'failure', html_url: `https://gh/r/${6000 + k}`}));
+  const many = Array.from({length: 14}, (_, k) => ({id: 6000 + k, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'failure', html_url: `https://gh/r/${6000 + k}`}));
   w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: many});
   await route(w, {head_sha: 'eee444'});
-  check('more than ten failed runs -> ten listed plus an explicit "and N more" tail', said(w, /gh\/r\/6009/, 94) && !said(w, /gh\/r\/6010/, 94) && said(w, /and 4 more failed run/, 94));
+  check('more than ten failed runs -> ten listed plus an explicit "and N more" tail', said(w, /gh\/r\/6009/, 94) && !said(w, /gh\/r\/6010/, 94) && said(w, /and 4 more non-successful run/, 94));
   check('exhausted path does not add another attempt label', !labels(w, 94).includes('auto-fix-5') && !w.log.some(l => /^\+auto-fix/.test(l)));
+
+  // --- red-team findings on #120 (2026-09-03) ---
+  // F5: labels are a set; a human removing auto-fix-1 to grant another go leaves {2,3,4}.
+  //     Writing attempts+1 (= auto-fix-4, already present) would be a no-op and the bound
+  //     unreachable forever. The router must write the first FREE index.
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], jobs: JOBS});
+  await route(w, {head_sha: 'gap001'});
+  check('F5: non-prefix label set {2,3,4} -> writes the free auto-fix-1, count advances', w.outputs.route === 'autofix' && labels(w, 94).includes('auto-fix-1') && said(w, /attempt 4 of 4/, 94));
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: runs});
+  await route(w, {head_sha: 'gap002'});
+  check('F5: the full set then exhausts — the bound is reachable', w.outputs.route === 'exhausted');
+  // F2/F7: knob semantics — < 1 disables (the sibling knobs' off switch), non-digit values
+  //        are unreadable (fail closed to 2), values above 10 are clamped (no "unlimited").
+  for (const off of ['0', '-1']) {
+    w = world({prs: [pr(94, 'task/26', ['agent-authored'])], jobs: JOBS});
+    await route(w, {head_sha: `off${off}`}, off);
+    check(`F2: auto_fix_max_attempts=${off} disables the loop (no label, no comment)`, w.outputs.route === 'none' && !w.log.some(l => /^\+/.test(l) || l.startsWith('comment@')) && w.log.some(l => /notice:.*disabled/.test(l)));
+  }
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'in-progress'])], issues: [issue(26, ['task', 'in-progress'])], jobs: JOBS, failedRuns: runs});
+  await route(w, {head_sha: 'sci001'}, '1e3');
+  check('F7: scientific-notation knob is unreadable -> fail closed to 2, not 1', w.outputs.route === 'exhausted' && w.log.some(l => /notice:.*unreadable/.test(l)));
+  w = world({prs: [pr(94, 'task/26', ['agent-authored'])], jobs: JOBS});
+  await route(w, {head_sha: 'big001'}, '999');
+  check('F7: 999 is clamped to 10 and says so', w.outputs.route === 'autofix' && w.log.some(l => /notice:.*clamped to 10/.test(l)) && said(w, /attempt 1 of 10/, 94));
+  // F3: the exhaustion comment reports the attempts actually taken, never just the bound.
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: runs});
+  await route(w, {head_sha: 'low001'}, '2');
+  check('F3: 4 labels, knob lowered to 2 -> "after 4 attempts (configured bound 2)"', w.outputs.route === 'exhausted' && said(w, /after 4 attempts \(configured bound 2\)/, 94));
+  // F6 + M1/M2: every non-successful conclusion is listed (timed_out, startup_failure,
+  //             cancelled), successes are not; no tail when nothing was cut; an empty list
+  //             falls back to naming the triggering run.
+  const mixed = [{id: 7001, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'failure', html_url: 'https://gh/r/7001'},
+                 {id: 7002, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'timed_out', html_url: 'https://gh/r/7002'},
+                 {id: 7003, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'startup_failure', html_url: 'https://gh/r/7003'},
+                 {id: 7004, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'cancelled', html_url: 'https://gh/r/7004'},
+                 {id: 7005, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'success', html_url: 'https://gh/r/7005'}];
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: mixed});
+  await route(w, {head_sha: 'mix001'});
+  check('F6: timed_out/startup_failure/cancelled listed with their conclusion; success is not', said(w, /7002.*timed_out/, 94) && said(w, /7003.*startup_failure/, 94) && said(w, /7004.*cancelled/, 94) && !said(w, /7005/, 94));
+  check('M1: nothing was cut -> no "and N more" tail and no window line', !said(w, /more non-successful/, 94) && !said(w, /window:/, 94));
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: []});
+  await route(w, {head_sha: 'mt0001'});
+  check('M2: empty run list -> the comment still names the triggering run (fallback)', said(w, /actions\/runs\/5001/, 94));
+
+  // --- sweep (delivery backstop): re-delivers at EVERY attempt count; `route` decides ---
+  const swRuns = [{id: 8001, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'failure', created_at: '2026-09-01T00:00:00Z', run_attempt: 1, html_url: 'https://gh/r/8001'}];
+  for (const n of [0, 2, 4, 5]) {
+    w = world({prs: [pr(94, 'task/26', ['agent-authored', ...Array.from({length: n}, (_, i) => `auto-fix-${i + 1}`)])], failedRuns: swRuns});
+    await sweep(w);
+    check(`sweep: re-delivers at ${n} attempt labels (F1: escalation needs the backstop most)`, w.log.some(l => l.startsWith('dispatch run=8001')));
+  }
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'needs-human'])], failedRuns: swRuns});
+  await sweep(w);
+  check('sweep: needs-human is the only label stop', !w.log.some(l => l.startsWith('dispatch')));
+  w = world({prs: [pr(94, 'task/26', ['agent-authored'])], failedRuns: swRuns, comments: {94: ['<!-- ci-failure-router sha=aaa111 pass=1 run=8001 -->']}});
+  await sweep(w);
+  check('sweep: an attempt marker for the head sha+pass suppresses re-dispatch', !w.log.some(l => l.startsWith('dispatch')));
+  w = world({prs: [pr(94, 'task/26', ['agent-authored'])], failedRuns: [...swRuns, {id: 8002, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'success', created_at: '2026-09-02T00:00:00Z', run_attempt: 1}]});
+  await sweep(w);
+  check('sweep: a later success on the same workflow means fixed — no dispatch', !w.log.some(l => l.startsWith('dispatch')));
+  w = world({prs: [pr(95, 'ci/tooling', ['agent-authored'])], failedRuns: swRuns});
+  await sweep(w);
+  check('sweep: non-task branch is not swept', !w.log.some(l => l.startsWith('dispatch')));
+  w = world({prs: [Object.assign(pr(96, 'task/26', ['agent-authored']), {head: {ref: 'task/26', sha: 'aaa111', repo: {full_name: 'someone/fork'}}})], failedRuns: swRuns});
+  await sweep(w);
+  check('sweep: fork head is never swept', !w.log.some(l => l.startsWith('dispatch')));
 
   w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4', 'needs-human'])], jobs: JOBS, failedRuns: runs});
   await route(w, {head_sha: 'bbb000'});

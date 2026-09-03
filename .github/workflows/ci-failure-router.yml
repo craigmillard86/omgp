@@ -58,15 +58,8 @@ jobs:
       pull-requests: read
       actions: write   # read the branch's runs; dispatch this workflow for the ones missed
     steps:
-      - uses: actions/checkout@v7
-        with: {sparse-checkout: .github, sparse-checkout-cone-mode: false}
-      - id: cfg
-        run: |
-          echo "max=$(sed -n 's/^auto_fix_max_attempts: *//p' .github/agent-config.yml)" >> "$GITHUB_OUTPUT"
       - name: Dispatch the router for failures it never saw
         uses: actions/github-script@v7
-        env:
-          MAX_ATTEMPTS: ${{ steps.cfg.outputs.max }}
         with:
           script: |
             const {owner, repo} = context.repo;
@@ -77,9 +70,11 @@ jobs:
               if (!has('agent-authored') || has('needs-human')) continue;
               if (!/^task\//.test(pr.head.ref)) continue;
               if (pr.head.repo && pr.head.repo.full_name !== `${owner}/${repo}`) continue;
-              // Same bound as `route` (auto-fix-<n> labels vs agent-config knob, fail-closed 2)
-              const swMax = Number.parseInt(process.env.MAX_ATTEMPTS || '', 10);
-              if (pr.labels.filter(l => /^auto-fix-\d+$/.test(l.name)).length >= (Number.isInteger(swMax) && swMax >= 1 ? swMax : 2)) continue;
+              // NO bound check here (red-team on #120 F1): the sweep re-delivers at EVERY
+              // attempt count — at/above the bound, what `route` does with the delivery is
+              // the exhaustion escalation, which needs a delivery backstop more than any
+              // attempt does. `needs-human` above is the only stop; `route`'s marker keeps
+              // re-delivery idempotent. Bounds and escalation stay in `route`, full stop.
               const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo,
                 {owner, repo, branch: pr.head.ref, head_sha: pr.head.sha, per_page: 100});
               // Newest failed ci/security run at this head, and only if it is still the
@@ -191,30 +186,46 @@ jobs:
               if (pr.labels.some(l => l.name === 'needs-human')) { core.notice(`router: #${pr.number} already needs-human — nothing to do (run ${runUrl})`); return out('none'); }
               if (await handled(pr.number)) { core.notice(`router: sha ${run.head_sha} pass ${pass} on #${pr.number} already handled — one attempt per commit and pass`); return out('none'); }
               // Bound = agent-config auto_fix_max_attempts (ruling 2026-09-03: 4; was 2).
-              // Unreadable knob fails closed to the previously ruled 2. Attempts are the
-              // auto-fix-<n> labels; nothing resets them but a human.
-              const rawMax = Number.parseInt(process.env.MAX_ATTEMPTS || '', 10);
-              const maxAttempts = Number.isInteger(rawMax) && rawMax >= 1 ? rawMax : 2;
-              if (maxAttempts !== rawMax) core.notice('auto_fix_max_attempts unreadable — using 2 (fail closed)');
+              // Strict parse (red-team on #120 F2/F7): digits only, so '1e3'/'0x10' are
+              // unreadable, and unreadable fails closed to the previously ruled 2. A value
+              // < 1 DISABLES auto-fix — the off-switch every sibling knob documents
+              // (review_fix_max_attempts, auto_*_max_tier) — instead of silently meaning 2.
+              // An upper clamp of 10 enforces the ruling's rejection of "unlimited".
+              // Attempts are the auto-fix-<n> labels; nothing resets them but a human.
+              const rawMax = /^-?\d+$/.test(process.env.MAX_ATTEMPTS || '') ? Number(process.env.MAX_ATTEMPTS) : null;
+              if (rawMax !== null && rawMax < 1) { core.notice(`router: auto_fix_max_attempts=${rawMax} — auto-fix disabled, taking no action on #${pr.number}`); return out('none'); }
+              const maxAttempts = rawMax === null ? 2 : Math.min(rawMax, 10);
+              if (rawMax === null) core.notice('auto_fix_max_attempts unreadable — using 2 (fail closed)');
+              else if (rawMax > 10) core.notice(`auto_fix_max_attempts=${rawMax} clamped to 10`);
               const attempts = pr.labels.filter(l => /^auto-fix-\d+$/.test(l.name)).length;
               if (attempts < maxAttempts) {
-                const n = attempts + 1;
+                // First FREE index, not attempts+1 (red-team on #120 F5): labels are a set,
+                // and a human removing auto-fix-1 to grant another go leaves {2,3,4} — a
+                // re-write of auto-fix-4 would be a no-op, the count would never advance,
+                // and the bound would be unreachable (unbounded auto-fix). A free-slot
+                // write advances the count every time.
+                let n = 1; while (pr.labels.some(l => l.name === `auto-fix-${n}`)) n++;
                 await github.rest.issues.addLabels({owner, repo, issue_number: pr.number, labels: [`auto-fix-${n}`]});
                 await github.rest.issues.createComment({owner, repo, issue_number: pr.number,
-                  body: `${marker}\n🔧 **${run.name}** failed at ${run.head_sha.slice(0, 7)} (${where}) — ${runUrl}\n\nAuto-fix attempt ${n} of ${maxAttempts} starting on this branch (router run ${routerRun}). Disable the \`ci-failure-router\` workflow to stop it.`});
-                return out('autofix', {pr: pr.number, attempt: n});
+                  body: `${marker}\n🔧 **${run.name}** failed at ${run.head_sha.slice(0, 7)} (${where}) — ${runUrl}\n\nAuto-fix attempt ${attempts + 1} of ${maxAttempts} starting on this branch (router run ${routerRun}). Disable the \`ci-failure-router\` workflow or set \`auto_fix_max_attempts: 0\` to stop it.`});
+                return out('autofix', {pr: pr.number, attempt: attempts + 1});
               }
               // Exhausted: release the claim on the PR and on the issues this PR actually closes (its
               // `Closes/Fixes/Resolves #n` — the branch name's digits only as a fallback), then escalate.
-              // ALL failed runs accounted for: up to 10 listed, an explicit tail beyond that — never
-              // a silent truncation presented as a complete list (maintainer report on #118,
-              // 2026-09-03: 3 of 4 failed runs shown, nothing marking the cut). One un-paginated
-              // call: `total_count` carries the full count, so a long-lived branch costs one API
-              // request, not a page walk, right when escalation must be reliable (Copilot on #120).
-              const fr = await github.rest.actions.listWorkflowRunsForRepo({owner, repo, branch, status: 'failure', per_page: 10});
-              const shown = fr.data.workflow_runs;
-              const links = (shown.map(r => `- ${r.name} run [${r.id}](${r.html_url})`).join('\n') || `- ${run.name} run [${run.id}](${runUrl})`)
-                + (fr.data.total_count > shown.length ? `\n- … and ${fr.data.total_count - shown.length} more failed run(s) on this branch` : '');
+              // ALL non-successful runs accounted for: up to 10 listed, an explicit tail beyond
+              // that, and the fetch window disclosed when it clips — never a silent truncation
+              // presented as a complete list (maintainer report on #118, 2026-09-03: 3 of 4
+              // failed runs shown, nothing marking the cut). One un-paginated call (Copilot on
+              // #120), filtered HERE rather than by the API's single-conclusion `status` param,
+              // so timed_out/startup_failure/cancelled runs are listed too (red-team F6 —
+              // startup_failure is exactly what a broken workflow edit by an auto-fix agent
+              // produces, and the human picking this up needs to see it).
+              const fr = await github.rest.actions.listWorkflowRunsForRepo({owner, repo, branch, per_page: 30});
+              const bad = fr.data.workflow_runs.filter(r => r.status === 'completed' && !['success', 'skipped'].includes(r.conclusion));
+              const shown = bad.slice(0, 10);
+              const links = (shown.map(r => `- ${r.name} run [${r.id}](${r.html_url}) — ${r.conclusion}`).join('\n') || `- ${run.name} run [${run.id}](${runUrl})`)
+                + (bad.length > shown.length ? `\n- … and ${bad.length - shown.length} more non-successful run(s) on this branch` : '')
+                + (fr.data.total_count > fr.data.workflow_runs.length ? `\n- (window: newest ${fr.data.workflow_runs.length} of ${fr.data.total_count} runs on this branch)` : '');
               const closes = [...new Set([...(pr.body || '').matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi)].map(x => Number(x[1])))];
               const m = branch.match(/^task\/(\d+)$/);
               const issues = closes.length ? closes : (m ? [Number(m[1])] : []);
@@ -230,7 +241,7 @@ jobs:
               }
               const status = [`\`in-progress\` released on ${released.join(', ')}`, ...problems.map(p => `⚠️ ${p} — do it by hand`)].join('; ');
               await github.rest.issues.createComment({owner, repo, issue_number: pr.number,
-                body: `${marker}\n🛑 Auto-fix **exhausted** after ${maxAttempts} attempts; CI is still failing (${where}). Escalated \`needs-human\`${issues.length ? ` on ${issues.map(n => `#${n}`).join(', ')}` : ''}; ${status}.\n\nFailed runs on this branch:\n${links}`});
+                body: `${marker}\n🛑 Auto-fix **exhausted** after ${attempts} attempts (configured bound ${maxAttempts}); CI is still failing (${where}). Escalated \`needs-human\`${issues.length ? ` on ${issues.map(n => `#${n}`).join(', ')}` : ''}; ${status}.\n\nNon-successful runs on this branch:\n${links}`});
               // The PR's own needs-human is the escalation signal humans watch: if it could not be applied, fail loudly.
               if (problems.some(p => p.includes(`\`needs-human\` on #${pr.number}`))) throw new Error(`router: escalation incomplete — ${problems.join('; ')}`);
               return out('exhausted', {pr: pr.number});
