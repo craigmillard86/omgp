@@ -74,7 +74,7 @@ Budget rule: a superframe never exceeds T_poll; unsent demand traffic carries to
 
 ## 8. Bridging rules (backplane duty)
 
-- Frames whose L3 node ID belongs to one of the backplane's slots are translated to module-bus transactions; the backplane holds the trunk response until the module answers or its module-bus timeout (5 ms) expires, whichever is sooner — but must always respond on the trunk within T_resp. If the module transaction is still in flight, the backplane answers `ERROR: busy`, and the host retries later; the backplane MUST NOT stall the trunk waiting on I2C.
+- Frames whose L3 node ID belongs to one of the backplane's slots are translated to module-bus transactions. The backplane MUST answer on the trunk within T_resp on every poll: with the module's reply if it is ready, otherwise `ERROR: busy` (the host retries later). The backplane never holds a trunk response open waiting on the module bus (module-bus timeout 5 ms is an internal bound, invisible to trunk timing); it MUST NOT stall the trunk waiting on I2C. (Reworded 2026-09-03 per docs/OPEN-QUESTIONS.md — the previous phrasing read as sanctioning a wait.)
 - The backplane maintains the per-slot event queues' summary (`event_pending`) in its own status block so the host learns of module events from the routine status poll without extra trunk traffic.
 - Module-bus supervision (clock-timeout recovery, slot power-cycle) is autonomous backplane behaviour, reported via backplane events, never coordinated over the trunk in real time.
 

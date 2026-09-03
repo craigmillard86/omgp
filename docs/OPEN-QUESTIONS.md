@@ -136,8 +136,7 @@ now; the reviewer of the feature's Phase 1 PR is asked to rule inline.
 - POWER_TUBE `power_class` is 1–4 (T1–T4); 0 and >4 are rejected.
 - READ_DESC response `len` ≤ 61 (64 − 3); the 28-byte module-bus chunk is
   a transport limit the codec does not enforce.
-**Ruling:** pending — rule inline on the Phase 1 PR of feature 001, or
-append a superseding entry per item.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): ratified — all seven defaults stand as the ruling; future changes need superseding entries.
 **Supersedes:** none.
 
 ## 2026-08-28 — Mutation kill-rate threshold for deep-verify
@@ -158,7 +157,7 @@ to 60 % now with the measured baseline recorded here, and raise it as
 unit tests gain boundary cases (raising is agent-safe; lowering is T3).
 Alternatively enforce 80 % immediately and accept that `deep-verify` is
 red for this feature's PR until survivors are killed.
-**Ruling:** pending — human, when wiring T062 (deep-verify `--require`).
+**Ruling:** closed 2026-09-03 (session Q&A) as superseded by the 2026-08-29 triage-gate ruling: no percentage is ever enforced; the whole-tree rate is a trend only.
 **Supersedes:** none.
 
 ## 2026-08-28 — Mutation kill-rate threshold: corrected measurement
@@ -178,7 +177,7 @@ small and every survivor names a missing boundary test; killing them is
 ordinary agent work (CLAUDE.md working agreements: "kill surviving
 mutants rather than chasing line %"). Enforce on `deep-verify` from
 T062 onward.
-**Ruling:** pending — human, with T062.
+**Ruling:** closed 2026-09-03 (session Q&A) as superseded by the 2026-08-29 triage-gate ruling, with the entry above.
 **Supersedes:** the previous entry's measurement and its 60 % suggestion.
 
 ## 2026-08-29 — trunk-link-layer.md §8 bridging bullet reads as self-contradictory
@@ -202,8 +201,7 @@ module's reply if it has arrived, otherwise `ERROR: busy` (the host retries
 later). The module-bus transaction proceeds independently under the 5 ms
 module-bus timeout; the backplane never waits on I2C while the trunk is
 waiting on it." No change to timing values or codec behaviour.
-**Ruling:** pending — the trunk document is a human-ruling artefact; not
-edited by the agent.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): rewording adopted as recommended; docs/trunk-link-layer.md §8's first bullet is amended in the same PR (CODEOWNERS review is the ruling's gate).
 **Supersedes:** none.
 
 ## 2026-08-28 — CodeQL and dependency review become required checks
@@ -348,14 +346,7 @@ sees and can dispute the claim "this file has no mutable code" in the PR
 diff. Does not touch `tools/mutate.cfg [policy]`'s T3 constants
 (`max_unlabelled_survivors`, `label_categories`) — those are unchanged and
 still gate every file that does contain logic.
-**Ruling:** pending — human. Implemented as the safe default per CLAUDE.md
-("implement nothing speculative... proceed only if a safe default
-exists"): `tools/mutate_report.py` (`NO_BODY_EXEMPT`, `exempt_reason`),
-markers added to `link/clock.hpp` and `link/byte_wire.hpp`, doc comment in
-`tools/mutate.sh`. If a human ruling instead prefers, e.g., excluding
-declaration-only files from `scope_dirs` matching entirely, or a
-tree-wide static check that a file has zero function bodies (removing the
-need for a per-file marker), that should supersede this entry.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): ratified as implemented; the per-file marker is the mechanism.
 **Supersedes:** none.
 
 ---
@@ -416,9 +407,7 @@ size is `frames` valid elements plus at least `per_class` corrupted elements per
 (≥ 8 × `per_class` beyond `frames`). `test_torture.py` asserts against this reading only
 (sum of `len(element.expected)` ≥ `frames`; per-class tally of `recipe` ≥ `per_class`),
 not against total element count.
-**Ruling:** pending — safe default implemented per CLAUDE.md ("implement nothing
-speculative … proceed only if a safe default exists"); flagged for the human review this
-issue's releasing comment already asked for, at PR time for #31.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): both readings ratified (flat four-field Element; frames counts delivered/valid frames).
 **Supersedes:** none.
 
 ---
@@ -731,10 +720,7 @@ flag), not a revert. (3) accept the deferred-REQUIRE reading of "overflow is a R
 failure" — a failure that fires with a one-`advance_to()`-call lag but before the test
 draws any conclusion from the wire's state is still "the test fails and says why", which
 is what the contract clause protects against (a silent drop the test never notices).
-**Ruling:** pending — human. Implemented as the safe default per CLAUDE.md ("implement
-nothing speculative … proceed only if a safe default exists"); T011 (#29) and T028/T031
-should be written against these three readings, or a superseding entry should replace
-them first.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): all three defaults ratified (interim echo until T034; first-matching-step order; deferred REQUIRE on capacity).
 **Supersedes:** none.
 
 ---
@@ -758,7 +744,7 @@ across three human-ruling documents plus code is a single T3 slice, not a T010 f
 Until then `count` stays `uint16_t` (matches every current spec artefact); a future
 `Rate` step's `count` cannot yet be authored at either documented bit rate, which is a
 pre-existing spec gap, not a new one.
-**Ruling:** pending — human, to land with T030.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): widen `count` to uint32_t atomically in T030 across all four artefacts; baked into issue #48's criteria.
 **Supersedes:** none.
 
 ---
@@ -965,7 +951,7 @@ reference is brought in line with it as part of T025: rejecting malformed/out-of
 before it reaches the codec is the stricter, fail-closed behaviour, matches this task's existing
 choice to reject rather than mask (`tools/canonical.cpp` comment above `parse_frame_line`), and
 keeps a caller error from silently being reinterpreted as a different, valid request.
-**Ruling:** pending — human, to land with T025 (`diffcheck.py --frames`, issue #43).
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): C++ strict rejection (`ERR BadRequest` before the codec) is normative; T025 aligns the Python reference (no seq masking); baked into issue #43's criteria.
 **Supersedes:** none.
 
 ## 2026-09-03 — l3_helper frame verbs: three error shapes outside the frame-vectors contract vocabulary
@@ -986,8 +972,7 @@ the malformed-input-text response for FENC, FDEC and FSTREAM, distinct from a co
 <Status>`/`ERR <Discard>` refusal of well-formed-but-invalid input, and add a
 `frame_error_to_canonical`-equivalent mapping on the Python side. No behaviour change implied —
 this documents what the code already does.
-**Ruling:** pending — `contracts/frame-vectors.md` is a T3 artefact; a human amends it (or rules
-otherwise), with T025.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): contract amended in the same PR: `ERR BadRequest` is the malformed-input-text response for FENC/FDEC/FSTREAM, distinct from codec-level refusals.
 **Supersedes:** none.
 
 ## 2026-09-03 — Correction: the Python reference does not mask `dst`/`src`, only `seq`
@@ -1008,7 +993,7 @@ node accepted instead of the caller's malformed request being refused.
 **Recommendation:** when ruling on the superseded entry's question, treat only `seq` as
 masked by the Python reference; `dst`/`src` out-of-range is a raised `ValueError` with no
 canonical rendering on that side, same as the entry's `dst=0x100` example.
-**Ruling:** pending — travels with the superseded entry's own ruling at T025.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): folded into the strict-input ruling above — only `seq` was masked; dst/src raised bare ValueError; all become uniform `ERR BadRequest` rejections at T025.
 **Supersedes:** 2026-09-03 — Frame line out-of-range fields: C++ rejects, Python reference
 masks/accepts (corrects its "masks them ... `dst`/`src`/`seq`" sentence only; every other claim
 in that entry stands).
@@ -1031,7 +1016,7 @@ declared scope (`tools/canonical.{hpp,cpp}`, `tools/l3_helper.cpp`).
 **Recommendation:** T025's `Helper` (or its own request driver) must read frame-verb responses
 by verb, not by line count: read one line for FENC/FDEC, and read lines until `END` for FSTREAM,
 never assume a 1:1 request:line ratio once frame verbs are mixed into a batch.
-**Ruling:** pending — travels with T025 (issue #43); no code in this PR is affected.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): the differential driver reads BY VERB (one line for FENC/FDEC; until `END` for FSTREAM); baked into issue #43's criteria.
 **Supersedes:** none.
 
 ---

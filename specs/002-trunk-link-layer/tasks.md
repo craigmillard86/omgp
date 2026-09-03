@@ -118,7 +118,7 @@ lists `fuzz_frame` with `findings=0`.
 - [ ] T022 [US1] Write `link/frame.hpp` / `link/frame.cpp` (`encode_frame`, `Deframer` per contracts/link-cpp.md and data-model.md §3, citing `trunk §4`) — make T014, T015, T016 pass; add to `link/CMakeLists.txt`
 - [ ] T023 [US1] Extend `tools/canonical.{hpp,cpp}` with frame rendering/parsing and `tools/l3_helper.cpp` with `FENC`/`FDEC`/`FSTREAM` verbs (contracts/frame-vectors.md); extend the bootstrap build if new sources are needed
 - [ ] T024 [US1] Write `tools/refimpl/torture.py` per contracts/link-python.md (classes, self-check dropping CRC-lucky corruptions, determinism) — make T013 pass
-- [ ] T025 [US1] Extend `tools/diffcheck.py` with `--frames` / `--frames-only`: ≥ 10 000 seeded frames through `FENC`/`FDEC` and every torture element through `FSTREAM`, first mismatch printed with `(seed, index)`; default run includes it; summary line gains `frames <n>, torture <m>`; confirm the whole `diffcheck` stage stays < 2 min and the torture part < 60 s (SC-002)
+- [ ] T025 [US1] Extend `tools/diffcheck.py` with `--frames` / `--frames-only`: **(rulings 2026-09-03, see issue #43: strict input normative — align the Python reference, no seq masking; `ERR BadRequest` in the vocabulary; the driver reads BY VERB, until `END` for FSTREAM)** ≥ 10 000 seeded frames through `FENC`/`FDEC` and every torture element through `FSTREAM`, first mismatch printed with `(seed, index)`; default run includes it; summary line gains `frames <n>, torture <m>`; confirm the whole `diffcheck` stage stays < 2 min and the torture part < 60 s (SC-002)
 - [ ] T026 [US1] Run `./tools/fuzz-smoke.sh 60` (fuzz preset) and record in `tests/fuzz/README.md`: `fuzz_frame findings=0`, then the discriminating check (remove the `TooLong` guard → ASan finding → restore), with the actual output lines
 - [ ] T027 [US1] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; `link/frame.cpp` and headers pass `check_embedded.py` (citations, no literals)
 
@@ -141,7 +141,7 @@ boundary tests for `T_resp`, `T_gap` and `retries`.
 
 ### Implementation for User Story 2
 
-- [ ] T030 [US2] Implement the remaining `MockWire` kinds in `tests/support/mock_wire.cpp` — make T028 pass
+- [ ] T030 [US2] Implement the remaining `MockWire` kinds in `tests/support/mock_wire.cpp` **(ruling 2026-09-03, see issue #48: widen `Step::count` to `uint32_t` atomically here, all four artefacts together)** — make T028 pass
 - [ ] T031 [US2] Write `link/master.hpp` / `link/master.cpp` per contracts/link-cpp.md "Master engine" and data-model.md §4 (states, per-destination `next_seq`, acceptance checks, retry, gap deferral, stats, `set_bit_rate` pass-through incrementing `BusStats.rate_changes`), citing `trunk §3` and `§7` — make T029 pass; add to `link/CMakeLists.txt`
 - [ ] T032 [US2] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; `mutate.sh --diff origin/main` locally (extracted Mull) — zero unlabelled survivors or labels justified in the PR body
 
