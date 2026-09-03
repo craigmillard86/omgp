@@ -113,6 +113,11 @@ TEST_CASE("parse_frame_line rejects malformed canonical text before it reaches t
          "leading-zero dst must not be silently reinterpreted as octal 010 == 0x08"},
         {"frame dst=0x01 src=0x00 flags=0x00 seq=010 payload=",
          "leading-zero seq must not be silently reinterpreted as octal 010 == 8"},
+        // The octal guard above was keyed on tok[0] == '0', so a leading '+' (accepted
+        // separately, see "accepts a leading '+'" below) skipped it entirely and still
+        // reached strtoul's octal reinterpretation one character later (review @ 22f601a).
+        {"frame dst=+010 src=0x00 flags=0x00 seq=0 payload=",
+         "a leading '+' must not let leading-zero dst bypass the octal guard (010 == 0x08)"},
     };
     for (const auto& c : cases) {
         INFO(c.why);

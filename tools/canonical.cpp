@@ -80,8 +80,14 @@ bool parse_uint(const std::string& tok, unsigned& v) {
     // refused. This is not full parity with int(tok, 0): the "0o"/"0b" and "1_0" forms
     // Python accepts are still rejected here (strtoul has no such syntax), and that gap is
     // pre-existing, not introduced by this guard.
-    if (tok.size() > 1 && tok[0] == '0' && tok[1] != 'x' && tok[1] != 'X' &&
-        tok.find_first_not_of('0') != std::string::npos)
+    // The digit scan starts after an optional leading '+' (accepted above): keying the guard
+    // on tok[0] == '0' alone let "+010" skip it entirely and still reach strtoul's octal
+    // reinterpretation (review @ 22f601a) — the exact hazard this guard exists to close, just
+    // one character later in the token.
+    const size_t digits_start = (tok[0] == '+') ? 1 : 0;
+    if (tok.size() > digits_start + 1 && tok[digits_start] == '0' && tok[digits_start + 1] != 'x' &&
+        tok[digits_start + 1] != 'X' &&
+        tok.find_first_not_of('0', digits_start) != std::string::npos)
         return false;
     char* end = nullptr;
     errno = 0;

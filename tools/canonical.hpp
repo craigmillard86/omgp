@@ -43,9 +43,12 @@ bool unquote_str(const std::string& quoted, std::vector<uint8_t>& out);
 // encode_frame/Deframer produce those). "frame dst=0x.. src=0x.. flags=0x.. seq=N payload=hex".
 std::string render_frame(const omgp::link::FrameFields& f);
 // Parses that exact line grammar. On success `out.payload` points into `payload_storage`,
-// which the caller must keep alive as long as `out` is used. Rejects a missing field, a seq
-// outside 0-15, and odd-length/non-hex/oversized payload without ever building a FrameFields
-// for the codec to see; sets error to "ERR BadRequest".
+// which the caller must keep alive as long as `out` is used. Rejects a missing/unexpected
+// field, a seq outside 0-15, flags outside 0x00-0x03, dst/src outside 0x00-0xFF, a numeric
+// token that overflows unsigned or the field's own width, and odd-length/non-hex/oversized
+// payload, without ever building a FrameFields for the codec to see; sets error to
+// "ERR BadRequest". A payload above LIMIT_max_l3_payload (but <= 0xFF) is deliberately NOT
+// rejected here — that's left to encode_frame_line's own PayloadTooLong.
 bool parse_frame_line(const std::string& canonical, omgp::link::FrameFields& out,
                       std::vector<uint8_t>& payload_storage, std::string& error);
 std::string discard_line(omgp::link::Discard d);    // "ERR <Discard>" (Deframer discard)
