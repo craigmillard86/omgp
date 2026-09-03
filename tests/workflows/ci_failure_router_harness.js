@@ -18,7 +18,8 @@ function world({prs = [], issues = [], jobs = [], failedRuns = [], comments = {}
   const issueState = new Map(issues.map(i => [i.number, i]));
   const labelsOf = n => (prState.get(n) || issueState.get(n) || {labels: []}).labels;
   const github = {
-    paginate: async (fn, args) => fn(args).then(r => r.data),
+    // Like real octokit paginate: unwrap list-shaped responses ({workflow_runs: [...]}) to the array.
+    paginate: async (fn, args) => fn(args).then(r => Array.isArray(r.data) ? r.data : r.data.workflow_runs),
     rest: {
       pulls: {
         list: async ({head, state}) => ({data: [...prState.values()].filter(p => p.state === (state || 'open') && `o:${p.head}` === head)}),
@@ -39,7 +40,12 @@ function world({prs = [], issues = [], jobs = [], failedRuns = [], comments = {}
       },
       actions: {
         listJobsForWorkflowRun: async () => ({data: jobs}),
-        listWorkflowRunsForRepo: async ({branch, status}) => ({data: failedRuns.filter(r => r.head_branch === branch && (!status || r.conclusion === status))}),
+        // Real response shape: {total_count, workflow_runs} honouring per_page — the exhaustion
+        // path reads it directly (one call, no pagination); the sweep still goes via paginate.
+        listWorkflowRunsForRepo: async ({branch, status, per_page}) => {
+          const all = failedRuns.filter(r => r.head_branch === branch && (!status || r.conclusion === status));
+          return {data: {total_count: all.length, workflow_runs: all.slice(0, per_page || 30)}};
+        },
       },
     },
   };
