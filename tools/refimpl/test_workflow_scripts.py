@@ -9,6 +9,7 @@ missing", and a bold aside inside a section ending it early (hiding a later depe
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -59,7 +60,16 @@ def test_ci_failure_router_routing_against_mocked_github(tmp_path):
     assert "cases passed" in r.stdout
 
 
-def test_ci_failure_router_wiring():
+def _run_cfg_step(cfg_script: str, cwd: pathlib.Path, tmp_path: pathlib.Path) -> str:
+    """Execute a cfg `run:` block verbatim the way the runner would, returning the max= value."""
+    gh_out = tmp_path / f"gh_out_{abs(hash(cfg_script + str(cwd)))}"
+    gh_out.write_text("")
+    subprocess.run(["bash", "-euo", "pipefail", "-c", cfg_script], cwd=cwd, check=True, timeout=30,
+                   env={**os.environ, "GITHUB_OUTPUT": str(gh_out)})
+    return dict(l.split("=", 1) for l in gh_out.read_text().splitlines() if "=" in l).get("max", "")
+
+
+def test_ci_failure_router_wiring(tmp_path):
     """The bounds that make the loop safe live in the YAML, not only in the script."""
     wf = yaml.safe_load(ROUTER.read_text())
     on = wf[True] if True in wf else wf["on"]           # PyYAML reads the bare key `on` as True
@@ -67,11 +77,25 @@ def test_ci_failure_router_wiring():
     assert on["workflow_run"]["types"] == ["completed"]
     assert "head_branch" in wf["concurrency"]["group"] and wf["concurrency"]["cancel-in-progress"] is False
     route, autofix = wf["jobs"]["route"], wf["jobs"]["autofix"]
+    # The cfg step is the bound's only real input, so it is EXECUTED here, not just grepped
+    # (red-team round 2 on #120: a copy-paste of the sed to a different key left the ruling
+    # inert with the whole suite green). Against the real config it must yield the configured
+    # digits; against an operator's `0  # OFF` it must yield 0 — the off-switch fails CLOSED.
+    cfg = next(st for st in route["steps"] if st.get("id") == "cfg")["run"]
+    assert "auto_fix_max_attempts" in cfg
+    want = re.search(r"^auto_fix_max_attempts: *(\d+)", (ROOT / ".github" / "agent-config.yml").read_text(), re.M).group(1)
+    assert _run_cfg_step(cfg, ROOT, tmp_path) == want
+    synth = tmp_path / "synth"
+    (synth / ".github").mkdir(parents=True)
+    (synth / ".github" / "agent-config.yml").write_text("auto_fix_max_attempts: 0  # OFF during incident\n")
+    assert _run_cfg_step(cfg, synth, tmp_path) == "0"
     # least privilege per job (review on #96): the always-running router holds no OIDC/contents/actions write
     assert "permissions" not in wf
     assert autofix["permissions"]["id-token"] == "write" and autofix["permissions"]["contents"] == "write"
     assert "id-token" not in route["permissions"] and route["permissions"].get("contents", "read") == "read" and route["permissions"]["actions"] == "read"
-    assert "conclusion == 'failure'" in route["if"] and "head_repository.full_name == github.repository" in route["if"]
+    # Hard-failure conclusions all route (red-team round 2): the guard, the script re-check
+    # and the sweep filter share the same three-conclusion set.
+    assert '["failure", "timed_out", "startup_failure"]' in route["if"] and "head_repository.full_name == github.repository" in route["if"]
     _st = next(st for st in wf["jobs"]["route"]["steps"] if "actions/github-script" in st.get("uses", ""))
     assert "MAX_ATTEMPTS" in _st.get("env", {})   # bound is the agent-config knob (ruling 2026-09-03)
     # red-team #120 F1: the sweep holds NO bound — it re-delivers even at/after exhaustion,

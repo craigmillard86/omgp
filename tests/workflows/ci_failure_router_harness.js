@@ -215,6 +215,11 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   w = world({prs: [pr(94, 'task/26', ['agent-authored'])], failedRuns: [{id: 8003, name: 'ci', head_branch: 'task/26', head_sha: 'old000', status: 'completed', conclusion: 'failure', created_at: '2026-09-01T00:00:00Z', run_attempt: 1, html_url: 'https://gh/r/8003'}]});
   await sweep(w);
   check('sweep: a stale head\'s failure is never re-delivered (head_sha pin observable)', !w.log.some(l => l.startsWith('dispatch')));
+  for (const c of ['timed_out', 'startup_failure']) {
+    w = world({prs: [pr(94, 'task/26', ['agent-authored'])], failedRuns: [{id: 8004, name: 'ci', head_branch: 'task/26', head_sha: 'aaa111', status: 'completed', conclusion: c, created_at: '2026-09-01T00:00:00Z', run_attempt: 1, html_url: 'https://gh/r/8004'}]});
+    await sweep(w);
+    check(`sweep: a ${c} head run is a failure and is re-delivered (red-team round 2)`, w.log.some(l => l.startsWith('dispatch run=8004')));
+  }
   w = world({prs: [pr(95, 'ci/tooling', ['agent-authored'])], failedRuns: swRuns});
   await sweep(w);
   check('sweep: non-task branch is not swept', !w.log.some(l => l.startsWith('dispatch')));
@@ -266,6 +271,14 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   w = world({prs: [pr(94, 'task/26', ['agent-authored'])], jobs: JOBS});
   await route(w, {conclusion: 'success'});
   check('non-failure conclusion -> nothing', w.outputs.route === 'none' && w.log.filter(l => !l.startsWith('out ')).every(l => l.startsWith('notice:')));
+  // Hard-failure conclusions route like failure (red-team round 2 on #120: they were listed
+  // as failures in the exhaustion report but never routed — stuck in-progress, no escalation).
+  w = world({prs: [pr(94, 'task/26', ['agent-authored'])], jobs: JOBS});
+  await route(w, {conclusion: 'timed_out'});
+  check('timed_out conclusion routes as a failure (attempt taken)', w.outputs.route === 'autofix' && labels(w, 94).includes('auto-fix-1'));
+  w = world({prs: [pr(94, 'task/26', ['agent-authored'])], jobs: JOBS});
+  await route(w, {conclusion: 'cancelled'});
+  check('cancelled conclusion still routes nowhere (concurrency noise)', w.outputs.route === 'none');
   w = world({prs: [pr(94, 'task/26', ['agent-authored'])], jobs: [{name: 'x', conclusion: 'cancelled', steps: []}]});
   await route(w, {});
   check('no failed job in the run -> still routes, says so', w.outputs.route === 'autofix' && said(w, /no failed job reported/, 94));

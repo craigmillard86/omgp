@@ -41,6 +41,12 @@ concurrency:
   # Every sweep collapses to ONE group (not `github.run_id`, which is unique per run and so
   # serialized nothing): two overlapping sweeps would otherwise race between the marker check
   # and the dispatch and route the same failure twice (Copilot review on #113).
+  # KNOWN bounded race (red-team round 2 on #120, accepted): an event-delivered route
+  # (grouped by branch) and a sweep-dispatched route for the same failure (grouped by run id)
+  # do not serialise, and both can pass handled() before either writes the marker. Labels and
+  # needs-human are set-idempotent so the BOUND is never inflated, but one duplicate attempt
+  # push or duplicate escalation comment per delivery pair is possible. A shared group cannot
+  # close it: the dispatch path does not know the branch until the run starts.
   group: ci-failure-router-${{ github.event.workflow_run.head_branch || inputs.run_id || 'sweep' }}
   cancel-in-progress: false
 
@@ -85,7 +91,7 @@ jobs:
                 const prev = latestOf.get(r.name);
                 if (!prev || new Date(r.created_at) > new Date(prev.created_at)) latestOf.set(r.name, r);
               }
-              const failed = [...latestOf.values()].filter(r => r.status === 'completed' && r.conclusion === 'failure')
+              const failed = [...latestOf.values()].filter(r => r.status === 'completed' && ['failure', 'timed_out', 'startup_failure'].includes(r.conclusion))
                 .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
               if (!failed) continue;
               const pass = failed.run_attempt || 1;
@@ -103,8 +109,12 @@ jobs:
     # carries secrets (GOVERNANCE.md §4b). Two entry paths, one decision procedure: the
     # workflow_run event, and a dispatch carrying the failed run's id (the sweep, or a human
     # routing a suppressed failure by hand).
+    # Hard-failure conclusions all route (red-team round 2 on #120): timed_out and
+    # startup_failure are failures a human must see — before this, they were REPORTED as
+    # failures in the exhaustion list but never routed, so such a head sat in-progress,
+    # holding a wip_cap slot, with no attempt, no comment and no escalation.
     if: >
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'workflow_run' && contains(fromJSON('["failure", "timed_out", "startup_failure"]'), github.event.workflow_run.conclusion) && github.event.workflow_run.head_repository.full_name == github.repository) ||
       (github.event_name == 'workflow_dispatch' && inputs.run_id)
     runs-on: ubuntu-latest
     permissions:
@@ -134,9 +144,11 @@ jobs:
           sparse-checkout-cone-mode: false
       - id: cfg
         run: |
-          # head -1 makes single-line output structural, not a property of the file's contents
-          # (review on #120; agent-config.yml is CODEOWNERS-owned, but belt and braces).
-          echo "max=$(sed -n 's/^auto_fix_max_attempts: *//p' .github/agent-config.yml | head -n1)" >> "$GITHUB_OUTPUT"
+          # Digit capture, tolerant of an inline comment or quotes (red-team round 2 on #120:
+          # `auto_fix_max_attempts: 0  # OFF` must DISABLE — the raw-suffix extraction handed
+          # `0  # OFF` to the strict parser, which read it as unreadable and fell back to 2,
+          # an off-switch failing OPEN). head -1 keeps single-line output structural.
+          echo "max=$(sed -n 's/^auto_fix_max_attempts: *"\{0,1\}\(-\{0,1\}[0-9][0-9]*\)"\{0,1\}.*$/\1/p' .github/agent-config.yml | head -n1)" >> "$GITHUB_OUTPUT"
       - name: Route the failure by branch
         id: route
         uses: actions/github-script@v7
@@ -154,7 +166,9 @@ jobs:
               (await github.rest.actions.getWorkflowRun({owner, repo, run_id: Number(process.env.DISPATCH_RUN_ID)})).data;
             for (const [k, v] of Object.entries({branch: run.head_branch, sha: run.head_sha, run_id: run.id, run_name: run.name, run_url: run.html_url})) core.setOutput(k, v);
             const out = (route, extra = {}) => { core.setOutput('route', route); for (const [k, v] of Object.entries(extra)) core.setOutput(k, v); };
-            if (run.conclusion !== 'failure') { core.notice(`router: ${run.name} run ${run.id} concluded ${run.conclusion} — nothing to do`); return out('none'); }
+            // Same hard-failure set as the job guard and the sweep — the three lists must stay
+            // identical or a conclusion becomes reportable-but-unroutable again (red-team round 2).
+            if (!['failure', 'timed_out', 'startup_failure'].includes(run.conclusion)) { core.notice(`router: ${run.name} run ${run.id} concluded ${run.conclusion} — nothing to do`); return out('none'); }
             if (run.head_repository && run.head_repository.full_name !== `${owner}/${repo}`) { core.notice(`router: run ${run.id} is from fork ${run.head_repository.full_name} — never touched (GOVERNANCE.md §4b)`); return out('none'); }
             const branch = run.head_branch;
             const runUrl = run.html_url;

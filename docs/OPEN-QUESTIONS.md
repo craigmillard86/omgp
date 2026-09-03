@@ -1107,7 +1107,12 @@ unreadable and fail closed to 2; values above 10 are clamped to 10 (the ruled-ou
 "unlimited" enforced against a fat-fingered knob); attempt labels are written to
 the first FREE index so the bound stays reachable after a human removes a label
 (label index is a free slot, not the attempt ordinal); labels auto-fix-1..10 are
-provisioned to cover the clamp range.
+provisioned to cover the clamp range. Red-team round 2 on #120 added: the knob
+value tolerates an inline comment or quotes (an operator's `0  # OFF` must
+disable, not silently mean 2 — an off-switch failing open), and `timed_out` /
+`startup_failure` conclusions route as failures end-to-end (guard, script,
+sweep) — previously the exhaustion report listed them as failures while the
+router could never act on them.
 **Ruling:** pending — ratified by the human merge of PR #120, which lands this
 entry and the semantics in the same commit history.
 **Supersedes:** nothing; extends the 2026-09-03 "auto-fix attempt bound" entry
