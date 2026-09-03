@@ -15,7 +15,7 @@ namespace {
 // (red-team on #118 finding 2 — one early stamp forced an instant, silent OFFLINE, and
 // in poll_due silently restored a SUSPECT node to full poll rate).
 constexpr uint64_t elapsed_us(uint64_t now_us, uint64_t since_us) {
-    return now_us >= since_us ? now_us - since_us : 0;
+    return now_us >= since_us ? now_us - since_us : 0; // mutant-ok(equivalent): at now_us == since_us both arms yield 0, so >= vs > is unobservable
 }
 // data-model.md §6: OFFLINE threshold is TRUNK_offline_after_suspect_ms of SUSPECT time,
 // but every clock reading in this engine is in microseconds.

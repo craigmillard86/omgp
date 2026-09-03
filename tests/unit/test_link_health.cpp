@@ -367,11 +367,73 @@ TEST_CASE("next_probe returns ADDR_host when no UNENROLLED/OFFLINE address exist
 
     Probe probe = tracker.next_probe(0);
     REQUIRE(probe.addr == omgp::ADDR_host);
+    // The sentinel still carries the real bit rate (deep-verify on #118: the bit_rate()
+    // call on the no-candidate return was asserted nowhere).
+    REQUIRE(probe.bit_rate == omgp::TRUNK_bit_rate);
 
     // Still no candidate on a second call: the "no eligible address" signal is stable,
     // not a one-shot artefact of where the rotation cursor happened to land.
     probe = tracker.next_probe(0);
     REQUIRE(probe.addr == omgp::ADDR_host);
+    REQUIRE(probe.bit_rate == omgp::TRUNK_bit_rate);
+}
+
+TEST_CASE("a failed sentinel pass leaves the cursor exactly one full cycle on", "[link]") {
+    // deep-verify on #118: the loop bound's off-by-one advanced the cursor one EXTRA step
+    // on the no-candidate path. One sentinel pass here, then the two lowest backplane
+    // addresses become eligible: a correct cursor (back at its start) scans min first;
+    // an overshot cursor sits ON min and would scan min+1 first. Exactly one sentinel
+    // call, deliberately — a second pass wraps the drift past the discriminating slot.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    for (uint8_t a = omgp::ADDR_backplane_min; a <= omgp::ADDR_backplane_max; ++a)
+        tracker.on_result(a, true, 0);
+    REQUIRE(tracker.next_probe(0).addr == omgp::ADDR_host); // the single sentinel pass
+
+    drive_to_offline(tracker, omgp::ADDR_backplane_min, 5000000);
+    drive_to_offline(tracker, static_cast<uint8_t>(omgp::ADDR_backplane_min + 1), 9000000);
+    REQUIRE(tracker.next_probe(0).addr == omgp::ADDR_backplane_min);
+}
+
+TEST_CASE("recovery from SUSPECT resets the failure count — three fresh failures needed again",
+          "[link]") {
+    // deep-verify on #118: the `consecutive_failures = 0` on the SUSPECT->ENROLLED
+    // transition was asserted nowhere — a constant-assign mutant survived. Two failures
+    // after a recovery must NOT re-suspect; the third must.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    drive_to_suspect(tracker, kAddr);
+    tracker.on_result(kAddr, true, 100); // RECOVERED
+    REQUIRE(tracker.state(kAddr) == HealthState::ENROLLED);
+    for (uint32_t i = 1; i < omgp::TRUNK_suspect_after_failures; ++i) {
+        tracker.on_result(kAddr, false, 100 + i);
+        REQUIRE(tracker.state(kAddr) == HealthState::ENROLLED);
+    }
+    tracker.on_result(kAddr, false, 200);
+    REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
+}
+
+TEST_CASE("recovery from OFFLINE resets the failure count — three fresh failures needed again",
+          "[link]") {
+    // deep-verify on #118: same shape as the SUSPECT-recovery reset, on the
+    // OFFLINE->ENROLLED transition.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    drive_to_offline(tracker, kAddr);
+    tracker.on_result(kAddr, true, 2000000); // RECOVERED
+    REQUIRE(tracker.state(kAddr) == HealthState::ENROLLED);
+    for (uint32_t i = 1; i < omgp::TRUNK_suspect_after_failures; ++i) {
+        tracker.on_result(kAddr, false, 2000000 + i);
+        REQUIRE(tracker.state(kAddr) == HealthState::ENROLLED);
+    }
+    tracker.on_result(kAddr, false, 2000100);
+    REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
 }
 
 TEST_CASE("out-of-range addresses are not nodes: no record, no notice, no effect", "[link]") {
