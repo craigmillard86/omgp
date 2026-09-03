@@ -275,7 +275,8 @@ def run_messages(helper: Helper, seed: int, count: int, only: int | None) -> int
     answers = helper.ask(requests)
     for (i, verb, req, want), got in zip(expect, answers):
         if got != want:
-            print(f"diffcheck: MESSAGE MISMATCH (seed={seed:#x}, index={i})\n  {verb} {req}\n  C++   : {got}\n"
+            print(f"diffcheck: MESSAGE MISMATCH (seed={seed:#x}, index={i})\n  {verb} {req}\n"
+                  f"  C++   : {got}{F._death_note(helper)}\n"
                   f"  Python: {want}\n  replay: python3 tools/diffcheck.py --seed {seed:#x} --index {i}")
             return -1
         if only is not None:
@@ -293,7 +294,10 @@ def run_invalid(helper: Helper, seed: int) -> int:
         if got == want:
             agree += 1
         else:
-            print(f"diffcheck: INVALID-CORPUS MISMATCH\n  DEC {b.hex()}\n  C++   : {got}\n  Python: {want}")
+            # _death_note (review round 5 on #121): the frame paths gained crash naming in
+            # round 3; the message/invalid corpora share the same Helper and the same
+            # EOF-derived blank, so they carry the same note for consistency.
+            print(f"diffcheck: INVALID-CORPUS MISMATCH\n  DEC {b.hex()}\n  C++   : {got}{F._death_note(helper)}\n  Python: {want}")
             disagree += 1
             if disagree >= 5:
                 break
@@ -304,7 +308,11 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--count", type=int, default=10000, help="valid message cases (default 10000)")
     ap.add_argument("--seed", type=lambda s: int(s, 0), default=DEFAULT_SEED)
-    ap.add_argument("--index", type=int, default=None, help="replay one message case")
+    # The three single-case replay flags are mutually exclusive (review round 5 on #121:
+    # combining them silently ignored one), and --index needs the corpus --frames-only
+    # skips.
+    replay = ap.add_mutually_exclusive_group()
+    replay.add_argument("--index", type=int, default=None, help="replay one message case")
     # contracts/tooling.md "tools/diffcheck.py --frames": the frame + torture corpora
     # already run by default (below); --frames is the explicit spelling for scripts that
     # want to say so, --frames-only restricts a local iteration run to just those two.
@@ -313,9 +321,11 @@ def main(argv=None) -> int:
     # strand this flag.
     ap.add_argument("--frames", action="store_true", help="include the frame + torture corpora (default)")
     ap.add_argument("--frames-only", action="store_true", help="run only the frame + torture corpora")
-    ap.add_argument("--frame-index", type=int, default=None, help="replay one frame (FENC/FDEC) case")
-    ap.add_argument("--torture-index", type=int, default=None, help="replay one torture (FSTREAM) element")
+    replay.add_argument("--frame-index", type=int, default=None, help="replay one frame (FENC/FDEC) case")
+    replay.add_argument("--torture-index", type=int, default=None, help="replay one torture (FSTREAM) element")
     args = ap.parse_args(argv)
+    if args.frames_only and args.index is not None:
+        ap.error("--index replays a MESSAGE case, which --frames-only skips")
 
     t0 = time.monotonic()
     crc = msgs = inval = desc = 0
@@ -340,7 +350,9 @@ def main(argv=None) -> int:
             except ImportError:
                 pass  # descriptor corpus only exists once US3 lands — by design, not an error
 
-        frames = F.run_frames(helper, args.seed, only=args.frame_index)
+        # A torture replay skips the frame corpus (review round 5 on #121: --torture-index
+        # alone paid the full 10k-case frame run before reaching its one element).
+        frames = 0 if args.torture_index is not None else F.run_frames(helper, args.seed, only=args.frame_index)
         if frames < 0:
             return 1
         if args.frame_index is not None:
