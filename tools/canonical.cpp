@@ -68,6 +68,15 @@ bool parse_uint(const std::string& tok, unsigned& v) {
     // grammar, not of the host's integer widths (review @ 641ee1e).
     if (tok.empty() || tok[0] == '-' || tok[0] == '+')
         return false;
+    // strtoul(..., 0) treats a leading '0' followed by more digits as legacy C octal (e.g.
+    // "010" -> 8), but the Python reference's int(tok, 0) rejects that outright — Python 3
+    // dropped implicit octal and requires an explicit "0o" prefix. Reject the same shape here
+    // so a canonical-text token that names one value cannot silently encode a different one
+    // (red-team @ 72d3072). "0"/"00"/... (all zero digits) still parse as 0, matching both
+    // sides; only a leading zero followed by a *nonzero* digit is refused.
+    if (tok.size() > 1 && tok[0] == '0' && tok[1] != 'x' && tok[1] != 'X' &&
+        tok.find_first_not_of('0') != std::string::npos)
+        return false;
     char* end = nullptr;
     errno = 0;
     const unsigned long x = std::strtoul(tok.c_str(), &end, 0);

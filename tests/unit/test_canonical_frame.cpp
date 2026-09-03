@@ -102,6 +102,17 @@ TEST_CASE("parse_frame_line rejects malformed canonical text before it reaches t
          "seq overflows unsigned and would truncate to 0x0F"},
         {"frame dst=-4294967295 src=0x00 flags=0x00 seq=0 payload=",
          "negative dst wraps through strtoul and would truncate to 0x01"},
+        {"frame dst=0x01 src=0x00 flags=0x00 seq=0 payload= bogus=1",
+         "unexpected trailing key (kv not empty after the named fields are taken)"},
+        // strtoul(..., 0) treats a leading '0' followed by more digits as legacy C octal
+        // (e.g. "010" -> 8), but the Python reference's int(tok, 0) rejects that outright —
+        // Python 3 dropped implicit octal and requires an explicit "0o" prefix (red-team @
+        // 72d3072). Both values below are in-range once misread as octal, so nothing else on
+        // the line would catch the divergence.
+        {"frame dst=010 src=0x00 flags=0x00 seq=0 payload=",
+         "leading-zero dst must not be silently reinterpreted as octal 010 == 0x08"},
+        {"frame dst=0x01 src=0x00 flags=0x00 seq=010 payload=",
+         "leading-zero seq must not be silently reinterpreted as octal 010 == 8"},
     };
     for (const auto& c : cases) {
         INFO(c.why);
@@ -111,6 +122,36 @@ TEST_CASE("parse_frame_line rejects malformed canonical text before it reaches t
         REQUIRE_FALSE(omgp::canon::parse_frame_line(c.text, f, payload, error));
         REQUIRE(error == "ERR BadRequest");
     }
+}
+
+// dst/src/payload-length: the untested bands above parse_uint's own UINT_MAX-overflow guard
+// but above each field's real width (0xFF for dst/src, since out.dst/out.src are uint8_t;
+// 0xFF for payload.size(), since out.len is a uint8_t). Neither is caught anywhere else:
+// dst=0x100/src=0x100 fit in `unsigned` and encode_frame never sees them (parse_frame_line
+// refuses first); a 256-byte payload is one byte too large for the length guard here but well
+// under encode_frame's own PayloadTooLong threshold. Removing any of these three guards ships
+// a *different, valid, correctly-CRC'd* frame instead of a refusal (red-team @ 72d3072).
+TEST_CASE("parse_frame_line rejects dst/src/payload just above their field width, distinct "
+          "from the unsigned-overflow band",
+          "[frame]") {
+    FrameFields f{};
+    std::vector<uint8_t> payload;
+    std::string error;
+
+    REQUIRE_FALSE(omgp::canon::parse_frame_line(
+        "frame dst=0x100 src=0x00 flags=0x00 seq=0 payload=", f, payload, error));
+    REQUIRE(error == "ERR BadRequest");
+
+    REQUIRE_FALSE(omgp::canon::parse_frame_line(
+        "frame dst=0x01 src=0x100 flags=0x00 seq=0 payload=", f, payload, error));
+    REQUIRE(error == "ERR BadRequest");
+
+    std::string payload_256;
+    for (unsigned i = 0; i < 256; ++i)
+        payload_256 += "aa";
+    REQUIRE_FALSE(omgp::canon::parse_frame_line(
+        "frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=" + payload_256, f, payload, error));
+    REQUIRE(error == "ERR BadRequest");
 }
 
 // --- encode_frame_line (FENC) refusals: codec status, not BadRequest ------------------------
