@@ -81,11 +81,24 @@ the enforcement.
     failed logs, fixes on that branch only (TDD where a test was missing,
     pipeline green before pushing) and comments root cause + evidence; an
     environmental failure is re-run, not patched.
-  - **Bound — two attempts, then a human.** Attempts are the PR labels
-    `auto-fix-1` and `auto-fix-2`, one attempt per commit; a failure after
-    the second releases `in-progress` and applies `needs-human` with the
-    failed-run links. The labels are the bound: nothing resets them but a
-    human.
+  - **Bound — `auto_fix_max_attempts` (agent-config; 4 since ruling
+    2026-09-03, was 2), then a human.** Attempts are the `auto-fix-<n>` PR
+    labels, one attempt per commit (written to the first free index, so the
+    bound stays reachable after a human removes a label); a failure after
+    the last releases `in-progress` and applies `needs-human` with the
+    branch's non-successful runs listed — capped at 10 links from the
+    newest 100 runs, every cut disclosed explicitly (never presented as
+    complete when it is not). The labels are the bound: nothing resets
+    them but a human. Knob semantics: 0 (or < 1) disables auto-fix —
+    INCLUDING escalation and claim release: a disabled router takes no
+    action at all, the PR keeps `in-progress`, and the disable window is
+    operator-owned (a distinct disabled marker keeps the sweep quiet;
+    restoring the knob re-routes on the next sweep). An unreadable value
+    (any non-digit suffix: `1e3`, `0x10`, `4.9`) fails closed to 2; an
+    inline comment or quotes around the value are tolerated; values above
+    10 are clamped. The sweep carries NO bound: it re-delivers at every
+    attempt count, since exhaustion/escalation needs the delivery
+    backstop most (red-team on #120, all rounds).
   - **`main` goes to triage.** A failure on `main` files one open
     `ci-failure` + `task` issue per workflow, which `agent-triage` handles
     exactly like `nightly-failure`.
