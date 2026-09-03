@@ -115,6 +115,35 @@ def test_main_ci_failures_reach_triage():
     assert "'ci-failure'" in triage["jobs"]["triage"]["if"] and "'nightly-failure'" in triage["jobs"]["triage"]["if"]
 
 
+# --- WIP cap as a knob, counting stories (ruling 2026-09-03) -----------------------------------
+
+PICK_HARNESS = ROOT / "tests" / "workflows" / "agent_pick_harness.js"
+
+
+@pytest.mark.skipif(shutil.which("node") is None,
+                    reason="node not present (blind spot: workflow scripts not exercised in this environment)")
+def test_agent_pick_wip_cap_against_mocked_github(tmp_path):
+    f = tmp_path / "scripts.json"
+    f.write_text(json.dumps({"pick": _script("agent-dispatch.yml", "pick")}))
+    r = subprocess.run(["node", str(PICK_HARNESS), str(f), str(ROOT)], capture_output=True, text=True, cwd=ROOT, timeout=120)
+    print(r.stdout)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "FAIL" not in r.stdout
+    assert "cases passed" in r.stdout
+
+
+def test_wip_cap_wiring():
+    """The knob is a T3 config value read by the workflow, not a constant in the script."""
+    cfg = (ROOT / ".github" / "agent-config.yml").read_text()
+    assert "wip_cap: 2" in cfg
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "agent-dispatch.yml").read_text())
+    steps = wf["jobs"]["pick"]["steps"]
+    script_step = next(s for s in steps if "actions/github-script" in s.get("uses", ""))
+    assert "WIP_CAP" in script_step.get("env", {})
+    gov = (ROOT / "docs" / "GOVERNANCE.md").read_text()
+    assert "wip_cap" in gov
+
+
 # --- model tiers for agent workflows (ruling 2026-08-31) ---------------------------------------
 
 def _claude_steps(workflow):
