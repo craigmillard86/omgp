@@ -201,7 +201,7 @@ module's reply if it has arrived, otherwise `ERROR: busy` (the host retries
 later). The module-bus transaction proceeds independently under the 5 ms
 module-bus timeout; the backplane never waits on I2C while the trunk is
 waiting on it." No change to timing values or codec behaviour.
-**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): rewording adopted as recommended; docs/trunk-link-layer.md §8's first bullet is amended in the same PR (CODEOWNERS review is the ruling's gate).
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): rewording adopted as recommended; docs/trunk-link-layer.md §8's first bullet is amended in the same PR (CODEOWNERS review is the ruling's gate). The landed text also carries the recommendation's forward-progress clause (`ERR_BUSY` never abandons the module-bus transaction) and two scoping sentences added per red-team review on #122: the MUST applies to accepted polls only (§4 silent discard stands), and an `ERR_BUSY` answer is a valid response for §7's failure accounting.
 **Supersedes:** none.
 
 ## 2026-08-28 — CodeQL and dependency review become required checks
@@ -346,7 +346,7 @@ sees and can dispute the claim "this file has no mutable code" in the PR
 diff. Does not touch `tools/mutate.cfg [policy]`'s T3 constants
 (`max_unlabelled_survivors`, `label_categories`) — those are unchanged and
 still gate every file that does contain logic.
-**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): ratified as implemented; the per-file marker is the mechanism.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): ratified as implemented; the per-file marker is the mechanism. What was implemented (record restored per red-team on #122): `tools/mutate_report.py` (`NO_BODY_EXEMPT`, `exempt_reason`), markers in `link/clock.hpp` and `link/byte_wire.hpp`, doc comment in `tools/mutate.sh`. Alternatives a superseding entry could still take: excluding declaration-only files from `scope_dirs` matching entirely, or a tree-wide static check that a file has zero function bodies (removing the per-file marker).
 **Supersedes:** none.
 
 ---
@@ -407,7 +407,7 @@ size is `frames` valid elements plus at least `per_class` corrupted elements per
 (≥ 8 × `per_class` beyond `frames`). `test_torture.py` asserts against this reading only
 (sum of `len(element.expected)` ≥ `frames`; per-class tally of `recipe` ≥ `per_class`),
 not against total element count.
-**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): both readings ratified (flat four-field Element; frames counts delivered/valid frames).
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): both readings ratified (flat four-field Element; frames counts delivered/valid frames). This ratifies the safe default that was flagged for human review in issue #31's releasing comment (record restored per red-team on #122).
 **Supersedes:** none.
 
 ---
@@ -720,7 +720,7 @@ flag), not a revert. (3) accept the deferred-REQUIRE reading of "overflow is a R
 failure" — a failure that fires with a one-`advance_to()`-call lag but before the test
 draws any conclusion from the wire's state is still "the test fails and says why", which
 is what the contract clause protects against (a silent drop the test never notices).
-**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): all three defaults ratified (interim echo until T034; first-matching-step order; deferred REQUIRE on capacity).
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): all three defaults ratified (interim echo until T034; first-matching-step order; deferred REQUIRE on capacity). T011 (#29) and T028/T031 are written against these three readings; a superseding entry must precede any change (record restored per red-team on #122).
 **Supersedes:** none.
 
 ---
@@ -951,7 +951,7 @@ reference is brought in line with it as part of T025: rejecting malformed/out-of
 before it reaches the codec is the stricter, fail-closed behaviour, matches this task's existing
 choice to reject rather than mask (`tools/canonical.cpp` comment above `parse_frame_line`), and
 keeps a caller error from silently being reinterpreted as a different, valid request.
-**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): C++ strict rejection (`ERR BadRequest` before the codec) is normative; T025 aligns the Python reference (no seq masking); baked into issue #43's criteria.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): C++ strict rejection is normative; T025 aligns the Python reference (no seq masking); baked into issue #43's criteria. Precision (per red-team on #122): `ERR BadRequest` covers malformed input text AND, for `FDEC`, well-formed hex whose bytes run out mid-frame with no discard counted (`test_canonical_frame.cpp`) — it is not purely pre-codec.
 **Supersedes:** none.
 
 ## 2026-09-03 — l3_helper frame verbs: three error shapes outside the frame-vectors contract vocabulary

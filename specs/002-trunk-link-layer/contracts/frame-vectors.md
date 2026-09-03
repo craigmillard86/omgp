@@ -19,9 +19,12 @@ frame dst=0x01 src=0x00 flags=0x00 seq=3 payload=0101000000
 - Discards render as `ERR <Discard>` (`ERR BadCrc`, `ERR BadLength`, `ERR BadEscape`,
   `ERR TooLong`); encode refusals as `ERR <Status>` (`ERR PayloadTooLong`,
   `ERR ReservedAddress`). Malformed input TEXT — an unparseable canonical line,
-  out-of-range field, or bad hex — renders as `ERR BadRequest` on every frame verb,
-  BEFORE any codec runs; strict rejection is normative on both implementations
-  (ruling 2026-09-03, docs/OPEN-QUESTIONS.md).
+  out-of-range field, or bad hex — renders as `ERR BadRequest` on every frame verb.
+  For `FDEC`, well-formed hex whose bytes run out mid-frame with no discard counted
+  is ALSO `ERR BadRequest` (locked by `tests/unit/test_canonical_frame.cpp`
+  "bytes running out mid-frame"), so `BadRequest` is not purely pre-codec there.
+  Strict rejection is normative on both implementations (ruling 2026-09-03,
+  docs/OPEN-QUESTIONS.md; wording corrected per red-team on #122).
 
 ## Vectors (created once by `genvectors.py`, then immutable)
 
@@ -39,7 +42,7 @@ frame dst=0x01 src=0x00 flags=0x00 seq=3 payload=0101000000
 |---|---|---|
 | `FENC <canonical frame line>` | fields | `OK <hex wire bytes>`, `ERR <Status>`, or `ERR BadRequest` (malformed text) |
 | `FDEC <hex wire bytes>` | one frame's bytes | `OK <canonical frame line>`, `ERR <Discard>` (first discard reason), or `ERR BadRequest` (malformed hex) |
-| `FSTREAM <hex stream>` | any byte stream | one `OK <canonical frame line>` per delivered frame, in order, then `END <discards>`; `ERR BadRequest` (malformed hex) instead of any output |
+| `FSTREAM <hex stream>` | any byte stream | one `OK <canonical frame line>` per delivered frame, in order, then `END <discards>`; malformed hex yields `ERR BadRequest` **then `END 0`** — the `END` terminator is ALWAYS sent, so a read-until-`END` driver never blocks (locked by `test_canonical_frame.cpp`) |
 
 `diffcheck.py --frames` uses `FENC`/`FDEC` on a seeded corpus of random valid frames
 (≥ 10 000: every dst/src in range, seq 0–15, flags, payload lengths 0–64 with 7E/7D-heavy
