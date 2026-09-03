@@ -52,7 +52,7 @@ L2 addresses are the L3 node IDs of trunk-resident nodes only: `0x00` host, `0x0
 
 Backplane L2 address is set by geographic strap pins or rotary switch on the backplane, not auto-assigned — the trunk must work before any protocol runs.
 
-`dst = 0xFF` is reserved for future broadcast and MUST NOT be used in v1.
+`dst = 0xFF` is reserved for future broadcast and MUST NOT be used in v1; a v1 receiver discards such a frame silently. A node likewise silently ignores any frame whose `dst` is not its own L2 address — made explicit 2026-09-03: this is the §5 half of the silent-discard rule that §8's accepted-poll scoping cites alongside §4.
 
 ## 6. Poll schedule
 
@@ -68,13 +68,13 @@ Budget rule: a superframe never exceeds T_poll; unsent demand traffic carries to
 ## 7. Errors, retries, node health
 
 - **Retry**: on response timeout or CRC-failed response, the host retransmits with the same L2 sequence and `ctrl.retry` set, up to **2 retries**. L3 idempotency (Protocol Draft §3) makes this safe. A node receiving a retry of a sequence it already answered re-sends its previous response (single-frame replay buffer per node).
-- **Node suspect**: 3 consecutive failed transactions → node marked SUSPECT; polled once per 10 superframes.
-- **Node dead**: 1 s in SUSPECT without a valid response → node marked OFFLINE, reported to L4 (which decides audio-safety consequences, e.g. muting that backplane's paths). OFFLINE nodes stay in the enrolment rotation.
+- **Node suspect**: 3 consecutive failed transactions → node marked SUSPECT; polled once per 10 superframes. (What counts as a failed transaction versus a valid `ERR_BUSY` answer: §8, and the open persistence bound in §10.5.)
+- **Node dead**: 1 s in SUSPECT without a valid response (per §8, an `ERR_BUSY` answer is a valid response) → node marked OFFLINE, reported to L4 (which decides audio-safety consequences, e.g. muting that backplane's paths). OFFLINE nodes stay in the enrolment rotation.
 - **Bus health**: if all nodes fail simultaneously, the host declares BUS_FAULT, re-probes at the fallback bit rate, and surfaces a system alert. This distinguishes a dead node from a broken trunk.
 
 ## 8. Bridging rules (backplane duty)
 
-- Frames whose L3 node ID belongs to one of the backplane's slots are translated to module-bus transactions; the backplane holds the trunk response until the module answers or its module-bus timeout (5 ms) expires, whichever is sooner — but must always respond on the trunk within T_resp. If the module transaction is still in flight, the backplane answers `ERROR: busy`, and the host retries later; the backplane MUST NOT stall the trunk waiting on I2C.
+- Frames whose L3 node ID belongs to one of the backplane's slots are translated to module-bus transactions. For every poll it accepts (a frame the receiver discards silently — §4, §5 — gets no response, as for any node), the backplane MUST begin its response within T_turn (§3), so the host sees it well inside T_resp: with the module's reply if it is ready, otherwise `ERR_BUSY` (the host retries later) or the applicable protocol error answered on the module's behalf — e.g. `ERR_UNKNOWN_TARGET` for a slot with no live module; the answer set is not closed to two elements. The module-bus transaction proceeds independently under its 5 ms module-bus timeout — answering `ERR_BUSY` never abandons or restarts it, and that timeout is invisible to trunk timing; where a module reply that arrives after its poll was answered `ERR_BUSY` is retained, and how it is correlated with a later poll, is an open question (§10.6). An `ERR_BUSY` answer is a valid response at L2 — the poll itself did not fail; how *persistent* busy is bounded is an open question (§10.5). The backplane never holds a trunk response open waiting on the module bus; it MUST NOT stall the trunk waiting on I2C.
 - The backplane maintains the per-slot event queues' summary (`event_pending`) in its own status block so the host learns of module events from the routine status poll without extra trunk traffic.
 - Module-bus supervision (clock-timeout recovery, slot power-cycle) is autonomous backplane behaviour, reported via backplane events, never coordinated over the trunk in real time.
 
@@ -96,3 +96,5 @@ Budget rule: a superframe never exceeds T_poll; unsent demand traffic carries to
 2. Is a 64-byte payload enough for efficient descriptor transfer over the trunk, or should trunk-side READ_DESC chunks go to 128 B (frame time vs. fewer round trips)? Simulator can measure full-rig discovery time both ways.
 3. Isolation: v1 assumes a common-ground single chassis. Multi-chassis rigs may want an isolated trunk segment — decide whether to provision for it mechanically (connector choice) even if unimplemented.
 4. 1 Mbit/s over the intended trunk length with stubs needs signal-integrity confirmation on Rev A before the rate is frozen; the fallback rate exists so bring-up never blocks on this.
+5. How is persistent `ERR_BUSY` bounded? A single busy answer is a valid response (§8), so §7's failure accounting never catches a wedged bridge that answers busy forever. Options and the layering constraint on each are recorded in `docs/OPEN-QUESTIONS.md` (2026-09-03 persistent-`ERR_BUSY` entry); must be ruled before the health tracker is implemented.
+6. Where does a bridged module reply go when it arrives after its poll was answered `ERR_BUSY`? §8 mandates the transaction proceed but states no retention or correlation rule — on the plain reading, `GET_EVENT`'s replay-safety justification in the protocol YAML ("replay-safe via L2 seq replay buffer") does not survive the bridge: the §7 replay buffer holds `ERR_BUSY`, and each drain's reply has nowhere defined to go. Options (retain-and-correlate with an explicit rule; forbid starting a module-bus transaction whose reply cannot be delivered; answer event reads from a backplane-side prefetch cache, which `event_pending` already gestures at) are recorded in `docs/OPEN-QUESTIONS.md` (2026-09-03 bridged-reply entry); must be ruled before any bridge implementation (f4).
