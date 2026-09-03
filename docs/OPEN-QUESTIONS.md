@@ -1224,3 +1224,29 @@ same amendment. Until ruled, the sentinel is documented at the declaration
 implemented against the contract's silence.
 **Ruling:** pending — human, with T039.
 **Supersedes:** none.
+
+---
+
+## 2026-09-03 — A comment-only diff in scope_dirs is indistinguishable from broken instrumentation
+
+**Context:** review + red-team on PR #124 (HIGH, convergent). Moving a `mutant-ok`
+label onto its own comment-only line — the placement `tools/mutate_report.py`'s own
+docstring prescribes for clang-format stability — made that comment the diff's only
+in-scope line. Mull attributes no mutant to a comment, so the report saw zero
+in-scope mutants and took the blind-spot branch ("instrumentation is not reaching
+the code"), failing deep-verify with a bogus FAIL. Demonstrated at 4265f78 (the CI
+run) and by the red-team's saturated-report reproducer: 170 survivors elsewhere in
+the file, exit 1 regardless. Any future PR whose only embedded-path change is a
+comment hits the same wall; `mutation-exempt(no-body)` is not an answer (it is a
+file-level claim about files with no function bodies).
+**Recommendation:** teach the blind-spot check the difference: when every in-scope
+changed line is a comment or blank (strip → empty or starting `//`), report
+"comment-only change: no mutable code in the diff" and pass instead of failing —
+optionally also pulling the line a changed `mutant-ok` label governs into scope so
+the labelled survivor is re-examined. Gate-scoping semantics, so a human rules it
+(both reviewers declined to pick a remedy for the same reason). PR #124 itself
+sidesteps it in-diff: a short trailing `// labelled above` marker keeps the
+governed line in scope without disturbing the format-stable label placement.
+**Ruling:** pending — human; the workaround unblocks #124, the tool fix is the
+durable answer.
+**Supersedes:** none.

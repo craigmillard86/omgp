@@ -30,10 +30,12 @@ struct RecordingListener : HealthListener {
     std::vector<Entry> entries;
 
     // Reserves up front so growth during a HEAP_FREE_SCOPE measures HealthTracker's own
-    // allocations, not this recording harness's vector doubling (well above any scripted
-    // sequence's transition count in this file).
+    // allocations, not this recording harness's vector doubling. 32 covers the largest
+    // scripted sequence in this file (the all-backplane cases emit 19 notices — review on
+    // #124: the old 16 was silently exceeded, which a future HEAP_FREE_SCOPE user would
+    // have measured as a tracker allocation).
     RecordingListener() {
-        entries.reserve(16);
+        entries.reserve(32);
     }
 
     void on_notice(Notice notice, uint8_t addr) override {
