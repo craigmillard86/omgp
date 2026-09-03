@@ -63,5 +63,15 @@ std::string fdec_line(const uint8_t* data, size_t len);
 // then "END <n>" where n is the total discarded (malformed, FLAG-delimited) frame count.
 std::string fstream_lines(const uint8_t* data, size_t len);
 
+// FENC: "OK <hex wire bytes>" on success, "ERR <Status>"/"ERR BadRequest" on refusal — the
+// text-in-to-line-out formatting l3_helper.cpp does for every other verb, kept here so this
+// "OK " can't drift from FDEC/FSTREAM's the way it did before (contracts/frame-vectors.md
+// "l3_helper verbs").
+std::string fenc_response(const std::string& canonical);
+// FSTREAM end to end: parses `hex`, then fstream_lines(). Malformed hex still ends in an
+// END line ("ERR BadRequest\nEND 0") so a "read lines until END" driver can never block
+// waiting for a terminator a bare "ERR BadRequest" would never send.
+std::string fstream_response(const std::string& hex);
+
 } // namespace canon
 } // namespace omgp

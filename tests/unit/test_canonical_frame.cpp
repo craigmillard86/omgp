@@ -217,11 +217,64 @@ TEST_CASE("fstream_lines counts a non-FLAG garbage burst as one discarded frame"
     std::vector<uint8_t> stream(ping, ping + ping_len);
     const std::vector<uint8_t> garbage = {0x11, 0x22, 0x33}; // never a valid header+CRC
     stream.insert(stream.end(), garbage.begin(), garbage.end());
-    stream.insert(stream.end(), ping, ping + ping_len); // its closing FLAG is this frame's FLAG
+    // the 2nd frame's opening FLAG ends the garbage run
+    stream.insert(stream.end(), ping, ping + ping_len);
 
     const std::string out = omgp::canon::fstream_lines(stream.data(), stream.size());
     const std::string expect = "OK frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=0101000000\n"
                                "OK frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=0101000000\n"
                                "END 1";
     REQUIRE(out == expect);
+}
+
+// --- fenc_response / fstream_response: the l3_helper FENC/FSTREAM verb bodies ---------------
+// contracts/frame-vectors.md "l3_helper verbs": FENC succeeds with "OK <hex wire bytes>" (like
+// FDEC/FSTREAM's own "OK "/"END " framing), never bare hex; FSTREAM always terminates in an
+// END line, even when the request itself is malformed, so a "read lines until END" driver can
+// never block on it.
+
+TEST_CASE("fenc_response OK-prefixes the hex wire bytes, matching every frame_* vector",
+          "[frame]") {
+    size_t seen = 0;
+    for (size_t i = 0; i < omgp::vectors::COUNT; ++i) {
+        const auto& v = omgp::vectors::ALL[i];
+        if (std::string(v.kind) != "frame")
+            continue;
+        ++seen;
+        INFO(v.name << " (" << v.spec_ref << ")");
+        REQUIRE(omgp::canon::fenc_response(v.canonical) ==
+                "OK " + omgp::canon::hex_lower(v.bytes, v.len));
+    }
+    REQUIRE(seen == 5);
+}
+
+TEST_CASE("fenc_response surfaces a refusal unprefixed, same spelling as encode_frame_line",
+          "[frame]") {
+    // dst == 0xFF: reserved broadcast address (trunk §5); no "OK " on a refusal.
+    REQUIRE(omgp::canon::fenc_response("frame dst=0xFF src=0x00 flags=0x00 seq=0 payload=") ==
+            "ERR ReservedAddress");
+    REQUIRE(omgp::canon::fenc_response("not-a-frame") == "ERR BadRequest");
+}
+
+TEST_CASE("fstream_response terminates a malformed hex request with END 0, not a bare ERR",
+          "[frame]") {
+    // "zz" is never valid hex: parse_hex fails before fstream_lines ever runs. A driver reading
+    // lines until END must see one here too, or it blocks waiting for a terminator that never
+    // arrives (the hazard this test pins).
+    REQUIRE(omgp::canon::fstream_response("zz") == "ERR BadRequest\nEND 0");
+}
+
+TEST_CASE("fstream_response matches fstream_lines on well-formed hex", "[frame]") {
+    const uint8_t* ping = nullptr;
+    uint16_t ping_len = 0;
+    for (size_t i = 0; i < omgp::vectors::COUNT; ++i) {
+        const auto& v = omgp::vectors::ALL[i];
+        if (std::string(v.name) == "frame_ping_req") {
+            ping = v.bytes;
+            ping_len = v.len;
+        }
+    }
+    REQUIRE(ping != nullptr);
+    REQUIRE(omgp::canon::fstream_response(omgp::canon::hex_lower(ping, ping_len)) ==
+            omgp::canon::fstream_lines(ping, ping_len));
 }

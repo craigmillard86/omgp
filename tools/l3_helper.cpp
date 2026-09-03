@@ -4,7 +4,7 @@
 //   ENC <canonical message>   -> hex | ERR <Status>
 //   DEC <hex>                 -> canonical message | ERR <Status>
 //   DENC/DDEC/DVAL            -> descriptor verbs (feature 001 US3)
-//   FENC <canonical frame>    -> hex wire bytes | ERR <Status>            (spec 002 T023)
+//   FENC <canonical frame>    -> OK <hex wire bytes> | ERR <Status>       (spec 002 T023)
 //   FDEC <hex wire bytes>     -> canonical frame | ERR <Discard>          (spec 002 T023)
 //   FSTREAM <hex stream>      -> canonical frame* then END <discards>     (spec 002 T023)
 //   CRC <hex>                 -> 0x%04X (crc16_ccitt_false, link/crc16.hpp)
@@ -53,18 +53,13 @@ int main() {
                       ? omgp::canon::validate_line(bytes.data(), bytes.size())
                       : "ERR BadRequest";
         } else if (verb == "FENC") {
-            std::string err;
-            out = omgp::canon::encode_frame_line(arg, bytes, err)
-                      ? omgp::canon::hex_lower(bytes.data(), bytes.size())
-                      : err;
+            out = omgp::canon::fenc_response(arg);
         } else if (verb == "FDEC") {
             out = omgp::canon::parse_hex(arg, bytes)
                       ? omgp::canon::fdec_line(bytes.data(), bytes.size())
                       : "ERR BadRequest";
         } else if (verb == "FSTREAM") {
-            out = omgp::canon::parse_hex(arg, bytes)
-                      ? omgp::canon::fstream_lines(bytes.data(), bytes.size())
-                      : "ERR BadRequest";
+            out = omgp::canon::fstream_response(arg);
         } else if (verb == "CRC") {
             if (omgp::canon::parse_hex(arg, bytes)) {
                 char b[8];

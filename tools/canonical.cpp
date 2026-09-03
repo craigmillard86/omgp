@@ -643,6 +643,21 @@ std::string fstream_lines(const uint8_t* data, size_t len) {
     return out;
 }
 
+std::string fenc_response(const std::string& canonical) {
+    std::vector<uint8_t> out;
+    std::string error;
+    if (!encode_frame_line(canonical, out, error))
+        return error;
+    return "OK " + hex_lower(out.data(), out.size());
+}
+
+std::string fstream_response(const std::string& hex) {
+    std::vector<uint8_t> bytes;
+    if (!parse_hex(hex, bytes))
+        return "ERR BadRequest\nEND 0";
+    return fstream_lines(bytes.data(), bytes.size());
+}
+
 } // namespace canon
 } // namespace omgp
 
