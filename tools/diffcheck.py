@@ -8,9 +8,14 @@ requests (contracts/canonical-text.md), so the corpus stays inside the per-commi
 (spec 001 SC-003: < 2 min).
 
     python3 tools/diffcheck.py [--count N] [--seed S] [--index I]
+    python3 tools/diffcheck.py [--frames] [--frames-only] [--frame-index I] [--torture-index I]
 
-Every case is replayable from (seed, index): `--index I` runs only that case and prints
-the request and both results.
+Every case is replayable from (seed, index): `--index I` runs only that message case,
+`--frame-index I` one FENC/FDEC frame case, `--torture-index I` one FSTREAM torture
+element; each prints the request and both results. The frame + torture corpora
+(contracts/frame-vectors.md, tools/refimpl/torture.py) run by default alongside the
+message/descriptor corpora; `--frames-only` restricts a run to just those two, for fast
+local iteration on the link-layer codec (contracts/tooling.md).
 """
 from __future__ import annotations
 
@@ -28,6 +33,7 @@ sys.path.insert(0, str(ROOT / "tools" / "refimpl"))
 from _gen import P  # noqa: E402
 from omgp_crc import crc16_ccitt_false  # noqa: E402
 import canonical as C  # noqa: E402
+import diffcheck_frames as F  # noqa: E402
 import omgp_l3 as l3  # noqa: E402
 
 G = P()
@@ -54,6 +60,33 @@ class Helper:
         def reader():
             for _ in lines:
                 out.append(self.p.stdout.readline().rstrip("\n"))
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        for i in range(0, len(lines), CHUNK):
+            self.p.stdin.write("".join(l + "\n" for l in lines[i:i + CHUNK]))
+            self.p.stdin.flush()
+        t.join()
+        return out
+
+    def ask_stream(self, lines: list[str]) -> list[list[str]]:
+        """Like ask(), but each line is a FSTREAM request whose response is a
+        variable-length block of "OK <frame>" lines terminated by one "END <n>" line
+        (contracts/frame-vectors.md); the reader groups lines per request by that
+        terminator instead of assuming one line per request."""
+        import threading
+
+        out: list[list[str]] = []
+
+        def reader():
+            for _ in lines:
+                block: list[str] = []
+                while True:
+                    ln = self.p.stdout.readline().rstrip("\n")
+                    block.append(ln)
+                    if ln.startswith("END "):
+                        break
+                out.append(block)
 
         t = threading.Thread(target=reader, daemon=True)
         t.start()
@@ -219,33 +252,54 @@ def main(argv=None) -> int:
     ap.add_argument("--count", type=int, default=10000, help="valid message cases (default 10000)")
     ap.add_argument("--seed", type=lambda s: int(s, 0), default=DEFAULT_SEED)
     ap.add_argument("--index", type=int, default=None, help="replay one message case")
+    # contracts/tooling.md "tools/diffcheck.py --frames": the frame + torture corpora
+    # already run by default (below); --frames is the explicit spelling for scripts that
+    # want to say so, --frames-only restricts a local iteration run to just those two.
+    ap.add_argument("--frames", action="store_true", help="include the frame + torture corpora (default)")
+    ap.add_argument("--frames-only", action="store_true", help="run only the frame + torture corpora")
+    ap.add_argument("--frame-index", type=int, default=None, help="replay one frame (FENC/FDEC) case")
+    ap.add_argument("--torture-index", type=int, default=None, help="replay one torture (FSTREAM) element")
     args = ap.parse_args(argv)
 
     t0 = time.monotonic()
-    crc = run_crc(random.Random(args.seed))
+    crc = msgs = inval = desc = 0
+    if not args.frames_only:
+        crc = run_crc(random.Random(args.seed))
     helper = Helper(BIN / "l3_helper")
     try:
-        msgs = run_messages(helper, args.seed, args.count, args.index)
-        if msgs < 0:
-            return 1
-        if args.index is not None:
-            return 0
-        inval = run_invalid(helper, args.seed)
-        if inval < 0:
-            return 1
-        desc = 0
-        try:
-            import diffcheck_descriptors  # type: ignore  # arrives with US3
-            desc = diffcheck_descriptors.run(helper, args.seed)
-            if desc < 0:
+        if not args.frames_only:
+            msgs = run_messages(helper, args.seed, args.count, args.index)
+            if msgs < 0:
                 return 1
-        except ImportError:
-            pass  # descriptor corpus only exists once US3 lands — by design, not an error
+            if args.index is not None:
+                return 0
+            inval = run_invalid(helper, args.seed)
+            if inval < 0:
+                return 1
+            try:
+                import diffcheck_descriptors  # type: ignore  # arrives with US3
+                desc = diffcheck_descriptors.run(helper, args.seed)
+                if desc < 0:
+                    return 1
+            except ImportError:
+                pass  # descriptor corpus only exists once US3 lands — by design, not an error
+
+        frames = F.run_frames(helper, args.seed, only=args.frame_index)
+        if frames < 0:
+            return 1
+        if args.frame_index is not None:
+            return 0
+        torture_n = F.run_torture(helper, args.seed, only=args.torture_index)
+        if torture_n < 0:
+            return 1
+        if args.torture_index is not None:
+            return 0
     finally:
         helper.close()
-    total = crc + msgs + inval + desc
+    total = crc + msgs + inval + desc + frames + torture_n
     print(f"diffcheck: {total} cases, C++ and Python agree "
-          f"(crc {crc}, messages {msgs}, invalid {inval}, descriptors {desc}) in {time.monotonic() - t0:.1f}s")
+          f"(crc {crc}, messages {msgs}, invalid {inval}, descriptors {desc}, "
+          f"frames {frames}, torture {torture_n}) in {time.monotonic() - t0:.1f}s")
     return 0
 
 
