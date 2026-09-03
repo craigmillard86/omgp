@@ -459,6 +459,27 @@ TEST_CASE("recovery from OFFLINE resets the failure count — three fresh failur
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
 }
 
+TEST_CASE("suspect_since is stamped with now, not left at its 0 initialiser", "[link]") {
+    // red-team round 3 on #124 (their killing case, taken nearly verbatim): every prior
+    // sequence suspected at t ≈ 0-3 µs, so a record stuck on its 0 initialiser was
+    // arithmetically indistinguishable from a stamped one — deleting the data-model §6
+    // `suspect_since = now` assignment left the whole suite green. At 5 s of rig uptime,
+    // an unstamped record would fall OFFLINE 1 ms into the 1000 ms window.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    const uint64_t uptime = 5000000; // 5 s: a rig that has been running
+    const uint64_t since = drive_to_suspect(tracker, kAddr, uptime);
+    REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
+
+    tracker.tick(since + 1000); // 1 ms into a 1000 ms threshold
+    REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
+
+    tracker.tick(since + omgp::TRUNK_offline_after_suspect_ms * 1000);
+    REQUIRE(tracker.state(kAddr) == HealthState::OFFLINE);
+}
+
 TEST_CASE("out-of-range addresses are not nodes: no record, no notice, no effect", "[link]") {
     // red-team on #118 M1/M14: `addr` is wire-derived (link/frame.cpp validates only
     // dst == 0xFF; src is copied through), so the bounds guard is the sole memory-safety

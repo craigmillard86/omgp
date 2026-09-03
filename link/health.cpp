@@ -89,13 +89,18 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
 void HealthTracker::tick(uint64_t now_us) {
     // data-model.md §6: the only time-only transition is SUSPECT -> OFFLINE once
     // kOfflineThresholdUs has elapsed since suspect_since, with no on_result involved.
-    for (size_t addr = 0; addr < kAddrCount; ++addr) {
-        HealthRecord& r = records_[addr];
+    // Range-for over the fixed array (red-team round 3 on #124): the previous indexed loop
+    // carried the file's last wrap COMPARISON, and its <= mutant read records_[16] — an
+    // intra-object overread ASan does not reliably flag. Here the bound is the array's own
+    // extent, by construction.
+    uint8_t addr = 0;
+    for (HealthRecord& r : records_) {
         if (r.state == HealthState::SUSPECT &&
             elapsed_us(now_us, r.suspect_since_us) >= kOfflineThresholdUs) {
             r.state = HealthState::OFFLINE;
-            notify(Notice::OFFLINE, static_cast<uint8_t>(addr));
+            notify(Notice::OFFLINE, addr);
         }
+        ++addr;
     }
 }
 
