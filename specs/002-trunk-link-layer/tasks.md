@@ -180,11 +180,11 @@ enrolment rotation and one notification per transition.
 
 ### Tests for User Story 4 (write first, must fail — one dispatch unit with their implementation, ruling 2026-08-30)
 
-- [ ] T037 [P] [US4] Write `tests/unit/test_link_health.cpp` with a recording `HealthListener`: every transition of data-model.md §6 and every non-transition at the boundary (2 failures stay ENROLLED; SUSPECT at 999 ms stays; `tick()` at 1000 ms → OFFLINE without a result); UNENROLLED never counts failures; `poll_due` for SUSPECT false at `9 × T_poll` after the last poll and true at `10 × T_poll` `[timing:T_poll]`; `next_probe` rotates over UNENROLLED and OFFLINE addresses only and skips 0x00; OFFLINE → ENROLLED on a valid answer with `RECOVERED`; exactly one notice per transition (count equality); `HEAP_FREE_SCOPE` around a full sequence
+- [x] T037 [P] [US4] Write `tests/unit/test_link_health.cpp` with a recording `HealthListener`: every transition of data-model.md §6 and every non-transition at the boundary (2 failures stay ENROLLED; SUSPECT at 999 ms stays; `tick()` at 1000 ms → OFFLINE without a result); UNENROLLED never counts failures; `poll_due` for SUSPECT false at `9 × T_poll` after the last poll and true at `10 × T_poll` `[timing:T_poll]`; `next_probe` rotates over UNENROLLED and OFFLINE addresses only and skips 0x00; OFFLINE → ENROLLED on a valid answer with `RECOVERED`; exactly one notice per transition (count equality); `HEAP_FREE_SCOPE` around a full sequence
 
 ### Implementation for User Story 4
 
-- [ ] T038 [US4] Write `link/health.hpp` / `link/health.cpp` per contracts/link-cpp.md "Health tracker" and data-model.md §6 (16-entry table, `on_result`, `tick`, `state`, `poll_due`, `mark_polled`, `next_probe` rotation — bus-fault parts stubbed to "never fault" until US5), citing `trunk §6` and `§7` — make T037 pass; add to `link/CMakeLists.txt`
+- [x] T038 [US4] Write `link/health.hpp` / `link/health.cpp` per contracts/link-cpp.md "Health tracker" and data-model.md §6 (16-entry table, `on_result`, `tick`, `state`, `poll_due`, `mark_polled`, `next_probe` rotation — bus-fault parts stubbed to "never fault" until US5), citing `trunk §6` and `§7` — make T037 pass; add to `link/CMakeLists.txt`
 - [ ] T039 [US4] Extend `tests/unit/test_link_loop.cpp` with the SUSPECT and OFFLINE scripts (three `Silence` steps → SUSPECT; silence for 1 s of simulated time → OFFLINE; a `Respond` after that → RECOVERED) driving `Master` + `HealthTracker` together — write first, then wire `HealthTracker::on_result` from the loop
 - [ ] T040 [US4] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; local mutation run
 

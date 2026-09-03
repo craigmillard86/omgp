@@ -4,6 +4,8 @@
 
 #include "omgp_protocol.h"
 
+#include <cstddef>
+
 namespace omgp {
 namespace link {
 
@@ -25,7 +27,11 @@ void HealthTracker::notify(Notice notice, uint8_t addr) {
 }
 
 void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
-    assert(addr < kAddrCount);
+    // Guards a wire-derived address (link/frame.cpp validates only dst == 0xFF; src is
+    // unchecked) against out-of-bounds access; `assert` alone would compile out under
+    // NDEBUG on the ESP32-S3 target build (rule 10).
+    if (addr >= kAddrCount)
+        return;
     HealthRecord& r = records_[addr];
     switch (r.state) {
     case HealthState::UNENROLLED:
@@ -78,12 +84,14 @@ void HealthTracker::tick(uint64_t now_us) {
 }
 
 HealthState HealthTracker::state(uint8_t addr) const {
-    assert(addr < kAddrCount);
+    if (addr >= kAddrCount)
+        return HealthState::UNENROLLED;
     return records_[addr].state;
 }
 
 bool HealthTracker::poll_due(uint8_t addr, uint64_t now_us) const {
-    assert(addr < kAddrCount);
+    if (addr >= kAddrCount)
+        return false;
     const HealthRecord& r = records_[addr];
     switch (r.state) {
     case HealthState::ENROLLED:
@@ -96,7 +104,8 @@ bool HealthTracker::poll_due(uint8_t addr, uint64_t now_us) const {
 }
 
 void HealthTracker::mark_polled(uint8_t addr, uint64_t now_us) {
-    assert(addr < kAddrCount);
+    if (addr >= kAddrCount)
+        return;
     records_[addr].last_poll_us = now_us;
 }
 
@@ -116,9 +125,12 @@ Probe HealthTracker::next_probe(uint64_t /*now_us*/) {
         if (s == HealthState::UNENROLLED || s == HealthState::OFFLINE)
             return Probe{next_probe_addr_, bit_rate()};
     }
-    // No eligible address (e.g. every enrolled node is healthy): hand back the last
-    // address visited rather than an undefined one; T043 revisits this under bus fault.
-    return Probe{next_probe_addr_, bit_rate()};
+    // No eligible address (e.g. every backplane node is ENROLLED/SUSPECT — the steady
+    // state of a healthy rig): ADDR_host (0x00) is outside the rotation range and is
+    // asserted by tests/unit/test_link_health.cpp to never be a real probe target, so it
+    // signals "nothing to probe" without adding a field the contract doesn't declare.
+    // T043 revisits this under bus fault.
+    return Probe{omgp::ADDR_host, bit_rate()};
 }
 
 bool HealthTracker::bus_fault() const {

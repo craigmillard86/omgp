@@ -346,10 +346,32 @@ TEST_CASE("next_probe rotates round-robin over UNENROLLED/OFFLINE addresses only
     std::sort(sorted_eligible.begin(), sorted_eligible.end());
     REQUIRE(sorted_seen == sorted_eligible);
 
-    // No bus fault was ever declared: `enrolled_addr` stayed ENROLLED throughout, so the
-    // nominal bit rate is what next_probe hands back.
+    // bus_fault()/bit_rate() are unconditional T038 stubs (bus_fault() always returns
+    // false, bit_rate() always TRUNK_bit_rate) — this pins the stub, not a property of
+    // `enrolled_addr` staying ENROLLED, which the stub never reads.
     REQUIRE_FALSE(tracker.bus_fault());
     REQUIRE(tracker.next_probe(0).bit_rate == omgp::TRUNK_bit_rate);
+}
+
+TEST_CASE("next_probe returns ADDR_host when no UNENROLLED/OFFLINE address exists", "[link]") {
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    // Every backplane address ENROLLED: the steady state of a healthy rig, and the one
+    // case data-model.md §6's "round-robin over addresses whose state is UNENROLLED or
+    // OFFLINE" has no candidate for. next_probe must signal that rather than handing back
+    // an ENROLLED/SUSPECT address the caller would mistake for a real probe target.
+    for (uint8_t a = omgp::ADDR_backplane_min; a <= omgp::ADDR_backplane_max; ++a)
+        tracker.on_result(a, true, 0);
+
+    Probe probe = tracker.next_probe(0);
+    REQUIRE(probe.addr == omgp::ADDR_host);
+
+    // Still no candidate on a second call: the "no eligible address" signal is stable,
+    // not a one-shot artefact of where the rotation cursor happened to land.
+    probe = tracker.next_probe(0);
+    REQUIRE(probe.addr == omgp::ADDR_host);
 }
 
 TEST_CASE("a full on_result/tick/poll_due/next_probe run allocates nothing", "[link]") {
