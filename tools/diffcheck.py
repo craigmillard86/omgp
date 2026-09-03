@@ -65,10 +65,17 @@ class Helper:
     thread calls them) never block on a full stdout pipe (descriptor lines run to several
     KB)."""
 
-    def __init__(self, path: pathlib.Path):
-        if not path.exists():
-            sys.exit(f"diffcheck: build the native preset first ({path.name} missing)")
-        self.p = subprocess.Popen([str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    def __init__(self, path):
+        # A list is taken as a full argv (review on #121: tests launch fake helpers via
+        # `[sys.executable, script]` so they run under the SAME interpreter, independent of
+        # shebang resolution and of noexec tmp filesystems); a single path is the binary.
+        if isinstance(path, (list, tuple)):
+            cmd = [str(p) for p in path]
+        else:
+            if not path.exists():
+                sys.exit(f"diffcheck: build the native preset first ({path.name} missing)")
+            cmd = [str(path)]
+        self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
                                   bufsize=1)
         self._lines: queue.Queue[str | None] = queue.Queue()
         self._eof = False

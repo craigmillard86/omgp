@@ -29,11 +29,14 @@ for line in sys.stdin:
 """
 
 
-def test_ask_stream_reports_a_live_helper_that_never_sends_end_instead_of_hanging(tmp_path):
+def test_ask_stream_reports_a_live_helper_that_never_sends_end_instead_of_hanging(tmp_path, monkeypatch):
+    # Review on #121: the real 2.0 s stall wait against a 5 s join budget flakes on loaded
+    # runners; the guard's behaviour, not its production duration, is what this test pins.
+    monkeypatch.setattr(D, "_STALL_TIMEOUT", 0.2)
     script = tmp_path / "fake_helper.py"
     script.write_text(FAKE_HELPER_NO_END)
     script.chmod(0o755)
-    helper = D.Helper(script)
+    helper = D.Helper([sys.executable, str(script)])
     result: dict = {}
     t = threading.Thread(target=lambda: result.__setitem__("out", helper.ask_stream(["FSTREAM aa"])), daemon=True)
     t.start()
@@ -68,7 +71,7 @@ def test_ask_stream_keeps_a_two_line_error_response_in_one_block(tmp_path):
     script = tmp_path / "fake_helper.py"
     script.write_text(FAKE_HELPER_TWO_LINE_ERR)
     script.chmod(0o755)
-    helper = D.Helper(script)
+    helper = D.Helper([sys.executable, str(script)])
     try:
         out = helper.ask_stream(["FSTREAM zz", "FSTREAM aa"])
     finally:
@@ -76,7 +79,7 @@ def test_ask_stream_keeps_a_two_line_error_response_in_one_block(tmp_path):
     assert out == [["ERR BadRequest", "END 0"], ["OK frame", "END 1"]]
 
 
-def test_ask_stream_does_not_hang_on_a_batch_of_requests_to_a_permanently_broken_helper(tmp_path):
+def test_ask_stream_does_not_hang_on_a_batch_of_requests_to_a_permanently_broken_helper(tmp_path, monkeypatch):
     """run_torture (tools/refimpl/diffcheck_frames.py) always calls ask_stream with the
     whole corpus in one batch, never one request at a time, so this multi-request case is
     the only one that actually runs in production. FAKE_HELPER_NO_END answers every request
@@ -85,10 +88,11 @@ def test_ask_stream_does_not_hang_on_a_batch_of_requests_to_a_permanently_broken
     the second block starts empty against an idle, still-live helper: the stall guard that
     only looks at bool(block) and block[-1] is unarmed for that fresh block and
     self._next_line(timeout=None) blocks forever."""
+    monkeypatch.setattr(D, "_STALL_TIMEOUT", 0.2)  # review on #121: behaviour, not duration
     script = tmp_path / "fake_helper.py"
     script.write_text(FAKE_HELPER_NO_END)
     script.chmod(0o755)
-    helper = D.Helper(script)
+    helper = D.Helper([sys.executable, str(script)])
     result: dict = {}
     t = threading.Thread(
         target=lambda: result.__setitem__("out", helper.ask_stream(["FSTREAM aa", "FSTREAM bb"])), daemon=True)

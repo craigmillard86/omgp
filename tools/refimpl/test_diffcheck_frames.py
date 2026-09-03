@@ -77,6 +77,9 @@ def test_random_frame_covers_every_dst_src_and_seq_over_frame_count():
     assert {fr.dst for fr in frames} == set(range(0xFF))  # every non-reserved dst
     assert {fr.src for fr in frames} == set(range(0x100))  # every src
     assert {fr.seq for fr in frames} == set(range(16))  # seq 0-15
+    # flags: the last unpinned line of the contract's corpus spec (review on #121).
+    assert {(fr.response, fr.retry) for fr in frames} == {(False, False), (False, True),
+                                                         (True, False), (True, True)}
     lengths = {len(fr.payload) for fr in frames}
     assert 0 in lengths and F.MAX_PAYLOAD in lengths  # payload lengths 0-64, boundaries hit
 
