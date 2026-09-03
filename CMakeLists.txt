@@ -87,6 +87,7 @@ target_link_libraries(test_l3_helper_dispatch PRIVATE omgp_l3_helper)
 omgp_add_catch_test(test_link_stuffing tests/property/test_link_stuffing.cpp)
 omgp_add_catch_test(test_link_resync tests/property/test_link_resync.cpp)
 omgp_add_catch_test(test_mock_wire tests/unit/test_mock_wire.cpp)
+omgp_add_catch_test(test_link_health tests/unit/test_link_health.cpp)
 
 # --- host-only tools ---
 add_executable(crc_helper tools/crc_helper.cpp)
