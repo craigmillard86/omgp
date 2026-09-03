@@ -73,6 +73,17 @@ async function route(w, run, maxAttempts = '4') {
   const context = {repo: {owner: 'o', repo: 'r'}, eventName: 'workflow_run', runId: 7777, serverUrl: 'https://gh', payload: {workflow_run}};
   await new AsyncFunction('github', 'context', 'core', 'require', S.route)(w.github, context, w.core, require);
 }
+// The workflow_dispatch entry (the sweep's delivery path, and a human routing a suppressed
+// failure by hand): no workflow_run payload — the run comes from getWorkflowRun.
+async function routeDispatch(w, run, maxAttempts = '4') {
+  process.env.MAX_ATTEMPTS = maxAttempts;
+  process.env.DISPATCH_RUN_ID = String(run.id);
+  w.github.rest.actions.getWorkflowRun = async ({run_id}) => ({data: run});
+  const context = {repo: {owner: 'o', repo: 'r'}, eventName: 'workflow_dispatch', runId: 7777, serverUrl: 'https://gh', payload: {}};
+  try {
+    await new AsyncFunction('github', 'context', 'core', 'require', S.route)(w.github, context, w.core, require);
+  } finally { delete process.env.DISPATCH_RUN_ID; }
+}
 async function sweep(w) {
   const context = {repo: {owner: 'o', repo: 'r'}, eventName: 'schedule', payload: {repository: {default_branch: 'main'}}};
   await new AsyncFunction('github', 'context', 'core', 'require', S.sweep)(w.github, context, w.core, require);
@@ -149,12 +160,25 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   for (const off of ['0', '-1']) {
     w = world({prs: [pr(94, 'task/26', ['agent-authored'])], jobs: JOBS});
     await route(w, {head_sha: `off${off}`}, off);
-    check(`F2: auto_fix_max_attempts=${off} disables the loop (no label; a marker comment quiets the sweep)`, w.outputs.route === 'none' && !w.log.some(l => /^\+/.test(l)) && said(w, /disabled/, 94) && said(w, new RegExp(`ci-failure-router sha=off${off}`), 94) && w.log.some(l => /notice:.*disabled/.test(l)));
+    check(`F2: auto_fix_max_attempts=${off} disables the loop (no label; a DISABLED marker quiets the sweep)`, w.outputs.route === 'none' && !w.log.some(l => /^\+/.test(l)) && said(w, new RegExp(`ci-failure-router sha=off${off} pass=1 run=5001 disabled -->`), 94) && w.log.some(l => /notice:.*disabled/.test(l)));
   }
-  // ...and the disabled marker is idempotent per sha+pass: a second delivery says nothing new.
-  w = world({prs: [pr(94, 'task/26', ['agent-authored'])], jobs: JOBS, comments: {94: ['<!-- ci-failure-router sha=abc123 pass=1 run=5001 -->\n⏸️ disabled earlier']}});
+  // ...the disabled marker is idempotent (no re-comment while disabled)...
+  w = world({prs: [pr(94, 'task/26', ['agent-authored'])], jobs: JOBS, comments: {94: ['<!-- ci-failure-router sha=abc123 pass=1 run=5001 disabled -->\n⏸️ disabled earlier']}});
   await route(w, {}, '0');
   check('F2: disabled state does not re-comment on the same sha+pass', w.outputs.route === 'none' && !w.log.some(l => l.startsWith('comment@')));
+  // ...and it does NOT outlive the disabled state: with the knob restored, the same failure
+  // routes again (red-team round 3: the plain marker closed the delivery backstop forever).
+  w = world({prs: [pr(94, 'task/26', ['agent-authored'])], jobs: JOBS, comments: {94: ['<!-- ci-failure-router sha=abc123 pass=1 run=5001 disabled -->\n⏸️ disabled earlier']}});
+  await route(w, {}, '4');
+  check('F2: restoring the knob re-routes a failure the disabled marker quieted', w.outputs.route === 'autofix' && labels(w, 94).includes('auto-fix-1'));
+  // Bound 1 — the off-switch boundary (red-team round 3 mutant: `< 1` typed as `<= 1`
+  // silently kills the conservative one-attempt setting).
+  w = world({prs: [pr(94, 'task/26', ['agent-authored'])], jobs: JOBS});
+  await route(w, {head_sha: 'one001'}, '1');
+  check('bound 1 is enabled: attempt 1 of 1 fires', w.outputs.route === 'autofix' && said(w, /attempt 1 of 1/, 94));
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: runs});
+  await route(w, {head_sha: 'one002'}, '1');
+  check('bound 1 then exhausts at one label', w.outputs.route === 'exhausted' && said(w, /after 1 attempts \(configured bound 1\)/, 94));
   w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'in-progress'])], issues: [issue(26, ['task', 'in-progress'])], jobs: JOBS, failedRuns: runs});
   await route(w, {head_sha: 'sci001'}, '1e3');
   check('F7: scientific-notation knob is unreadable -> fail closed to 2, not 1', w.outputs.route === 'exhausted' && w.log.some(l => /notice:.*unreadable/.test(l)));
@@ -172,10 +196,11 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
                  {id: 7002, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'timed_out', html_url: 'https://gh/r/7002'},
                  {id: 7003, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'startup_failure', html_url: 'https://gh/r/7003'},
                  {id: 7004, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'cancelled', html_url: 'https://gh/r/7004'},
-                 {id: 7005, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'success', html_url: 'https://gh/r/7005'}];
+                 {id: 7005, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'success', html_url: 'https://gh/r/7005'},
+                 {id: 7006, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'skipped', html_url: 'https://gh/r/7006'}];
   w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: mixed});
   await route(w, {head_sha: 'mix001'});
-  check('F6: timed_out/startup_failure/cancelled listed with their conclusion; success is not', said(w, /7002.*timed_out/, 94) && said(w, /7003.*startup_failure/, 94) && said(w, /7004.*cancelled/, 94) && !said(w, /7005/, 94));
+  check('F6: timed_out/startup_failure/cancelled listed with their conclusion; success/skipped are not', said(w, /7002.*timed_out/, 94) && said(w, /7003.*startup_failure/, 94) && said(w, /7004.*cancelled/, 94) && !said(w, /7005/, 94) && !said(w, /7006/, 94));
   check('M1: nothing was cut -> no "and N more" tail and no window line', !said(w, /more non-successful/, 94) && !said(w, /window:/, 94));
   w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: []});
   await route(w, {head_sha: 'mt0001'});
@@ -185,11 +210,22 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   // real failures — newest-first alone would fill all 10 slots with cancellations.
   const noisy = [...Array.from({length: 12}, (_, k) => ({id: 9500 + k, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'cancelled', html_url: `https://gh/r/${9500 + k}`})),
                  {id: 9400, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'failure', html_url: 'https://gh/r/9400'},
-                 {id: 9300, name: 'security', head_branch: 'task/26', status: 'completed', conclusion: 'timed_out', html_url: 'https://gh/r/9300'}];
+                 {id: 9300, name: 'security', head_branch: 'task/26', status: 'completed', conclusion: 'timed_out', html_url: 'https://gh/r/9300'},
+                 {id: 9250, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'startup_failure', html_url: 'https://gh/r/9250'}];
   w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: noisy});
   await route(w, {head_sha: 'noz001'});
-  check('rank: hard failures listed before cancellations even when 12 cancellations are newer', said(w, /9400.*failure/, 94) && said(w, /9300.*timed_out/, 94) && said(w, /and 4 more non-successful/, 94));
-  check('rank: the oldest cancellations are what falls below the cap, not the failures', !said(w, /9511/, 94) && said(w, /9500/, 94));
+  check('rank: hard failures listed before cancellations even when 12 cancellations are newer', said(w, /9400.*failure/, 94) && said(w, /9300.*timed_out/, 94) && said(w, /9250.*startup_failure/, 94) && said(w, /and 5 more non-successful/, 94));
+  check('rank: the oldest cancellations are what falls below the cap, not the failures', !said(w, /9510/, 94) && said(w, /9500/, 94));
+  // Triggering run always linked (red-team round 3): a dispatch of an OLD run whose link
+  // fell below the cap must still name the run under escalation.
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: noisy});
+  await route(w, {head_sha: 'trg001'});
+  check('exhaustion comment always names the triggering run, even when not in the window list', said(w, /Triggering run.*actions\/runs\/5001/, 94));
+  // The workflow_dispatch entry path routes identically (red-team round 3: the delivery
+  // backstop F1 depends on arrives via dispatch, which no case executed).
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task', 'in-progress'])], jobs: JOBS, failedRuns: runs});
+  await routeDispatch(w, {id: 5001, name: 'ci', conclusion: 'failure', head_branch: 'task/26', head_sha: 'dsp001', run_attempt: 1, html_url: 'https://gh/o/r/actions/runs/5001', head_repository: {full_name: REPO}});
+  check('dispatch-delivered exhaustion escalates identically to the event path', w.outputs.route === 'exhausted' && labels(w, 94).includes('needs-human') && !labels(w, 26).includes('in-progress'));
   // Window clipping (review on #120): counts are scoped to the fetch, never worded branch-wide.
   const flood = Array.from({length: 105}, (_, k) => ({id: 9000 + k, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'failure', html_url: `https://gh/r/${9000 + k}`}));
   w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: flood});
@@ -209,6 +245,9 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   w = world({prs: [pr(94, 'task/26', ['agent-authored'])], failedRuns: swRuns, comments: {94: ['<!-- ci-failure-router sha=aaa111 pass=1 run=8001 -->']}});
   await sweep(w);
   check('sweep: an attempt marker for the head sha+pass suppresses re-dispatch', !w.log.some(l => l.startsWith('dispatch')));
+  w = world({prs: [pr(94, 'task/26', ['agent-authored'])], failedRuns: swRuns, comments: {94: ['<!-- ci-failure-router sha=aaa111 pass=1 run=8001 disabled -->\n⏸️ disabled earlier']}});
+  await sweep(w);
+  check('sweep: a DISABLED marker does not suppress — the re-dispatch is the knob-restore recovery path', w.log.some(l => l.startsWith('dispatch run=8001')));
   w = world({prs: [pr(94, 'task/26', ['agent-authored'])], failedRuns: [...swRuns, {id: 8002, name: 'ci', head_branch: 'task/26', head_sha: 'aaa111', status: 'completed', conclusion: 'success', created_at: '2026-09-02T00:00:00Z', run_attempt: 1}]});
   await sweep(w);
   check('sweep: a later success on the same workflow means fixed — no dispatch', !w.log.some(l => l.startsWith('dispatch')));

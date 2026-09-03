@@ -83,12 +83,24 @@ def test_ci_failure_router_wiring(tmp_path):
     # digits; against an operator's `0  # OFF` it must yield 0 — the off-switch fails CLOSED.
     cfg = next(st for st in route["steps"] if st.get("id") == "cfg")["run"]
     assert "auto_fix_max_attempts" in cfg
-    want = re.search(r"^auto_fix_max_attempts: *(\d+)", (ROOT / ".github" / "agent-config.yml").read_text(), re.M).group(1)
+    # Shape pin accepting every DOCUMENTED form (review+red-team round 4 on #120: the first
+    # shape pin rejected `0  # OFF`, `-1` and quoted values — the very forms agent-config.yml
+    # documents — so pulling the off-switch turned ci-gate red repo-wide). The VALUE
+    # semantics (fail-closed 2, <1 disables, clamp 10) are pinned by harness cases.
+    _KNOB = re.compile(r'^auto_fix_max_attempts: *"?(-?\d+)"?( *#.*)?$', re.M)
+    _m = _KNOB.findall((ROOT / ".github" / "agent-config.yml").read_text())
+    assert _m, "auto_fix_max_attempts missing or in an undocumented form"
+    want = _m[-1][0]  # last match: YAML last-key-wins, matching the cfg step's tail -1
     assert _run_cfg_step(cfg, ROOT, tmp_path) == want
+    # The sed's whole contract (red-team round 4 on #120): documented forms pass through,
+    # digit-PREFIX values do NOT truncate — they emit nothing and the route script fails
+    # closed to 2. `0x10` truncating to `0` silently disabled auto-fix.
     synth = tmp_path / "synth"
     (synth / ".github").mkdir(parents=True)
-    (synth / ".github" / "agent-config.yml").write_text("auto_fix_max_attempts: 0  # OFF during incident\n")
-    assert _run_cfg_step(cfg, synth, tmp_path) == "0"
+    for raw, expect in [("0  # OFF during incident", "0"), ("-1", "-1"), ('"4"', "4"),
+                        ("1e3", ""), ("0x10", ""), ("4.9", ""), ("4 attempts", "")]:
+        (synth / ".github" / "agent-config.yml").write_text(f"auto_fix_max_attempts: {raw}\n")
+        assert _run_cfg_step(cfg, synth, tmp_path) == expect, raw
     # least privilege per job (review on #96): the always-running router holds no OIDC/contents/actions write
     assert "permissions" not in wf
     assert autofix["permissions"]["id-token"] == "write" and autofix["permissions"]["contents"] == "write"
@@ -102,12 +114,7 @@ def test_ci_failure_router_wiring(tmp_path):
     # because the escalation is the router decision that needs the delivery backstop most.
     _sw = next(st for st in wf["jobs"]["sweep"]["steps"] if "actions/github-script" in st.get("uses", ""))
     assert "MAX_ATTEMPTS" not in _sw.get("env", {})
-    # Shape pin, not value pin (review round 3 on #120): the workflow's own comment tells a
-    # human `auto_fix_max_attempts: 0` is a supported off-switch — a value pin here would turn
-    # ci-gate red on every PR the moment they used it. The VALUE semantics (fail-closed 2,
-    # <1 disables, clamp 10) are pinned behaviourally by the harness cases instead.
-    assert re.search(r"^auto_fix_max_attempts: \d+$",
-                     (ROOT / ".github" / "agent-config.yml").read_text(), re.M)
+    # (the documented-forms knob pin lives above, beside the executed cfg step)
     assert autofix["needs"] == "route" and "route.outputs.route == 'autofix'" in autofix["if"]
     action = next(s for s in autofix["steps"] if "claude-code-action" in s.get("uses", ""))
     assert "claude_code_oauth_token" in action["with"]

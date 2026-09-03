@@ -41,12 +41,14 @@ concurrency:
   # Every sweep collapses to ONE group (not `github.run_id`, which is unique per run and so
   # serialized nothing): two overlapping sweeps would otherwise race between the marker check
   # and the dispatch and route the same failure twice (Copilot review on #113).
-  # KNOWN bounded race (red-team round 2 on #120, accepted): an event-delivered route
+  # KNOWN bounded race (red-team rounds 2+3 on #120, accepted): an event-delivered route
   # (grouped by branch) and a sweep-dispatched route for the same failure (grouped by run id)
-  # do not serialise, and both can pass handled() before either writes the marker. Labels and
-  # needs-human are set-idempotent so the BOUND is never inflated, but one duplicate attempt
-  # push or duplicate escalation comment per delivery pair is possible. A shared group cannot
-  # close it: the dispatch path does not know the branch until the run starts.
+  # do not serialise, and both can pass handled() before either writes the marker. Both then
+  # compute the SAME first-free label index, so the second addLabels is a set-level no-op:
+  # the label COUNT under-counts — real attempts can EXCEED the bound by one per delivery
+  # pair (it never over-blocks). One duplicate push or escalation comment is also possible.
+  # A shared group cannot close it: the dispatch path does not know the branch until the
+  # run starts.
   group: ci-failure-router-${{ github.event.workflow_run.head_branch || inputs.run_id || 'sweep' }}
   cancel-in-progress: false
 
@@ -96,7 +98,10 @@ jobs:
               if (!failed) continue;
               const pass = failed.run_attempt || 1;
               const comments = await github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: pr.number, per_page: 100});
-              if (comments.some(c => (c.body || '').includes(`ci-failure-router sha=${pr.head.sha} pass=${pass}`))) continue;
+              // Disabled markers don't count (` disabled -->`): while the knob is off the
+              // route run they trigger is a marker-deduped no-op, and once the knob is
+              // restored this re-dispatch is exactly the recovery path (red-team round 3).
+              if (comments.some(c => (c.body || '').includes(`ci-failure-router sha=${pr.head.sha} pass=${pass}`) && !(c.body || '').includes(' disabled -->'))) continue;
               core.notice(`sweep: #${pr.number} has an unrouted ${failed.name} failure (run ${failed.id}, pass ${pass}) — dispatching the router`);
               await github.rest.actions.createWorkflowDispatch({owner, repo, workflow_id: 'ci-failure-router.yml',
                 ref: context.payload.repository.default_branch, inputs: {run_id: String(failed.id)}});
@@ -144,11 +149,12 @@ jobs:
           sparse-checkout-cone-mode: false
       - id: cfg
         run: |
-          # Digit capture, tolerant of an inline comment or quotes (red-team round 2 on #120:
-          # `auto_fix_max_attempts: 0  # OFF` must DISABLE — the raw-suffix extraction handed
-          # `0  # OFF` to the strict parser, which read it as unreadable and fell back to 2,
-          # an off-switch failing OPEN). head -1 keeps single-line output structural.
-          echo "max=$(sed -n 's/^auto_fix_max_attempts: *"\{0,1\}\(-\{0,1\}[0-9][0-9]*\)"\{0,1\}.*$/\1/p' .github/agent-config.yml | head -n1)" >> "$GITHUB_OUTPUT"
+          # Digit capture tolerant of quotes and an inline comment, and of NOTHING else
+          # (red-team rounds 2+3 on #120): `0  # OFF` must disable, but `1e3`/`0x10`/`4.9`
+          # must NOT truncate to a digit prefix — they fall through unmatched, emit nothing,
+          # and the route script fails closed to 2. tail -1 matches YAML's last-key-wins on
+          # a duplicate key and keeps single-line output structural.
+          echo "max=$(sed -n 's/^auto_fix_max_attempts: *"\{0,1\}\(-\{0,1\}[0-9][0-9]*\)"\{0,1\}[[:space:]]*\(#.*\)\{0,1\}$/\1/p' .github/agent-config.yml | tail -n1)" >> "$GITHUB_OUTPUT"
       - name: Route the failure by branch
         id: route
         uses: actions/github-script@v7
@@ -185,8 +191,12 @@ jobs:
             // The marker is invisible in rendered Markdown.
             const pass = run.run_attempt || 1;
             const marker = `<!-- ci-failure-router sha=${run.head_sha} pass=${pass} run=${run.id} -->`;
+            // Disabled markers (` disabled -->`) do NOT count as handled: they exist only to
+            // quiet the sweep WHILE the knob is off — once restored, the failure must route
+            // again (red-team round 3 on #120: the plain marker outlived the disabled state
+            // and closed the delivery backstop permanently).
             const handled = async n => (await github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: n, per_page: 100}))
-              .some(c => (c.body || '').includes(`ci-failure-router sha=${run.head_sha} pass=${pass}`));
+              .some(c => (c.body || '').includes(`ci-failure-router sha=${run.head_sha} pass=${pass}`) && !(c.body || '').includes(' disabled -->'));
 
             // (b) main: one open ci-failure issue per workflow; agent-triage takes it from there.
             if (branch === 'main') {
@@ -219,11 +229,18 @@ jobs:
               const rawMax = /^-?\d+$/.test(process.env.MAX_ATTEMPTS || '') ? Number(process.env.MAX_ATTEMPTS) : null;
               if (rawMax !== null && rawMax < 1) {
                 core.notice(`router: auto_fix_max_attempts=${rawMax} — auto-fix disabled, not acting on #${pr.number}`);
-                // The marker keeps the disabled state QUIET: the sweep carries no knob (F1),
-                // so without a marker it would re-dispatch this same failure every 2 hours
-                // forever (review on #120). One comment per sha+pass, like every route action.
-                await github.rest.issues.createComment({owner, repo, issue_number: pr.number,
-                  body: `${marker}\n⏸️ **${run.name}** failed at ${run.head_sha.slice(0, 7)} (${where}) — ${runUrl}\n\nAuto-fix is disabled (\`auto_fix_max_attempts: ${rawMax}\`); the router is not acting. Fix by hand, or restore the knob.`});
+                // DISTINCT disabled marker (` disabled` token): handled() and the sweep skip
+                // it, so restoring the knob lets the next sweep re-route this failure
+                // (red-team round 3). While disabled, the sweep re-dispatches ~2-hourly and
+                // this branch no-ops against its own marker — bounded Actions noise, zero
+                // comment spam. NOTE (review round 3, recorded in GOVERNANCE §4): disabling
+                // stops escalation and claim release too — the PR keeps `in-progress`; the
+                // disable window is operator-owned.
+                const dMarker = marker.replace(' -->', ' disabled -->');
+                const already = (await github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: pr.number, per_page: 100}))
+                  .some(c => (c.body || '').includes(dMarker));
+                if (!already) await github.rest.issues.createComment({owner, repo, issue_number: pr.number,
+                  body: `${dMarker}\n⏸️ **${run.name}** failed at ${run.head_sha.slice(0, 7)} (${where}) — ${runUrl}\n\nAuto-fix is disabled (\`auto_fix_max_attempts: ${rawMax}\`); the router is not acting, and this PR keeps its \`in-progress\` claim — release it by hand if you are parking this work. Restoring the knob re-routes this failure on the next sweep.`});
                 return out('none');
               }
               const maxAttempts = rawMax === null ? 2 : Math.min(rawMax, 10);
@@ -284,7 +301,7 @@ jobs:
               }
               const status = [`\`in-progress\` released on ${released.join(', ')}`, ...problems.map(p => `⚠️ ${p} — do it by hand`)].join('; ');
               await github.rest.issues.createComment({owner, repo, issue_number: pr.number,
-                body: `${marker}\n🛑 Auto-fix **exhausted** after ${attempts} attempts (configured bound ${maxAttempts}); CI is still failing (${where}). Escalated \`needs-human\`${issues.length ? ` on ${issues.map(n => `#${n}`).join(', ')}` : ''}; ${status}.\n\nNon-successful runs on this branch:\n${links}`});
+                body: `${marker}\n🛑 Auto-fix **exhausted** after ${attempts} attempts (configured bound ${maxAttempts}); CI is still failing (${where}). Escalated \`needs-human\`${issues.length ? ` on ${issues.map(n => `#${n}`).join(', ')}` : ''}; ${status}.\n\nTriggering run: **${run.name}** [${run.id}](${runUrl}) — always listed, even when newer failures crowd the window (red-team round 3 on #120).\n\nNon-successful runs on this branch:\n${links}`});
               // The PR's own needs-human is the escalation signal humans watch: if it could not be applied, fail loudly.
               if (problems.some(p => p.includes(`\`needs-human\` on #${pr.number}`))) throw new Error(`router: escalation incomplete — ${problems.join('; ')}`);
               return out('exhausted', {pr: pr.number});
