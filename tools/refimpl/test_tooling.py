@@ -63,7 +63,7 @@ def test_diffcheck_frames_only_discloses_its_blind_spot():
     # it stays harmless — if the corpora ever move behind an opt-in, this invocation is the
     # first thing that must keep working.
     r = subprocess.run([sys.executable, str(DIFFCHECK), "--frames-only", "--frames"], capture_output=True,
-                       text=True, cwd=ROOT, timeout=120)
+                       text=True, cwd=ROOT, timeout=60)  # 60 pins SC-002 (torture < 60 s; review round 7)
     assert r.returncode == 0, r.stdout + r.stderr
     # The DISCLOSURE text itself, not the counts field (review round 3 on #121: plain
     # "descriptor" also matches the always-printed "descriptors <n>" count, so that

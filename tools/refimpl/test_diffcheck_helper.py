@@ -100,7 +100,11 @@ def test_ask_stream_does_not_hang_on_a_batch_of_requests_to_a_permanently_broken
     t.join(timeout=5)
     try:
         assert not t.is_alive(), "ask_stream hung on the second block of a multi-request batch"
-        assert result["out"] == [["ERR BadRequest", "ERR BadRequest"], []]
+        # Race-free pin (review round 7 on #121): whether both responses land in block 0
+        # or split across the stall boundary depends on pump timing under load. The
+        # timing-independent properties are the flattened sequence and the block count.
+        flat = [ln for block in result["out"] for ln in block]
+        assert flat == ["ERR BadRequest", "ERR BadRequest"] and len(result["out"]) == 2
     finally:
         helper.p.kill()
         helper.p.wait(timeout=5)

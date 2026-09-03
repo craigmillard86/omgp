@@ -155,7 +155,15 @@ class Helper:
             self.p.stdin.flush()
         except BrokenPipeError:
             pass  # helper already exited (e.g. after a crash we reported): nothing left to tell it
-        self.p.wait(timeout=5)
+        try:
+            self.p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            # review round 7 on #121: an abandoned mid-corpus batch leaves ~18k unread
+            # requests behind QUIT; the child may not exit in time, and a TimeoutExpired
+            # out of a `finally` would bury the already-printed mismatch report. Kill it —
+            # the reported failure stays the one the operator needs.
+            self.p.kill()
+            self.p.wait(timeout=5)
 
 
 # --- corpus generation -------------------------------------------------------------------
@@ -365,7 +373,14 @@ def main(argv=None) -> int:
     finally:
         helper.close()
     total = crc + msgs + inval + desc + frames + torture_n
-    blind_spot = " (blind spot: crc/message/invalid/descriptor corpora not run)" if args.frames_only else ""
+    notes = []
+    if args.frames_only:
+        notes.append("blind spot: crc/message/invalid/descriptor corpora not run")
+    if torture_n:
+        # review round 7 on #121: the reason-blindness was stated only in a module
+        # docstring; the operator reading the run sees it here, like the other blind spot.
+        notes.append("torture compares discard COUNTS; per-reason parity rests on each side's unit tests")
+    blind_spot = f" ({'; '.join(notes)})" if notes else ""
     print(f"diffcheck: {total} cases, C++ and Python agree "
           f"(crc {crc}, messages {msgs}, invalid {inval}, descriptors {desc}, "
           f"frames {frames}, torture {torture_n}) in {time.monotonic() - t0:.1f}s{blind_spot}")
