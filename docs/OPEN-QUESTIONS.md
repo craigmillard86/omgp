@@ -346,7 +346,7 @@ sees and can dispute the claim "this file has no mutable code" in the PR
 diff. Does not touch `tools/mutate.cfg [policy]`'s T3 constants
 (`max_unlabelled_survivors`, `label_categories`) — those are unchanged and
 still gate every file that does contain logic.
-**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): ratified as implemented; the per-file marker is the mechanism. What was implemented (record restored per red-team on #122): `tools/mutate_report.py` (`NO_BODY_EXEMPT`, `exempt_reason`), markers in `link/clock.hpp` and `link/byte_wire.hpp`, doc comment in `tools/mutate.sh`. Alternatives a superseding entry could still take: excluding declaration-only files from `scope_dirs` matching entirely, or a tree-wide static check that a file has zero function bodies (removing the per-file marker).
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): ratified as implemented; the per-file marker is the mechanism. The superseded pending text read, verbatim (quoted per review on #122 so the prior wording survives byte-for-byte): "Implemented as the safe default per CLAUDE.md (\"implement nothing speculative... proceed only if a safe default exists\"): `tools/mutate_report.py` (`NO_BODY_EXEMPT`, `exempt_reason`), markers added to `link/clock.hpp` and `link/byte_wire.hpp`, doc comment in `tools/mutate.sh`. If a human ruling instead prefers, e.g., excluding declaration-only files from `scope_dirs` matching entirely, or a tree-wide static check that a file has zero function bodies (removing the need for a per-file marker), that should supersede this entry."
 **Supersedes:** none.
 
 ---
@@ -407,7 +407,7 @@ size is `frames` valid elements plus at least `per_class` corrupted elements per
 (≥ 8 × `per_class` beyond `frames`). `test_torture.py` asserts against this reading only
 (sum of `len(element.expected)` ≥ `frames`; per-class tally of `recipe` ≥ `per_class`),
 not against total element count.
-**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): both readings ratified (flat four-field Element; frames counts delivered/valid frames). This ratifies the safe default that was flagged for human review in issue #31's releasing comment (record restored per red-team on #122).
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): both readings ratified (flat four-field Element; frames counts delivered/valid frames). The superseded pending text read, verbatim (quoted per review on #122): "safe default implemented per CLAUDE.md (\"implement nothing speculative … proceed only if a safe default exists\"); flagged for the human review this issue's releasing comment already asked for, at PR time for #31." — this ruling is that review.
 **Supersedes:** none.
 
 ---
@@ -720,7 +720,7 @@ flag), not a revert. (3) accept the deferred-REQUIRE reading of "overflow is a R
 failure" — a failure that fires with a one-`advance_to()`-call lag but before the test
 draws any conclusion from the wire's state is still "the test fails and says why", which
 is what the contract clause protects against (a silent drop the test never notices).
-**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): all three defaults ratified (interim echo until T034; first-matching-step order; deferred REQUIRE on capacity). T011 (#29) and T028/T031 are written against these three readings; a superseding entry must precede any change (record restored per red-team on #122).
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): all three defaults ratified (interim echo until T034; first-matching-step order; deferred REQUIRE on capacity). The superseded pending text read, verbatim (quoted per review on #122): "Implemented as the safe default per CLAUDE.md (\"implement nothing speculative … proceed only if a safe default exists\"); T011 (#29) and T028/T031 should be written against these three readings, or a superseding entry should replace them first." That instruction stands and is forward-looking: T011/T028/T031 are unimplemented at this head and are TO BE written against these readings.
 **Supersedes:** none.
 
 ---
@@ -1050,3 +1050,26 @@ fail-closed parsing). GOVERNANCE §2's cap row updated; OPERATING-POLICY §2's
 "one item in flight" wording is a human-ruling artefact left for the
 maintainer's own hand (same precedent as the §4 loop table).
 **Supersedes:** none.
+
+---
+
+## 2026-09-03 — Persistent ERR_BUSY: no bound anywhere detects a wedged bridge
+
+**Context:** review on PR #122 (MEDIUM). The §8 rewording makes `ERR_BUSY` the
+mandated per-poll answer while a module transaction is in flight, and the first
+draft of that PR's scoping sentence said a busy answer "is not a failed
+transaction" for §7. §7's only health triggers are 3 consecutive failed
+transactions → SUSPECT and 1 s in SUSPECT without a valid response → OFFLINE —
+so under that sentence a backplane wedged answering `ERR_BUSY` forever stays
+ENROLLED indefinitely, undetected by any bound in the document (proved by
+reading §7 as it stands; no accounting code exists yet — `link/` holds only
+`HealthState`, so there is no code divergence). T031/T039 implement against
+this text, so the question must be ruled before they land. §8 now marks the
+question explicitly open and decides neither direction.
+**Recommendation:** bound persistent busy explicitly in §7: N consecutive
+`ERR_BUSY` answers to the same outstanding request (spanning its retries)
+count as one failed transaction, so ordinary busy stays harmless while a
+wedged bridge still walks to SUSPECT. Alternative: an explicit sentence
+declaring persistent busy out of node-health scope and owned by L4.
+**Ruling:** pending — human; blocks nothing until T031/T039.
+**Supersedes:** the §7-accounting scoping sentence first pushed on PR #122.

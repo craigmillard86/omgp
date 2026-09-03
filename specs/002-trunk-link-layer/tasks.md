@@ -143,7 +143,7 @@ boundary tests for `T_resp`, `T_gap` and `retries`.
 ### Implementation for User Story 2
 
 - [ ] T030 [US2] Implement the remaining `MockWire` kinds in `tests/support/mock_wire.cpp` — make T028 pass
-  - Ruling 2026-09-03 (see issue #48): widen `Step::count` to `uint32_t` atomically in this task, all four artefacts together
+  - Ruling 2026-09-03 (see issue #48): widen `Step::count` to `uint32_t` atomically in this task, all four artefacts together. This is a T3 slice by the ruling's own classification, but NO path-based gate labels it so (`risk-score` and CODEOWNERS cover neither `specs/**/contracts/` nor `tests/support/**`) — #48 carries `needs-human` until a human releases it (review on PR #122)
 - [ ] T031 [US2] Write `link/master.hpp` / `link/master.cpp` per contracts/link-cpp.md "Master engine" and data-model.md §4 (states, per-destination `next_seq`, acceptance checks, retry, gap deferral, stats, `set_bit_rate` pass-through incrementing `BusStats.rate_changes`), citing `trunk §3` and `§7` — make T029 pass; add to `link/CMakeLists.txt`
 - [ ] T032 [US2] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; `mutate.sh --diff origin/main` locally (extracted Mull) — zero unlabelled survivors or labels justified in the PR body
 
