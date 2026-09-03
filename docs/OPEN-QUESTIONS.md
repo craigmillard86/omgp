@@ -880,6 +880,70 @@ place to re-argue it.
 
 ---
 
+## 2026-09-02 - the first autonomous merge worked; the claim it left behind stalled the loop
+
+**Context:** PR #114 (T021, `risk:t1`) was reviewed clean and merged by `agent-merge` at
+21:25 with no human in the loop - the cycle working end to end for the first time. It then
+stopped: issue #39 stayed OPEN with `in-progress`, because the PR body wrote
+`Closes T021 (issue #39)` and GitHub only honours a closing reference that directly follows
+the keyword. `agent-dispatch`'s WIP cap counts open issues labelled `task,in-progress`, so
+every one of the eight dispatch runs over the next ~10 hours logged "WIP cap: a task is
+already in progress - not pulling" and did nothing, with 26 `queued` and 2 `ready` tasks
+behind it. Nothing failed; nothing was red; the loop was simply wedged, and only a human
+reading the labels would notice.
+**Options:** (a) tighten the dispatch prompt so the agent writes `Closes #n` exactly;
+(b) have `agent-merge` release the claim itself after a successful merge, from the body's
+references AND the branch's `task/<n>`; (c) have a sweep detect `in-progress` issues whose
+PR has merged and release them after the fact.
+**Recommendation:** (b) with (a). (a) alone is an instruction to an LLM about prose - the
+same class of thing that just failed. (b) makes the release mechanical at the exact moment
+the fact becomes true. (c) is a slower rediscovery of the same state and is unnecessary once
+(b) holds.
+**Ruling:** (b) + (a), 2026-09-02 - human. `agent-merge` now removes `in-progress` and closes
+each target after merging (404 = non-event; anything else is a `warning`, because an
+unreleased claim silently blocks every later dispatch). The dispatch prompt additionally
+states the exact required form and cites this incident. Issue #39 was closed and its claim
+released by hand to unblock the queue.
+Regression cover: four new cases in `tests/workflows/agent_merge_harness.js` (41 total),
+including the malformed-prose case reproduced from #114 verbatim.
+NOT EXAMINED: the same wedge is reachable through paths this fix does not cover - a PR
+CLOSED unmerged, or an implement run that dies after claiming, both leave `in-progress` with
+no merge event to hang the release off. `ci-failure-router` releases the claim only on
+auto-fix exhaustion. A periodic claim-reaper (option (c)) remains the honest answer for
+those; it is not implemented here.
+**Supersedes:** none (extends the 2026-09-02 autonomous-merge ruling).
+
+---
+
+## 2026-09-03 - review-fix bound raised from 2 to 4, and made a config knob
+
+**Context:** PR #116 (T023) was the loop's first live run and it exhausted the two-attempt
+bound in 38 minutes: attempt 1 fixed a MEDIUM contract divergence, attempt 2 fixed a real
+`strtoul` range bug in `parse_uint`, and the third review still found 2 MEDIUM + 6 LOW. The
+bound did what it was written to do, but it stopped a loop that was demonstrably still
+converging - each round fixed genuine defects rather than churning. Two attempts was a guess
+made before any live evidence existed.
+**Options:** (a) leave it at 2 and let a human take every PR that needs a third round;
+(b) raise it to a larger fixed number in the workflow; (c) raise it AND move the number to
+`.github/agent-config.yml` so it can be retuned from evidence.
+**Recommendation:** (c). The number is a tuning parameter, not a safety property - the safety
+properties are one-attempt-per-head-commit, the labels being the bound, and nothing but a
+human resetting them, all unchanged. Keeping it in the workflow also makes it the one thing
+the fixer agent can never adjust: `.github/workflows/*` needs a `workflow` OAuth scope the
+Claude App token does not carry (demonstrated on #113).
+**Ruling:** (c), 2026-09-03 - human direction. `review_fix_max_attempts: 4`; the gate reads it
+from the DEFAULT-branch config at run time and fails closed if it is unreadable, absent or
+below 1. Labels `review-fix-3`/`review-fix-4` provisioned in `tools/gh-setup.sh`. The
+attempt and exhaustion comments state the configured bound rather than a hard-coded 2.
+Regression cover: the harness derives its expectations from the real config file, so the
+bound and the tests cannot drift apart (`review_fix_harness.js`, 29 cases).
+NOT EXAMINED: whether 4 is right either. The evidence for it is one PR. What is now cheap is
+changing it: a one-line edit to a non-workflow file. Worth revisiting once
+`delivery-metrics` records attempt counts - it does not today, so the only way to see how
+often the bound is hit is to read PR labels by hand.
+**Supersedes:** the two-attempt bound in the 2026-09-02 review-fix ruling; nothing else in
+that entry changes.
+
 ## 2026-09-03 — Frame line out-of-range fields: C++ rejects, Python reference masks/accepts
 
 **Context:** review on PR #116 (T023, @ d30ef1c) flagged that `tools/canonical.cpp`'s
@@ -948,4 +1012,3 @@ canonical rendering on that side, same as the entry's `dst=0x100` example.
 **Supersedes:** 2026-09-03 — Frame line out-of-range fields: C++ rejects, Python reference
 masks/accepts (corrects its "masks them ... `dst`/`src`/`seq`" sentence only; every other claim
 in that entry stands).
-

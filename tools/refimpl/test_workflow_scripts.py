@@ -214,7 +214,8 @@ def test_bot_triggered_agent_workflows_allow_their_bot_actors():
 
 def test_router_labels_are_provisioned():
     setup = (ROOT / "tools" / "gh-setup.sh").read_text()
-    for l in ("auto-fix-1", "auto-fix-2", "ci-failure", "review-fix-1", "review-fix-2"):
+    for l in ("auto-fix-1", "auto-fix-2", "ci-failure",
+              "review-fix-1", "review-fix-2", "review-fix-3", "review-fix-4"):
         assert f"L {l} " in setup or f'L "{l}"' in setup, l
 
 
@@ -261,6 +262,12 @@ def test_review_fix_wiring():
     for must in ("CLAUDE.md", "OPERATING-POLICY", "./pipeline.sh", "tests/vectors/",
                  "protocol/omgp-protocol.yaml", "HIGH and MEDIUM", "DEFERRED"):
         assert must in prompt, must
+    # The bound lives in agent-config.yml, not in the workflow: retuning it must not need a
+    # workflow-scope push, because the fixer agent itself cannot edit .github/workflows/*.
+    gate_script = next(s for s in gate["steps"] if "actions/github-script" in s.get("uses", ""))["with"]["script"]
+    assert "review_fix_max_attempts" in gate_script and "ATTEMPT_LABELS" in gate_script
+    assert "review-fix-1" not in gate_script.replace("`review-fix-${i + 1}`", "")   # no hard-coded attempt list
+    assert "review_fix_max_attempts: 4" in (ROOT / ".github" / "agent-config.yml").read_text()
     # The severity policy is the point of the loop: LOW findings are not chased on their own.
     assert "Fix a LOW finding ONLY if it is in code you are already" in prompt
     assert "If EVERY finding is LOW, change no code at all" in prompt
@@ -321,6 +328,9 @@ def test_agent_merge_wiring():
     # The merge is pinned to the head the verdicts were issued for: with dismiss_stale_reviews
     # off, this is what stops an approval from carrying an unreviewed head to main.
     assert "sha: head" in script and "merge_method: 'merge'" in script
+    # The claim release must never close a pull request (Copilot review on #117): issues and
+    # PRs share a number namespace and this path goes through the issues API.
+    assert "iss.pull_request" in script
     assert "tier >= 3" in script                        # T3 never
     assert "auto_merge_max_tier" in script
     for must in ("agent-authored", "needs-human", "VERDICT", "listForRef", "getCombinedStatusForRef", "CODEOWNERS"):

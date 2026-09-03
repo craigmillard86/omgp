@@ -117,9 +117,14 @@ the enforcement.
     `findings`, so the PR is not auto-approved and a human merges it —
     accepted deliberately: relaxing the verdict would be a T3 change to
     the approval gate, not a property of this loop.
-  - **Bound — two attempts, then a human.** `review-fix-1`/`review-fix-2`,
-    at most one attempt per head commit (a red-team verdict arriving after
-    a review verdict on the same commit is the same attempt). Exhaustion
+  - **Bound — `review_fix_max_attempts` attempts, then a human.** Labels
+    `review-fix-1..N`, at most one attempt per head commit (a red-team
+    verdict arriving after a review verdict on the same commit is the same
+    attempt). The bound is 4 (raised from 2, ruling 2026-09-03: PR #116
+    spent both attempts while still fixing real findings each round). It
+    lives in `.github/agent-config.yml`, not in the workflow, so retuning
+    it needs no workflow-scope push — the fixer agent cannot edit
+    `.github/workflows/*` itself. `0` disables the loop. Exhaustion
     releases `in-progress` and applies `needs-human`, exactly as the CI
     router does. Nothing resets the labels but a human.
   - **Never.** No approval, no merge, no weakened test or gate, no edit to
@@ -146,6 +151,14 @@ the enforcement.
     `docs/OPEN-QUESTIONS.md` and `specs/**/tasks.md` — the two OPERATING-POLICY
     §2 already sanctions agents to write. Ground truth and governance keep
     their owner regardless of the tier the diff happens to score.
+  - **The claim is released by the merger, not by the PR's prose.** After a
+    successful merge, `agent-merge` removes `in-progress` from and closes
+    the issues the PR closes (`Closes/Fixes/Resolves #n`) plus the branch's
+    own `task/<n>`. GitHub's auto-close only honours a reference directly
+    after the keyword, and on #114 a body reading "Closes T021 (issue #39)"
+    closed nothing: the issue kept `in-progress`, held the WIP cap, and
+    dispatch pulled no work for ~10 hours (2026-09-02). The loop must not
+    depend on an agent writing the right sentence.
   - **Trigger.** The verdict comment, plus a 20-minute sweep, because the
     moment a PR becomes merge-ready is usually the last check going green
     rather than any event this workflow can subscribe to.
