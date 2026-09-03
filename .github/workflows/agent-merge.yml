@@ -185,6 +185,11 @@ jobs:
                   catch (e) { if (e.status !== 404) core.warning(`merge: could NOT release in-progress on #${t} (${e.status}) — the WIP cap may stay closed`); }
                   try {
                     const iss = (await github.rest.issues.get({owner, repo, issue_number: t})).data;
+                    // Issues and PRs share one number namespace, and this path uses the issues
+                    // API, which would happily close a PULL REQUEST — something GitHub's own
+                    // closing keywords never do (Copilot review on #117). A `Closes #<pr>` in a
+                    // body, or a stacked branch, must not close that PR.
+                    if (iss.pull_request) { core.notice(`merge: #${t} is a pull request — not closed by the claim release`); continue; }
                     if (iss.state === 'open') {
                       await github.rest.issues.createComment({owner, repo, issue_number: t,
                         body: `Closed by #${number}, merged at ${head.slice(0, 7)} by agent-merge.`});

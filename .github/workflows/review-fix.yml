@@ -19,9 +19,10 @@ name: review-fix
 # the merge human). Changing verdict semantics so deferred LOWs read as clean would be a
 # T3 governance change and is NOT done here.
 #
-# Bound — two attempts per PR (`review-fix-1`/`review-fix-2`), at most one per head commit.
-# Nothing resets the labels but a human. Exhaustion escalates `needs-human` exactly as the
-# CI router does. Kill switch: disable this workflow.
+# Bound — `review_fix_max_attempts` attempts per PR (.github/agent-config.yml; 4 since the
+# 2026-09-03 ruling), as labels `review-fix-1..N`, at most one per head commit. Nothing
+# resets the labels but a human. Exhaustion escalates `needs-human` exactly as the CI router
+# does. Kill switch: `review_fix_max_attempts: 0`, or disable this workflow.
 # The `gate` script is executed verbatim by tests/workflows/review_fix_harness.js.
 on:
   issue_comment:
@@ -71,8 +72,18 @@ jobs:
           DISPATCH_PR: ${{ inputs.pr }}
         with:
           script: |
+            const fs = require('fs');
             const {owner, repo} = context.repo;
             const out = (go, extra = {}) => { core.setOutput('go', go); for (const [k, v] of Object.entries(extra)) core.setOutput(k, v); };
+            // The bound comes from the DEFAULT-branch config, so it can be retuned without a
+            // workflow-scope push. Unreadable or absent => no attempt (fail closed).
+            let MAX;
+            try {
+              MAX = Number.parseInt(/^review_fix_max_attempts: *(\d+)/m.exec(
+                fs.readFileSync(`${process.env.GITHUB_WORKSPACE || '.'}/.github/agent-config.yml`, 'utf8'))[1], 10);
+            } catch (e) { core.notice(`review-fix: review_fix_max_attempts unreadable (${e.message}) — no attempt (fail closed)`); return out('no'); }
+            if (!Number.isInteger(MAX) || MAX < 1) { core.notice(`review-fix: review_fix_max_attempts=${MAX} — the loop is disabled`); return out('no'); }
+            const ATTEMPT_LABELS = Array.from({length: MAX}, (_, i) => `review-fix-${i + 1}`);
             // `Number('')` is 0, not NaN: a blank dispatch input must fail closed, never act on
             // PR #0 (Copilot review on #113 — the same class of bug the merge harness caught).
             const raw = String(context.payload.issue ? context.payload.issue.number : (process.env.DISPATCH_PR || '')).trim();
@@ -120,8 +131,8 @@ jobs:
             if (comments.some(c => (c.body || '').includes(`review-fix sha=${head}`))) {
               core.notice(`review-fix: ${head.slice(0, 7)} already attempted — one attempt per commit`); return out('no');
             }
-            const attempts = ['review-fix-1', 'review-fix-2'].filter(l => has(l)).length;
-            if (attempts >= 2) {
+            const attempts = ATTEMPT_LABELS.filter(l => has(l)).length;
+            if (attempts >= MAX) {
               // Exhausted: release the claim on the PR and on the issues it closes, then
               // escalate — the same shape as ci-failure-router's exhaustion path, including
               // its rule that only a 404 ("label already absent") is a non-event.
@@ -138,7 +149,7 @@ jobs:
               }
               const status = [`\`in-progress\` released on ${released.join(', ')}`, ...problems.map(p => `⚠️ ${p} — do it by hand`)].join('; ');
               await github.rest.issues.createComment({owner, repo, issue_number: number,
-                body: `${marker}\n🛑 Review-fix **exhausted** after 2 attempts; ${kinds.join(' + ')} findings remain at ${head.slice(0, 7)}. Escalated \`needs-human\`${issues.length ? ` on ${issues.map(n => `#${n}`).join(', ')}` : ''}; ${status}.`});
+                body: `${marker}\n🛑 Review-fix **exhausted** after ${MAX} attempts; ${kinds.join(' + ')} findings remain at ${head.slice(0, 7)}. Escalated \`needs-human\`${issues.length ? ` on ${issues.map(n => `#${n}`).join(', ')}` : ''}; ${status}.`});
               // The PR's own needs-human is the escalation signal humans watch: if it could not be applied, fail loudly.
               if (problems.some(p => p.includes(`\`needs-human\` on #${number}`))) throw new Error(`review-fix: escalation incomplete — ${problems.join('; ')}`);
               return out('no');
@@ -146,7 +157,7 @@ jobs:
             const n = attempts + 1;
             await github.rest.issues.addLabels({owner, repo, issue_number: number, labels: [`review-fix-${n}`]});
             await github.rest.issues.createComment({owner, repo, issue_number: number,
-              body: `${marker}\n🔧 ${kinds.join(' + ')} findings at ${head.slice(0, 7)} — review-fix attempt ${n} of 2 starting on \`${pr.head.ref}\` (run ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}).\n\nPolicy: HIGH/MEDIUM findings are fixed; a LOW finding is fixed only where the agent is already changing that code, otherwise it is listed as deferred. Disable the \`review-fix\` workflow to stop this loop.`});
+              body: `${marker}\n🔧 ${kinds.join(' + ')} findings at ${head.slice(0, 7)} — review-fix attempt ${n} of ${MAX} starting on \`${pr.head.ref}\` (run ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}).\n\nPolicy: HIGH/MEDIUM findings are fixed; a LOW finding is fixed only where the agent is already changing that code, otherwise it is listed as deferred. Disable the \`review-fix\` workflow to stop this loop.`});
             return out('yes', {pr: number, branch: pr.head.ref, head, attempt: n, kinds: kinds.join(',')});
 
   fix:
@@ -192,7 +203,7 @@ jobs:
             permissions. You are on branch ${{ needs.gate.outputs.branch }}
             of PR #${{ needs.gate.outputs.pr }} at head
             ${{ needs.gate.outputs.head }} (review-fix attempt
-            ${{ needs.gate.outputs.attempt }} of 2). The
+            ${{ needs.gate.outputs.attempt }}). The
             ${{ needs.gate.outputs.kinds }} pass reported findings.
             1. Read the findings: `gh pr view ${{ needs.gate.outputs.pr }} --comments`.
                The authoritative set is the LATEST claude[bot] comment for

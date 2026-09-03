@@ -225,6 +225,15 @@ const said = (w, re) => w.log.some(l => re.test(l));
   await run(w);
   check('an already-closed issue is not re-closed or re-commented', mergedIt(w) && !said(w, /close@39/) && !said(w, /comment@39/));
 
+  // Copilot review on #117: issues and PRs share a number namespace and this path uses the
+  // issues API, which WOULD close a pull request — something GitHub's closing keywords never do.
+  w = world({prs: [PR(['agent-authored', 'risk:t1'], {ref: 'task/39'})],
+             issues: [{number: 77, state: 'open', labels: [], pull_request: {url: 'u'}}, ISSUE(39, ['task', 'in-progress'])],
+             comments: {94: clean(HEAD)}});
+  w.prState.get(94).body = 'Stacked on the other one. Closes #77';
+  await run(w);
+  check('a Closes target that is a PULL REQUEST is never closed', mergedIt(w) && !said(w, /close@77/) && said(w, /close@39/));
+
   w = world({prs: [PR(['agent-authored', 'risk:t1'], {ref: 'task/39'})], issues: [], comments: {94: clean(HEAD)}});
   await run(w);
   check('a missing issue (404) is a non-event, never a failed merge', mergedIt(w) && !w.log.some(l => l.startsWith('warning:')));

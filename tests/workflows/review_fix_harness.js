@@ -9,6 +9,12 @@
 'use strict';
 const fs = require('fs');
 const S = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+// The gate reads review_fix_max_attempts from the real .github/agent-config.yml on the
+// default branch, so the harness points it at the repo root it was given.
+process.env.GITHUB_WORKSPACE = process.argv[3] || '.';
+const MAX = Number.parseInt(/^review_fix_max_attempts: *(\d+)/m.exec(
+  fs.readFileSync(`${process.env.GITHUB_WORKSPACE}/.github/agent-config.yml`, 'utf8'))[1], 10);
+const SPENT = Array.from({length: MAX}, (_, i) => `review-fix-${i + 1}`);   // every attempt used up
 
 const REPO = 'o/r';
 const HEAD = 'a'.repeat(40);
@@ -78,12 +84,20 @@ const quiet = w => !w.log.some(l => l.startsWith('comment@') || /^[+-]/.test(l))
   await gate(w);
   check('review findings at head -> attempt 1 + go', w.outputs.go === 'yes' && w.outputs.attempt === '1' && w.outputs.kinds === 'review' && labels(w, 94).includes('review-fix-1'));
   check('outputs carry the branch and head the fix job checks out', w.outputs.branch === 'task/26' && w.outputs.head === HEAD && w.outputs.pr === '94');
-  check('attempt comment carries the sha marker and states the severity policy', said(w, new RegExp(`review-fix sha=${HEAD}`), 94) && said(w, /attempt 1 of 2/, 94) && said(w, /LOW finding is fixed only where/, 94));
+  check('attempt comment carries the sha marker and states the severity policy', said(w, new RegExp(`review-fix sha=${HEAD}`), 94) && said(w, new RegExp(`attempt 1 of ${MAX}`), 94) && said(w, /LOW finding is fixed only where/, 94));
   check('attempt path touches no issue labels', !w.log.some(l => /@26$/.test(l)));
 
   w = world({pr: PR(['agent-authored', 'review-fix-1']), comments: [verdict('review', 'findings', HEAD), verdict('red-team', 'findings', HEAD)]});
   await gate(w);
   check('both passes report findings -> attempt 2, kinds names both', w.outputs.go === 'yes' && w.outputs.attempt === '2' && w.outputs.kinds === 'review,red-team' && labels(w, 94).includes('review-fix-2'));
+
+  // The bound is whatever .github/agent-config.yml says (4 since the 2026-09-03 ruling, raised
+  // from 2 after #116 exhausted the old bound while still fixing real findings each round).
+  w = world({pr: PR(['agent-authored', 'review-fix-1', 'review-fix-2']), comments: [verdict('review', 'findings', HEAD)]});
+  await gate(w);
+  check(`two attempts spent -> a third is still due when the bound is ${MAX}`,
+        MAX > 2 ? (w.outputs.go === 'yes' && w.outputs.attempt === '3') : w.outputs.go === 'no');
+  check('the attempt comment states the configured bound', said(w, new RegExp(`attempt 3 of ${MAX}`), 94));
 
   w = world({pr: PR(['agent-authored']), comments: [verdict('review', 'clean', HEAD), verdict('red-team', 'findings', HEAD)]});
   await gate(w);
@@ -142,15 +156,16 @@ const quiet = w => !w.log.some(l => l.startsWith('comment@') || /^[+-]/.test(l))
   check('red-team findings arriving after review on the SAME commit -> not a second attempt', w.outputs.go === 'no' && !labels(w, 94).includes('review-fix-2') && quiet(w));
 
   // --- the bound ---
-  w = world({pr: PR(['agent-authored', 'review-fix-1', 'review-fix-2', 'in-progress'], {body: 'Body.\n\nCloses #40'}),
+  w = world({pr: PR(['agent-authored', ...SPENT, 'in-progress'], {body: 'Body.\n\nCloses #40'}),
              issues: [issue(26, ['task', 'in-progress']), issue(40, ['task', 'in-progress'])],
              comments: [verdict('review', 'findings', HEAD)]});
   await gate(w);
-  check('two attempts spent -> no third, escalates needs-human on the PR', w.outputs.go === 'no' && labels(w, 94).includes('needs-human') && !labels(w, 94).includes('review-fix-3') && !w.log.some(l => /^\+review-fix/.test(l)));
+  check('every attempt spent -> no further attempt, escalates needs-human on the PR', w.outputs.go === 'no' && labels(w, 94).includes('needs-human') && !labels(w, 94).includes(`review-fix-${MAX + 1}`) && !w.log.some(l => /^\+review-fix/.test(l)));
   check('exhaustion releases the claim on the PR and on the issue it Closes, not the branch digits', !labels(w, 94).includes('in-progress') && labels(w, 40).includes('needs-human') && !labels(w, 40).includes('in-progress') && !labels(w, 26).includes('needs-human'));
   check('exhaustion comment says which pass still has findings', said(w, /exhausted/, 94) && said(w, /review findings remain/, 94));
+  check('exhaustion comment names the configured bound', said(w, new RegExp(`exhausted\\*\\* after ${MAX} attempts`), 94));
 
-  w = world({pr: PR(['agent-authored', 'review-fix-1', 'review-fix-2', 'in-progress']),
+  w = world({pr: PR(['agent-authored', ...SPENT, 'in-progress']),
              issues: [issue(26, ['task', 'in-progress'])], comments: [verdict('review', 'findings', HEAD)], failRemove: 26});
   await gate(w);
   check('a non-404 failure to release the claim is reported, never claimed as done', said(w, /could NOT release `in-progress` on #26/, 94) && !said(w, /released on #26/, 94));

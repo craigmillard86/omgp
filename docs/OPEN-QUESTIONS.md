@@ -913,3 +913,34 @@ auto-fix exhaustion. A periodic claim-reaper (option (c)) remains the honest ans
 those; it is not implemented here.
 **Supersedes:** none (extends the 2026-09-02 autonomous-merge ruling).
 
+---
+
+## 2026-09-03 - review-fix bound raised from 2 to 4, and made a config knob
+
+**Context:** PR #116 (T023) was the loop's first live run and it exhausted the two-attempt
+bound in 38 minutes: attempt 1 fixed a MEDIUM contract divergence, attempt 2 fixed a real
+`strtoul` range bug in `parse_uint`, and the third review still found 2 MEDIUM + 6 LOW. The
+bound did what it was written to do, but it stopped a loop that was demonstrably still
+converging - each round fixed genuine defects rather than churning. Two attempts was a guess
+made before any live evidence existed.
+**Options:** (a) leave it at 2 and let a human take every PR that needs a third round;
+(b) raise it to a larger fixed number in the workflow; (c) raise it AND move the number to
+`.github/agent-config.yml` so it can be retuned from evidence.
+**Recommendation:** (c). The number is a tuning parameter, not a safety property - the safety
+properties are one-attempt-per-head-commit, the labels being the bound, and nothing but a
+human resetting them, all unchanged. Keeping it in the workflow also makes it the one thing
+the fixer agent can never adjust: `.github/workflows/*` needs a `workflow` OAuth scope the
+Claude App token does not carry (demonstrated on #113).
+**Ruling:** (c), 2026-09-03 - human direction. `review_fix_max_attempts: 4`; the gate reads it
+from the DEFAULT-branch config at run time and fails closed if it is unreadable, absent or
+below 1. Labels `review-fix-3`/`review-fix-4` provisioned in `tools/gh-setup.sh`. The
+attempt and exhaustion comments state the configured bound rather than a hard-coded 2.
+Regression cover: the harness derives its expectations from the real config file, so the
+bound and the tests cannot drift apart (`review_fix_harness.js`, 29 cases).
+NOT EXAMINED: whether 4 is right either. The evidence for it is one PR. What is now cheap is
+changing it: a one-line edit to a non-workflow file. Worth revisiting once
+`delivery-metrics` records attempt counts - it does not today, so the only way to see how
+often the bound is hit is to read PR labels by hand.
+**Supersedes:** the two-attempt bound in the 2026-09-02 review-fix ruling; nothing else in
+that entry changes.
+
