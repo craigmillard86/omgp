@@ -62,7 +62,11 @@ bool lookup_name(const names::Entry (&table)[N], const std::string& tok, unsigne
 }
 
 bool parse_uint(const std::string& tok, unsigned& v) {
-    if (tok.empty())
+    // strtoul silently accepts a leading '-' and negates (so "-0" parses as 0, and any other
+    // negative token only fails downstream because unsigned long happens to be wider than
+    // unsigned on this host) — reject the sign up front so rejection is a property of the
+    // grammar, not of the host's integer widths (review @ 641ee1e).
+    if (tok.empty() || tok[0] == '-' || tok[0] == '+')
         return false;
     char* end = nullptr;
     errno = 0;

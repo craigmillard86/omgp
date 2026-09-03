@@ -118,9 +118,9 @@ TEST_CASE("encode_frame_line surfaces encode_frame's own refusal spellings", "[f
         "frame dst=0xFF src=0x00 flags=0x00 seq=0 payload=", out, error));
     REQUIRE(error == "ERR ReservedAddress");
 
-    // payload longer than LIMIT_max_l3_payload (64 bytes): 65 bytes of "00".
+    // one byte past LIMIT_max_l3_payload.
     std::string long_payload;
-    for (int i = 0; i < 65; ++i)
+    for (unsigned i = 0; i < omgp::LIMIT_max_l3_payload + 1; ++i)
         long_payload += "00";
     REQUIRE_FALSE(omgp::canon::encode_frame_line(
         "frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=" + long_payload, out, error));
@@ -146,7 +146,8 @@ TEST_CASE("fdec_line: a flipped CRC byte on frame_ping_req is ERR BadCrc, not OK
     const std::string expect_ok = "OK frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=0101000000";
     REQUIRE(omgp::canon::fdec_line(good, good_len) == expect_ok);
 
-    // Flip one bit of the CRC's low byte (second-to-last byte, before the closing FLAG).
+    // Flip one bit of the CRC's high byte (second-to-last byte, before the closing FLAG; the
+    // low byte comes first on the wire per encode_frame's `bytes([c & 0xFF, (c >> 8) & 0xFF])`).
     std::vector<uint8_t> corrupt(good, good + good_len);
     REQUIRE(good_len >= 2);
     corrupt[corrupt.size() - 2] ^= 0x01;
@@ -162,11 +163,11 @@ TEST_CASE("fdec_line names every Discard reason with the contract's exact spelli
     const uint8_t bad_escape[] = {0x7e, 0x04, 0x00, 0x20, 0x01, 0x7d, 0x00, 0xa4, 0xb2, 0x7e};
     REQUIRE(omgp::canon::fdec_line(bad_escape, sizeof bad_escape) == "ERR BadEscape");
 
-    // 71-byte unstuffed body: one past kMaxUnstuffed.
-    STATIC_REQUIRE(omgp::LIMIT_max_l3_payload == 64);
-    uint8_t too_long[1 + 71];
+    // Unstuffed body one byte past kMaxUnstuffed.
+    constexpr size_t kBodyLen = kMaxUnstuffed + 1;
+    uint8_t too_long[1 + kBodyLen];
     too_long[0] = 0x7e;
-    for (int i = 0; i < 71; ++i)
+    for (size_t i = 0; i < kBodyLen; ++i)
         too_long[1 + i] = 0x01;
     REQUIRE(omgp::canon::fdec_line(too_long, sizeof too_long) == "ERR TooLong");
 

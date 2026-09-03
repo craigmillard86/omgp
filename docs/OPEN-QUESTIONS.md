@@ -926,3 +926,26 @@ this documents what the code already does.
 otherwise), with T025.
 **Supersedes:** none.
 
+## 2026-09-03 — Correction: the Python reference does not mask `dst`/`src`, only `seq`
+
+**Context:** review on PR #116 (@ 641ee1e) flagged that the "Frame line out-of-range fields"
+entry above (2026-09-03) misstates what `tools/refimpl/omgp_link.py`'s `encode_frame` does with
+out-of-range `dst`/`src`: it says the Python side "masks them (`omgp_link.py:97`, `dst`/`src`/
+`seq`)", but line 97 (`ctrl = ... | ((f.seq & 0x0F) << 4)`) only masks `seq`. `dst` and `src` are
+never masked — they go straight into `bytes([f.dst, f.src, ctrl, len(f.payload)])`, which raises
+`ValueError` for anything outside 0-255 — exactly what the same entry's own `dst=0x100` example
+already said two sentences later, so the entry contradicted itself on its central claim. Per
+CLAUDE.md's append-only rule for this file, the error is corrected here rather than by editing
+the original entry's text.
+**Why it matters:** left uncorrected, a human ruling T025 from that entry could read "Python
+masks `dst`/`src`" and choose masking as the normative behaviour for both sides. `dst=0x100`
+would then silently become `dst=0x00` instead of being rejected — a frame addressed to the wrong
+node accepted instead of the caller's malformed request being refused.
+**Recommendation:** when ruling on the superseded entry's question, treat only `seq` as
+masked by the Python reference; `dst`/`src` out-of-range is a raised `ValueError` with no
+canonical rendering on that side, same as the entry's `dst=0x100` example.
+**Ruling:** pending — travels with the superseded entry's own ruling at T025.
+**Supersedes:** 2026-09-03 — Frame line out-of-range fields: C++ rejects, Python reference
+masks/accepts (corrects its "masks them ... `dst`/`src`/`seq`" sentence only; every other claim
+in that entry stands).
+
