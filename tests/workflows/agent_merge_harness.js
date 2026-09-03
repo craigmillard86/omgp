@@ -17,9 +17,10 @@ const REPO = 'o/r';
 const HEAD = 'a'.repeat(40);
 const OLD = 'b'.repeat(40);
 
-function world({prs = [], comments = {}, files = {}, checks = null, status = null, mergeFails = null} = {}) {
+function world({prs = [], issues = [], comments = {}, files = {}, checks = null, status = null, mergeFails = null} = {}) {
   const log = [];
   const prState = new Map(prs.map(p => [p.number, p]));
+  const issueState = new Map(issues.map(i => [i.number, i]));
   const github = {
     paginate: async (fn, args) => fn(args).then(r => r.data),
     rest: {
@@ -36,6 +37,13 @@ function world({prs = [], comments = {}, files = {}, checks = null, status = nul
       issues: {
         listComments: async ({issue_number}) => ({data: comments[issue_number] || []}),
         createComment: async ({issue_number, body}) => log.push(`comment@${issue_number}: ${body.replace(/\n+/g, ' | ').slice(0, 400)}`),
+        get: async ({issue_number}) => { const i = issueState.get(issue_number); if (!i) throw Object.assign(new Error('Not Found'), {status: 404}); return {data: i}; },
+        update: async ({issue_number, state}) => { const i = issueState.get(issue_number); i.state = state; log.push(`close@${issue_number}`); },
+        removeLabel: async ({issue_number, name}) => {
+          const i = issueState.get(issue_number);
+          if (!i || !i.labels.some(l => l.name === name)) throw Object.assign(new Error('Not Found'), {status: 404});
+          i.labels = i.labels.filter(l => l.name !== name); log.push(`-${name}@${issue_number}`);
+        },
       },
       checks: {
         listForRef: async () => ({data: checks || [{name: 'score', status: 'completed', conclusion: 'success'},
@@ -47,7 +55,7 @@ function world({prs = [], comments = {}, files = {}, checks = null, status = nul
     },
   };
   const core = {info: () => {}, notice: m => log.push(`notice: ${m}`), warning: m => log.push(`warning: ${m}`), setOutput: () => {}};
-  return {github, core, log, prState};
+  return {github, core, log, prState, issueState};
 }
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -192,6 +200,34 @@ const said = (w, re) => w.log.some(l => re.test(l));
              mergeFails: {status: 405, message: 'Pull Request is not mergeable'}});
   await run(w);
   check('405 again on the same head -> no second comment (sweep runs every 20 minutes)', !w.log.some(l => l.startsWith('comment@')));
+
+  // --- the claim must be released MECHANICALLY, not by the PR body's prose ---
+  // Live failure on #114 (2026-09-02): the body said "Closes T021 (issue #39)", which GitHub
+  // does not treat as a closing reference. Issue #39 stayed open with `in-progress`, held the
+  // WIP cap, and agent-dispatch pulled nothing for ~10 hours.
+  const ISSUE = (number, labels, state = 'open') => ({number, state, labels: labels.map(name => ({name}))});
+
+  w = world({prs: [PR(['agent-authored', 'risk:t1'], {ref: 'task/39'})],
+             issues: [ISSUE(39, ['task', 'in-progress'])], comments: {94: clean(HEAD)}});
+  w.prState.get(94).body = 'Closes T021 (issue #39) - a form GitHub does not honour.';
+  await run(w);
+  check('malformed closing prose -> the branch task/<n> still releases the claim and closes it',
+        mergedIt(w) && said(w, /-in-progress@39/) && said(w, /close@39/) && w.issueState.get(39).state === 'closed');
+
+  w = world({prs: [PR(['agent-authored', 'risk:t1'], {ref: 'task/39'})],
+             issues: [ISSUE(39, ['task', 'in-progress']), ISSUE(40, ['task', 'in-progress'])], comments: {94: clean(HEAD)}});
+  w.prState.get(94).body = 'Body. Closes #40';
+  await run(w);
+  check('every Closes/Fixes target is released, plus the branch issue', said(w, /close@40/) && said(w, /close@39/));
+
+  w = world({prs: [PR(['agent-authored', 'risk:t1'], {ref: 'task/39'})],
+             issues: [ISSUE(39, ['task'], 'closed')], comments: {94: clean(HEAD)}});
+  await run(w);
+  check('an already-closed issue is not re-closed or re-commented', mergedIt(w) && !said(w, /close@39/) && !said(w, /comment@39/));
+
+  w = world({prs: [PR(['agent-authored', 'risk:t1'], {ref: 'task/39'})], issues: [], comments: {94: clean(HEAD)}});
+  await run(w);
+  check('a missing issue (404) is a non-event, never a failed merge', mergedIt(w) && !w.log.some(l => l.startsWith('warning:')));
 
   for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
   console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);

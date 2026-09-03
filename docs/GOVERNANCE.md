@@ -146,6 +146,14 @@ the enforcement.
     `docs/OPEN-QUESTIONS.md` and `specs/**/tasks.md` — the two OPERATING-POLICY
     §2 already sanctions agents to write. Ground truth and governance keep
     their owner regardless of the tier the diff happens to score.
+  - **The claim is released by the merger, not by the PR's prose.** After a
+    successful merge, `agent-merge` removes `in-progress` from and closes
+    the issues the PR closes (`Closes/Fixes/Resolves #n`) plus the branch's
+    own `task/<n>`. GitHub's auto-close only honours a reference directly
+    after the keyword, and on #114 a body reading "Closes T021 (issue #39)"
+    closed nothing: the issue kept `in-progress`, held the WIP cap, and
+    dispatch pulled no work for ~10 hours (2026-09-02). The loop must not
+    depend on an agent writing the right sentence.
   - **Trigger.** The verdict comment, plus a 20-minute sweep, because the
     moment a PR becomes merge-ready is usually the last check going green
     rather than any event this workflow can subscribe to.

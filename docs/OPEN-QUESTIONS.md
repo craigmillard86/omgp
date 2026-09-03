@@ -878,3 +878,38 @@ If the dismissal is ever reverted, the required check fails again and this entry
 place to re-argue it.
 **Supersedes:** none.
 
+---
+
+## 2026-09-02 - the first autonomous merge worked; the claim it left behind stalled the loop
+
+**Context:** PR #114 (T021, `risk:t1`) was reviewed clean and merged by `agent-merge` at
+21:25 with no human in the loop - the cycle working end to end for the first time. It then
+stopped: issue #39 stayed OPEN with `in-progress`, because the PR body wrote
+`Closes T021 (issue #39)` and GitHub only honours a closing reference that directly follows
+the keyword. `agent-dispatch`'s WIP cap counts open issues labelled `task,in-progress`, so
+every one of the eight dispatch runs over the next ~10 hours logged "WIP cap: a task is
+already in progress - not pulling" and did nothing, with 26 `queued` and 2 `ready` tasks
+behind it. Nothing failed; nothing was red; the loop was simply wedged, and only a human
+reading the labels would notice.
+**Options:** (a) tighten the dispatch prompt so the agent writes `Closes #n` exactly;
+(b) have `agent-merge` release the claim itself after a successful merge, from the body's
+references AND the branch's `task/<n>`; (c) have a sweep detect `in-progress` issues whose
+PR has merged and release them after the fact.
+**Recommendation:** (b) with (a). (a) alone is an instruction to an LLM about prose - the
+same class of thing that just failed. (b) makes the release mechanical at the exact moment
+the fact becomes true. (c) is a slower rediscovery of the same state and is unnecessary once
+(b) holds.
+**Ruling:** (b) + (a), 2026-09-02 - human. `agent-merge` now removes `in-progress` and closes
+each target after merging (404 = non-event; anything else is a `warning`, because an
+unreleased claim silently blocks every later dispatch). The dispatch prompt additionally
+states the exact required form and cites this incident. Issue #39 was closed and its claim
+released by hand to unblock the queue.
+Regression cover: four new cases in `tests/workflows/agent_merge_harness.js` (41 total),
+including the malformed-prose case reproduced from #114 verbatim.
+NOT EXAMINED: the same wedge is reachable through paths this fix does not cover - a PR
+CLOSED unmerged, or an implement run that dies after claiming, both leave `in-progress` with
+no merge event to hang the release off. `ci-failure-router` releases the claim only on
+auto-fix exhaustion. A periodic claim-reaper (option (c)) remains the honest answer for
+those; it is not implemented here.
+**Supersedes:** none (extends the 2026-09-02 autonomous-merge ruling).
+
