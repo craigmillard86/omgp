@@ -367,8 +367,10 @@ TEST_CASE("next_probe returns ADDR_host when no UNENROLLED/OFFLINE address exist
 
     Probe probe = tracker.next_probe(0);
     REQUIRE(probe.addr == omgp::ADDR_host);
-    // The sentinel still carries the real bit rate (deep-verify on #118: the bit_rate()
-    // call on the no-candidate return was asserted nowhere).
+    // Pins the T038 STUB on the sentinel return path (bit_rate() is unconditionally
+    // TRUNK_bit_rate until T043 alternates it under bus fault) — asserted here because
+    // deep-verify on #118 found this call site covered by no assertion, not because the
+    // sentinel guarantees the reference rate as a lasting property.
     REQUIRE(probe.bit_rate == omgp::TRUNK_bit_rate);
 
     // Still no candidate on a second call: the "no eligible address" signal is stable,
@@ -395,6 +397,25 @@ TEST_CASE("a failed sentinel pass leaves the cursor exactly one full cycle on", 
     drive_to_offline(tracker, omgp::ADDR_backplane_min, 5000000);
     drive_to_offline(tracker, static_cast<uint8_t>(omgp::ADDR_backplane_min + 1), 9000000);
     REQUIRE(tracker.next_probe(0).addr == omgp::ADDR_backplane_min);
+}
+
+TEST_CASE("the farthest eligible address is still found in one scan", "[link]") {
+    // red-team on #124: the cursor case above pins only the OVER-scan direction; a scan
+    // covering kBackplaneCount - 1 addresses still passed it, and its failure mode is the
+    // one that starves a node — next_probe answers "nothing to probe" while an OFFLINE
+    // address is eligible, so it never re-enrols (data-model.md §6 round-robin over
+    // 0x01-0x0F). A fresh tracker's cursor starts at ADDR_backplane_max, so that is the
+    // slot a scan reaches LAST: finding it needs all kBackplaneCount steps.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    for (uint8_t a = omgp::ADDR_backplane_min; a <= omgp::ADDR_backplane_max; ++a)
+        tracker.on_result(a, true, 0); // every backplane node ENROLLED
+    drive_to_offline(tracker, omgp::ADDR_backplane_max, 1000);
+
+    REQUIRE(tracker.state(omgp::ADDR_backplane_max) == HealthState::OFFLINE);
+    REQUIRE(tracker.next_probe(0).addr == omgp::ADDR_backplane_max); // not the sentinel
 }
 
 TEST_CASE("recovery from SUSPECT resets the failure count — three fresh failures needed again",
