@@ -84,11 +84,20 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   const runs = [{id: 5001, name: 'ci', head_branch: 'task/26', conclusion: 'failure', html_url: 'https://gh/r/5001'},
                 {id: 4900, name: 'ci', head_branch: 'task/26', conclusion: 'failure', html_url: 'https://gh/r/4900'},
                 {id: 4800, name: 'ci', head_branch: 'task/26', conclusion: 'failure', html_url: 'https://gh/r/4800'},
+                {id: 4750, name: 'security', head_branch: 'task/26', conclusion: 'failure', html_url: 'https://gh/r/4750'},
                 {id: 4700, name: 'ci', head_branch: 'task/99', conclusion: 'failure', html_url: 'https://gh/r/4700'}];
   w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'in-progress'])], issues: [issue(26, ['task', 'in-progress', 'agent-authored'])], jobs: JOBS, failedRuns: runs});
   await route(w, {head_sha: 'aaa999'});
   check('two prior attempts -> exhausted: needs-human on PR, in-progress released on PR and task issue', w.outputs.route === 'exhausted' && labels(w, 94).includes('needs-human') && !labels(w, 94).includes('in-progress') && !labels(w, 26).includes('in-progress') && labels(w, 26).includes('needs-human'));
   check('exhausted comment links the failed runs on this branch (not other branches)', said(w, /exhausted/, 94) && said(w, /gh\/r\/5001/, 94) && said(w, /gh\/r\/4900/, 94) && !said(w, /gh\/r\/4700/, 94));
+  // 2026-09-03 (maintainer report on #118): the run list silently truncated at 3, presenting
+  // 3 of 4 failed runs as if complete. ALL of this branch's failed runs must appear (a
+  // security failure included), up to a sane cap with an explicit "and N more" tail beyond it.
+  check('exhausted comment lists ALL four failed runs on the branch', said(w, /gh\/r\/4800/, 94) && said(w, /gh\/r\/4750/, 94));
+  const many = Array.from({length: 14}, (_, k) => ({id: 6000 + k, name: 'ci', head_branch: 'task/26', conclusion: 'failure', html_url: `https://gh/r/${6000 + k}`}));
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: many});
+  await route(w, {head_sha: 'eee444'});
+  check('more than ten failed runs -> ten listed plus an explicit "and N more" tail', said(w, /gh\/r\/6009/, 94) && !said(w, /gh\/r\/6010/, 94) && said(w, /and 4 more failed run/, 94));
   check('exhausted path does not add another attempt label', !labels(w, 94).includes('auto-fix-3') && !w.log.some(l => /^\+auto-fix/.test(l)));
 
   w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'needs-human'])], jobs: JOBS, failedRuns: runs});
