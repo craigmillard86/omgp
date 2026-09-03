@@ -17,8 +17,7 @@ import diffcheck as D  # noqa: E402
 # Simulates tools/l3_helper_dispatch.cpp's FSTREAM case being renamed or dropped: dispatch
 # falls through to the single-line "ERR BadRequest" response with no "END " line, and the
 # process stays alive afterwards (blocked reading the next request) rather than exiting.
-FAKE_HELPER_NO_END = """#!/usr/bin/env python3
-import sys
+FAKE_HELPER_NO_END = """import sys
 for line in sys.stdin:
     line = line.strip()
     if line == "QUIT":
@@ -35,7 +34,6 @@ def test_ask_stream_reports_a_live_helper_that_never_sends_end_instead_of_hangin
     monkeypatch.setattr(D, "_STALL_TIMEOUT", 0.2)
     script = tmp_path / "fake_helper.py"
     script.write_text(FAKE_HELPER_NO_END)
-    script.chmod(0o755)
     helper = D.Helper([sys.executable, str(script)])
     result: dict = {}
     t = threading.Thread(target=lambda: result.__setitem__("out", helper.ask_stream(["FSTREAM aa"])), daemon=True)
@@ -54,8 +52,7 @@ def test_ask_stream_reports_a_live_helper_that_never_sends_end_instead_of_hangin
 # '\n' (tools/l3_helper.cpp:31) -- so both lines land in the pipe as one flushed write, one
 # block, for one FSTREAM request. A second request follows so a reader that stops at the
 # first non-"OK " line (rather than at "END ") would misattribute "END 0" to it.
-FAKE_HELPER_TWO_LINE_ERR = """#!/usr/bin/env python3
-import sys
+FAKE_HELPER_TWO_LINE_ERR = """import sys
 for line in sys.stdin:
     line = line.strip()
     if line == "QUIT":
@@ -70,7 +67,6 @@ for line in sys.stdin:
 def test_ask_stream_keeps_a_two_line_error_response_in_one_block(tmp_path):
     script = tmp_path / "fake_helper.py"
     script.write_text(FAKE_HELPER_TWO_LINE_ERR)
-    script.chmod(0o755)
     helper = D.Helper([sys.executable, str(script)])
     try:
         out = helper.ask_stream(["FSTREAM zz", "FSTREAM aa"])
@@ -91,7 +87,6 @@ def test_ask_stream_does_not_hang_on_a_batch_of_requests_to_a_permanently_broken
     monkeypatch.setattr(D, "_STALL_TIMEOUT", 0.2)  # review on #121: behaviour, not duration
     script = tmp_path / "fake_helper.py"
     script.write_text(FAKE_HELPER_NO_END)
-    script.chmod(0o755)
     helper = D.Helper([sys.executable, str(script)])
     result: dict = {}
     t = threading.Thread(

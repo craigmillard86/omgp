@@ -65,7 +65,10 @@ def test_diffcheck_frames_only_discloses_its_blind_spot():
     r = subprocess.run([sys.executable, str(DIFFCHECK), "--frames-only", "--frames"], capture_output=True,
                        text=True, cwd=ROOT, timeout=120)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "blind spot" in r.stdout and "descriptor" in r.stdout
+    # The DISCLOSURE text itself, not the counts field (review round 3 on #121: plain
+    # "descriptor" also matches the always-printed "descriptors <n>" count, so that
+    # conjunct was true on every exit-0 run — evidence identical either way is no evidence).
+    assert "blind spot: crc/message/invalid/descriptor" in r.stdout, r.stdout
     # T025 criterion pinned (review on #121): the summary line carries the frame and
     # torture counts — dropping or renaming either field must fail here, not regress
     # silently with the stage still exiting 0.

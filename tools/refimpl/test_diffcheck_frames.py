@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import pathlib
 import random
+
+import pytest
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
@@ -130,7 +132,7 @@ def test_run_frames_reports_first_mismatch(capsys):
     out = capsys.readouterr().out
     assert f"seed={SEED:#x}" in out and "index=1" in out
     assert "FENC" in out
-    assert "--frame-index 1" in out
+    assert "--frames-only" in out and "--frame-index 1" in out  # hint replays directly (review r3)
 
 
 def test_run_frames_index_replays_a_single_case():
@@ -151,11 +153,23 @@ def test_run_torture_reports_first_mismatch(capsys):
     out = capsys.readouterr().out
     assert f"seed={SEED:#x}" in out and "index=0" in out
     assert "recipe=" in out
-    assert "--torture-index 0" in out
+    assert "--frames-only" in out and "--torture-index 0" in out  # hint replays directly (review r3)
 
 
 def test_run_torture_index_replays_a_single_valid_element():
     assert F.run_torture(FakeHelper(), SEED, only=0, frames=20, per_class=3) == 1
+
+
+def test_replay_index_range_guards_exit_with_a_diagnostic():
+    # review round 3 on #121: the range guards landed untested. Out-of-range and negative
+    # indices must sys.exit with the documented message, never IndexError or silent wrap.
+    for bad in (50, -1):
+        with pytest.raises(SystemExit, match="--frame-index must be 0"):
+            F.run_frames(FakeHelper(), SEED, count=50, only=bad)
+    with pytest.raises(SystemExit, match="--torture-index must be 0"):
+        F.run_torture(FakeHelper(), SEED, only=999, frames=20, per_class=3)
+    with pytest.raises(SystemExit, match="--torture-index must be 0"):
+        F.run_torture(FakeHelper(), SEED, only=-1, frames=20, per_class=3)
 
 
 def test_run_torture_index_replays_a_single_corrupted_element():

@@ -153,6 +153,10 @@ OUT_OF_RANGE_FRAME_LINES = [
     ("flags-above-0x03", "frame dst=0x00 src=0x00 flags=0x04 seq=0 payload="),
     ("seq-above-0x0f", "frame dst=0x00 src=0x00 flags=0x00 seq=16 payload="),
     ("payload-longer-than-wire-length-byte", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=" + ("00" * 256)),
+    # Folded in from the concurrent branch's loop-form test (review round 3 on #121:
+    # three tests, one behaviour — the parametrized form names its failing case).
+    ("negative-seq", "frame dst=0x01 src=0x00 flags=0x00 seq=-1 payload="),
+    ("negative-dst", "frame dst=-1 src=0x00 flags=0x00 seq=0 payload="),
 ]
 
 
@@ -205,35 +209,15 @@ def test_encode_frame_refusal_renders_err(reason, frame):
     assert exc.value.reason == reason
     assert C.frame_error_to_canonical(exc.value.reason) == f"ERR {reason}"
 
-# --- strict frame-line input (ruling 2026-09-03, issue #43: C++ strict rejection is
-# --- normative; T025 aligns the Python reference — no seq masking, no silent wrap) ---------
-
-def test_canonical_to_frame_rejects_out_of_range_fields_uniformly():
-    import canonical as C
-    import pytest
-    good = "frame dst=0x01 src=0x00 flags=0x00 seq=0 payload="
-    C.canonical_to_frame(good)  # sanity: the base line parses
-    for bad in (
-        "frame dst=0x100 src=0x00 flags=0x00 seq=0 payload=",   # dst above field width
-        "frame dst=0x01 src=0x100 flags=0x00 seq=0 payload=",   # src above field width
-        "frame dst=0x01 src=0x00 flags=0x04 seq=0 payload=",    # flags beyond bit1
-        "frame dst=0x01 src=0x00 flags=0x00 seq=16 payload=",   # seq above 4 bits (no masking)
-        "frame dst=0x01 src=0x00 flags=0x00 seq=-1 payload=",   # negative
-        "frame dst=-1 src=0x00 flags=0x00 seq=0 payload=",      # negative dst
-        "frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=" + "aa" * 256,  # len byte overflow
-    ):
-        with pytest.raises(C.CanonicalError):
-            C.canonical_to_frame(bad)
+# The loop-form duplicate of the parametrized rejects test was folded into
+# OUT_OF_RANGE_FRAME_LINES above (review round 3 on #121: merge-union residue).
 
 
 def test_canonical_to_frame_payload_65_to_255_parses_and_defers_to_the_codec():
     # contracts/frame-vectors.md carve-out: 65-255 B PARSES (the codec refuses it as
     # PayloadTooLong); only >= 256 B fails the parser. Locked on the C++ side by
     # test_canonical_frame.cpp; this is the Python half of the same boundary.
-    import canonical as C
-    import omgp_link as link
-    import pytest
     f = C.canonical_to_frame("frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=" + "aa" * 65)
-    with pytest.raises(link.FrameError) as e:
-        link.encode_frame(f)
+    with pytest.raises(L.FrameError) as e:
+        L.encode_frame(f)
     assert e.value.reason == "PayloadTooLong"

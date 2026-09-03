@@ -1083,9 +1083,10 @@ deliberately left to `encode_frame`'s own checks, matching `parse_frame_line`'s 
 TDD: `tools/refimpl/test_canonical.py::test_canonical_to_frame_rejects_out_of_range_fields` (5
 cases) and `test_canonical_to_frame_does_not_mask_seq`, confirmed failing pre-fix (`DID NOT
 RAISE CanonicalError` for all 6), then passing post-fix; `./pipeline.sh refimpl diffcheck`
-green (257 passed; 42287 cases, frames 10000/torture 18000 still agree — the real corpus is
+green (counts as recorded at commit 94eefff, before the concurrent branch's tests were
+unioned in; 42287 cases, frames 10000/torture 18000 still agree — the real corpus is
 valid-only, so this is a regression guard, not a change to today's differential pass/fail).
-**Not done:** the sibling entry below (`l3_helper` frame verbs: `ERR BadRequest` outside the
+**Not done:** the sibling entry above (`l3_helper` frame verbs: `ERR BadRequest` outside the
 contract vocabulary) recommends a `frame_error_to_canonical`-equivalent mapping so a live
 Python-side driver could render `CanonicalError` as `ERR BadRequest` the way `tools/l3_helper`
 does. No such driver exists in this repo (the real differential always talks to the compiled
@@ -1098,6 +1099,9 @@ prior entry's own recommendation and "to land with T025" instruction; flagged he
 confirmation rather than assumed final, per the prior entry's "pending — human" status.
 **Supersedes:** none (the 2026-09-03 "Frame line out-of-range fields" entry's ruling line is
 now stale; this entry is the record of what landed).
+
+---
+
 ## 2026-09-03 — Auto-fix attempt bound raised to 4, as an agent-config knob
 
 **Context:** the 2-attempt bound (ruled 2026-08-30 with the router) has exhausted on
