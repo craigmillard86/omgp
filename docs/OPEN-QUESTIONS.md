@@ -4,8 +4,11 @@ Append-only log of spec ambiguities encountered during implementation, and
 their resolutions. Entries are dated and append-only. Exactly one in-place
 edit is part of the format: filling a `pending` **Ruling:** field with the
 decision it was waiting for (that is what the placeholder is for). Every
-other line of a landed entry is never edited or deleted; superseded text
-that a filled ruling replaces is quoted verbatim inside the ruling. A
+other line of a landed entry is never edited or deleted; SUBSTANTIVE
+superseded text that a filled ruling replaces is quoted verbatim inside the
+ruling — the placeholder stub itself (the word `pending` plus a scheduling
+note of who or when would rule, e.g. "pending — human, with T062") needs no
+quoting, since it records no decision or fact. A
 decision is changed by appending a new, superseding entry that references
 the entry it supersedes — never by editing history. (Lifecycle written
 down 2026-09-03 per review on PR #122, the precedent-setting instance.)
@@ -141,7 +144,7 @@ now; the reviewer of the feature's Phase 1 PR is asked to rule inline.
 - POWER_TUBE `power_class` is 1–4 (T1–T4); 0 and >4 are rejected.
 - READ_DESC response `len` ≤ 61 (64 − 3); the 28-byte module-bus chunk is
   a transport limit the codec does not enforce.
-**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): ratified — all seven defaults stand as the ruling; future changes need superseding entries.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): ratified — all seven defaults stand as the ruling; future changes need superseding entries. The superseded pending text read, verbatim: "rule inline on the Phase 1 PR of feature 001, or append a superseding entry per item."
 **Supersedes:** none.
 
 ## 2026-08-28 — Mutation kill-rate threshold for deep-verify
@@ -206,7 +209,7 @@ module's reply if it has arrived, otherwise `ERROR: busy` (the host retries
 later). The module-bus transaction proceeds independently under the 5 ms
 module-bus timeout; the backplane never waits on I2C while the trunk is
 waiting on it." No change to timing values or codec behaviour.
-**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): rewording adopted as recommended; docs/trunk-link-layer.md §8's first bullet is amended in the same PR (CODEOWNERS review is the ruling's gate). The landed text also carries the recommendation's forward-progress clause (`ERR_BUSY` never abandons the module-bus transaction) and two scoping sentences added per red-team review on #122: the MUST applies to accepted polls only (§4 silent discard stands), and an `ERR_BUSY` answer is a valid response for §7's failure accounting.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): rewording adopted as recommended; docs/trunk-link-layer.md §8's first bullet is amended in the same PR (CODEOWNERS review is the ruling's gate). The landed text also carries the recommendation's forward-progress clause (`ERR_BUSY` never abandons the module-bus transaction) and two scoping sentences added per red-team review on #122: the MUST applies to accepted polls only (§4 silent discard stands), and an `ERR_BUSY` answer is a valid response for §7's failure accounting. The superseded pending text read, verbatim: "the trunk document is a human-ruling artefact; not edited by the agent." AUTHORISATION RECORD (review round 4 on #122): the maintainer directly instructed the session agent to prepare this §8 amendment as part of the 2026-09-03 rulings PR — a ONE-OFF authorisation exercised through a CODEOWNERS-gated PR the maintainer reviews; it does not generalise. Whether OPERATING-POLICY §2 should gain a matching carve-out is the maintainer's own decision, in the policy, by their own hand.
 **Supersedes:** none.
 
 ## 2026-08-28 — CodeQL and dependency review become required checks
@@ -998,7 +1001,7 @@ node accepted instead of the caller's malformed request being refused.
 **Recommendation:** when ruling on the superseded entry's question, treat only `seq` as
 masked by the Python reference; `dst`/`src` out-of-range is a raised `ValueError` with no
 canonical rendering on that side, same as the entry's `dst=0x100` example.
-**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): folded into the strict-input ruling above — only `seq` was masked; dst/src raised bare ValueError; all become uniform `ERR BadRequest` rejections at T025.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): folded into the strict-input ruling above — only `seq` was masked; dst/src raised bare ValueError; all become uniform `ERR BadRequest` rejections at T025. (Superseded pending text, verbatim: "travels with the superseded entry's own ruling at T025.")
 **Supersedes:** 2026-09-03 — Frame line out-of-range fields: C++ rejects, Python reference
 masks/accepts (corrects its "masks them ... `dst`/`src`/`seq`" sentence only; every other claim
 in that entry stands).
@@ -1097,7 +1100,7 @@ replaced within the still-unmerged PR #122, not by a landed entry).
 
 **Context:** review round 3 on PR #122 (MEDIUM). The pending text superseded on
 that PR said, verbatim, "`contracts/frame-vectors.md` is a T3 artefact; a human
-amends it" — but nothing enforces that: risk-score's T3 regex covers protocol/,
+amends it (or rules otherwise), with T025." — but nothing enforces that: risk-score's T3 regex covers protocol/,
 tests/vectors/, .github/, CLAUDE.md, the named docs/*, .specify/memory/ and
 tools/mutate.cfg, while CODEOWNERS covers only `specs/**/tasks.md` under specs/.
 PR #122 scored T3 solely because it also touches docs/trunk-link-layer.md; an
@@ -1108,6 +1111,46 @@ autonomous merge under GOVERNANCE §1. The same gap was recorded for T030's
 text: add `specs/**/contracts/`, `specs/**/data-model.md` and
 `specs/**/research.md` to CODEOWNERS and to risk-score's T3 regex (a T3 workflow
 change, its own CODEOWNERS-gated PR). Until then, contract amendments ride only
-in PRs that also touch an already-gated artefact, as this one does.
+in PRs that also touch an already-gated artefact, as this one does. Companion
+verification gap (red-team round 4 on #122): nothing EXECUTES the artefact's
+claims either — the full pipeline stays green with a factually wrong helper
+description in the tree. The same gate-extension ruling should add a refimpl
+test that drives `build/native/l3_helper` with the verb table's own probes
+(truncated-hex FDEC, bad-hex FSTREAM, the 65 B and 256 B payload boundaries)
+and asserts the documented spellings — it would have caught two of this PR's
+own review findings mechanically.
 **Ruling:** pending — human; the gate extension is a one-line T3 PR when ruled.
+**Supersedes:** none.
+
+---
+
+## 2026-09-03 — Bridged replies after ERR_BUSY: retention and correlation unspecified
+
+**Context:** red-team round 4 on PR #122 (HIGH). §8 as amended mandates that the
+module-bus transaction proceed after the poll is answered `ERR_BUSY` ("never
+abandons or restarts it"), but states no rule for where the module's reply goes
+when it arrives after its poll was already answered. T_resp (200 µs) is ~25×
+shorter than the module-bus timeout (5 ms), so `ERR_BUSY` is the COMMON first
+answer for every bridged request, not a corner. Consequence on the plain
+reading: the §7 single-frame replay buffer for that seq holds `ERR_BUSY`, so
+`GET_EVENT` — the protocol's only non-idempotent opcode, justified in the YAML
+as "replay-safe via L2 seq replay buffer" — can drain an event whose reply has
+nowhere defined to go; a retry drains another. Two §8-conformant
+implementations both lose events (drop the late reply; or serve it uncorrelated
+to the next poll). Golden rule 2 ("retries at L2 must always be safe") is not
+provably preserved by the text as it stands. A backplane that answers event
+reads from its own prefetch cache (which the `event_pending` status summary
+already gestures at) never hits this path — but §8's plain reading describes
+and permits the unsafe model.
+**Recommendation:** rule one of: (a) retain-and-correlate — the backplane keeps
+the completed reply and serves it to the next poll carrying the same request,
+with the correlation rule (same src+seq? same opcode?) spelled out; (b) the
+backplane MUST NOT begin a module-bus transaction whose reply it cannot
+deliver (restores the replay-buffer justification directly); (c) event reads
+are answered from a backplane-side event cache filled autonomously, making
+GET_EVENT bridge-local and never subject to the late-reply hole — likely the
+intended design, and the recommendation. §8 now marks the question open
+(§10.6) and mandates none of the three.
+**Ruling:** pending — human; must be ruled before any bridge implementation
+(feature f4), gates nothing in feature 002.
 **Supersedes:** none.

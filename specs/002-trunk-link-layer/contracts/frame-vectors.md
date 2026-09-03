@@ -19,8 +19,13 @@ frame dst=0x01 src=0x00 flags=0x00 seq=3 payload=0101000000
 - Discards render as `ERR <Discard>` (`ERR BadCrc`, `ERR BadLength`, `ERR BadEscape`,
   `ERR TooLong`); encode refusals as `ERR <Status>` (`ERR PayloadTooLong`,
   `ERR ReservedAddress`). Malformed input TEXT — an unparseable canonical line,
-  out-of-range field, or bad hex — renders as `ERR BadRequest` on every frame verb
-  (`FSTREAM` additionally emits its `END 0` terminator — see the table below).
+  a field the LINE PARSER rejects as out of range, or bad hex — renders as
+  `ERR BadRequest` on every frame verb (`FSTREAM` additionally emits its `END 0`
+  terminator — see the table below). Carve-out (red-team round 4 on #122): a
+  payload of 65–255 bytes PARSES and is refused by the codec as
+  `ERR PayloadTooLong`; only ≥ 256 bytes fails the parser as `ERR BadRequest` —
+  the 256 B split is deliberate (`tools/canonical.hpp`) and locked by
+  `test_canonical_frame.cpp`.
   For `FDEC`, well-formed hex whose bytes run out mid-frame with no discard counted
   is ALSO `ERR BadRequest` (locked by `tests/unit/test_canonical_frame.cpp`
   "bytes running out mid-frame"), so `BadRequest` is not purely pre-codec there.
