@@ -1,9 +1,9 @@
 name: ci-failure-router
 # CI-failure auto-resolution (GOVERNANCE.md §4, ruled 2026-08-30). When a `ci` or
 # `security` run fails, route by the failed run's head branch:
-#   task/* with an open agent-authored PR  -> bounded auto-fix on that branch: at most two
-#                                             attempts per PR (auto_fix_max_attempts in
-#                                             agent-config, labels auto-fix-<n>,
+#   task/* with an open agent-authored PR  -> bounded auto-fix on that branch: at most
+#                                             auto_fix_max_attempts attempts per PR (the
+#                                             agent-config knob; labels auto-fix-<n>,
 #                                             one attempt per commit), then needs-human
 #   main                                   -> ci-failure + task issue (one open per workflow),
 #                                             handled by agent-triage like nightly-failure
@@ -123,7 +123,15 @@ jobs:
       run_url: ${{ steps.route.outputs.run_url }}
     steps:
       - uses: actions/checkout@v7
-        with: {sparse-checkout: .github, sparse-checkout-cone-mode: false}
+        # This is the DEFAULT branch — never PR content. workflow_run/workflow_dispatch
+        # checkouts default to it anyway, but the bound lives in .github/agent-config.yml,
+        # which an auto-fix agent CAN edit on its own branch (unlike .github/workflows/*),
+        # so the property is pinned and stated, not inherited (review on #120; same
+        # annotation as agent-approve/review-fix/agent-merge).
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github
+          sparse-checkout-cone-mode: false
       - id: cfg
         run: |
           echo "max=$(sed -n 's/^auto_fix_max_attempts: *//p' .github/agent-config.yml)" >> "$GITHUB_OUTPUT"
@@ -193,7 +201,15 @@ jobs:
               // An upper clamp of 10 enforces the ruling's rejection of "unlimited".
               // Attempts are the auto-fix-<n> labels; nothing resets them but a human.
               const rawMax = /^-?\d+$/.test(process.env.MAX_ATTEMPTS || '') ? Number(process.env.MAX_ATTEMPTS) : null;
-              if (rawMax !== null && rawMax < 1) { core.notice(`router: auto_fix_max_attempts=${rawMax} — auto-fix disabled, taking no action on #${pr.number}`); return out('none'); }
+              if (rawMax !== null && rawMax < 1) {
+                core.notice(`router: auto_fix_max_attempts=${rawMax} — auto-fix disabled, not acting on #${pr.number}`);
+                // The marker keeps the disabled state QUIET: the sweep carries no knob (F1),
+                // so without a marker it would re-dispatch this same failure every 2 hours
+                // forever (review on #120). One comment per sha+pass, like every route action.
+                await github.rest.issues.createComment({owner, repo, issue_number: pr.number,
+                  body: `${marker}\n⏸️ **${run.name}** failed at ${run.head_sha.slice(0, 7)} (${where}) — ${runUrl}\n\nAuto-fix is disabled (\`auto_fix_max_attempts: ${rawMax}\`); the router is not acting. Fix by hand, or restore the knob.`});
+                return out('none');
+              }
               const maxAttempts = rawMax === null ? 2 : Math.min(rawMax, 10);
               if (rawMax === null) core.notice('auto_fix_max_attempts unreadable — using 2 (fail closed)');
               else if (rawMax > 10) core.notice(`auto_fix_max_attempts=${rawMax} clamped to 10`);
@@ -220,12 +236,16 @@ jobs:
               // so timed_out/startup_failure/cancelled runs are listed too (red-team F6 —
               // startup_failure is exactly what a broken workflow edit by an auto-fix agent
               // produces, and the human picking this up needs to see it).
-              const fr = await github.rest.actions.listWorkflowRunsForRepo({owner, repo, branch, per_page: 30});
+              const fr = await github.rest.actions.listWorkflowRunsForRepo({owner, repo, branch, per_page: 100});
               const bad = fr.data.workflow_runs.filter(r => r.status === 'completed' && !['success', 'skipped'].includes(r.conclusion));
               const shown = bad.slice(0, 10);
+              // Every count is scoped to what was actually fetched (review on #120: five
+              // workflows fire per push, so exhaustion is exactly when a small window clips —
+              // a branch-wide-sounding number computed inside a window is the same quiet
+              // evidence-narrowing this comment exists to remove).
               const links = (shown.map(r => `- ${r.name} run [${r.id}](${r.html_url}) — ${r.conclusion}`).join('\n') || `- ${run.name} run [${run.id}](${runUrl})`)
-                + (bad.length > shown.length ? `\n- … and ${bad.length - shown.length} more non-successful run(s) on this branch` : '')
-                + (fr.data.total_count > fr.data.workflow_runs.length ? `\n- (window: newest ${fr.data.workflow_runs.length} of ${fr.data.total_count} runs on this branch)` : '');
+                + (bad.length > shown.length ? `\n- … and ${bad.length - shown.length} more non-successful run(s) in the newest ${fr.data.workflow_runs.length} runs fetched` : '')
+                + (fr.data.total_count > fr.data.workflow_runs.length ? `\n- (window: newest ${fr.data.workflow_runs.length} of ${fr.data.total_count} runs on this branch — older runs not scanned)` : '');
               const closes = [...new Set([...(pr.body || '').matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi)].map(x => Number(x[1])))];
               const m = branch.match(/^task\/(\d+)$/);
               const issues = closes.length ? closes : (m ? [Number(m[1])] : []);

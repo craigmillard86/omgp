@@ -144,8 +144,12 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   for (const off of ['0', '-1']) {
     w = world({prs: [pr(94, 'task/26', ['agent-authored'])], jobs: JOBS});
     await route(w, {head_sha: `off${off}`}, off);
-    check(`F2: auto_fix_max_attempts=${off} disables the loop (no label, no comment)`, w.outputs.route === 'none' && !w.log.some(l => /^\+/.test(l) || l.startsWith('comment@')) && w.log.some(l => /notice:.*disabled/.test(l)));
+    check(`F2: auto_fix_max_attempts=${off} disables the loop (no label; a marker comment quiets the sweep)`, w.outputs.route === 'none' && !w.log.some(l => /^\+/.test(l)) && said(w, /disabled/, 94) && said(w, new RegExp(`ci-failure-router sha=off${off}`), 94) && w.log.some(l => /notice:.*disabled/.test(l)));
   }
+  // ...and the disabled marker is idempotent per sha+pass: a second delivery says nothing new.
+  w = world({prs: [pr(94, 'task/26', ['agent-authored'])], jobs: JOBS, comments: {94: ['<!-- ci-failure-router sha=abc123 pass=1 run=5001 -->\n⏸️ disabled earlier']}});
+  await route(w, {}, '0');
+  check('F2: disabled state does not re-comment on the same sha+pass', w.outputs.route === 'none' && !w.log.some(l => l.startsWith('comment@')));
   w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'in-progress'])], issues: [issue(26, ['task', 'in-progress'])], jobs: JOBS, failedRuns: runs});
   await route(w, {head_sha: 'sci001'}, '1e3');
   check('F7: scientific-notation knob is unreadable -> fail closed to 2, not 1', w.outputs.route === 'exhausted' && w.log.some(l => /notice:.*unreadable/.test(l)));
@@ -171,6 +175,11 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: []});
   await route(w, {head_sha: 'mt0001'});
   check('M2: empty run list -> the comment still names the triggering run (fallback)', said(w, /actions\/runs\/5001/, 94));
+  // Window clipping (review on #120): counts are scoped to the fetch, never worded branch-wide.
+  const flood = Array.from({length: 105}, (_, k) => ({id: 9000 + k, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'failure', html_url: `https://gh/r/${9000 + k}`}));
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: flood});
+  await route(w, {head_sha: 'fld001'});
+  check('window: 105 runs -> tail counts within the fetched 100 and the clip is disclosed', said(w, /and 90 more non-successful run\(s\) in the newest 100 runs fetched/, 94) && said(w, /window: newest 100 of 105 runs on this branch — older runs not scanned/, 94));
 
   // --- sweep (delivery backstop): re-delivers at EVERY attempt count; `route` decides ---
   const swRuns = [{id: 8001, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'failure', created_at: '2026-09-01T00:00:00Z', run_attempt: 1, html_url: 'https://gh/r/8001'}];

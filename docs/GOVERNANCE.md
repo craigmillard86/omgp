@@ -86,8 +86,10 @@ the enforcement.
     labels, one attempt per commit (written to the first free index, so the
     bound stays reachable after a human removes a label); a failure after
     the last releases `in-progress` and applies `needs-human` with the
-    complete non-successful-run list. The labels are the bound: nothing
-    resets them but a human. Knob semantics: 0 (or < 1) disables auto-fix,
+    branch's non-successful runs listed — capped at 10 links from the
+    newest 100 runs, every cut disclosed explicitly (never presented as
+    complete when it is not). The labels are the bound: nothing resets
+    them but a human. Knob semantics: 0 (or < 1) disables auto-fix,
     an unreadable value fails closed to 2, values above 10 are clamped —
     and the sweep carries NO bound: it re-delivers at every attempt count,
     since exhaustion/escalation needs the delivery backstop most (red-team

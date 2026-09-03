@@ -261,4 +261,4 @@ jobs:
           script: |
             const pr = Number('${{ needs.gate.outputs.pr }}');
             await github.rest.issues.createComment({...context.repo, issue_number: pr,
-              body: `⚠️ Review-fix attempt ${{ needs.gate.outputs.attempt }} did not complete (run ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). It still counts toward the bound of 2.`});
+              body: `⚠️ Review-fix attempt ${{ needs.gate.outputs.attempt }} did not complete (run ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). It still counts toward the configured bound.`});
