@@ -7,6 +7,15 @@
 # (2 not recommended until telemetry supports it). T3 is never releasable.
 auto_ready_max_tier: 1
 
+# Auto-fix attempts the ci-failure-router may take per agent PR before escalating
+# needs-human (ruling 2026-09-03; was 2). Attempts are the auto-fix-<n> labels —
+# nothing resets them but a human. 0 (or any value < 1) disables auto-fix
+# ENTIRELY — attempts, escalation and claim release; see GOVERNANCE §4. An inline
+# comment or quotes after the value are tolerated; anything else non-digit
+# (1e3, 0x10, 4.9) is unreadable and fails closed to 2; values above 10 are
+# clamped (red-team on #120, all rounds).
+auto_fix_max_attempts: 4
+
 # Stories an agent may have in flight at once (open agent-authored PRs ∪ claimed
 # task issues, one story counted once; ruling 2026-09-03). 1 restores the original
 # single-slot behaviour and is the kill switch; unreadable values fail closed to 1.

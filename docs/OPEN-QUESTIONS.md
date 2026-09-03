@@ -1061,6 +1061,58 @@ maintainer's own hand (same precedent as the §4 loop table).
 
 ---
 
+## 2026-09-03 — Auto-fix attempt bound raised to 4, as an agent-config knob
+
+**Context:** the 2-attempt bound (ruled 2026-08-30 with the router) has exhausted on
+real work twice (#108's mutation survivors needed a maintainer @claude mention as a
+third attempt, which then succeeded; #118 escalated needs-human with the failure
+plausibly fixable). Two attempts often covers only "diagnose + one fix"; genuinely
+iterative failures (fuzz findings, mutation triage) can need more.
+**Options:** (1) keep 2 and route third attempts through @claude mentions by hand;
+(2) 4, as `auto_fix_max_attempts` in .github/agent-config.yml — same knob pattern as
+`wip_cap`/`auto_approve_max_tier`, labels auto-fix-1..4, unreadable values failing
+closed to the previously ruled 2; (3) unlimited with a time budget — unbounded spend,
+rejected out of hand.
+**Recommendation:** (2).
+**Ruling:** human, 2026-09-03 ("meant the auto-fix attempt bound should be 4 rather
+than 2", this session): option (2). Router counts `auto-fix-<n>` labels against the
+knob; comments say "attempt n of <max>"; exhaustion says "after <max> attempts";
+labels 3/4 provisioned in gh-setup.sh and created in-repo. Harness re-pinned: two
+priors now yields attempt 3, four priors exhausts, `auto_fix_max_attempts: 2`
+reproduces the original bound exactly, unreadable knob fails closed with a notice.
+**Supersedes:** the bound sentence of "CI-failure auto-resolution" (2026-08-30);
+the rest of that ruling stands.
+
+---
+
+## 2026-09-03 — auto_fix_max_attempts knob semantics beyond the value 4
+
+**Context:** review round 3 on PR #120: GOVERNANCE §4 states knob semantics that
+the 2026-09-03 bound entry above does not record — the ruling recorded option (2)
+(value 4, unreadable fails closed to 2) and nothing else. The additional
+semantics were added on PR #120 in response to red-team findings F2/F5/F7 and
+review findings there, and this append-only file must not trail the governing
+document.
+**Recommendation (as implemented on PR #120, for ratification with that PR's
+CODEOWNERS review):** a value < 1 DISABLES auto-fix (route posts one marker
+comment per sha+pass so the boundless sweep stays quiet); non-digit values are
+unreadable and fail closed to 2; values above 10 are clamped to 10 (the ruled-out
+"unlimited" enforced against a fat-fingered knob); attempt labels are written to
+the first FREE index so the bound stays reachable after a human removes a label
+(label index is a free slot, not the attempt ordinal); labels auto-fix-1..10 are
+provisioned to cover the clamp range. Red-team round 2 on #120 added: the knob
+value tolerates an inline comment or quotes (an operator's `0  # OFF` must
+disable, not silently mean 2 — an off-switch failing open), and `timed_out` /
+`startup_failure` conclusions route as failures end-to-end (guard, script,
+sweep) — previously the exhaustion report listed them as failures while the
+router could never act on them.
+**Ruling:** pending — ratified by the human merge of PR #120, which lands this
+entry and the semantics in the same commit history.
+**Supersedes:** nothing; extends the 2026-09-03 "auto-fix attempt bound" entry
+above (its option (2) ruling stands).
+
+---
+
 ## 2026-09-03 — Persistent ERR_BUSY: no bound anywhere detects a wedged bridge
 
 **Context:** review on PR #122 (MEDIUM). The §8 rewording makes `ERR_BUSY` the
