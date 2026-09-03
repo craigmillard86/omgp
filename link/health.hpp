@@ -60,7 +60,12 @@ class HealthTracker {
     void notify(Notice notice, uint8_t addr);
     uint8_t next_backplane_addr(uint8_t addr) const; // wraps ADDR_backplane_min..ADDR_backplane_max
 
-    Clock& clock_;
+    // Stored for the constructor-signature parity with Master/Responder (link-cpp.md
+    // "Health tracker") and for T043 (US5), which reads it for bus-fault re-probe timing
+    // (data-model.md §7). Every method in this T038 stub takes `now_us` explicitly, so
+    // clock_ itself is not yet read — clang's -Wunused-private-field would otherwise flag
+    // it under the fuzz preset (tools/fuzz-smoke.sh, clang++ -Werror).
+    [[maybe_unused]] Clock& clock_;
     HealthListener& listener_;
     HealthRecord records_[kAddrCount];
     uint8_t next_probe_addr_;
