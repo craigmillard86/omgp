@@ -8,6 +8,8 @@
 #include "omgp_names.h"
 #include "omgp_protocol.h"
 
+#include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -63,8 +65,15 @@ bool parse_uint(const std::string& tok, unsigned& v) {
     if (tok.empty())
         return false;
     char* end = nullptr;
+    errno = 0;
     const unsigned long x = std::strtoul(tok.c_str(), &end, 0);
     if (end == nullptr || *end != '\0')
+        return false;
+    // strtoul saturates to ULONG_MAX (with errno == ERANGE) above its own range, and on an
+    // LP64 host (unsigned long wider than unsigned) silently accepts values above UINT_MAX
+    // that would truncate on the cast below — reject both here so a range check downstream
+    // never sees a value the input text didn't name (review @ d30ef1c).
+    if (errno == ERANGE || x > UINT_MAX)
         return false;
     v = static_cast<unsigned>(x);
     return true;

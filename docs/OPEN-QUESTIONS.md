@@ -878,3 +878,51 @@ If the dismissal is ever reverted, the required check fails again and this entry
 place to re-argue it.
 **Supersedes:** none.
 
+---
+
+## 2026-09-03 — Frame line out-of-range fields: C++ rejects, Python reference masks/accepts
+
+**Context:** review on PR #116 (T023, @ d30ef1c) flagged that `tools/canonical.cpp`'s
+`parse_frame_line` rejects out-of-range `dst`/`src`/`flags`/`seq`/`payload` tokens as `ERR
+BadRequest`, while `tools/refimpl/canonical.py`'s `canonical_to_frame` accepts the same tokens
+and either masks them (`omgp_link.py:97`, `dst`/`src`/`seq`) or raises a Python exception with
+no canonical rendering. Three concrete cases: `seq=16` -> C++ `ERR BadRequest`, Python masks to
+`seq=0` and returns `OK`; a 256-byte `payload=` -> C++ `ERR BadRequest`, Python `ERR
+PayloadTooLong` — inverting the PR body's own stated intent that above-limit payloads keep
+their contract spelling instead of collapsing into `BadRequest` (true for 65-255 bytes, false
+at exactly 256); `dst=0x100` -> C++ `ERR BadRequest`, Python raises `ValueError` (neither
+`CanonicalError` nor `FrameError`, so `canonical.py:293`'s error mapper has nothing to render).
+`contracts/frame-vectors.md` does not define behaviour for out-of-range frame-line fields at
+all, so neither side contradicts the contract — they contradict each other, and nothing pins
+which is normative before `tools/diffcheck.py --frames` (T025, issue #43) compares them
+line-for-line.
+**Recommendation:** the C++ side (reject as `ERR BadRequest`) becomes normative, and the Python
+reference is brought in line with it as part of T025: rejecting malformed/out-of-range text
+before it reaches the codec is the stricter, fail-closed behaviour, matches this task's existing
+choice to reject rather than mask (`tools/canonical.cpp` comment above `parse_frame_line`), and
+keeps a caller error from silently being reinterpreted as a different, valid request.
+**Ruling:** pending — human, to land with T025 (`diffcheck.py --frames`, issue #43).
+**Supersedes:** none.
+
+## 2026-09-03 — l3_helper frame verbs: three error shapes outside the frame-vectors contract vocabulary
+
+**Context:** review on PR #116 (T023, @ d30ef1c) flagged that `contracts/frame-vectors.md`
+defines exactly two error shapes (`ERR <Status>` for FENC, `ERR <Discard>` for FDEC) and, for
+FSTREAM, zero or more `OK <canonical frame line>` lines followed by one `END <discards>` line —
+but the code emits `ERR BadRequest` from three places neither the contract nor
+`tools/refimpl/canonical.py`'s `frame_error_to_canonical` has a counterpart for: `fdec_line`
+(malformed/truncated input with no discard counted), `fenc_response` (malformed canonical text
+ahead of `encode_frame_line`), and `fstream_response` (malformed hex, terminated with `END 0`
+per the prior review-fix pass on this PR). The `END 0` termination itself is correct and
+uncontested; the gap is that no artefact records `ERR BadRequest` as part of any of these three
+verbs' vocabulary, so a future differential test has nothing to check FDEC's truncated-input
+path against.
+**Recommendation:** amend `contracts/frame-vectors.md` to name `ERR BadRequest` explicitly as
+the malformed-input-text response for FENC, FDEC and FSTREAM, distinct from a codec-level `ERR
+<Status>`/`ERR <Discard>` refusal of well-formed-but-invalid input, and add a
+`frame_error_to_canonical`-equivalent mapping on the Python side. No behaviour change implied —
+this documents what the code already does.
+**Ruling:** pending — `contracts/frame-vectors.md` is a T3 artefact; a human amends it (or rules
+otherwise), with T025.
+**Supersedes:** none.
+

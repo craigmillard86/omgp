@@ -87,6 +87,16 @@ TEST_CASE("parse_frame_line rejects malformed canonical text before it reaches t
         {"frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=0", "odd-length payload hex"},
         {"frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=zz", "non-hex payload"},
         {"not-a-frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=", "wrong line prefix"},
+        // parse_uint must reject values that don't fit unsigned before any range check runs
+        // (review @ d30ef1c): strtoul returns `unsigned long`, and casting straight to
+        // `unsigned` truncates modulo 2^32 on an LP64 host, so a huge token can alias an
+        // in-range field value instead of being refused.
+        {"frame dst=0x100000001 src=0x00 flags=0x00 seq=0 payload=",
+         "dst overflows unsigned and would truncate to 0x01"},
+        {"frame dst=0x01 src=0x00 flags=0x00 seq=0x10000000F payload=",
+         "seq overflows unsigned and would truncate to 0x0F"},
+        {"frame dst=-4294967295 src=0x00 flags=0x00 seq=0 payload=",
+         "negative dst wraps through strtoul and would truncate to 0x01"},
     };
     for (const auto& c : cases) {
         INFO(c.why);
