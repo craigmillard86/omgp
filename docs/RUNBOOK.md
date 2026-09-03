@@ -70,9 +70,13 @@
   runs no agent and merges with `GITHUB_TOKEN`, so already-clean PRs would
   keep merging.
 - Review findings not being fixed (the `review-fix` agent pushing bad
-  fixes, or looping): disable the `review-fix` workflow. It is bounded to
-  two attempts per PR (`review-fix-1`/`review-fix-2`), one per head commit;
-  remove those labels only to grant a fresh pair. LOW-severity findings are
+  fixes, or looping): disable the `review-fix` workflow, or set
+  `review_fix_max_attempts: 0`. It is bounded to `review_fix_max_attempts`
+  attempts per PR (4; labels `review-fix-1..4`), one per head commit;
+  remove those labels only to grant fresh attempts. Raising the knob also
+  frees an already-escalated PR: remove `needs-human` and the spent labels
+  below the new bound stay, so it resumes at the next attempt number.
+  LOW-severity findings are
   deferred by design, which keeps the verdict at `findings` — such a PR
   never auto-approves or auto-merges and is yours to merge.
 - `ci-failure` issue on `main`: agent-triage takes it like

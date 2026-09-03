@@ -101,7 +101,11 @@ jobs:
             3. Commit on branch task/<issue-number> with `Refs #<n>` in
                commits; open a PR titled after the task, labelled
                agent-authored + the task's feature label, body summarising
-               approach and evidence, containing `Closes #<n>`.
+               approach and evidence, containing the closing reference in
+               EXACTLY the form `Closes #<n>` (the number directly after
+               the keyword, on its own line). GitHub honours no other
+               form: `Closes T021 (issue #39)` on #114 closed nothing,
+               left `in-progress` on the issue and stalled the WIP cap.
             4. If you discover the task is blocked, ambiguous beyond a safe
                default, or requires a human-ruling artefact (protocol YAML,
                vectors, spec docs): implement nothing speculative — comment

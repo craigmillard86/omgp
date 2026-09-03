@@ -24,6 +24,16 @@ auto_approve_max_tier: 2
 # specs/**/tasks.md) — ground truth and governance always need their owner.
 auto_merge_max_tier: 2
 
+# How many bounded fix attempts the `review-fix` loop may take on one PR
+# before it releases the claim and escalates `needs-human` (raised from 2 to
+# 4, ruling 2026-09-03: PR #116 exhausted two attempts while still making
+# real progress each round). Attempts are the PR labels review-fix-1..N, at
+# most one per head commit; nothing resets them but a human. 0 disables the
+# loop. Read at RUN time from the default branch, so retuning it needs no
+# workflow-scope push — which matters because the fixer agent itself cannot
+# edit .github/workflows/*.
+review_fix_max_attempts: 4
+
 # Backstops that make auto-release safe (do not remove):
 # - ready-gate still validates the enriched story mechanically
 # - risk-score re-rates the ACTUAL diff at PR time; a T2+/T3 outcome from

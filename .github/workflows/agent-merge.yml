@@ -168,6 +168,36 @@ jobs:
                   commit_message: `${pr.title}\n\n🤖 Autonomous merge (ruling 2026-09-02, GOVERNANCE.md §1): risk:t${tier} <= auto_merge_max_tier=${max}; VERDICT(review): clean @ ${head.slice(0, 7)}${tier >= 2 ? '; VERDICT(red-team): clean' : ''}; every check green at this head. No CODEOWNERS-owned path outside the agent-sanctioned set.`});
                 core.notice(`merge: #${number} merged at ${head.slice(0, 7)} (risk:t${tier})`);
                 merged++;
+                // Release the claim MECHANICALLY. GitHub's auto-close only fires on a
+                // reference that directly follows the keyword, so a PR body reading
+                // "Closes T021 (issue #39)" closes nothing — which is exactly what happened
+                // on #114: the task issue stayed open with `in-progress`, held the WIP cap
+                // and stalled agent-dispatch for ~10 hours (2026-09-02). The loop must not
+                // depend on an agent's prose. Targets: the body's Closes/Fixes/Resolves
+                // references, plus the branch's own task/<n>.
+                const closes = [...new Set([...(pr.body || '').matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi)].map(x => Number(x[1])))];
+                const bm = pr.head.ref.match(/^task\/(\d+)$/);
+                for (const t of new Set([...closes, ...(bm ? [Number(bm[1])] : [])])) {
+                  if (t === number) continue;
+                  // A 404 is "already absent / not an issue" — a non-event. Anything else is
+                  // reported: an unreleased claim silently blocks every later dispatch.
+                  try { await github.rest.issues.removeLabel({owner, repo, issue_number: t, name: 'in-progress'}); }
+                  catch (e) { if (e.status !== 404) core.warning(`merge: could NOT release in-progress on #${t} (${e.status}) — the WIP cap may stay closed`); }
+                  try {
+                    const iss = (await github.rest.issues.get({owner, repo, issue_number: t})).data;
+                    // Issues and PRs share one number namespace, and this path uses the issues
+                    // API, which would happily close a PULL REQUEST — something GitHub's own
+                    // closing keywords never do (Copilot review on #117). A `Closes #<pr>` in a
+                    // body, or a stacked branch, must not close that PR.
+                    if (iss.pull_request) { core.notice(`merge: #${t} is a pull request — not closed by the claim release`); continue; }
+                    if (iss.state === 'open') {
+                      await github.rest.issues.createComment({owner, repo, issue_number: t,
+                        body: `Closed by #${number}, merged at ${head.slice(0, 7)} by agent-merge.`});
+                      await github.rest.issues.update({owner, repo, issue_number: t, state: 'closed', state_reason: 'completed'});
+                      core.notice(`merge: closed #${t} (claimed by #${number})`);
+                    }
+                  } catch (e) { if (e.status !== 404) core.warning(`merge: could NOT close #${t} (${e.status})`); }
+                }
               } catch (e) {
                 // 409: the head moved between the checks above and this call — exactly the
                 // stale-approval race this design exists to lose safely. 405: branch
