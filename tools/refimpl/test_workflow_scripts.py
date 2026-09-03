@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 
@@ -77,7 +78,12 @@ def test_ci_failure_router_wiring():
     # because the escalation is the router decision that needs the delivery backstop most.
     _sw = next(st for st in wf["jobs"]["sweep"]["steps"] if "actions/github-script" in st.get("uses", ""))
     assert "MAX_ATTEMPTS" not in _sw.get("env", {})
-    assert "auto_fix_max_attempts: 4" in (ROOT / ".github" / "agent-config.yml").read_text()
+    # Shape pin, not value pin (review round 3 on #120): the workflow's own comment tells a
+    # human `auto_fix_max_attempts: 0` is a supported off-switch — a value pin here would turn
+    # ci-gate red on every PR the moment they used it. The VALUE semantics (fail-closed 2,
+    # <1 disables, clamp 10) are pinned behaviourally by the harness cases instead.
+    assert re.search(r"^auto_fix_max_attempts: \d+$",
+                     (ROOT / ".github" / "agent-config.yml").read_text(), re.M)
     assert autofix["needs"] == "route" and "route.outputs.route == 'autofix'" in autofix["if"]
     action = next(s for s in autofix["steps"] if "claude-code-action" in s.get("uses", ""))
     assert "claude_code_oauth_token" in action["with"]
@@ -253,7 +259,9 @@ def test_bot_triggered_agent_workflows_allow_their_bot_actors():
 
 def test_router_labels_are_provisioned():
     setup = (ROOT / "tools" / "gh-setup.sh").read_text()
-    for l in ("auto-fix-1", "auto-fix-2", "auto-fix-3", "auto-fix-4", "ci-failure",
+    # auto-fix-1..10: the knob clamps at 10 and the first-free-index write can reach any of
+    # them, so every label the router can create is provisioned (review round 3 on #120).
+    for l in (*[f"auto-fix-{n}" for n in range(1, 11)], "ci-failure",
               "review-fix-1", "review-fix-2", "review-fix-3", "review-fix-4"):
         assert f"L {l} " in setup or f'L "{l}"' in setup, l
 

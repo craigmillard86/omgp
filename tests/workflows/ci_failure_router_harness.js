@@ -46,8 +46,11 @@ function world({prs = [], issues = [], jobs = [], failedRuns = [], comments = {}
         listJobsForWorkflowRun: async () => ({data: jobs}),
         // Real response shape: {total_count, workflow_runs} honouring per_page — the exhaustion
         // path reads it directly (one call, no pagination); the sweep goes via paginate.
-        listWorkflowRunsForRepo: async ({branch, status, per_page}) => {
-          const all = failedRuns.filter(r => r.head_branch === branch && (!status || r.conclusion === status));
+        // head_sha honoured too (review round 3 on #120): the sweep pins its query to the PR
+        // head so a stale head's failure is never re-delivered — the mock must be able to
+        // observe that pin, not silently ignore it.
+        listWorkflowRunsForRepo: async ({branch, status, head_sha, per_page}) => {
+          const all = failedRuns.filter(r => r.head_branch === branch && (!status || r.conclusion === status) && (!head_sha || r.head_sha === head_sha));
           return {data: {total_count: all.length, workflow_runs: all.slice(0, per_page || 30)}};
         },
         createWorkflowDispatch: async ({inputs, ref}) => log.push(`dispatch run=${inputs.run_id} ref=${ref}`),
@@ -118,7 +121,9 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'in-progress'])], issues: [issue(26, ['task', 'in-progress', 'agent-authored'])], jobs: JOBS, failedRuns: runs});
   await route(w, {head_sha: 'aaa996'}, '');
   check('unreadable bound -> conservative 2 (fail closed): exhausted at two priors', w.outputs.route === 'exhausted' && w.log.some(l => /notice: .*auto_fix_max_attempts/.test(l)));
-  check('exhausted comment links the failed runs on this branch (not other branches)', said(w, /exhausted.*after 4 attempts|exhausted/, 94) && said(w, /gh\/r\/5001/, 94) && said(w, /gh\/r\/4900/, 94) && !said(w, /gh\/r\/4700/, 94));
+  // (The dead `after 4 attempts` alternation was dropped here — review round 3 on #120; the
+  // F3 case below pins the attempts/bound wording verbatim, so no coverage moved.)
+  check('exhausted comment links the failed runs on this branch (not other branches)', said(w, /exhausted/, 94) && said(w, /gh\/r\/5001/, 94) && said(w, /gh\/r\/4900/, 94) && !said(w, /gh\/r\/4700/, 94));
   // 2026-09-03 (maintainer report on #118): the run list silently truncated at 3, presenting
   // 3 of 4 failed runs as if complete. ALL of this branch's failed runs must appear (a
   // security failure included), up to a sane cap with an explicit "and N more" tail beyond it.
@@ -175,6 +180,16 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: []});
   await route(w, {head_sha: 'mt0001'});
   check('M2: empty run list -> the comment still names the triggering run (fallback)', said(w, /actions\/runs\/5001/, 94));
+  // Partition before capping (review round 3 on #120): ci.yml cancels in-progress runs on
+  // every non-main push, so a burst of pushes manufactures newer `cancelled` runs than the
+  // real failures — newest-first alone would fill all 10 slots with cancellations.
+  const noisy = [...Array.from({length: 12}, (_, k) => ({id: 9500 + k, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'cancelled', html_url: `https://gh/r/${9500 + k}`})),
+                 {id: 9400, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'failure', html_url: 'https://gh/r/9400'},
+                 {id: 9300, name: 'security', head_branch: 'task/26', status: 'completed', conclusion: 'timed_out', html_url: 'https://gh/r/9300'}];
+  w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: noisy});
+  await route(w, {head_sha: 'noz001'});
+  check('rank: hard failures listed before cancellations even when 12 cancellations are newer', said(w, /9400.*failure/, 94) && said(w, /9300.*timed_out/, 94) && said(w, /and 4 more non-successful/, 94));
+  check('rank: the oldest cancellations are what falls below the cap, not the failures', !said(w, /9511/, 94) && said(w, /9500/, 94));
   // Window clipping (review on #120): counts are scoped to the fetch, never worded branch-wide.
   const flood = Array.from({length: 105}, (_, k) => ({id: 9000 + k, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'failure', html_url: `https://gh/r/${9000 + k}`}));
   w = world({prs: [pr(94, 'task/26', ['agent-authored', 'auto-fix-1', 'auto-fix-2', 'auto-fix-3', 'auto-fix-4'])], issues: [issue(26, ['task'])], jobs: JOBS, failedRuns: flood});
@@ -182,7 +197,7 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   check('window: 105 runs -> tail counts within the fetched 100 and the clip is disclosed', said(w, /and 90 more non-successful run\(s\) in the newest 100 runs fetched/, 94) && said(w, /window: newest 100 of 105 runs on this branch — older runs not scanned/, 94));
 
   // --- sweep (delivery backstop): re-delivers at EVERY attempt count; `route` decides ---
-  const swRuns = [{id: 8001, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'failure', created_at: '2026-09-01T00:00:00Z', run_attempt: 1, html_url: 'https://gh/r/8001'}];
+  const swRuns = [{id: 8001, name: 'ci', head_branch: 'task/26', head_sha: 'aaa111', status: 'completed', conclusion: 'failure', created_at: '2026-09-01T00:00:00Z', run_attempt: 1, html_url: 'https://gh/r/8001'}];
   for (const n of [0, 2, 4, 5]) {
     w = world({prs: [pr(94, 'task/26', ['agent-authored', ...Array.from({length: n}, (_, i) => `auto-fix-${i + 1}`)])], failedRuns: swRuns});
     await sweep(w);
@@ -194,9 +209,12 @@ const labels = (w, n) => (w.prState.get(n) || w.issueState.get(n)).labels.map(l 
   w = world({prs: [pr(94, 'task/26', ['agent-authored'])], failedRuns: swRuns, comments: {94: ['<!-- ci-failure-router sha=aaa111 pass=1 run=8001 -->']}});
   await sweep(w);
   check('sweep: an attempt marker for the head sha+pass suppresses re-dispatch', !w.log.some(l => l.startsWith('dispatch')));
-  w = world({prs: [pr(94, 'task/26', ['agent-authored'])], failedRuns: [...swRuns, {id: 8002, name: 'ci', head_branch: 'task/26', status: 'completed', conclusion: 'success', created_at: '2026-09-02T00:00:00Z', run_attempt: 1}]});
+  w = world({prs: [pr(94, 'task/26', ['agent-authored'])], failedRuns: [...swRuns, {id: 8002, name: 'ci', head_branch: 'task/26', head_sha: 'aaa111', status: 'completed', conclusion: 'success', created_at: '2026-09-02T00:00:00Z', run_attempt: 1}]});
   await sweep(w);
   check('sweep: a later success on the same workflow means fixed — no dispatch', !w.log.some(l => l.startsWith('dispatch')));
+  w = world({prs: [pr(94, 'task/26', ['agent-authored'])], failedRuns: [{id: 8003, name: 'ci', head_branch: 'task/26', head_sha: 'old000', status: 'completed', conclusion: 'failure', created_at: '2026-09-01T00:00:00Z', run_attempt: 1, html_url: 'https://gh/r/8003'}]});
+  await sweep(w);
+  check('sweep: a stale head\'s failure is never re-delivered (head_sha pin observable)', !w.log.some(l => l.startsWith('dispatch')));
   w = world({prs: [pr(95, 'ci/tooling', ['agent-authored'])], failedRuns: swRuns});
   await sweep(w);
   check('sweep: non-task branch is not swept', !w.log.some(l => l.startsWith('dispatch')));

@@ -134,7 +134,9 @@ jobs:
           sparse-checkout-cone-mode: false
       - id: cfg
         run: |
-          echo "max=$(sed -n 's/^auto_fix_max_attempts: *//p' .github/agent-config.yml)" >> "$GITHUB_OUTPUT"
+          # head -1 makes single-line output structural, not a property of the file's contents
+          # (review on #120; agent-config.yml is CODEOWNERS-owned, but belt and braces).
+          echo "max=$(sed -n 's/^auto_fix_max_attempts: *//p' .github/agent-config.yml | head -n1)" >> "$GITHUB_OUTPUT"
       - name: Route the failure by branch
         id: route
         uses: actions/github-script@v7
@@ -238,6 +240,13 @@ jobs:
               // produces, and the human picking this up needs to see it).
               const fr = await github.rest.actions.listWorkflowRunsForRepo({owner, repo, branch, per_page: 100});
               const bad = fr.data.workflow_runs.filter(r => r.status === 'completed' && !['success', 'skipped'].includes(r.conclusion));
+              // Hard failures before noise (review round 3 on #120): ci.yml cancels in-progress
+              // runs on every non-main push, so `cancelled` is the most-produced conclusion on
+              // exactly the branches this path serves — newest-first alone can fill all 10 slots
+              // with cancellations and push the real failures below the cap. Stable sort keeps
+              // newest-first within each class.
+              const rank = c => (['failure', 'timed_out', 'startup_failure'].includes(c) ? 0 : 1);
+              bad.sort((a, b) => rank(a.conclusion) - rank(b.conclusion));
               const shown = bad.slice(0, 10);
               // Every count is scoped to what was actually fetched (review on #120: five
               // workflows fire per push, so exhaustion is exactly when a small window clips —

@@ -1089,3 +1089,26 @@ priors now yields attempt 3, four priors exhausts, `auto_fix_max_attempts: 2`
 reproduces the original bound exactly, unreadable knob fails closed with a notice.
 **Supersedes:** the bound sentence of "CI-failure auto-resolution" (2026-08-30);
 the rest of that ruling stands.
+
+---
+
+## 2026-09-03 — auto_fix_max_attempts knob semantics beyond the value 4
+
+**Context:** review round 3 on PR #120: GOVERNANCE §4 states knob semantics that
+the 2026-09-03 bound entry above does not record — the ruling recorded option (2)
+(value 4, unreadable fails closed to 2) and nothing else. The additional
+semantics were added on PR #120 in response to red-team findings F2/F5/F7 and
+review findings there, and this append-only file must not trail the governing
+document.
+**Recommendation (as implemented on PR #120, for ratification with that PR's
+CODEOWNERS review):** a value < 1 DISABLES auto-fix (route posts one marker
+comment per sha+pass so the boundless sweep stays quiet); non-digit values are
+unreadable and fail closed to 2; values above 10 are clamped to 10 (the ruled-out
+"unlimited" enforced against a fat-fingered knob); attempt labels are written to
+the first FREE index so the bound stays reachable after a human removes a label
+(label index is a free slot, not the attempt ordinal); labels auto-fix-1..10 are
+provisioned to cover the clamp range.
+**Ruling:** pending — ratified by the human merge of PR #120, which lands this
+entry and the semantics in the same commit history.
+**Supersedes:** nothing; extends the 2026-09-03 "auto-fix attempt bound" entry
+above (its option (2) ruling stands).
