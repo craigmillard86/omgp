@@ -374,6 +374,104 @@ TEST_CASE("next_probe returns ADDR_host when no UNENROLLED/OFFLINE address exist
     REQUIRE(probe.addr == omgp::ADDR_host);
 }
 
+TEST_CASE("out-of-range addresses are not nodes: no record, no notice, no effect", "[link]") {
+    // red-team on #118 M1/M14: `addr` is wire-derived (link/frame.cpp validates only
+    // dst == 0xFF; src is copied through), so the bounds guard is the sole memory-safety
+    // control on records_[kAddrCount] — and reverting it, or "fixing" it with a modulo
+    // that aliases 0x11 onto backplane 0x01's record, must fail THIS test.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    tracker.on_result(kAddr, true, 0); // one real record the invalid addresses must not touch
+    REQUIRE(listener.entries.size() == 1);
+
+    for (uint8_t bad : {uint8_t{0x10}, uint8_t{0x42}, uint8_t{0xFF}}) {
+        tracker.on_result(bad, true, 1);
+        tracker.on_result(bad, false, 2);
+        tracker.mark_polled(bad, 3);
+        REQUIRE(tracker.state(bad) == HealthState::UNENROLLED);
+        REQUIRE_FALSE(tracker.poll_due(bad, 4));
+    }
+    // 0x10 % kAddrCount == 0x00 and 0x11 % kAddrCount == 0x01: an aliasing "guard" would
+    // have disturbed a real record. The in-range record is untouched and nothing notified.
+    tracker.on_result(uint8_t{0x11}, false, 5);
+    REQUIRE(tracker.state(kAddr) == HealthState::ENROLLED);
+    REQUIRE(listener.entries.size() == 1);
+}
+
+TEST_CASE("ADDR_host is not a node: on_result and a hostile lifecycle leave it untracked",
+          "[link]") {
+    // red-team on #118 finding 1: 0x00 is the host's own address (trunk §5). next_probe
+    // already excludes it and uses it as the no-candidate sentinel; on_result must agree,
+    // or an echoed/hostile src=0x00 frame enrols the host, poll_due tells F3 to poll it
+    // forever, and every notice carries addr 0 — which data-model §9 reserves for
+    // bus-level notices.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    tracker.on_result(omgp::ADDR_host, true, 0);
+    REQUIRE(tracker.state(omgp::ADDR_host) == HealthState::UNENROLLED);
+    REQUIRE_FALSE(tracker.poll_due(omgp::ADDR_host, 1));
+    REQUIRE(listener.entries.empty());
+
+    // Full hostile lifecycle: enrol, drive to SUSPECT, tick past the OFFLINE threshold.
+    tracker.on_result(omgp::ADDR_host, true, 0);
+    for (uint32_t i = 1; i <= omgp::TRUNK_suspect_after_failures; ++i)
+        tracker.on_result(omgp::ADDR_host, false, i);
+    tracker.tick(omgp::TRUNK_suspect_after_failures +
+                 uint64_t{omgp::TRUNK_offline_after_suspect_ms} * 1000);
+    REQUIRE(tracker.state(omgp::ADDR_host) == HealthState::UNENROLLED);
+    REQUIRE(listener.entries.empty());
+}
+
+TEST_CASE("an earlier now_us than a stored stamp reads as zero elapsed, never a wraparound",
+          "[link]") {
+    // red-team on #118 finding 2: now_us is a caller-supplied parameter with no
+    // monotonicity contract across the four entry points. One stamp earlier than
+    // suspect_since wrapped the uint64_t delta to ~1.8e19 µs — an instant, silent
+    // OFFLINE (and, in poll_due, a SUSPECT node silently restored to full poll rate).
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    const uint64_t suspect_since = drive_to_suspect(tracker, kAddr, 1000);
+    const auto notices_after_suspect = listener.entries.size();
+
+    tracker.tick(suspect_since - 1);
+    REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
+
+    tracker.on_result(kAddr, false, suspect_since - 1);
+    REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
+    REQUIRE(listener.entries.size() == notices_after_suspect);
+
+    tracker.mark_polled(kAddr, 1000000);
+    REQUIRE_FALSE(tracker.poll_due(kAddr, 999999)); // 0 µs since last poll, not ~1.8e19
+}
+
+TEST_CASE("next_probe's cursor stays inside the backplane range from every state", "[link]") {
+    // red-team on #118 M12: an off-by-one in the wrap comparison walked the cursor to
+    // 0x10 and read records_[16] — an intra-object overflow ASan's default config does
+    // not flag. Two full passes over an all-eligible table must yield exactly the
+    // backplane sequence, twice, with every address in range.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    constexpr size_t kBackplaneCount =
+        static_cast<size_t>(omgp::ADDR_backplane_max) - omgp::ADDR_backplane_min + 1;
+    std::vector<uint8_t> seq;
+    for (size_t i = 0; i < 2 * kBackplaneCount; ++i) {
+        const Probe probe = tracker.next_probe(0);
+        REQUIRE(probe.addr >= omgp::ADDR_backplane_min);
+        REQUIRE(probe.addr <= omgp::ADDR_backplane_max);
+        seq.push_back(probe.addr);
+    }
+    for (size_t i = 0; i < seq.size(); ++i)
+        REQUIRE(seq[i] == omgp::ADDR_backplane_min + static_cast<uint8_t>(i % kBackplaneCount));
+}
+
 TEST_CASE("a full on_result/tick/poll_due/next_probe run allocates nothing", "[link]") {
     FakeClock clock;
     RecordingListener listener;

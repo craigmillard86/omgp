@@ -20,7 +20,9 @@ constexpr uint64_t kOfflineThresholdUs =
 } // namespace
 
 HealthTracker::HealthTracker(Clock& clock, HealthListener& listener)
-    : clock_(clock), listener_(listener), records_{}, next_probe_addr_(omgp::ADDR_backplane_max) {}
+    : clock_(clock), listener_(listener), records_{}, next_probe_addr_(omgp::ADDR_backplane_max) {
+    (void)clock_; // discarded read: see the clock_ declaration comment in health.hpp
+}
 
 void HealthTracker::notify(Notice notice, uint8_t addr) {
     listener_.on_notice(notice, addr);

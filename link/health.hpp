@@ -63,9 +63,11 @@ class HealthTracker {
     // Stored for the constructor-signature parity with Master/Responder (link-cpp.md
     // "Health tracker") and for T043 (US5), which reads it for bus-fault re-probe timing
     // (data-model.md §7). Every method in this T038 stub takes `now_us` explicitly, so
-    // clock_ itself is not yet read — clang's -Wunused-private-field would otherwise flag
-    // it under the fuzz preset (tools/fuzz-smoke.sh, clang++ -Werror).
-    [[maybe_unused]] Clock& clock_;
+    // clock_ itself is not yet read; the constructor body performs one discarded read,
+    // which silences clang's -Wunused-private-field (fuzz preset) without
+    // [[maybe_unused]] — some gcc versions reject that attribute on a data member
+    // under -Werror=attributes (observed locally, gcc/WSL).
+    Clock& clock_;
     HealthListener& listener_;
     HealthRecord records_[kAddrCount];
     uint8_t next_probe_addr_;
