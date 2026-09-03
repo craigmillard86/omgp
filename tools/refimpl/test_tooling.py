@@ -18,6 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 FUZZ = ROOT / "tools" / "fuzz-smoke.sh"
 MUTATE = ROOT / "tools" / "mutate.sh"
 CFG = ROOT / "tools" / "mutate.cfg"
+DIFFCHECK = ROOT / "tools" / "diffcheck.py"
 
 
 # "Tool absent" is simulated through the scripts' own override variables (a nonexistent
@@ -42,6 +43,16 @@ def test_fuzz_smoke_without_clang_fails_with_disclosure():
     rc, out, _ = run(FUZZ, "1", env_overrides=NO_CLANG)
     assert rc == 1
     assert "blind spot" in out and "libFuzzer" in out
+
+
+def test_diffcheck_frames_only_discloses_its_blind_spot():
+    # --frames-only skips the crc/message/invalid/descriptor corpora (contracts/tooling.md
+    # "every fast/partial path states its blind spot"); the summary line must say so, not
+    # just print the same "C++ and Python agree" sentence a full run prints.
+    r = subprocess.run([sys.executable, str(DIFFCHECK), "--frames-only"], capture_output=True, text=True,
+                       cwd=ROOT, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "blind spot" in r.stdout and "descriptor" in r.stdout
 
 
 def test_mutate_cfg_parses_and_pins():

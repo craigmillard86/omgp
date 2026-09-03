@@ -83,6 +83,8 @@ class Helper:
                 block: list[str] = []
                 while True:
                     ln = self.p.stdout.readline().rstrip("\n")
+                    if not ln:  # EOF: helper died mid-block: stop, let the caller
+                        break   # report the truncated block as a mismatch instead of spinning
                     block.append(ln)
                     if ln.startswith("END "):
                         break
@@ -297,9 +299,10 @@ def main(argv=None) -> int:
     finally:
         helper.close()
     total = crc + msgs + inval + desc + frames + torture_n
+    blind_spot = " (blind spot: crc/message/invalid/descriptor corpora not run)" if args.frames_only else ""
     print(f"diffcheck: {total} cases, C++ and Python agree "
           f"(crc {crc}, messages {msgs}, invalid {inval}, descriptors {desc}, "
-          f"frames {frames}, torture {torture_n}) in {time.monotonic() - t0:.1f}s")
+          f"frames {frames}, torture {torture_n}) in {time.monotonic() - t0:.1f}s{blind_spot}")
     return 0
 
 

@@ -74,6 +74,20 @@ def test_random_frame_covers_every_dst_src_and_seq_over_frame_count():
     assert 0 in lengths and F.MAX_PAYLOAD in lengths  # payload lengths 0-64, boundaries hit
 
 
+def test_random_frame_seq_is_not_a_function_of_src():
+    # Regression: seq and src were both `index % k` with 16 | 256, so seq == src & 0x0F
+    # for every generated frame — a C++ encode_frame that built ctrl from src instead of
+    # seq would emit byte-identical wire bytes and diffcheck would never catch it. At
+    # least one src value must map to more than one seq value across the corpus.
+    rng = random.Random(SEED)
+    frames = [F.random_frame(rng, i) for i in range(F.FRAME_COUNT)]
+    seqs_by_src: dict[int, set[int]] = {}
+    for fr in frames:
+        seqs_by_src.setdefault(fr.src, set()).add(fr.seq)
+    assert any(len(seqs) > 1 for seqs in seqs_by_src.values())
+    assert not all(fr.seq == (fr.src & 0x0F) for fr in frames)
+
+
 def test_random_frame_never_generates_the_reserved_destination():
     rng = random.Random(SEED)
     for i in range(F.FRAME_COUNT):

@@ -22,6 +22,7 @@ G = P()
 FRAME_COUNT = 10_000
 MAX_PAYLOAD = G.LIMIT_max_l3_payload
 _RESERVED_DST = 0xFF  # trunk §5: dst 0xFF is reserved; excluded from the valid-frame corpus
+_VALID_DST = [d for d in range(0x100) if d != _RESERVED_DST]  # explicit, not a coincidental modulus
 _FRAME_SEED_XOR = 0xF12A5E
 _TORTURE_SEED_XOR = 0x70127E
 
@@ -44,9 +45,12 @@ def random_frame(rng: random.Random, index: int) -> link.Frame:
     hit at least once over FRAME_COUNT draws (frame-vectors.md's `l3_helper` verbs
     section: "every dst/src in range, seq 0-15, flags, payload lengths 0-64 with
     7E/7D-heavy content")."""
-    dst = index % _RESERVED_DST  # 0..254: every non-reserved dst, over >= 255 draws
+    dst = _VALID_DST[index % len(_VALID_DST)]  # every non-reserved dst, over >= 255 draws
     src = index % 0x100  # 0..255: every src, over >= 256 draws
-    seq = index % 16
+    # seq is drawn independently of src/index (once its 0-15 range is covered by the first
+    # 16 draws) so it is never a fixed function of src — see
+    # test_random_frame_seq_is_not_a_function_of_src.
+    seq = index % 16 if index < 16 else rng.randrange(16)
     length = _payload_len(rng, index)
     payload = bytes(_biased_byte(rng) for _ in range(length))
     return link.Frame(dst=dst, src=src, response=rng.getrandbits(1) == 1, retry=rng.getrandbits(1) == 1,
