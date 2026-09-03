@@ -74,3 +74,29 @@ def test_ask_stream_keeps_a_two_line_error_response_in_one_block(tmp_path):
     finally:
         helper.close()
     assert out == [["ERR BadRequest", "END 0"], ["OK frame", "END 1"]]
+
+
+def test_ask_stream_does_not_hang_on_a_batch_of_requests_to_a_permanently_broken_helper(tmp_path):
+    """run_torture (tools/refimpl/diffcheck_frames.py) always calls ask_stream with the
+    whole corpus in one batch, never one request at a time, so this multi-request case is
+    the only one that actually runs in production. FAKE_HELPER_NO_END answers every request
+    with a bare "ERR BadRequest" and no "END " line, so once the pump has drained both
+    responses into the queue, the first block absorbs both lines before it can time out and
+    the second block starts empty against an idle, still-live helper: the stall guard that
+    only looks at bool(block) and block[-1] is unarmed for that fresh block and
+    self._next_line(timeout=None) blocks forever."""
+    script = tmp_path / "fake_helper.py"
+    script.write_text(FAKE_HELPER_NO_END)
+    script.chmod(0o755)
+    helper = D.Helper(script)
+    result: dict = {}
+    t = threading.Thread(
+        target=lambda: result.__setitem__("out", helper.ask_stream(["FSTREAM aa", "FSTREAM bb"])), daemon=True)
+    t.start()
+    t.join(timeout=5)
+    try:
+        assert not t.is_alive(), "ask_stream hung on the second block of a multi-request batch"
+        assert result["out"] == [["ERR BadRequest", "ERR BadRequest"], []]
+    finally:
+        helper.p.kill()
+        helper.p.wait(timeout=5)

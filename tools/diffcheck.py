@@ -46,9 +46,12 @@ CHUNK = 400  # requests in flight per pipe round trip (well under the 64 KiB pip
 # "END ") waits this long for the "END " that a well-formed FSTREAM response always sends
 # next (tools/canonical.cpp fstream_response()/fstream_lines(): both lines are flushed by
 # l3_helper.cpp in a single write, so they are already sitting in the pipe and arrive well
-# inside this bound). A helper that is alive but will genuinely never answer again (e.g. its
-# FSTREAM handling was dropped and dispatch fell through to the bare "ERR BadRequest"
-# fallback) stalls this long once, then the truncated block is reported instead of hanging.
+# inside this bound). If that wait ever actually times out, the helper is presumed dead for
+# the rest of the batch (Helper._dead, below): every later block, including the first line
+# of blocks that have not started reading yet, returns immediately instead of re-arming this
+# same timeout once per remaining request. Without that stickiness, run_torture's one-call,
+# whole-corpus batches (tools/refimpl/diffcheck_frames.py) would each pay this timeout again
+# for every request after the dead one, rather than once for the whole run.
 _STALL_TIMEOUT = 2.0
 
 
@@ -65,6 +68,7 @@ class Helper:
                                   bufsize=1)
         self._lines: queue.Queue[str | None] = queue.Queue()
         self._eof = False
+        self._dead = False  # set once a stalled wait (see _STALL_TIMEOUT) times out: sticky
         threading.Thread(target=self._pump, daemon=True).start()
 
     def _pump(self):
@@ -75,8 +79,9 @@ class Helper:
     def _next_line(self, timeout: float | None = None) -> str | None:
         """A line, or None for EOF. Once EOF is seen it is remembered locally: the single
         sentinel in the queue must not be consumed by one caller and hidden from the rest of
-        a batch still in flight."""
-        if self._eof:
+        a batch still in flight. Likewise, once the helper is confirmed dead (self._dead) no
+        further waiting is attempted at all -- not even the timeout the caller asked for."""
+        if self._eof or self._dead:
             return None
         ln = self._lines.get(timeout=timeout)  # queue.Empty propagates to the caller
         if ln is None:
@@ -104,15 +109,17 @@ class Helper:
             while True:
                 # First line of a block, or still inside a normal "OK "-line run: no
                 # timeout, since the helper may legitimately take a while to answer.
-                # After a protocol violation (anything else), bound the wait for the "END
-                # " a well-formed response always sends next instead of blocking forever.
-                stalled = bool(block) and not block[-1].startswith("OK ")
+                # After a protocol violation (anything else) -- or once a prior block has
+                # already confirmed the helper dead -- bound the wait for the "END " a
+                # well-formed response always sends next, instead of blocking forever.
+                stalled = self._dead or (bool(block) and not block[-1].startswith("OK "))
                 try:
                     ln = self._next_line(timeout=_STALL_TIMEOUT if stalled else None)
                 except queue.Empty:
+                    self._dead = True  # confirmed silent: don't wait again for the rest of this run
                     break  # alive but silent after a protocol violation: truncated block
                 if ln is None:
-                    break  # EOF: helper died mid-block
+                    break  # EOF, or (self._dead already set) a later block in this same batch
                 block.append(ln)
                 if ln.startswith("END "):
                     break
