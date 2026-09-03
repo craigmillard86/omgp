@@ -286,6 +286,22 @@ def canonical_to_frame(line: str) -> link.Frame:
     payload = _hexbytes(_take(kv, "payload"))
     if kv:
         raise CanonicalError(f"unexpected keys {sorted(kv)}")
+    # Strict rejection is normative (ruling 2026-09-03, issue #43; contracts/
+    # frame-vectors.md): the C++ line parser refuses every out-of-range field as
+    # ERR BadRequest, with NO masking or silent wrap — this aligns the reference.
+    # A 65-255 byte payload deliberately PARSES here; encode_frame owns that refusal
+    # as PayloadTooLong (the 256 B split, locked on the C++ side by
+    # test_canonical_frame.cpp and here by test_canonical.py).
+    if not 0 <= dst <= 0xFF:
+        raise CanonicalError(f"dst out of range: {dst:#x}")
+    if not 0 <= src <= 0xFF:
+        raise CanonicalError(f"src out of range: {src:#x}")
+    if not 0 <= flags <= 0x03:
+        raise CanonicalError(f"flags out of range: {flags:#x}")
+    if not 0 <= seq <= 15:
+        raise CanonicalError(f"seq out of range: {seq}")
+    if len(payload) > 0xFF:
+        raise CanonicalError(f"payload exceeds the len byte: {len(payload)} > 255")
     return link.Frame(dst=dst, src=src, response=bool(flags & 0x01), retry=bool(flags & 0x02), seq=seq,
                        payload=payload)
 

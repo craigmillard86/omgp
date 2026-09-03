@@ -92,11 +92,12 @@ def run_frames(helper, seed: int, count: int = FRAME_COUNT, only: int | None = N
     return len(indices)
 
 
-def run_torture(helper, seed: int, only: int | None = None) -> int:
+def run_torture(helper, seed: int, only: int | None = None, **corpus_kwargs) -> int:
     # Corpus sizing lives in torture.corpus's OWN defaults (review on #121: re-declaring
     # frames/per_class here silently pinned the old sizes if torture.py ever raised its
-    # coverage — the same drift the FRAME_COUNT pin closes on the frame side).
-    elements = list(torture.corpus(seed ^ _TORTURE_SEED_XOR))
+    # coverage — the same drift the FRAME_COUNT pin closes on the frame side). Tests may
+    # still pass small frames=/per_class= overrides; they flow through unre-declared.
+    elements = list(torture.corpus(seed ^ _TORTURE_SEED_XOR, **corpus_kwargs))
     if only is not None and not 0 <= only < len(elements):
         sys.exit(f"--torture-index must be 0..{len(elements) - 1}")
     indices = [only] if only is not None else range(len(elements))
