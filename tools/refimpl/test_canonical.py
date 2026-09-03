@@ -157,6 +157,9 @@ OUT_OF_RANGE_FRAME_LINES = [
     # three tests, one behaviour — the parametrized form names its failing case).
     ("negative-seq", "frame dst=0x01 src=0x00 flags=0x00 seq=-1 payload="),
     ("negative-dst", "frame dst=-1 src=0x00 flags=0x00 seq=0 payload="),
+    # review round 4 on #121: parse_frame_line's first-token compare rejects a leading
+    # space; the Python side must not silently tolerate it.
+    ("leading-whitespace", " frame dst=0x00 src=0x00 flags=0x00 seq=0 payload="),
 ]
 
 

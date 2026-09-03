@@ -101,8 +101,15 @@ class Helper:
 
     def _write(self, lines: list[str]) -> None:
         for i in range(0, len(lines), CHUNK):
-            self.p.stdin.write("".join(l + "\n" for l in lines[i:i + CHUNK]))
-            self.p.stdin.flush()
+            try:
+                self.p.stdin.write("".join(l + "\n" for l in lines[i:i + CHUNK]))
+                self.p.stdin.flush()
+            except BrokenPipeError:
+                # The helper died mid-batch (review round 4 on #121: an early segfault made
+                # the NEXT chunk's write raise an unhandled traceback with no (seed, index)
+                # and no crash attribution). Stop writing; the read side drains to EOF and
+                # the mismatch report — with _death_note naming the exit code — fires.
+                return
 
     def ask(self, lines: list[str]) -> list[str]:
         self._write(lines)
@@ -123,6 +130,11 @@ class Helper:
                 # After a protocol violation (anything else) -- or once a prior block has
                 # already confirmed the helper dead -- bound the wait for the "END " a
                 # well-formed response always sends next, instead of blocking forever.
+                # SCOPE (review round 4 on #121, rule 11): this guard covers
+                # answered-without-END; a request answered with ZERO lines would still
+                # block on its unarmed first line. Unreachable today only because
+                # l3_helper.cpp always prints exactly one response string per request —
+                # a control from the repo's current contents, not a guarantee.
                 stalled = self._dead or (bool(block) and not block[-1].startswith("OK "))
                 try:
                     ln = self._next_line(timeout=_STALL_TIMEOUT if stalled else None)

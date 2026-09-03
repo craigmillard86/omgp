@@ -160,6 +160,25 @@ def test_run_torture_index_replays_a_single_valid_element():
     assert F.run_torture(FakeHelper(), SEED, only=0, frames=20, per_class=3) == 1
 
 
+def test_a_dead_helper_is_named_in_the_mismatch_report(capsys):
+    # review round 4 on #121: _death_note had no test on either path. A helper whose
+    # process is dead and whose answers are the EOF-derived blanks must be reported as a
+    # crash, never as a bare content mismatch with an empty C++ side.
+    class DeadProc:
+        def poll(self):
+            return -11
+
+    class DeadHelper(FakeHelper):
+        p = DeadProc()
+
+        def ask(self, lines):
+            return ["" for _ in lines]
+
+    assert F.run_frames(DeadHelper(), SEED, count=3) == -1
+    out = capsys.readouterr().out
+    assert "helper exited rc=-11: crash, not a content mismatch" in out
+
+
 def test_replay_index_range_guards_exit_with_a_diagnostic():
     # review round 3 on #121: the range guards landed untested. Out-of-range and negative
     # indices must sys.exit with the documented message, never IndexError or silent wrap.

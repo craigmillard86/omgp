@@ -277,7 +277,11 @@ def frame_to_canonical(f: link.Frame) -> str:
 
 
 def canonical_to_frame(line: str) -> link.Frame:
-    prefix, _, rest = line.strip().partition(" ")
+    # rstrip, not strip (review round 4 on #121): parse_frame_line compares the FIRST
+    # token to "frame", so a leading space yields an empty prefix and ERR BadRequest on
+    # the C++ side — tolerating it here was a residual parser divergence. (The int-radix
+    # forms 0o/0b/1_0 that int(tok, 0) accepts remain the disclosed pre-existing gap.)
+    prefix, _, rest = line.rstrip().partition(" ")
     if prefix != "frame":
         raise CanonicalError(f"not a frame line: {line!r}")
     kv = _tokens(rest)

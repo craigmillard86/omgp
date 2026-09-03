@@ -83,7 +83,12 @@ def test_ask_stream_does_not_hang_on_a_batch_of_requests_to_a_permanently_broken
     responses into the queue, the first block absorbs both lines before it can time out and
     the second block starts empty against an idle, still-live helper: the stall guard that
     only looks at bool(block) and block[-1] is unarmed for that fresh block and
-    self._next_line(timeout=None) blocks forever."""
+    self._next_line(timeout=None) blocks forever.
+
+    Scope (review round 4 on #121): the guard covers answered-without-END. A request
+    answered with ZERO lines would still block on its unarmed first line — unreachable
+    today because l3_helper prints exactly one response string per request, which is a
+    repo-contents control, not a guarantee."""
     monkeypatch.setattr(D, "_STALL_TIMEOUT", 0.2)  # review on #121: behaviour, not duration
     script = tmp_path / "fake_helper.py"
     script.write_text(FAKE_HELPER_NO_END)
@@ -99,3 +104,15 @@ def test_ask_stream_does_not_hang_on_a_batch_of_requests_to_a_permanently_broken
     finally:
         helper.p.kill()
         helper.p.wait(timeout=5)
+
+
+def test_write_to_a_dead_helper_does_not_raise(tmp_path):
+    # review round 4 on #121: an early helper death made the NEXT chunk's stdin.write
+    # raise an unhandled BrokenPipeError — no (seed, index), no crash attribution. The
+    # write loop must swallow it and let the EOF-derived answers reach the reporter.
+    script = tmp_path / "die.py"
+    script.write_text("import sys; sys.exit(3)\n")
+    helper = D.Helper([sys.executable, str(script)])
+    helper.p.wait(timeout=5)  # definitely dead before any write
+    out = helper.ask([f"REQ {i}" for i in range(1000)])  # > one CHUNK: writes post-mortem
+    assert out == [""] * 1000
