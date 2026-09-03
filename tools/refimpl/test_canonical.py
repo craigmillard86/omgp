@@ -141,6 +141,36 @@ def test_frame_round_trip(line, frame):
     assert C.frame_to_canonical(C.canonical_to_frame(line)) == line
 
 
+# Out-of-range frame-line fields must be rejected, not masked or left to crash with a bare
+# ValueError, matching tools/canonical.cpp's parse_frame_line (docs/OPEN-QUESTIONS.md
+# 2026-09-03 "Frame line out-of-range fields": C++ strict rejection is normative, T025 aligns
+# the Python reference). dst=0xFF (reserved, but in-range) and payload lengths 65-0xFF (in
+# text-range, refused by encode_frame's own PayloadTooLong) are deliberately NOT here: those
+# stay valid parses per parse_frame_line's own layering, covered by ENCODE_REFUSALS above.
+OUT_OF_RANGE_FRAME_LINES = [
+    ("dst-overflow", "frame dst=0x100 src=0x00 flags=0x00 seq=0 payload="),
+    ("src-overflow", "frame dst=0x00 src=0x100 flags=0x00 seq=0 payload="),
+    ("flags-above-0x03", "frame dst=0x00 src=0x00 flags=0x04 seq=0 payload="),
+    ("seq-above-0x0f", "frame dst=0x00 src=0x00 flags=0x00 seq=16 payload="),
+    ("payload-longer-than-wire-length-byte", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=" + ("00" * 256)),
+]
+
+
+@pytest.mark.parametrize("line", [c[1] for c in OUT_OF_RANGE_FRAME_LINES],
+                         ids=[c[0] for c in OUT_OF_RANGE_FRAME_LINES])
+def test_canonical_to_frame_rejects_out_of_range_fields(line):
+    with pytest.raises(C.CanonicalError):
+        C.canonical_to_frame(line)
+
+
+def test_canonical_to_frame_does_not_mask_seq():
+    # seq=16 must be rejected outright, never silently reinterpreted as seq=0 (the masking
+    # `encode_frame` itself still applies to an already-valid Frame is a different, narrower
+    # guard than this parse-time check).
+    with pytest.raises(C.CanonicalError):
+        C.canonical_to_frame("frame dst=0x00 src=0x00 flags=0x00 seq=16 payload=")
+
+
 # Hand-crafted bad streams and their expected discard, lifted from the same fixtures
 # test_link.py drives the Deframer with (T012/#30), so the reason names round-trip through
 # the renderer exactly as the Deframer actually reports them, not just as literal strings.

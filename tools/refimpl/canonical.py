@@ -286,6 +286,18 @@ def canonical_to_frame(line: str) -> link.Frame:
     payload = _hexbytes(_take(kv, "payload"))
     if kv:
         raise CanonicalError(f"unexpected keys {sorted(kv)}")
+    # trunk §4: dst/src are single wire bytes, flags occupies ctrl bits 0-1 (bits 2-3
+    # reserved-0, bits 4-7 are `seq`, supplied separately by this field), seq is a nibble,
+    # and payload length must fit the one-byte wire length field. Reject out-of-range
+    # fields here, at parse time, instead of masking (dropping high bits) or falling
+    # through to a bare ValueError out of encode_frame's byte packing — matches
+    # tools/canonical.cpp's parse_frame_line (docs/OPEN-QUESTIONS.md 2026-09-03 "Frame line
+    # out-of-range fields"). dst=0xFF (reserved, in-range) and payload lengths 65-0xFF
+    # (in-range here, refused by encode_frame's own PayloadTooLong) are deliberately left
+    # for encode_frame's own checks, matching parse_frame_line's layering.
+    if not (0 <= dst <= 0xFF and 0 <= src <= 0xFF and 0 <= flags <= 0x03 and 0 <= seq <= 0x0F
+            and len(payload) <= 0xFF):
+        raise CanonicalError(f"out-of-range frame field in {line!r}")
     return link.Frame(dst=dst, src=src, response=bool(flags & 0x01), retry=bool(flags & 0x02), seq=seq,
                        payload=payload)
 
