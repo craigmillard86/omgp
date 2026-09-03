@@ -4,6 +4,7 @@
 
 #include "l3/l3_header.hpp"
 #include "l3/l3_payload.hpp"
+#include "link/frame.hpp"
 #include "omgp_names.h"
 #include "omgp_protocol.h"
 
@@ -526,6 +527,120 @@ bool encode_status(const std::string& canonical, std::vector<uint8_t>& out, std:
     out.resize(n);
     error.clear();
     return true;
+}
+
+// ================================================================================================
+// Frames (spec 002 US1, T023). Mirrors the frame half of tools/refimpl/canonical.py; the line
+// grammar is contracts/frame-vectors.md "Canonical frame line".
+// ================================================================================================
+
+std::string render_frame(const omgp::link::FrameFields& f) {
+    const unsigned flags = (f.response ? 0x01u : 0u) | (f.retry ? 0x02u : 0u);
+    return "frame dst=" + hex2(f.dst) + " src=" + hex2(f.src) + " flags=" + hex2(flags) +
+           " seq=" + dec(f.seq) + " payload=" + hex_lower(f.payload, f.len);
+}
+
+bool parse_frame_line(const std::string& canonical, omgp::link::FrameFields& out,
+                      std::vector<uint8_t>& payload_storage, std::string& error) {
+    const size_t sp = canonical.find(' ');
+    const std::string prefix = canonical.substr(0, sp);
+    Tokens t;
+    unsigned dst = 0, src = 0, flags = 0, seq = 0;
+    std::vector<uint8_t> payload;
+    // payload.size() > LIMIT_max_l3_payload is left for encode_frame's own PayloadTooLong
+    // check below; only >0xFF (which out.len, a uint8_t, cannot represent at all) is
+    // rejected here as malformed text.
+    if (prefix != "frame" || sp == std::string::npos || !tokenize(canonical.substr(sp + 1), t) ||
+        !t.take_uint("dst", dst) || !t.take_uint("src", src) || !t.take_uint("flags", flags) ||
+        !t.take_uint("seq", seq) || !t.take_hex("payload", payload) || !t.kv.empty() ||
+        dst > 0xFF || src > 0xFF || flags > 0xFF || seq > 0x0F || payload.size() > 0xFF) {
+        error = "ERR BadRequest";
+        return false;
+    }
+    payload_storage = std::move(payload);
+    out.dst = static_cast<uint8_t>(dst);
+    out.src = static_cast<uint8_t>(src);
+    out.response = (flags & 0x01u) != 0;
+    out.retry = (flags & 0x02u) != 0;
+    out.seq = static_cast<uint8_t>(seq);
+    out.len = static_cast<uint8_t>(payload_storage.size());
+    out.payload = payload_storage.data();
+    error.clear();
+    return true;
+}
+
+std::string discard_line(omgp::link::Discard d) {
+    using omgp::link::Discard;
+    switch (d) {
+    case Discard::BadCrc:
+        return "ERR BadCrc";
+    case Discard::BadLength:
+        return "ERR BadLength";
+    case Discard::BadEscape:
+        return "ERR BadEscape";
+    case Discard::TooLong:
+        return "ERR TooLong";
+    case Discard::ReservedAddress:
+        return "ERR ReservedAddress";
+    case Discard::COUNT:
+        break;
+    }
+    return "ERR ?"; // unreachable for valid enumerators; keeps -Wreturn-type quiet everywhere
+}
+
+std::string link_status_line(omgp::link::Status s) {
+    return std::string("ERR ") + omgp::link::status_name(s);
+}
+
+bool encode_frame_line(const std::string& canonical, std::vector<uint8_t>& out,
+                       std::string& error) {
+    omgp::link::FrameFields f{};
+    std::vector<uint8_t> payload;
+    if (!parse_frame_line(canonical, f, payload, error))
+        return false;
+    uint8_t wire[omgp::link::kMaxWire];
+    size_t written = 0;
+    const omgp::link::Status st = omgp::link::encode_frame(f, wire, sizeof wire, written);
+    if (st != omgp::link::Status::Ok) {
+        error = link_status_line(st);
+        return false;
+    }
+    out.assign(wire, wire + written);
+    error.clear();
+    return true;
+}
+
+std::string fdec_line(const uint8_t* data, size_t len) {
+    omgp::link::Deframer d;
+    omgp::link::FrameView view{};
+    omgp::link::DeframerStats before = d.stats();
+    for (size_t i = 0; i < len; ++i) {
+        if (d.feed(data[i], view))
+            return "OK " + render_frame(view.f);
+        const omgp::link::DeframerStats& after = d.stats();
+        for (size_t r = 0; r < static_cast<size_t>(omgp::link::Discard::COUNT); ++r) {
+            if (after.discarded[r] != before.discarded[r])
+                return discard_line(static_cast<omgp::link::Discard>(r));
+        }
+        before = after;
+    }
+    return "ERR BadRequest"; // bytes ran out with no frame delivered and no discard counted
+}
+
+std::string fstream_lines(const uint8_t* data, size_t len) {
+    omgp::link::Deframer d;
+    omgp::link::FrameView view{};
+    std::string out;
+    for (size_t i = 0; i < len; ++i) {
+        if (d.feed(data[i], view))
+            out += "OK " + render_frame(view.f) + "\n";
+    }
+    const omgp::link::DeframerStats& stats = d.stats();
+    uint32_t discards = 0;
+    for (size_t r = 0; r < static_cast<size_t>(omgp::link::Discard::COUNT); ++r)
+        discards += stats.discarded[r];
+    out += "END " + dec(discards);
+    return out;
 }
 
 } // namespace canon

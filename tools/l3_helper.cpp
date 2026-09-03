@@ -1,8 +1,12 @@
 // Host-only helper for tools/diffcheck.py: one request per stdin line, one result per
-// stdout line, flushed per line. Protocol: contracts/canonical-text.md.
+// stdout line (FSTREAM: several, ending in one END line), flushed per line. Protocol:
+// contracts/canonical-text.md, contracts/frame-vectors.md.
 //   ENC <canonical message>   -> hex | ERR <Status>
 //   DEC <hex>                 -> canonical message | ERR <Status>
 //   DENC/DDEC/DVAL            -> descriptor verbs (feature 001 US3)
+//   FENC <canonical frame>    -> hex wire bytes | ERR <Status>            (spec 002 T023)
+//   FDEC <hex wire bytes>     -> canonical frame | ERR <Discard>          (spec 002 T023)
+//   FSTREAM <hex stream>      -> canonical frame* then END <discards>     (spec 002 T023)
 //   CRC <hex>                 -> 0x%04X (crc16_ccitt_false, link/crc16.hpp)
 //   QUIT                      -> exit 0
 #include "../link/crc16.hpp"
@@ -47,6 +51,19 @@ int main() {
         } else if (verb == "DVAL") {
             out = omgp::canon::parse_hex(arg, bytes)
                       ? omgp::canon::validate_line(bytes.data(), bytes.size())
+                      : "ERR BadRequest";
+        } else if (verb == "FENC") {
+            std::string err;
+            out = omgp::canon::encode_frame_line(arg, bytes, err)
+                      ? omgp::canon::hex_lower(bytes.data(), bytes.size())
+                      : err;
+        } else if (verb == "FDEC") {
+            out = omgp::canon::parse_hex(arg, bytes)
+                      ? omgp::canon::fdec_line(bytes.data(), bytes.size())
+                      : "ERR BadRequest";
+        } else if (verb == "FSTREAM") {
+            out = omgp::canon::parse_hex(arg, bytes)
+                      ? omgp::canon::fstream_lines(bytes.data(), bytes.size())
                       : "ERR BadRequest";
         } else if (verb == "CRC") {
             if (omgp::canon::parse_hex(arg, bytes)) {
