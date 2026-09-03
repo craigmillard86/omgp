@@ -42,7 +42,7 @@ frame dst=0x01 src=0x00 flags=0x00 seq=3 payload=0101000000
 | verb | in | out |
 |---|---|---|
 | `FENC <canonical frame line>` | fields | `OK <hex wire bytes>`, `ERR <Status>`, or `ERR BadRequest` (malformed text) |
-| `FDEC <hex wire bytes>` | one frame's bytes | `OK <canonical frame line>`, `ERR <Discard>` (first discard reason), or `ERR BadRequest` (malformed hex) |
+| `FDEC <hex wire bytes>` | one frame's bytes | `OK <canonical frame line>`, `ERR <Discard>` (first discard reason), or `ERR BadRequest` (malformed hex, or bytes exhausted mid-frame) |
 | `FSTREAM <hex stream>` | any byte stream | one `OK <canonical frame line>` per delivered frame, in order, then `END <discards>`; malformed hex yields `ERR BadRequest` **then `END 0`** — the `END` terminator is ALWAYS sent, so a read-until-`END` driver never blocks (locked by `test_canonical_frame.cpp`) |
 
 `diffcheck.py --frames` uses `FENC`/`FDEC` on a seeded corpus of random valid frames

@@ -635,6 +635,8 @@ assert no bus fault.
   Principle III requires of every codec; the engines and health tracker are behavioural,
   not codecs, and are verified by the scripted-transport tests rather than a second
   implementation.
-- **Pending ruling on §8**: `docs/OPEN-QUESTIONS.md` (2026-08-29) records that §8's
-  "holds the trunk response" wording contradicts its own T_resp clause; this feature
-  depends only on §3/§7/§9 and is unaffected by how §8 is reworded.
+- **§8 ruling landed (2026-09-03)**: the 2026-08-29 `docs/OPEN-QUESTIONS.md` entry
+  recording that §8's old "holds the trunk response" wording contradicted its own
+  T_resp clause was ruled, and §8 now reads reply-or-`ERR_BUSY` within T_resp with no
+  response held open; this feature depends only on §3/§7/§9 and was unaffected
+  either way.

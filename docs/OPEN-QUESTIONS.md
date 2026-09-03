@@ -1,9 +1,14 @@
 # Open Questions
 
 Append-only log of spec ambiguities encountered during implementation, and
-their resolutions. Entries are dated and never edited or deleted. A
+their resolutions. Entries are dated and append-only. Exactly one in-place
+edit is part of the format: filling a `pending` **Ruling:** field with the
+decision it was waiting for (that is what the placeholder is for). Every
+other line of a landed entry is never edited or deleted; superseded text
+that a filled ruling replaces is quoted verbatim inside the ruling. A
 decision is changed by appending a new, superseding entry that references
-the entry it supersedes — never by editing history.
+the entry it supersedes — never by editing history. (Lifecycle written
+down 2026-09-03 per review on PR #122, the precedent-setting instance.)
 
 ## Entry format
 
@@ -1064,12 +1069,45 @@ so under that sentence a backplane wedged answering `ERR_BUSY` forever stays
 ENROLLED indefinitely, undetected by any bound in the document (proved by
 reading §7 as it stands; no accounting code exists yet — `link/` holds only
 `HealthState`, so there is no code divergence). T031/T039 implement against
-this text, so the question must be ruled before they land. §8 now marks the
-question explicitly open and decides neither direction.
+this text, so the question must be ruled before they land. To be precise
+about what §8 as amended does and does not settle (review round 3 on #122):
+it DOES decide the per-poll case — a single `ERR_BUSY` is a valid response,
+not a failed transaction, and via §7's "valid response" clause it would also
+rescue a SUSPECT node — and it marks only the PERSISTENCE bound as open.
 **Recommendation:** bound persistent busy explicitly in §7: N consecutive
 `ERR_BUSY` answers to the same outstanding request (spanning its retries)
 count as one failed transaction, so ordinary busy stays harmless while a
-wedged bridge still walks to SUSPECT. Alternative: an explicit sentence
-declaring persistent busy out of node-health scope and owned by L4.
+wedged bridge still walks to SUSPECT. LAYERING CONSEQUENCE the ruling must
+weigh (review round 3 on #122): §7's health accounting is L2, implemented in
+`link/` (T031 master, T039 HealthTracker), and the architecture invariant
+says `link/` never interprets payloads — but distinguishing an `ERR_BUSY`
+answer from any other response IS payload inspection, so this option needs
+either a narrow, explicitly-sanctioned carve-out (e.g. L4 feeds a
+busy/not-busy hint back to the tracker) or it violates L2/L3 opacity.
+Alternative with no layering conflict: an explicit sentence declaring
+persistent busy out of node-health scope and owned by L4 — which is already
+where §7 reports OFFLINE.
 **Ruling:** pending — human; blocks nothing until T031/T039.
-**Supersedes:** the §7-accounting scoping sentence first pushed on PR #122.
+**Supersedes:** none (the §7-accounting sentence this entry discusses was
+replaced within the still-unmerged PR #122, not by a landed entry).
+
+---
+
+## 2026-09-03 — specs/**/contracts/ are T3 artefacts no path gate treats as T3
+
+**Context:** review round 3 on PR #122 (MEDIUM). The pending text superseded on
+that PR said, verbatim, "`contracts/frame-vectors.md` is a T3 artefact; a human
+amends it" — but nothing enforces that: risk-score's T3 regex covers protocol/,
+tests/vectors/, .github/, CLAUDE.md, the named docs/*, .specify/memory/ and
+tools/mutate.cfg, while CODEOWNERS covers only `specs/**/tasks.md` under specs/.
+PR #122 scored T3 solely because it also touches docs/trunk-link-layer.md; an
+identical amendment to frame-vectors.md alone would score T0 and be eligible for
+autonomous merge under GOVERNANCE §1. The same gap was recorded for T030's
+`tests/support/**` slice (issue #48, now needs-human).
+**Recommendation:** extend the mechanical gates rather than relying on entry
+text: add `specs/**/contracts/`, `specs/**/data-model.md` and
+`specs/**/research.md` to CODEOWNERS and to risk-score's T3 regex (a T3 workflow
+change, its own CODEOWNERS-gated PR). Until then, contract amendments ride only
+in PRs that also touch an already-gated artefact, as this one does.
+**Ruling:** pending — human; the gate extension is a one-line T3 PR when ruled.
+**Supersedes:** none.
