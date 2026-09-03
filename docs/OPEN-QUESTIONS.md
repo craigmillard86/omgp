@@ -1033,3 +1033,35 @@ by verb, not by line count: read one line for FENC/FDEC, and read lines until `E
 never assume a 1:1 request:line ratio once frame verbs are mixed into a batch.
 **Ruling:** pending — travels with T025 (issue #43); no code in this PR is affected.
 **Supersedes:** none.
+
+---
+
+## 2026-09-03 — WIP cap widened to 2 stories, as an agent-config knob
+
+**Context:** the cap of 1 froze the pipeline whenever a single agent PR stalled:
+observed live — PR #118 (T037, auto-fix exhausted, needs-human) held the cap while
+#43 (T025, cleanly `ready`) starved; `pick` logged "WIP cap: agent PR awaiting
+review — not pulling". tasks.md anticipated the widening ("US4 … can run in
+parallel with US2/US3 by a second agent — but the WIP cap is one"), and the
+GOVERNANCE §6 cadence names the cap as the intended widening lever.
+**Options:** (1) keep 1 and clear stalls by hand each time; (2) cap 2, counting
+STORIES in flight — open agent-authored PRs ∪ claimed task issues, joined on the
+task/<n> head-branch convention so a story with both counts once, with
+needs-human PRs still counting (they are review load; pressure to resolve them
+stays real without freezing everything) and non-task/<n> agent branches counting
+fail-closed; (3) also exclude needs-human PRs from the count — maximises
+throughput but lets stalled PRs accumulate invisibly.
+**Known friction accepted with (2):** two concurrent PRs may both bump
+UNIT_TEST_FLOOR in pipeline.sh or append to this file; with strict up-to-date
+checks the second lands BEHIND and needs an update-branch, occasionally a trivial
+conflict — rebase noise, not a correctness risk.
+**Recommendation:** (2), as `wip_cap: 2` in .github/agent-config.yml (T3 constant;
+`1` restores the original behaviour and is the kill switch; an unreadable value
+fails closed to 1).
+**Ruling:** human, 2026-09-03 ("do it but also ask open questions", this session):
+option (2) adopted. Pick logic harness-covered for the first time (12 cases:
+cap counting, the both-halves dedupe, needs-human skipping, cap=1 equivalence,
+fail-closed parsing). GOVERNANCE §2's cap row updated; OPERATING-POLICY §2's
+"one item in flight" wording is a human-ruling artefact left for the
+maintainer's own hand (same precedent as the §4 loop table).
+**Supersedes:** none.

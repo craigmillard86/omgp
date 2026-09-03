@@ -41,7 +41,7 @@ issues, comments) — never as direct changes to main.
 | Autonomous merge ≤ T2 | merge only when the tier, the verdicts, every check and the changed paths all clear at ONE head; T3 and human-owned paths never | agent-merge workflow — the merge API call is pinned to that head's sha, so a push landing mid-run makes GitHub refuse (409) rather than merge an unreviewed head; `auto_merge_max_tier: -1` returns the click to a human |
 | Verdict-gated auto-approval ≤ T2 | approval only on a clean review (and, at T2, red-team) verdict for the exact head; stale bot approvals self-dismissed; fail-closed on any unresolved input | agent-approve workflow — `issue_comment` trigger, so the DEFAULT-BRANCH definition and inputs run and a PR cannot rewrite the gate in its own diff (ruling 2026-08-31; hardened per Copilot review on #103) |
 | Red team: PR attack on T2/T3 + monthly hostile-module protocol attack | falsification with runnable reproducers | red-team workflow (advisory; findings need evidence) |
-| WIP cap = 1 | review capacity governs autonomy | dispatch workflow |
+| WIP cap (`wip_cap` in .github/agent-config.yml, currently 2; stories in flight = open agent PRs ∪ claimed tasks, deduped per story; ruling 2026-09-03) | review capacity governs autonomy; `wip_cap: 1` restores single-slot | dispatch workflow |
 | `ready`-only pull | humans release all autonomous work | dispatch workflow |
 | Tool allow-lists + minimal permissions | agent blast radius | workflow definitions |
 | Timeouts + claim release | no runaway/stuck autonomy | workflow definitions |

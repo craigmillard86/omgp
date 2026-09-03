@@ -7,6 +7,11 @@
 # (2 not recommended until telemetry supports it). T3 is never releasable.
 auto_ready_max_tier: 1
 
+# Stories an agent may have in flight at once (open agent-authored PRs ∪ claimed
+# task issues, one story counted once; ruling 2026-09-03). 1 restores the original
+# single-slot behaviour and is the kill switch; unreadable values fail closed to 1.
+wip_cap: 2
+
 # Highest ACTUAL risk tier (risk-score label on the PR) at which a clean
 # machine-readable review verdict may satisfy the required PR approval for
 # agent-authored PRs (claude-review `approve` job; ruling 2026-08-31).

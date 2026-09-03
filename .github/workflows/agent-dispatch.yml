@@ -39,21 +39,36 @@ jobs:
     outputs:
       issue: ${{ steps.select.outputs.issue }}
     steps:
-      - name: Select next task (WIP cap 1, oldest ready first)
+      - uses: actions/checkout@v7
+        with: {sparse-checkout: .github, sparse-checkout-cone-mode: false}
+      - id: cfg
+        run: |
+          echo "cap=$(sed -n 's/^wip_cap: *//p' .github/agent-config.yml)" >> "$GITHUB_OUTPUT"
+      - name: Select next task (WIP cap from agent-config, oldest ready first)
         id: select
         uses: actions/github-script@v7
+        env:
+          WIP_CAP: ${{ steps.cfg.outputs.cap }}
         with:
           script: |
             const {owner, repo} = context.repo;
-            // WIP cap: any open agent PR, or any issue already claimed, blocks a new pull
-            const openPRs = await github.rest.pulls.list({owner, repo, state: 'open', per_page: 100});
-            if (openPRs.data.some(p => p.labels.some(l => l.name === 'agent-authored'))) {
-              core.notice('WIP cap: agent PR awaiting review — not pulling'); return;
-            }
-            const claimed = await github.rest.issues.listForRepo({
-              owner, repo, state: 'open', labels: 'task,in-progress', per_page: 10});
-            if (claimed.data.length) {
-              core.notice('WIP cap: a task is already in progress — not pulling'); return;
+            // WIP cap counts STORIES in flight (ruling 2026-09-03): open agent-authored
+            // PRs ∪ claimed task issues, joined on the task/<n> head-branch convention so
+            // a story with both counts once. needs-human PRs still count (review load);
+            // a non-task/<n> agent branch counts fail-closed. wip_cap: 1 in agent-config
+            // restores the original behaviour; an unreadable value fails closed to 1.
+            const rawCap = Number.parseInt(process.env.WIP_CAP || '', 10);
+            const cap = Number.isInteger(rawCap) && rawCap >= 1 ? rawCap : 1;
+            if (cap !== rawCap) core.notice('wip_cap unreadable — using 1 (fail closed)');
+            const openPRs = (await github.rest.pulls.list({owner, repo, state: 'open', per_page: 100})).data
+              .filter(p => p.labels.some(l => l.name === 'agent-authored'));
+            const claimed = (await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: 'task,in-progress', per_page: 100})).data;
+            const stories = new Set();
+            for (const p of openPRs) { const m = /^task\/(\d+)$/.exec(p.head.ref); stories.add(m ? `t${m[1]}` : `pr${p.number}`); }
+            for (const i of claimed) stories.add(`t${i.number}`);
+            if (stories.size >= cap) {
+              core.notice(`WIP cap: ${stories.size} story(ies) in flight >= wip_cap=${cap} — not pulling`); return;
             }
             // Oldest ready task = created first = tasks.md order = dependency order
             const ready = await github.rest.issues.listForRepo({
