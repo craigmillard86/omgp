@@ -39,7 +39,7 @@ frame dst=0x01 src=0x00 flags=0x00 seq=3 payload=0101000000
 |---|---|---|
 | `FENC <canonical frame line>` | fields | `OK <hex wire bytes>`, `ERR <Status>`, or `ERR BadRequest` (malformed text) |
 | `FDEC <hex wire bytes>` | one frame's bytes | `OK <canonical frame line>`, `ERR <Discard>` (first discard reason), or `ERR BadRequest` (malformed hex) |
-| `FSTREAM <hex stream>` | any byte stream | one `OK <canonical frame line>` per delivered frame, in order, then `END <discards>` |
+| `FSTREAM <hex stream>` | any byte stream | one `OK <canonical frame line>` per delivered frame, in order, then `END <discards>`; `ERR BadRequest` (malformed hex) instead of any output |
 
 `diffcheck.py --frames` uses `FENC`/`FDEC` on a seeded corpus of random valid frames
 (≥ 10 000: every dst/src in range, seq 0–15, flags, payload lengths 0–64 with 7E/7D-heavy
