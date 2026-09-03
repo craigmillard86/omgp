@@ -8,10 +8,16 @@ run_frames(helper, seed, count, only) / run_torture(helper, seed, only, frames, 
 `.ask(lines) -> list[str]` (FENC/FDEC: one line in, one line out) and
 `.ask_stream(lines) -> list[list[str]]` (FSTREAM: one line in, a variable-length block of
 response lines out, the caller's Helper.ask_stream splits on "END " terminators).
+
+Blind spot (stated per the working agreement; review on #121): the corpus is valid-only
+by construction and FSTREAM reports discards as a count, so the FENC refusal spellings
+(ERR PayloadTooLong/ReservedAddress) and per-reason FDEC discards get no differential
+coverage here — they are pinned by unit tests on each side, not by C++/Python agreement.
 """
 from __future__ import annotations
 
 import random
+import sys
 
 from _gen import P
 import canonical as C
@@ -21,7 +27,10 @@ import torture
 G = P()
 FRAME_COUNT = 10_000
 MAX_PAYLOAD = G.LIMIT_max_l3_payload
-_RESERVED_DST = 0xFF  # trunk §5: dst 0xFF is reserved; excluded from the valid-frame corpus
+# trunk §5: dst 0xFF is reserved; excluded from the valid-frame corpus. Imported from the
+# reference codec rather than restated (review on #121: this was the third independent
+# hardcoding — the YAML has no symbol for the L2 reserved dst, so link.py is the anchor).
+_RESERVED_DST = link._RESERVED_DST
 _VALID_DST = [d for d in range(0x100) if d != _RESERVED_DST]  # explicit, not a coincidental modulus
 _FRAME_SEED_XOR = 0xF12A5E
 _TORTURE_SEED_XOR = 0x70127E
@@ -58,6 +67,10 @@ def random_frame(rng: random.Random, index: int) -> link.Frame:
 
 
 def run_frames(helper, seed: int, count: int = FRAME_COUNT, only: int | None = None) -> int:
+    # Operator-facing replay path: a clean diagnostic beats an IndexError, and a negative
+    # index must not silently wrap to case count-1 while the report prints -1 (review #121).
+    if only is not None and not 0 <= only < count:
+        sys.exit(f"--frame-index must be 0..{count - 1}")
     rng = random.Random(seed ^ _FRAME_SEED_XOR)
     cases = [random_frame(rng, i) for i in range(count)]
     indices = [only] if only is not None else range(count)
@@ -72,7 +85,7 @@ def run_frames(helper, seed: int, count: int = FRAME_COUNT, only: int | None = N
     for (i, verb, req, want), got in zip(expect, answers):
         if got != want:
             print(f"diffcheck: FRAME MISMATCH (seed={seed:#x}, index={i})\n  {verb} {req}\n  C++   : {got}\n"
-                  f"  Python: {want}\n  replay: python3 tools/diffcheck.py --seed {seed:#x} --frame-index {i}")
+                  f"  Python: {want}\n  replay: python3 tools/diffcheck.py --frames-only --seed {seed:#x} --frame-index {i}")
             return -1
         if only is not None:
             print(f"  {verb} {req}\n  both: {got}")
@@ -82,6 +95,8 @@ def run_frames(helper, seed: int, count: int = FRAME_COUNT, only: int | None = N
 def run_torture(helper, seed: int, only: int | None = None, *, frames: int = 10_000,
                 per_class: int = 1_000) -> int:
     elements = list(torture.corpus(seed ^ _TORTURE_SEED_XOR, frames=frames, per_class=per_class))
+    if only is not None and not 0 <= only < len(elements):
+        sys.exit(f"--torture-index must be 0..{len(elements) - 1}")
     indices = [only] if only is not None else range(len(elements))
     requests = [f"FSTREAM {elements[i].stream.hex()}" for i in indices]
     blocks = helper.ask_stream(requests)
@@ -91,7 +106,7 @@ def run_torture(helper, seed: int, only: int | None = None, *, frames: int = 10_
         if block != want:
             print(f"diffcheck: TORTURE MISMATCH (seed={seed:#x}, index={i}, recipe={elem.recipe})\n"
                   f"  FSTREAM {elem.stream.hex()}\n  C++   : {block}\n  Python: {want}\n"
-                  f"  replay: python3 tools/diffcheck.py --seed {seed:#x} --torture-index {i}")
+                  f"  replay: python3 tools/diffcheck.py --frames-only --seed {seed:#x} --torture-index {i}")
             return -1
         if only is not None:
             print(f"  FSTREAM {elem.stream.hex()}\n  both: {block}")

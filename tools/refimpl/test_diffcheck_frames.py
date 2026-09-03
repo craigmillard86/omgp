@@ -64,6 +64,13 @@ class FakeHelper:
 
 # --- random_frame: coverage and validity (frame-vectors.md "l3_helper verbs") ---------------
 
+def test_frame_count_meets_the_contract_threshold():
+    # contracts/frame-vectors.md: "≥ 10 000 seeded frames". Without this pin, trimming
+    # FRAME_COUNT to speed the stage up passes every other test here (review on #121:
+    # coverage assertions stay green down to 256).
+    assert F.FRAME_COUNT >= 10_000
+
+
 def test_random_frame_covers_every_dst_src_and_seq_over_frame_count():
     rng = random.Random(SEED)
     frames = [F.random_frame(rng, i) for i in range(F.FRAME_COUNT)]

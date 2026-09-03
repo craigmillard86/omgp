@@ -41,7 +41,11 @@ import omgp_l3 as l3  # noqa: E402
 G = P()
 BIN = ROOT / "build" / "native"
 DEFAULT_SEED = 0xB0071E  # fixed seed: reproducible corpus
-CHUNK = 400  # requests in flight per pipe round trip (well under the 64 KiB pipe buffer)
+# Requests in flight per pipe round trip. NOT a pipe-buffer bound (review on #121: one
+# torture FSTREAM line reaches ~290 bytes, so a chunk can exceed the 64 KiB default pipe
+# buffer) — the always-running _pump reader thread is what prevents write-side deadlock;
+# the chunk size only bounds memory and batching latency.
+CHUNK = 400
 # A block that is still open after a protocol violation (a line that is neither "OK " nor
 # "END ") waits this long for the "END " that a well-formed FSTREAM response always sends
 # next (tools/canonical.cpp fstream_response()/fstream_lines(): both lines are flushed by
@@ -285,6 +289,9 @@ def main(argv=None) -> int:
     # contracts/tooling.md "tools/diffcheck.py --frames": the frame + torture corpora
     # already run by default (below); --frames is the explicit spelling for scripts that
     # want to say so, --frames-only restricts a local iteration run to just those two.
+    # The no-op is pinned by test_tooling's `--frames-only --frames` invocation (review on
+    # #121): moving the corpora behind an opt-in must revisit that test, not silently
+    # strand this flag.
     ap.add_argument("--frames", action="store_true", help="include the frame + torture corpora (default)")
     ap.add_argument("--frames-only", action="store_true", help="run only the frame + torture corpora")
     ap.add_argument("--frame-index", type=int, default=None, help="replay one frame (FENC/FDEC) case")

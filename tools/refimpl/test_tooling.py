@@ -58,10 +58,18 @@ def test_diffcheck_frames_only_discloses_its_blind_spot():
     # or different build is used as-is, same as every other consumer of build/native/.
     if not L3_HELPER.exists():
         pytest.skip(f"{L3_HELPER} not built (run ./pipeline.sh build first, or the full pipeline)")
-    r = subprocess.run([sys.executable, str(DIFFCHECK), "--frames-only"], capture_output=True, text=True,
-                       cwd=ROOT, timeout=120)
+    # `--frames` is passed alongside `--frames-only` deliberately (review on #121): the
+    # flag is a documented no-op today (frames run by default), and this pins that passing
+    # it stays harmless — if the corpora ever move behind an opt-in, this invocation is the
+    # first thing that must keep working.
+    r = subprocess.run([sys.executable, str(DIFFCHECK), "--frames-only", "--frames"], capture_output=True,
+                       text=True, cwd=ROOT, timeout=120)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "blind spot" in r.stdout and "descriptor" in r.stdout
+    # T025 criterion pinned (review on #121): the summary line carries the frame and
+    # torture counts — dropping or renaming either field must fail here, not regress
+    # silently with the stage still exiting 0.
+    assert "frames " in r.stdout and "torture " in r.stdout, r.stdout
 
 
 def test_mutate_cfg_parses_and_pins():
