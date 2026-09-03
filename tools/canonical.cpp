@@ -4,9 +4,12 @@
 
 #include "l3/l3_header.hpp"
 #include "l3/l3_payload.hpp"
+#include "link/frame.hpp"
 #include "omgp_names.h"
 #include "omgp_protocol.h"
 
+#include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -59,11 +62,43 @@ bool lookup_name(const names::Entry (&table)[N], const std::string& tok, unsigne
 }
 
 bool parse_uint(const std::string& tok, unsigned& v) {
-    if (tok.empty())
+    // strtoul silently accepts a leading '-' and negates (so "-0" parses as 0, and any other
+    // negative token only fails downstream because unsigned long happens to be wider than
+    // unsigned on this host) — reject the sign up front so rejection is a property of the
+    // grammar, not of the host's integer widths (review @ 641ee1e). A leading '+' is not
+    // rejected: the Python reference's int(tok, 0) accepts it (int('+5', 0) == 5), and
+    // pre-PR strtoul(..., 0) did too — rejecting it here would be a new C++/Python
+    // divergence, not a fix (red-team @ 65922b5).
+    if (tok.empty() || tok[0] == '-')
+        return false;
+    // strtoul(..., 0) treats a leading '0' followed by more digits as legacy C octal (e.g.
+    // "010" -> 8), but the Python reference's int(tok, 0) rejects that outright — Python 3
+    // dropped implicit octal and requires an explicit "0o" prefix. Reject the leading-zero
+    // decimal shape here so a canonical-text token that names one value cannot silently
+    // encode a different one (red-team @ 72d3072). "0"/"00"/... (all zero digits) still
+    // parse as 0, matching both sides; only a leading zero followed by a *nonzero* digit is
+    // refused. This is not full parity with int(tok, 0): the "0o"/"0b" and "1_0" forms
+    // Python accepts are still rejected here (strtoul has no such syntax), and that gap is
+    // pre-existing, not introduced by this guard.
+    // The digit scan starts after an optional leading '+' (accepted above): keying the guard
+    // on tok[0] == '0' alone let "+010" skip it entirely and still reach strtoul's octal
+    // reinterpretation (review @ 22f601a) — the exact hazard this guard exists to close, just
+    // one character later in the token.
+    const size_t digits_start = (tok[0] == '+') ? 1 : 0;
+    if (tok.size() > digits_start + 1 && tok[digits_start] == '0' && tok[digits_start + 1] != 'x' &&
+        tok[digits_start + 1] != 'X' &&
+        tok.find_first_not_of('0', digits_start) != std::string::npos)
         return false;
     char* end = nullptr;
+    errno = 0;
     const unsigned long x = std::strtoul(tok.c_str(), &end, 0);
     if (end == nullptr || *end != '\0')
+        return false;
+    // strtoul saturates to ULONG_MAX (with errno == ERANGE) above its own range, and on an
+    // LP64 host (unsigned long wider than unsigned) silently accepts values above UINT_MAX
+    // that would truncate on the cast below — reject both here so a range check downstream
+    // never sees a value the input text didn't name (review @ d30ef1c).
+    if (errno == ERANGE || x > UINT_MAX)
         return false;
     v = static_cast<unsigned>(x);
     return true;
@@ -526,6 +561,140 @@ bool encode_status(const std::string& canonical, std::vector<uint8_t>& out, std:
     out.resize(n);
     error.clear();
     return true;
+}
+
+// ================================================================================================
+// Frames (spec 002 US1, T023). Mirrors the frame half of tools/refimpl/canonical.py; the line
+// grammar is contracts/frame-vectors.md "Canonical frame line".
+// ================================================================================================
+
+std::string render_frame(const omgp::link::FrameFields& f) {
+    const unsigned flags = (f.response ? 0x01u : 0u) | (f.retry ? 0x02u : 0u);
+    return "frame dst=" + hex2(f.dst) + " src=" + hex2(f.src) + " flags=" + hex2(flags) +
+           " seq=" + dec(f.seq) + " payload=" + hex_lower(f.payload, f.len);
+}
+
+bool parse_frame_line(const std::string& canonical, omgp::link::FrameFields& out,
+                      std::vector<uint8_t>& payload_storage, std::string& error) {
+    const size_t sp = canonical.find(' ');
+    const std::string prefix = canonical.substr(0, sp);
+    Tokens t;
+    unsigned dst = 0, src = 0, flags = 0, seq = 0;
+    std::vector<uint8_t> payload;
+    // payload.size() > LIMIT_max_l3_payload is left for encode_frame's own PayloadTooLong
+    // check below; only >0xFF (which out.len, a uint8_t, cannot represent at all) is
+    // rejected here as malformed text.
+    // flags' real domain is 0x00-0x03: trunk §4's ctrl byte is bit0=response, bit1=retry,
+    // bits2-3=reserved 0, bits4-7=seq (supplied separately by the `seq=` field above), so
+    // anything above 0x03 is a caller passing a whole ctrl byte here, not a valid flags
+    // value — reject it rather than silently masking to a different, valid request
+    // (review @ a95b531).
+    if (prefix != "frame" || sp == std::string::npos || !tokenize(canonical.substr(sp + 1), t) ||
+        !t.take_uint("dst", dst) || !t.take_uint("src", src) || !t.take_uint("flags", flags) ||
+        !t.take_uint("seq", seq) || !t.take_hex("payload", payload) || !t.kv.empty() ||
+        dst > 0xFF || src > 0xFF || flags > 0x03 || seq > 0x0F || payload.size() > 0xFF) {
+        error = "ERR BadRequest";
+        return false;
+    }
+    payload_storage = std::move(payload);
+    out.dst = static_cast<uint8_t>(dst);
+    out.src = static_cast<uint8_t>(src);
+    out.response = (flags & 0x01u) != 0;
+    out.retry = (flags & 0x02u) != 0;
+    out.seq = static_cast<uint8_t>(seq);
+    out.len = static_cast<uint8_t>(payload_storage.size());
+    out.payload = payload_storage.data();
+    error.clear();
+    return true;
+}
+
+std::string discard_line(omgp::link::Discard d) {
+    using omgp::link::Discard;
+    switch (d) {
+    case Discard::BadCrc:
+        return "ERR BadCrc";
+    case Discard::BadLength:
+        return "ERR BadLength";
+    case Discard::BadEscape:
+        return "ERR BadEscape";
+    case Discard::TooLong:
+        return "ERR TooLong";
+    case Discard::ReservedAddress:
+        return "ERR ReservedAddress";
+    case Discard::COUNT:
+        break;
+    }
+    return "ERR ?"; // unreachable for valid enumerators; keeps -Wreturn-type quiet everywhere
+}
+
+std::string link_status_line(omgp::link::Status s) {
+    return std::string("ERR ") + omgp::link::status_name(s);
+}
+
+bool encode_frame_line(const std::string& canonical, std::vector<uint8_t>& out,
+                       std::string& error) {
+    omgp::link::FrameFields f{};
+    std::vector<uint8_t> payload;
+    if (!parse_frame_line(canonical, f, payload, error))
+        return false;
+    uint8_t wire[omgp::link::kMaxWire];
+    size_t written = 0;
+    const omgp::link::Status st = omgp::link::encode_frame(f, wire, sizeof wire, written);
+    if (st != omgp::link::Status::Ok) {
+        error = link_status_line(st);
+        return false;
+    }
+    out.assign(wire, wire + written);
+    error.clear();
+    return true;
+}
+
+std::string fdec_line(const uint8_t* data, size_t len) {
+    omgp::link::Deframer d;
+    omgp::link::FrameView view{};
+    omgp::link::DeframerStats before = d.stats();
+    for (size_t i = 0; i < len; ++i) {
+        if (d.feed(data[i], view))
+            return "OK " + render_frame(view.f);
+        const omgp::link::DeframerStats& after = d.stats();
+        for (size_t r = 0; r < static_cast<size_t>(omgp::link::Discard::COUNT); ++r) {
+            if (after.discarded[r] != before.discarded[r])
+                return discard_line(static_cast<omgp::link::Discard>(r));
+        }
+        before = after;
+    }
+    return "ERR BadRequest"; // bytes ran out with no frame delivered and no discard counted
+}
+
+std::string fstream_lines(const uint8_t* data, size_t len) {
+    omgp::link::Deframer d;
+    omgp::link::FrameView view{};
+    std::string out;
+    for (size_t i = 0; i < len; ++i) {
+        if (d.feed(data[i], view))
+            out += "OK " + render_frame(view.f) + "\n";
+    }
+    const omgp::link::DeframerStats& stats = d.stats();
+    uint32_t discards = 0;
+    for (size_t r = 0; r < static_cast<size_t>(omgp::link::Discard::COUNT); ++r)
+        discards += stats.discarded[r];
+    out += "END " + dec(discards);
+    return out;
+}
+
+std::string fenc_response(const std::string& canonical) {
+    std::vector<uint8_t> out;
+    std::string error;
+    if (!encode_frame_line(canonical, out, error))
+        return error;
+    return "OK " + hex_lower(out.data(), out.size());
+}
+
+std::string fstream_response(const std::string& hex) {
+    std::vector<uint8_t> bytes;
+    if (!parse_hex(hex, bytes))
+        return "ERR BadRequest\nEND 0";
+    return fstream_lines(bytes.data(), bytes.size());
 }
 
 } // namespace canon

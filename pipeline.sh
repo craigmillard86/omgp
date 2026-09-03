@@ -59,7 +59,8 @@ stage_build() {
       g++ ${CXXFLAGS_BOOT/-Werror/} -Ithird_party/catch2 -c third_party/catch2/catch_amalgamated.cpp -o "$BIN/catch2.o"
     fi
     local support l3srcs linksrcs t name
-    support="$(ls tests/support/*.cpp) tools/canonical.cpp"   # canonical.cpp: host-only, used by tests + l3_helper
+    # canonical.cpp/l3_helper_dispatch.cpp: host-only, used by tests + l3_helper
+    support="$(ls tests/support/*.cpp) tools/canonical.cpp tools/l3_helper_dispatch.cpp"
     l3srcs=$(ls l3/*.cpp 2>/dev/null || true)
     linksrcs=$(ls link/*.cpp 2>/dev/null || true)
     # One binary per tests/unit/test_*.cpp and tests/property/test_*.cpp. test_smoke keeps its
@@ -75,7 +76,8 @@ stage_build() {
       fi
     done
     g++ $CXXFLAGS_BOOT tools/crc_helper.cpp -o "$BIN/crc_helper"
-    g++ $CXXFLAGS_BOOT -I. -Il3 -Itools tools/l3_helper.cpp tools/canonical.cpp $l3srcs $linksrcs -o "$BIN/l3_helper"
+    g++ $CXXFLAGS_BOOT -I. -Il3 -Itools tools/l3_helper.cpp tools/l3_helper_dispatch.cpp \
+      tools/canonical.cpp $l3srcs $linksrcs -o "$BIN/l3_helper"
   fi
 }
 

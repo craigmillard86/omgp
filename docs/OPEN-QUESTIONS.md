@@ -944,3 +944,92 @@ often the bound is hit is to read PR labels by hand.
 **Supersedes:** the two-attempt bound in the 2026-09-02 review-fix ruling; nothing else in
 that entry changes.
 
+## 2026-09-03 — Frame line out-of-range fields: C++ rejects, Python reference masks/accepts
+
+**Context:** review on PR #116 (T023, @ d30ef1c) flagged that `tools/canonical.cpp`'s
+`parse_frame_line` rejects out-of-range `dst`/`src`/`flags`/`seq`/`payload` tokens as `ERR
+BadRequest`, while `tools/refimpl/canonical.py`'s `canonical_to_frame` accepts the same tokens
+and either masks them (`omgp_link.py:97`, `dst`/`src`/`seq`) or raises a Python exception with
+no canonical rendering. Three concrete cases: `seq=16` -> C++ `ERR BadRequest`, Python masks to
+`seq=0` and returns `OK`; a 256-byte `payload=` -> C++ `ERR BadRequest`, Python `ERR
+PayloadTooLong` — inverting the PR body's own stated intent that above-limit payloads keep
+their contract spelling instead of collapsing into `BadRequest` (true for 65-255 bytes, false
+at exactly 256); `dst=0x100` -> C++ `ERR BadRequest`, Python raises `ValueError` (neither
+`CanonicalError` nor `FrameError`, so `canonical.py:293`'s error mapper has nothing to render).
+`contracts/frame-vectors.md` does not define behaviour for out-of-range frame-line fields at
+all, so neither side contradicts the contract — they contradict each other, and nothing pins
+which is normative before `tools/diffcheck.py --frames` (T025, issue #43) compares them
+line-for-line.
+**Recommendation:** the C++ side (reject as `ERR BadRequest`) becomes normative, and the Python
+reference is brought in line with it as part of T025: rejecting malformed/out-of-range text
+before it reaches the codec is the stricter, fail-closed behaviour, matches this task's existing
+choice to reject rather than mask (`tools/canonical.cpp` comment above `parse_frame_line`), and
+keeps a caller error from silently being reinterpreted as a different, valid request.
+**Ruling:** pending — human, to land with T025 (`diffcheck.py --frames`, issue #43).
+**Supersedes:** none.
+
+## 2026-09-03 — l3_helper frame verbs: three error shapes outside the frame-vectors contract vocabulary
+
+**Context:** review on PR #116 (T023, @ d30ef1c) flagged that `contracts/frame-vectors.md`
+defines exactly two error shapes (`ERR <Status>` for FENC, `ERR <Discard>` for FDEC) and, for
+FSTREAM, zero or more `OK <canonical frame line>` lines followed by one `END <discards>` line —
+but the code emits `ERR BadRequest` from three places neither the contract nor
+`tools/refimpl/canonical.py`'s `frame_error_to_canonical` has a counterpart for: `fdec_line`
+(malformed/truncated input with no discard counted), `fenc_response` (malformed canonical text
+ahead of `encode_frame_line`), and `fstream_response` (malformed hex, terminated with `END 0`
+per the prior review-fix pass on this PR). The `END 0` termination itself is correct and
+uncontested; the gap is that no artefact records `ERR BadRequest` as part of any of these three
+verbs' vocabulary, so a future differential test has nothing to check FDEC's truncated-input
+path against.
+**Recommendation:** amend `contracts/frame-vectors.md` to name `ERR BadRequest` explicitly as
+the malformed-input-text response for FENC, FDEC and FSTREAM, distinct from a codec-level `ERR
+<Status>`/`ERR <Discard>` refusal of well-formed-but-invalid input, and add a
+`frame_error_to_canonical`-equivalent mapping on the Python side. No behaviour change implied —
+this documents what the code already does.
+**Ruling:** pending — `contracts/frame-vectors.md` is a T3 artefact; a human amends it (or rules
+otherwise), with T025.
+**Supersedes:** none.
+
+## 2026-09-03 — Correction: the Python reference does not mask `dst`/`src`, only `seq`
+
+**Context:** review on PR #116 (@ 641ee1e) flagged that the "Frame line out-of-range fields"
+entry above (2026-09-03) misstates what `tools/refimpl/omgp_link.py`'s `encode_frame` does with
+out-of-range `dst`/`src`: it says the Python side "masks them (`omgp_link.py:97`, `dst`/`src`/
+`seq`)", but line 97 (`ctrl = ... | ((f.seq & 0x0F) << 4)`) only masks `seq`. `dst` and `src` are
+never masked — they go straight into `bytes([f.dst, f.src, ctrl, len(f.payload)])`, which raises
+`ValueError` for anything outside 0-255 — exactly what the same entry's own `dst=0x100` example
+already said two sentences later, so the entry contradicted itself on its central claim. Per
+CLAUDE.md's append-only rule for this file, the error is corrected here rather than by editing
+the original entry's text.
+**Why it matters:** left uncorrected, a human ruling T025 from that entry could read "Python
+masks `dst`/`src`" and choose masking as the normative behaviour for both sides. `dst=0x100`
+would then silently become `dst=0x00` instead of being rejected — a frame addressed to the wrong
+node accepted instead of the caller's malformed request being refused.
+**Recommendation:** when ruling on the superseded entry's question, treat only `seq` as
+masked by the Python reference; `dst`/`src` out-of-range is a raised `ValueError` with no
+canonical rendering on that side, same as the entry's `dst=0x100` example.
+**Ruling:** pending — travels with the superseded entry's own ruling at T025.
+**Supersedes:** 2026-09-03 — Frame line out-of-range fields: C++ rejects, Python reference
+masks/accepts (corrects its "masks them ... `dst`/`src`/`seq`" sentence only; every other claim
+in that entry stands).
+
+## 2026-09-03 — FSTREAM's multi-line response will desynchronise a naive T025 driver
+
+**Context:** red-team pass on PR #116 (T023, @ 65922b5) ran `tools/diffcheck.py`'s own `Helper`
+class (`Helper.ask()` reads exactly one line per request, `tools/diffcheck.py:49-63`) against
+`build/native/l3_helper` as an early preview of what T025 (`diffcheck.py --frames`, issue #43)
+will do. FSTREAM is the first verb in this task to emit more than one line (zero or more `OK
+<frame>` lines then one `END <discards>` line, per `contracts/frame-vectors.md`); batching an
+FSTREAM request alongside later requests through `Helper.ask()` shifts every later answer by one
+line with no exception raised, so the differential silently compares the wrong pairs instead of
+failing. Concretely: `["FSTREAM <hex>", "CRC 01020304", "CRC 05060708"]` returns the FSTREAM
+line, then `END 0` where `CRC 01020304`'s answer belongs, and the `CRC 05060708` answer is left
+unread in the pipe for whatever request comes next. Nothing in this PR or in `diffcheck.py`
+today is affected — `diffcheck.py` does not yet call FENC/FDEC/FSTREAM at all (that's T025's own
+job), so this is a trap laid for that future driver, not a live break, and out of this task's
+declared scope (`tools/canonical.{hpp,cpp}`, `tools/l3_helper.cpp`).
+**Recommendation:** T025's `Helper` (or its own request driver) must read frame-verb responses
+by verb, not by line count: read one line for FENC/FDEC, and read lines until `END` for FSTREAM,
+never assume a 1:1 request:line ratio once frame verbs are mixed into a batch.
+**Ruling:** pending — travels with T025 (issue #43); no code in this PR is affected.
+**Supersedes:** none.

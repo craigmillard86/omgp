@@ -53,6 +53,12 @@ add_library(omgp_canon STATIC tools/canonical.cpp)
 target_include_directories(omgp_canon PUBLIC tools)
 target_link_libraries(omgp_canon PUBLIC omgp_l3 omgp_link)
 
+# --- l3_helper's verb table, split out so its dispatch is unit testable (test_l3_helper_dispatch)
+#     without spawning the built binary ---
+add_library(omgp_l3_helper STATIC tools/l3_helper_dispatch.cpp)
+target_include_directories(omgp_l3_helper PUBLIC tools)
+target_link_libraries(omgp_l3_helper PUBLIC omgp_canon omgp_link)
+
 # --- fuzz targets (clang only; `fuzz` preset) — the rest of the tree is skipped there so a
 #     fuzz build stays fast and never needs the Catch2 object ---
 if(OMGP_FUZZ)
@@ -74,6 +80,10 @@ omgp_add_catch_test(test_l3_roundtrip tests/property/test_l3_roundtrip.cpp)
 omgp_add_catch_test(test_link_interfaces tests/unit/test_link_interfaces.cpp)
 omgp_add_catch_test(test_link_types tests/unit/test_link_types.cpp)
 omgp_add_catch_test(test_link_frame tests/unit/test_link_frame.cpp)
+omgp_add_catch_test(test_canonical_frame tests/unit/test_canonical_frame.cpp)
+target_link_libraries(test_canonical_frame PRIVATE omgp_canon)
+omgp_add_catch_test(test_l3_helper_dispatch tests/unit/test_l3_helper_dispatch.cpp)
+target_link_libraries(test_l3_helper_dispatch PRIVATE omgp_l3_helper)
 omgp_add_catch_test(test_link_stuffing tests/property/test_link_stuffing.cpp)
 omgp_add_catch_test(test_link_resync tests/property/test_link_resync.cpp)
 omgp_add_catch_test(test_mock_wire tests/unit/test_mock_wire.cpp)
@@ -81,4 +91,4 @@ omgp_add_catch_test(test_mock_wire tests/unit/test_mock_wire.cpp)
 # --- host-only tools ---
 add_executable(crc_helper tools/crc_helper.cpp)
 add_executable(l3_helper tools/l3_helper.cpp)
-target_link_libraries(l3_helper PRIVATE omgp_canon omgp_link)
+target_link_libraries(l3_helper PRIVATE omgp_l3_helper)
