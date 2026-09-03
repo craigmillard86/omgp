@@ -53,8 +53,9 @@ def test_diffcheck_frames_only_discloses_its_blind_spot():
     # Otherwise-hermetic (no other test in this file needs a native build): skip honestly
     # rather than fail when build/native/l3_helper hasn't been built yet, so
     # `python -m pytest tools/refimpl/` stays runnable standalone on a fresh checkout
-    # (CLAUDE.md: "python -m pytest tools/refimpl/" is documented as a standalone command)
-    # and this test never validates a stale binary left over from an earlier build.
+    # (CLAUDE.md: "python -m pytest tools/refimpl/" is documented as a standalone command).
+    # This is an existence check, not a freshness one: a binary left over from an earlier
+    # or different build is used as-is, same as every other consumer of build/native/.
     if not L3_HELPER.exists():
         pytest.skip(f"{L3_HELPER} not built (run ./pipeline.sh build first, or the full pipeline)")
     r = subprocess.run([sys.executable, str(DIFFCHECK), "--frames-only"], capture_output=True, text=True,

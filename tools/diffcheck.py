@@ -22,9 +22,11 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import queue
 import random
 import subprocess
 import sys
+import threading
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -40,67 +42,81 @@ G = P()
 BIN = ROOT / "build" / "native"
 DEFAULT_SEED = 0xB0071E  # fixed seed: reproducible corpus
 CHUNK = 400  # requests in flight per pipe round trip (well under the 64 KiB pipe buffer)
+# A block that is still open after a protocol violation (a line that is neither "OK " nor
+# "END ") waits this long for the "END " that a well-formed FSTREAM response always sends
+# next (tools/canonical.cpp fstream_response()/fstream_lines(): both lines are flushed by
+# l3_helper.cpp in a single write, so they are already sitting in the pipe and arrive well
+# inside this bound). A helper that is alive but will genuinely never answer again (e.g. its
+# FSTREAM handling was dropped and dispatch fell through to the bare "ERR BadRequest"
+# fallback) stalls this long once, then the truncated block is reported instead of hanging.
+_STALL_TIMEOUT = 2.0
 
 
 class Helper:
-    """One l3_helper process; requests are streamed in while a reader thread drains the
-    answers, so neither pipe can fill and deadlock (descriptor lines run to several KB)."""
+    """One l3_helper process. A single pump thread continuously drains stdout into a queue
+    for the process's whole lifetime, so stdin writes (from ask()/ask_stream(), on whichever
+    thread calls them) never block on a full stdout pipe (descriptor lines run to several
+    KB)."""
 
     def __init__(self, path: pathlib.Path):
         if not path.exists():
             sys.exit(f"diffcheck: build the native preset first ({path.name} missing)")
         self.p = subprocess.Popen([str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
                                   bufsize=1)
+        self._lines: queue.Queue[str | None] = queue.Queue()
+        self._eof = False
+        threading.Thread(target=self._pump, daemon=True).start()
 
-    def ask(self, lines: list[str]) -> list[str]:
-        import threading
+    def _pump(self):
+        for line in iter(self.p.stdout.readline, ""):
+            self._lines.put(line.rstrip("\n"))
+        self._lines.put(None)  # EOF: stdout closed (process exited), sent exactly once
 
-        out: list[str] = []
+    def _next_line(self, timeout: float | None = None) -> str | None:
+        """A line, or None for EOF. Once EOF is seen it is remembered locally: the single
+        sentinel in the queue must not be consumed by one caller and hidden from the rest of
+        a batch still in flight."""
+        if self._eof:
+            return None
+        ln = self._lines.get(timeout=timeout)  # queue.Empty propagates to the caller
+        if ln is None:
+            self._eof = True
+        return ln
 
-        def reader():
-            for _ in lines:
-                out.append(self.p.stdout.readline().rstrip("\n"))
-
-        t = threading.Thread(target=reader, daemon=True)
-        t.start()
+    def _write(self, lines: list[str]) -> None:
         for i in range(0, len(lines), CHUNK):
             self.p.stdin.write("".join(l + "\n" for l in lines[i:i + CHUNK]))
             self.p.stdin.flush()
-        t.join()
-        return out
+
+    def ask(self, lines: list[str]) -> list[str]:
+        self._write(lines)
+        return [self._next_line() or "" for _ in lines]
 
     def ask_stream(self, lines: list[str]) -> list[list[str]]:
         """Like ask(), but each line is a FSTREAM request whose response is a
         variable-length block of "OK <frame>" lines terminated by one "END <n>" line
         (contracts/frame-vectors.md); the reader groups lines per request by that
         terminator instead of assuming one line per request."""
-        import threading
-
+        self._write(lines)
         out: list[list[str]] = []
-
-        def reader():
-            for _ in lines:
-                block: list[str] = []
-                while True:
-                    ln = self.p.stdout.readline().rstrip("\n")
-                    if not ln:  # EOF: helper died mid-block: stop, let the caller
-                        break   # report the truncated block as a mismatch instead of spinning
-                    block.append(ln)
-                    if not ln.startswith("OK "):
-                        # "END <n>" (normal terminator) or any other line (the helper
-                        # answered something other than the FSTREAM block it promised,
-                        # e.g. "ERR BadRequest" with no END): stop now rather than block
-                        # on a live but stuck process waiting for more output that a
-                        # protocol violation on its side will never produce.
-                        break
-                out.append(block)
-
-        t = threading.Thread(target=reader, daemon=True)
-        t.start()
-        for i in range(0, len(lines), CHUNK):
-            self.p.stdin.write("".join(l + "\n" for l in lines[i:i + CHUNK]))
-            self.p.stdin.flush()
-        t.join()
+        for _ in lines:
+            block: list[str] = []
+            while True:
+                # First line of a block, or still inside a normal "OK "-line run: no
+                # timeout, since the helper may legitimately take a while to answer.
+                # After a protocol violation (anything else), bound the wait for the "END
+                # " a well-formed response always sends next instead of blocking forever.
+                stalled = bool(block) and not block[-1].startswith("OK ")
+                try:
+                    ln = self._next_line(timeout=_STALL_TIMEOUT if stalled else None)
+                except queue.Empty:
+                    break  # alive but silent after a protocol violation: truncated block
+                if ln is None:
+                    break  # EOF: helper died mid-block
+                block.append(ln)
+                if ln.startswith("END "):
+                    break
+            out.append(block)
         return out
 
     def close(self):
