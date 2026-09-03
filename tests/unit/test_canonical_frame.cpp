@@ -154,6 +154,20 @@ TEST_CASE("parse_frame_line rejects dst/src/payload just above their field width
     REQUIRE(error == "ERR BadRequest");
 }
 
+// parse_uint must not reject a leading '+': the Python reference's int(tok, 0) accepts it
+// (int('+1', 0) == 1) and so did this C++ side before the sign guard landed. Rejecting it would
+// be a *new* C++/Python divergence on every verb that shares parse_uint (ENC/DENC/DVAL, not
+// just frame fields) — the opposite of what the sign guard was added for (red-team @ 65922b5).
+TEST_CASE("parse_frame_line accepts a leading '+' on a field, matching the Python reference",
+          "[frame]") {
+    FrameFields f{};
+    std::vector<uint8_t> payload;
+    std::string error;
+    const std::string text = "frame dst=+1 src=0x00 flags=0x00 seq=0 payload=";
+    REQUIRE(omgp::canon::parse_frame_line(text, f, payload, error));
+    REQUIRE(f.dst == 0x01);
+}
+
 // --- encode_frame_line (FENC) refusals: codec status, not BadRequest ------------------------
 
 TEST_CASE("encode_frame_line surfaces encode_frame's own refusal spellings", "[frame]") {

@@ -65,15 +65,21 @@ bool parse_uint(const std::string& tok, unsigned& v) {
     // strtoul silently accepts a leading '-' and negates (so "-0" parses as 0, and any other
     // negative token only fails downstream because unsigned long happens to be wider than
     // unsigned on this host) — reject the sign up front so rejection is a property of the
-    // grammar, not of the host's integer widths (review @ 641ee1e).
-    if (tok.empty() || tok[0] == '-' || tok[0] == '+')
+    // grammar, not of the host's integer widths (review @ 641ee1e). A leading '+' is not
+    // rejected: the Python reference's int(tok, 0) accepts it (int('+5', 0) == 5), and
+    // pre-PR strtoul(..., 0) did too — rejecting it here would be a new C++/Python
+    // divergence, not a fix (red-team @ 65922b5).
+    if (tok.empty() || tok[0] == '-')
         return false;
     // strtoul(..., 0) treats a leading '0' followed by more digits as legacy C octal (e.g.
     // "010" -> 8), but the Python reference's int(tok, 0) rejects that outright — Python 3
-    // dropped implicit octal and requires an explicit "0o" prefix. Reject the same shape here
-    // so a canonical-text token that names one value cannot silently encode a different one
-    // (red-team @ 72d3072). "0"/"00"/... (all zero digits) still parse as 0, matching both
-    // sides; only a leading zero followed by a *nonzero* digit is refused.
+    // dropped implicit octal and requires an explicit "0o" prefix. Reject the leading-zero
+    // decimal shape here so a canonical-text token that names one value cannot silently
+    // encode a different one (red-team @ 72d3072). "0"/"00"/... (all zero digits) still
+    // parse as 0, matching both sides; only a leading zero followed by a *nonzero* digit is
+    // refused. This is not full parity with int(tok, 0): the "0o"/"0b" and "1_0" forms
+    // Python accepts are still rejected here (strtoul has no such syntax), and that gap is
+    // pre-existing, not introduced by this guard.
     if (tok.size() > 1 && tok[0] == '0' && tok[1] != 'x' && tok[1] != 'X' &&
         tok.find_first_not_of('0') != std::string::npos)
         return false;

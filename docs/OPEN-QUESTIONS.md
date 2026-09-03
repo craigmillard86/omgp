@@ -1012,3 +1012,24 @@ canonical rendering on that side, same as the entry's `dst=0x100` example.
 **Supersedes:** 2026-09-03 — Frame line out-of-range fields: C++ rejects, Python reference
 masks/accepts (corrects its "masks them ... `dst`/`src`/`seq`" sentence only; every other claim
 in that entry stands).
+
+## 2026-09-03 — FSTREAM's multi-line response will desynchronise a naive T025 driver
+
+**Context:** red-team pass on PR #116 (T023, @ 65922b5) ran `tools/diffcheck.py`'s own `Helper`
+class (`Helper.ask()` reads exactly one line per request, `tools/diffcheck.py:49-63`) against
+`build/native/l3_helper` as an early preview of what T025 (`diffcheck.py --frames`, issue #43)
+will do. FSTREAM is the first verb in this task to emit more than one line (zero or more `OK
+<frame>` lines then one `END <discards>` line, per `contracts/frame-vectors.md`); batching an
+FSTREAM request alongside later requests through `Helper.ask()` shifts every later answer by one
+line with no exception raised, so the differential silently compares the wrong pairs instead of
+failing. Concretely: `["FSTREAM <hex>", "CRC 01020304", "CRC 05060708"]` returns the FSTREAM
+line, then `END 0` where `CRC 01020304`'s answer belongs, and the `CRC 05060708` answer is left
+unread in the pipe for whatever request comes next. Nothing in this PR or in `diffcheck.py`
+today is affected — `diffcheck.py` does not yet call FENC/FDEC/FSTREAM at all (that's T025's own
+job), so this is a trap laid for that future driver, not a live break, and out of this task's
+declared scope (`tools/canonical.{hpp,cpp}`, `tools/l3_helper.cpp`).
+**Recommendation:** T025's `Helper` (or its own request driver) must read frame-verb responses
+by verb, not by line count: read one line for FENC/FDEC, and read lines until `END` for FSTREAM,
+never assume a 1:1 request:line ratio once frame verbs are mixed into a batch.
+**Ruling:** pending — travels with T025 (issue #43); no code in this PR is affected.
+**Supersedes:** none.
