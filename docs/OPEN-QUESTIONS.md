@@ -1,9 +1,17 @@
 # Open Questions
 
 Append-only log of spec ambiguities encountered during implementation, and
-their resolutions. Entries are dated and never edited or deleted. A
+their resolutions. Entries are dated and append-only. Exactly one in-place
+edit is part of the format: filling a `pending` **Ruling:** field with the
+decision it was waiting for (that is what the placeholder is for). Every
+other line of a landed entry is never edited or deleted; SUBSTANTIVE
+superseded text that a filled ruling replaces is quoted verbatim inside the
+ruling — the placeholder stub itself (the word `pending` plus a scheduling
+note of who or when would rule, e.g. "pending — human, with T062") needs no
+quoting, since it records no decision or fact. A
 decision is changed by appending a new, superseding entry that references
-the entry it supersedes — never by editing history.
+the entry it supersedes — never by editing history. (Lifecycle written
+down 2026-09-03 per review on PR #122, the precedent-setting instance.)
 
 ## Entry format
 
@@ -136,8 +144,7 @@ now; the reviewer of the feature's Phase 1 PR is asked to rule inline.
 - POWER_TUBE `power_class` is 1–4 (T1–T4); 0 and >4 are rejected.
 - READ_DESC response `len` ≤ 61 (64 − 3); the 28-byte module-bus chunk is
   a transport limit the codec does not enforce.
-**Ruling:** pending — rule inline on the Phase 1 PR of feature 001, or
-append a superseding entry per item.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): ratified — all seven defaults stand as the ruling; future changes need superseding entries. The superseded pending text read, verbatim: "rule inline on the Phase 1 PR of feature 001, or append a superseding entry per item."
 **Supersedes:** none.
 
 ## 2026-08-28 — Mutation kill-rate threshold for deep-verify
@@ -158,7 +165,7 @@ to 60 % now with the measured baseline recorded here, and raise it as
 unit tests gain boundary cases (raising is agent-safe; lowering is T3).
 Alternatively enforce 80 % immediately and accept that `deep-verify` is
 red for this feature's PR until survivors are killed.
-**Ruling:** pending — human, when wiring T062 (deep-verify `--require`).
+**Ruling:** closed 2026-09-03 (session Q&A) as superseded by the 2026-08-29 triage-gate ruling: no percentage is ever enforced; the whole-tree rate is a trend only.
 **Supersedes:** none.
 
 ## 2026-08-28 — Mutation kill-rate threshold: corrected measurement
@@ -178,7 +185,7 @@ small and every survivor names a missing boundary test; killing them is
 ordinary agent work (CLAUDE.md working agreements: "kill surviving
 mutants rather than chasing line %"). Enforce on `deep-verify` from
 T062 onward.
-**Ruling:** pending — human, with T062.
+**Ruling:** closed 2026-09-03 (session Q&A) as superseded by the 2026-08-29 triage-gate ruling, with the entry above.
 **Supersedes:** the previous entry's measurement and its 60 % suggestion.
 
 ## 2026-08-29 — trunk-link-layer.md §8 bridging bullet reads as self-contradictory
@@ -202,8 +209,7 @@ module's reply if it has arrived, otherwise `ERROR: busy` (the host retries
 later). The module-bus transaction proceeds independently under the 5 ms
 module-bus timeout; the backplane never waits on I2C while the trunk is
 waiting on it." No change to timing values or codec behaviour.
-**Ruling:** pending — the trunk document is a human-ruling artefact; not
-edited by the agent.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): rewording adopted as recommended; docs/trunk-link-layer.md §8's first bullet is amended in the same PR (CODEOWNERS review is the ruling's gate). The landed text also carries the recommendation's forward-progress clause (`ERR_BUSY` never abandons the module-bus transaction) and two scoping sentences added per red-team review on #122: the MUST applies to accepted polls only (§4 silent discard stands), and an `ERR_BUSY` answer is a valid response for §7's failure accounting. The superseded pending text read, verbatim: "the trunk document is a human-ruling artefact; not edited by the agent." AUTHORISATION RECORD (review round 4 on #122): the maintainer directly instructed the session agent to prepare this §8 amendment as part of the 2026-09-03 rulings PR — a ONE-OFF authorisation exercised through a CODEOWNERS-gated PR the maintainer reviews; it does not generalise. Whether OPERATING-POLICY §2 should gain a matching carve-out is the maintainer's own decision, in the policy, by their own hand.
 **Supersedes:** none.
 
 ## 2026-08-28 — CodeQL and dependency review become required checks
@@ -348,14 +354,7 @@ sees and can dispute the claim "this file has no mutable code" in the PR
 diff. Does not touch `tools/mutate.cfg [policy]`'s T3 constants
 (`max_unlabelled_survivors`, `label_categories`) — those are unchanged and
 still gate every file that does contain logic.
-**Ruling:** pending — human. Implemented as the safe default per CLAUDE.md
-("implement nothing speculative... proceed only if a safe default
-exists"): `tools/mutate_report.py` (`NO_BODY_EXEMPT`, `exempt_reason`),
-markers added to `link/clock.hpp` and `link/byte_wire.hpp`, doc comment in
-`tools/mutate.sh`. If a human ruling instead prefers, e.g., excluding
-declaration-only files from `scope_dirs` matching entirely, or a
-tree-wide static check that a file has zero function bodies (removing the
-need for a per-file marker), that should supersede this entry.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): ratified as implemented; the per-file marker is the mechanism. The superseded pending text read, verbatim (quoted per review on #122 so the prior wording survives byte-for-byte): "Implemented as the safe default per CLAUDE.md (\"implement nothing speculative... proceed only if a safe default exists\"): `tools/mutate_report.py` (`NO_BODY_EXEMPT`, `exempt_reason`), markers added to `link/clock.hpp` and `link/byte_wire.hpp`, doc comment in `tools/mutate.sh`. If a human ruling instead prefers, e.g., excluding declaration-only files from `scope_dirs` matching entirely, or a tree-wide static check that a file has zero function bodies (removing the need for a per-file marker), that should supersede this entry."
 **Supersedes:** none.
 
 ---
@@ -416,9 +415,7 @@ size is `frames` valid elements plus at least `per_class` corrupted elements per
 (≥ 8 × `per_class` beyond `frames`). `test_torture.py` asserts against this reading only
 (sum of `len(element.expected)` ≥ `frames`; per-class tally of `recipe` ≥ `per_class`),
 not against total element count.
-**Ruling:** pending — safe default implemented per CLAUDE.md ("implement nothing
-speculative … proceed only if a safe default exists"); flagged for the human review this
-issue's releasing comment already asked for, at PR time for #31.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): both readings ratified (flat four-field Element; frames counts delivered/valid frames). The superseded pending text read, verbatim (quoted per review on #122): "safe default implemented per CLAUDE.md (\"implement nothing speculative … proceed only if a safe default exists\"); flagged for the human review this issue's releasing comment already asked for, at PR time for #31." — this ruling is that review.
 **Supersedes:** none.
 
 ---
@@ -731,10 +728,7 @@ flag), not a revert. (3) accept the deferred-REQUIRE reading of "overflow is a R
 failure" — a failure that fires with a one-`advance_to()`-call lag but before the test
 draws any conclusion from the wire's state is still "the test fails and says why", which
 is what the contract clause protects against (a silent drop the test never notices).
-**Ruling:** pending — human. Implemented as the safe default per CLAUDE.md ("implement
-nothing speculative … proceed only if a safe default exists"); T011 (#29) and T028/T031
-should be written against these three readings, or a superseding entry should replace
-them first.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): all three defaults ratified (interim echo until T034; first-matching-step order; deferred REQUIRE on capacity). The superseded pending text read, verbatim (quoted per review on #122): "Implemented as the safe default per CLAUDE.md (\"implement nothing speculative … proceed only if a safe default exists\"); T011 (#29) and T028/T031 should be written against these three readings, or a superseding entry should replace them first." That instruction stands and is forward-looking: T011/T028/T031 are unimplemented at this head and are TO BE written against these readings.
 **Supersedes:** none.
 
 ---
@@ -758,7 +752,7 @@ across three human-ruling documents plus code is a single T3 slice, not a T010 f
 Until then `count` stays `uint16_t` (matches every current spec artefact); a future
 `Rate` step's `count` cannot yet be authored at either documented bit rate, which is a
 pre-existing spec gap, not a new one.
-**Ruling:** pending — human, to land with T030.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): widen `count` to uint32_t atomically in T030 across all four artefacts; baked into issue #48's criteria.
 **Supersedes:** none.
 
 ---
@@ -965,7 +959,7 @@ reference is brought in line with it as part of T025: rejecting malformed/out-of
 before it reaches the codec is the stricter, fail-closed behaviour, matches this task's existing
 choice to reject rather than mask (`tools/canonical.cpp` comment above `parse_frame_line`), and
 keeps a caller error from silently being reinterpreted as a different, valid request.
-**Ruling:** pending — human, to land with T025 (`diffcheck.py --frames`, issue #43).
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): C++ strict rejection is normative; T025 aligns the Python reference (no seq masking); baked into issue #43's criteria. Precision (per red-team on #122): `ERR BadRequest` covers malformed input text AND, for `FDEC`, well-formed hex whose bytes run out mid-frame with no discard counted (`test_canonical_frame.cpp`) — it is not purely pre-codec.
 **Supersedes:** none.
 
 ## 2026-09-03 — l3_helper frame verbs: three error shapes outside the frame-vectors contract vocabulary
@@ -986,8 +980,7 @@ the malformed-input-text response for FENC, FDEC and FSTREAM, distinct from a co
 <Status>`/`ERR <Discard>` refusal of well-formed-but-invalid input, and add a
 `frame_error_to_canonical`-equivalent mapping on the Python side. No behaviour change implied —
 this documents what the code already does.
-**Ruling:** pending — `contracts/frame-vectors.md` is a T3 artefact; a human amends it (or rules
-otherwise), with T025.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): contract amended in the same PR: `ERR BadRequest` is the malformed-input-text response for FENC/FDEC/FSTREAM, distinct from codec-level refusals.
 **Supersedes:** none.
 
 ## 2026-09-03 — Correction: the Python reference does not mask `dst`/`src`, only `seq`
@@ -1008,7 +1001,7 @@ node accepted instead of the caller's malformed request being refused.
 **Recommendation:** when ruling on the superseded entry's question, treat only `seq` as
 masked by the Python reference; `dst`/`src` out-of-range is a raised `ValueError` with no
 canonical rendering on that side, same as the entry's `dst=0x100` example.
-**Ruling:** pending — travels with the superseded entry's own ruling at T025.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): folded into the strict-input ruling above — only `seq` was masked; dst/src raised bare ValueError; all become uniform `ERR BadRequest` rejections at T025. (Superseded pending text, verbatim: "travels with the superseded entry's own ruling at T025.")
 **Supersedes:** 2026-09-03 — Frame line out-of-range fields: C++ rejects, Python reference
 masks/accepts (corrects its "masks them ... `dst`/`src`/`seq`" sentence only; every other claim
 in that entry stands).
@@ -1031,7 +1024,7 @@ declared scope (`tools/canonical.{hpp,cpp}`, `tools/l3_helper.cpp`).
 **Recommendation:** T025's `Helper` (or its own request driver) must read frame-verb responses
 by verb, not by line count: read one line for FENC/FDEC, and read lines until `END` for FSTREAM,
 never assume a 1:1 request:line ratio once frame verbs are mixed into a batch.
-**Ruling:** pending — travels with T025 (issue #43); no code in this PR is affected.
+**Ruling:** human, 2026-09-03 (open-questions session, one-at-a-time Q&A): the differential driver reads BY VERB (one line for FENC/FDEC; until `END` for FSTREAM); baked into issue #43's criteria.
 **Supersedes:** none.
 
 ---
@@ -1105,3 +1098,148 @@ prior entry's own recommendation and "to land with T025" instruction; flagged he
 confirmation rather than assumed final, per the prior entry's "pending — human" status.
 **Supersedes:** none (the 2026-09-03 "Frame line out-of-range fields" entry's ruling line is
 now stale; this entry is the record of what landed).
+## 2026-09-03 — Auto-fix attempt bound raised to 4, as an agent-config knob
+
+**Context:** the 2-attempt bound (ruled 2026-08-30 with the router) has exhausted on
+real work twice (#108's mutation survivors needed a maintainer @claude mention as a
+third attempt, which then succeeded; #118 escalated needs-human with the failure
+plausibly fixable). Two attempts often covers only "diagnose + one fix"; genuinely
+iterative failures (fuzz findings, mutation triage) can need more.
+**Options:** (1) keep 2 and route third attempts through @claude mentions by hand;
+(2) 4, as `auto_fix_max_attempts` in .github/agent-config.yml — same knob pattern as
+`wip_cap`/`auto_approve_max_tier`, labels auto-fix-1..4, unreadable values failing
+closed to the previously ruled 2; (3) unlimited with a time budget — unbounded spend,
+rejected out of hand.
+**Recommendation:** (2).
+**Ruling:** human, 2026-09-03 ("meant the auto-fix attempt bound should be 4 rather
+than 2", this session): option (2). Router counts `auto-fix-<n>` labels against the
+knob; comments say "attempt n of <max>"; exhaustion says "after <max> attempts";
+labels 3/4 provisioned in gh-setup.sh and created in-repo. Harness re-pinned: two
+priors now yields attempt 3, four priors exhausts, `auto_fix_max_attempts: 2`
+reproduces the original bound exactly, unreadable knob fails closed with a notice.
+**Supersedes:** the bound sentence of "CI-failure auto-resolution" (2026-08-30);
+the rest of that ruling stands.
+
+---
+
+## 2026-09-03 — auto_fix_max_attempts knob semantics beyond the value 4
+
+**Context:** review round 3 on PR #120: GOVERNANCE §4 states knob semantics that
+the 2026-09-03 bound entry above does not record — the ruling recorded option (2)
+(value 4, unreadable fails closed to 2) and nothing else. The additional
+semantics were added on PR #120 in response to red-team findings F2/F5/F7 and
+review findings there, and this append-only file must not trail the governing
+document.
+**Recommendation (as implemented on PR #120, for ratification with that PR's
+CODEOWNERS review):** a value < 1 DISABLES auto-fix (route posts one marker
+comment per sha+pass so the boundless sweep stays quiet); non-digit values are
+unreadable and fail closed to 2; values above 10 are clamped to 10 (the ruled-out
+"unlimited" enforced against a fat-fingered knob); attempt labels are written to
+the first FREE index so the bound stays reachable after a human removes a label
+(label index is a free slot, not the attempt ordinal); labels auto-fix-1..10 are
+provisioned to cover the clamp range. Red-team round 2 on #120 added: the knob
+value tolerates an inline comment or quotes (an operator's `0  # OFF` must
+disable, not silently mean 2 — an off-switch failing open), and `timed_out` /
+`startup_failure` conclusions route as failures end-to-end (guard, script,
+sweep) — previously the exhaustion report listed them as failures while the
+router could never act on them.
+**Ruling:** pending — ratified by the human merge of PR #120, which lands this
+entry and the semantics in the same commit history.
+**Supersedes:** nothing; extends the 2026-09-03 "auto-fix attempt bound" entry
+above (its option (2) ruling stands).
+
+---
+
+## 2026-09-03 — Persistent ERR_BUSY: no bound anywhere detects a wedged bridge
+
+**Context:** review on PR #122 (MEDIUM). The §8 rewording makes `ERR_BUSY` the
+mandated per-poll answer while a module transaction is in flight, and the first
+draft of that PR's scoping sentence said a busy answer "is not a failed
+transaction" for §7. §7's only health triggers are 3 consecutive failed
+transactions → SUSPECT and 1 s in SUSPECT without a valid response → OFFLINE —
+so under that sentence a backplane wedged answering `ERR_BUSY` forever stays
+ENROLLED indefinitely, undetected by any bound in the document (proved by
+reading §7 as it stands; no accounting code exists yet — `link/` holds only
+`HealthState`, so there is no code divergence). T031/T039 implement against
+this text, so the question must be ruled before they land. To be precise
+about what §8 as amended does and does not settle (review round 3 on #122):
+it DOES decide the per-poll case — a single `ERR_BUSY` is a valid response,
+not a failed transaction, and via §7's "valid response" clause it would also
+rescue a SUSPECT node — and it marks only the PERSISTENCE bound as open.
+**Recommendation:** bound persistent busy explicitly in §7: N consecutive
+`ERR_BUSY` answers to the same outstanding request (spanning its retries)
+count as one failed transaction, so ordinary busy stays harmless while a
+wedged bridge still walks to SUSPECT. LAYERING CONSEQUENCE the ruling must
+weigh (review round 3 on #122): §7's health accounting is L2, implemented in
+`link/` (T031 master, T039 HealthTracker), and the architecture invariant
+says `link/` never interprets payloads — but distinguishing an `ERR_BUSY`
+answer from any other response IS payload inspection, so this option needs
+either a narrow, explicitly-sanctioned carve-out (e.g. L4 feeds a
+busy/not-busy hint back to the tracker) or it violates L2/L3 opacity.
+Alternative with no layering conflict: an explicit sentence declaring
+persistent busy out of node-health scope and owned by L4 — which is already
+where §7 reports OFFLINE.
+**Ruling:** pending — human; blocks nothing until T031/T039.
+**Supersedes:** none (the §7-accounting sentence this entry discusses was
+replaced within the still-unmerged PR #122, not by a landed entry).
+
+---
+
+## 2026-09-03 — specs/**/contracts/ are T3 artefacts no path gate treats as T3
+
+**Context:** review round 3 on PR #122 (MEDIUM). The pending text superseded on
+that PR said, verbatim, "`contracts/frame-vectors.md` is a T3 artefact; a human
+amends it (or rules otherwise), with T025." — but nothing enforces that: risk-score's T3 regex covers protocol/,
+tests/vectors/, .github/, CLAUDE.md, the named docs/*, .specify/memory/ and
+tools/mutate.cfg, while CODEOWNERS covers only `specs/**/tasks.md` under specs/.
+PR #122 scored T3 solely because it also touches docs/trunk-link-layer.md; an
+identical amendment to frame-vectors.md alone would score T0 and be eligible for
+autonomous merge under GOVERNANCE §1. The same gap was recorded for T030's
+`tests/support/**` slice (issue #48, now needs-human).
+**Recommendation:** extend the mechanical gates rather than relying on entry
+text: add `specs/**/contracts/`, `specs/**/data-model.md` and
+`specs/**/research.md` to CODEOWNERS and to risk-score's T3 regex (a T3 workflow
+change, its own CODEOWNERS-gated PR). Until then, contract amendments ride only
+in PRs that also touch an already-gated artefact, as this one does. Companion
+verification gap (red-team round 4 on #122): nothing EXECUTES the artefact's
+claims either — the full pipeline stays green with a factually wrong helper
+description in the tree. The same gate-extension ruling should add a refimpl
+test that drives `build/native/l3_helper` with the verb table's own probes
+(truncated-hex FDEC, bad-hex FSTREAM, the 65 B and 256 B payload boundaries)
+and asserts the documented spellings — it would have caught two of this PR's
+own review findings mechanically.
+**Ruling:** pending — human; the gate extension is a one-line T3 PR when ruled.
+**Supersedes:** none.
+
+---
+
+## 2026-09-03 — Bridged replies after ERR_BUSY: retention and correlation unspecified
+
+**Context:** red-team round 4 on PR #122 (HIGH). §8 as amended mandates that the
+module-bus transaction proceed after the poll is answered `ERR_BUSY` ("never
+abandons or restarts it"), but states no rule for where the module's reply goes
+when it arrives after its poll was already answered. T_resp (200 µs) is ~25×
+shorter than the module-bus timeout (5 ms), so `ERR_BUSY` is the COMMON first
+answer for every bridged request, not a corner. Consequence on the plain
+reading: the §7 single-frame replay buffer for that seq holds `ERR_BUSY`, so
+`GET_EVENT` — the protocol's only non-idempotent opcode, justified in the YAML
+as "replay-safe via L2 seq replay buffer" — can drain an event whose reply has
+nowhere defined to go; a retry drains another. Two §8-conformant
+implementations both lose events (drop the late reply; or serve it uncorrelated
+to the next poll). Golden rule 2 ("retries at L2 must always be safe") is not
+provably preserved by the text as it stands. A backplane that answers event
+reads from its own prefetch cache (which the `event_pending` status summary
+already gestures at) never hits this path — but §8's plain reading describes
+and permits the unsafe model.
+**Recommendation:** rule one of: (a) retain-and-correlate — the backplane keeps
+the completed reply and serves it to the next poll carrying the same request,
+with the correlation rule (same src+seq? same opcode?) spelled out; (b) the
+backplane MUST NOT begin a module-bus transaction whose reply it cannot
+deliver (restores the replay-buffer justification directly); (c) event reads
+are answered from a backplane-side event cache filled autonomously, making
+GET_EVENT bridge-local and never subject to the late-reply hole — likely the
+intended design, and the recommendation. §8 now marks the question open
+(§10.6) and mandates none of the three.
+**Ruling:** pending — human; must be ruled before any bridge implementation
+(feature f4), gates nothing in feature 002.
+**Supersedes:** none.
