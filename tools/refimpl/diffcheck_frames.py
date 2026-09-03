@@ -66,7 +66,7 @@ def random_frame(rng: random.Random, index: int) -> link.Frame:
                       seq=seq, payload=payload)
 
 
-def _death_note(helper) -> str:
+def death_note(helper) -> str:
     """Names a crashed helper in a mismatch report (review round 3 on #121: EOF maps to an
     empty string, so a segfault printed as a content mismatch with a blank C++ side)."""
     proc = getattr(helper, "p", None)
@@ -92,7 +92,7 @@ def run_frames(helper, seed: int, count: int = FRAME_COUNT, only: int | None = N
     answers = helper.ask(requests)
     for (i, verb, req, want), got in zip(expect, answers):
         if got != want:
-            print(f"diffcheck: FRAME MISMATCH (seed={seed:#x}, index={i})\n  {verb} {req}\n  C++   : {got}{_death_note(helper)}\n"
+            print(f"diffcheck: FRAME MISMATCH (seed={seed:#x}, index={i})\n  {verb} {req}\n  C++   : {got}{death_note(helper)}\n"
                   f"  Python: {want}\n  replay: python3 tools/diffcheck.py --frames-only --seed {seed:#x} --frame-index {i}")
             return -1
         if only is not None:
@@ -116,7 +116,7 @@ def run_torture(helper, seed: int, only: int | None = None, **corpus_kwargs) -> 
         want = [f"OK {C.frame_to_canonical(fr)}" for fr in elem.expected] + [f"END {elem.expected_discards}"]
         if block != want:
             print(f"diffcheck: TORTURE MISMATCH (seed={seed:#x}, index={i}, recipe={elem.recipe})\n"
-                  f"  FSTREAM {elem.stream.hex()}\n  C++   : {block}{_death_note(helper)}\n  Python: {want}\n"
+                  f"  FSTREAM {elem.stream.hex()}\n  C++   : {block}{death_note(helper)}\n  Python: {want}\n"
                   f"  replay: python3 tools/diffcheck.py --frames-only --seed {seed:#x} --torture-index {i}")
             return -1
         if only is not None:

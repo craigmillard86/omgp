@@ -161,7 +161,7 @@ def test_run_torture_index_replays_a_single_valid_element():
 
 
 def test_a_dead_helper_is_named_in_the_mismatch_report(capsys):
-    # review round 4 on #121: _death_note had no test on either path. A helper whose
+    # review round 4 on #121: death_note had no test on either path. A helper whose
     # process is dead and whose answers are the EOF-derived blanks must be reported as a
     # crash, never as a bare content mismatch with an empty C++ side.
     class DeadProc:

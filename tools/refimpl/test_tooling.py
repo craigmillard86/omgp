@@ -69,10 +69,11 @@ def test_diffcheck_frames_only_discloses_its_blind_spot():
     # "descriptor" also matches the always-printed "descriptors <n>" count, so that
     # conjunct was true on every exit-0 run — evidence identical either way is no evidence).
     assert "blind spot: crc/message/invalid/descriptor" in r.stdout, r.stdout
-    # T025 criterion pinned (review on #121, tightened round 5): the summary line carries
-    # the frame count AT THE CONTRACT THRESHOLD and a nonzero torture count — "frames 0,
-    # torture 0" satisfied the field-name check while the criterion regressed.
-    assert "frames 10000" in r.stdout, r.stdout
+    # T025 criterion pinned (review on #121, rounds 5-6): the summary line carries a frame
+    # count AT OR ABOVE the contract threshold ("≥ 10 000" everywhere else — an equality pin
+    # would go red the day FRAME_COUNT is raised) and a nonzero torture count.
+    _frames = re.search(r"frames (\d+)", r.stdout)
+    assert _frames and int(_frames.group(1)) >= 10_000, r.stdout
     assert re.search(r"torture [1-9]\d*", r.stdout), r.stdout
 
 

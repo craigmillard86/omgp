@@ -108,7 +108,7 @@ class Helper:
                 # The helper died mid-batch (review round 4 on #121: an early segfault made
                 # the NEXT chunk's write raise an unhandled traceback with no (seed, index)
                 # and no crash attribution). Stop writing; the read side drains to EOF and
-                # the mismatch report — with _death_note naming the exit code — fires.
+                # the mismatch report — with death_note naming the exit code — fires.
                 return
 
     def ask(self, lines: list[str]) -> list[str]:
@@ -276,7 +276,7 @@ def run_messages(helper: Helper, seed: int, count: int, only: int | None) -> int
     for (i, verb, req, want), got in zip(expect, answers):
         if got != want:
             print(f"diffcheck: MESSAGE MISMATCH (seed={seed:#x}, index={i})\n  {verb} {req}\n"
-                  f"  C++   : {got}{F._death_note(helper)}\n"
+                  f"  C++   : {got}{F.death_note(helper)}\n"
                   f"  Python: {want}\n  replay: python3 tools/diffcheck.py --seed {seed:#x} --index {i}")
             return -1
         if only is not None:
@@ -294,10 +294,10 @@ def run_invalid(helper: Helper, seed: int) -> int:
         if got == want:
             agree += 1
         else:
-            # _death_note (review round 5 on #121): the frame paths gained crash naming in
+            # death_note (review round 5 on #121): the frame paths gained crash naming in
             # round 3; the message/invalid corpora share the same Helper and the same
             # EOF-derived blank, so they carry the same note for consistency.
-            print(f"diffcheck: INVALID-CORPUS MISMATCH\n  DEC {b.hex()}\n  C++   : {got}{F._death_note(helper)}\n  Python: {want}")
+            print(f"diffcheck: INVALID-CORPUS MISMATCH\n  DEC {b.hex()}\n  C++   : {got}{F.death_note(helper)}\n  Python: {want}")
             disagree += 1
             if disagree >= 5:
                 break
