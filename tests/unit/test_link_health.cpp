@@ -32,7 +32,9 @@ struct RecordingListener : HealthListener {
     // Reserves up front so growth during a HEAP_FREE_SCOPE measures HealthTracker's own
     // allocations, not this recording harness's vector doubling (well above any scripted
     // sequence's transition count in this file).
-    RecordingListener() { entries.reserve(16); }
+    RecordingListener() {
+        entries.reserve(16);
+    }
 
     void on_notice(Notice notice, uint8_t addr) override {
         entries.push_back({notice, addr});
@@ -88,8 +90,7 @@ TEST_CASE("UNENROLLED never counts failures, however many", "[link]") {
     REQUIRE(listener.entries.empty());
 }
 
-TEST_CASE("ENROLLED tolerates two consecutive failures and resets the count on success",
-          "[link]") {
+TEST_CASE("ENROLLED tolerates two consecutive failures and resets the count on success", "[link]") {
     FakeClock clock;
     RecordingListener listener;
     HealthTracker tracker(clock, listener);
@@ -165,14 +166,13 @@ TEST_CASE("SUSPECT stays SUSPECT via a failing on_result just short of the OFFLI
     uint64_t suspect_since = drive_to_suspect(tracker, kAddr);
     size_t before = listener.entries.size();
     tracker.on_result(kAddr, false,
-                       suspect_since + (omgp::TRUNK_offline_after_suspect_ms - 1) * 1000);
+                      suspect_since + (omgp::TRUNK_offline_after_suspect_ms - 1) * 1000);
 
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
     REQUIRE(listener.entries.size() == before);
 }
 
-TEST_CASE("SUSPECT to OFFLINE via tick alone at the boundary, no on_result involved",
-          "[link]") {
+TEST_CASE("SUSPECT to OFFLINE via tick alone at the boundary, no on_result involved", "[link]") {
     FakeClock clock;
     RecordingListener listener;
     HealthTracker tracker(clock, listener);
@@ -225,7 +225,7 @@ TEST_CASE("OFFLINE stays OFFLINE on further failures", "[link]") {
     uint64_t suspect_since = drive_to_offline(tracker, kAddr);
     size_t before = listener.entries.size();
     tracker.on_result(kAddr, false,
-                       suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000 + 1);
+                      suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000 + 1);
 
     REQUIRE(tracker.state(kAddr) == HealthState::OFFLINE);
     REQUIRE(listener.entries.size() == before);
@@ -237,24 +237,25 @@ TEST_CASE("notice count equals transition count across a full scripted lifecycle
     HealthTracker tracker(clock, listener);
 
     uint64_t t = 0;
-    tracker.on_result(kAddr, true, t);       // UNENROLLED -> ENROLLED           : ENROLLED
-    tracker.on_result(kAddr, false, ++t);    // ENROLLED, failures=1             : —
-    tracker.on_result(kAddr, false, ++t);    // ENROLLED, failures=2             : —
-    tracker.on_result(kAddr, false, ++t);    // ENROLLED -> SUSPECT              : SUSPECT
-    tracker.on_result(kAddr, true, ++t);     // SUSPECT -> ENROLLED              : RECOVERED
-    tracker.on_result(kAddr, false, ++t);    // ENROLLED, failures=1             : —
-    tracker.on_result(kAddr, false, ++t);    // ENROLLED, failures=2             : —
-    tracker.on_result(kAddr, false, ++t);    // ENROLLED -> SUSPECT              : SUSPECT
+    tracker.on_result(kAddr, true, t);    // UNENROLLED -> ENROLLED           : ENROLLED
+    tracker.on_result(kAddr, false, ++t); // ENROLLED, failures=1             : —
+    tracker.on_result(kAddr, false, ++t); // ENROLLED, failures=2             : —
+    tracker.on_result(kAddr, false, ++t); // ENROLLED -> SUSPECT              : SUSPECT
+    tracker.on_result(kAddr, true, ++t);  // SUSPECT -> ENROLLED              : RECOVERED
+    tracker.on_result(kAddr, false, ++t); // ENROLLED, failures=1             : —
+    tracker.on_result(kAddr, false, ++t); // ENROLLED, failures=2             : —
+    tracker.on_result(kAddr, false, ++t); // ENROLLED -> SUSPECT              : SUSPECT
     uint64_t suspect_since = t;
-    tracker.tick(suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000); // -> OFFLINE : OFFLINE
+    tracker.tick(suspect_since +
+                 omgp::TRUNK_offline_after_suspect_ms * 1000); // -> OFFLINE : OFFLINE
     t = suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000;
-    tracker.on_result(kAddr, false, ++t);    // OFFLINE, stays                  : —
-    tracker.on_result(kAddr, true, ++t);     // OFFLINE -> ENROLLED             : RECOVERED
+    tracker.on_result(kAddr, false, ++t); // OFFLINE, stays                  : —
+    tracker.on_result(kAddr, true, ++t);  // OFFLINE -> ENROLLED             : RECOVERED
 
     REQUIRE(tracker.state(kAddr) == HealthState::ENROLLED);
     REQUIRE(listener.entries.size() == 6);
-    Notice expected[6] = {Notice::ENROLLED, Notice::SUSPECT,  Notice::RECOVERED,
-                           Notice::SUSPECT,  Notice::OFFLINE, Notice::RECOVERED};
+    Notice expected[6] = {Notice::ENROLLED, Notice::SUSPECT, Notice::RECOVERED,
+                          Notice::SUSPECT,  Notice::OFFLINE, Notice::RECOVERED};
     for (size_t i = 0; i < 6; ++i) {
         REQUIRE(listener.entries[i].notice == expected[i]);
         REQUIRE(listener.entries[i].addr == kAddr);
@@ -309,9 +310,9 @@ TEST_CASE("next_probe rotates round-robin over UNENROLLED/OFFLINE addresses only
     RecordingListener listener;
     HealthTracker tracker(clock, listener);
 
-    const uint8_t enrolled_addr = omgp::ADDR_backplane_min;     // 0x01, must never be returned
-    const uint8_t suspect_addr = omgp::ADDR_backplane_min + 1;  // 0x02, must never be returned
-    const uint8_t offline_addr = omgp::ADDR_backplane_min + 2;  // 0x03, eligible
+    const uint8_t enrolled_addr = omgp::ADDR_backplane_min;    // 0x01, must never be returned
+    const uint8_t suspect_addr = omgp::ADDR_backplane_min + 1; // 0x02, must never be returned
+    const uint8_t offline_addr = omgp::ADDR_backplane_min + 2; // 0x03, eligible
 
     // offline_addr is driven through its whole SUSPECT->OFFLINE cycle at t ~ 0..1e6 first;
     // suspect_addr only starts failing well after that tick has already landed, so the
