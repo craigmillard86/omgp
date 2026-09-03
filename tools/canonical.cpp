@@ -563,10 +563,15 @@ bool parse_frame_line(const std::string& canonical, omgp::link::FrameFields& out
     // payload.size() > LIMIT_max_l3_payload is left for encode_frame's own PayloadTooLong
     // check below; only >0xFF (which out.len, a uint8_t, cannot represent at all) is
     // rejected here as malformed text.
+    // flags' real domain is 0x00-0x03: trunk §4's ctrl byte is bit0=response, bit1=retry,
+    // bits2-3=reserved 0, bits4-7=seq (supplied separately by the `seq=` field above), so
+    // anything above 0x03 is a caller passing a whole ctrl byte here, not a valid flags
+    // value — reject it rather than silently masking to a different, valid request
+    // (review @ a95b531).
     if (prefix != "frame" || sp == std::string::npos || !tokenize(canonical.substr(sp + 1), t) ||
         !t.take_uint("dst", dst) || !t.take_uint("src", src) || !t.take_uint("flags", flags) ||
         !t.take_uint("seq", seq) || !t.take_hex("payload", payload) || !t.kv.empty() ||
-        dst > 0xFF || src > 0xFF || flags > 0xFF || seq > 0x0F || payload.size() > 0xFF) {
+        dst > 0xFF || src > 0xFF || flags > 0x03 || seq > 0x0F || payload.size() > 0xFF) {
         error = "ERR BadRequest";
         return false;
     }

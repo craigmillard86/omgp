@@ -84,6 +84,11 @@ TEST_CASE("parse_frame_line rejects malformed canonical text before it reaches t
         {"frame dst=0x01 src=0x00 flags=0x00 seq=0", "missing payload field"},
         {"frame dst=0x01 src=0x00 flags=0x00 payload=00", "missing seq field"},
         {"frame dst=0x01 src=0x00 flags=0x00 seq=16 payload=00", "seq out of 0..15 range"},
+        // trunk §4: ctrl bit0=response, bit1=retry, bits2-3=reserved 0 (bits4-7 are the
+        // separately-supplied seq nibble, not part of `flags`), so flags' real domain is
+        // 0x00-0x03; a caller passing a whole ctrl byte here must be refused, not silently
+        // masked to a different, valid request (review @ a95b531).
+        {"frame dst=0x01 src=0x00 flags=0x04 seq=0 payload=00", "flags out of 0..3 range"},
         {"frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=0", "odd-length payload hex"},
         {"frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=zz", "non-hex payload"},
         {"not-a-frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=", "wrong line prefix"},
@@ -174,6 +179,29 @@ TEST_CASE("fdec_line names every Discard reason with the contract's exact spelli
     // dst == 0xFF with a correct CRC: reserved broadcast, discarded on decode too.
     const uint8_t reserved[] = {0x7e, 0xff, 0x00, 0x00, 0x00, 0x63, 0xcf, 0x7e};
     REQUIRE(omgp::canon::fdec_line(reserved, sizeof reserved) == "ERR ReservedAddress");
+}
+
+TEST_CASE("fdec_line: bytes running out mid-frame with no discard counted is ERR BadRequest",
+          "[frame]") {
+    const uint8_t* ping = nullptr;
+    uint16_t ping_len = 0;
+    for (size_t i = 0; i < omgp::vectors::COUNT; ++i) {
+        const auto& v = omgp::vectors::ALL[i];
+        if (std::string(v.name) == "frame_ping_req") {
+            ping = v.bytes;
+            ping_len = v.len;
+        }
+    }
+    REQUIRE(ping != nullptr);
+    REQUIRE(ping_len >= 1);
+
+    // Drop the closing FLAG: the deframer is left mid-frame (header+payload+CRC fed, no
+    // terminating FLAG), so on_flag() never runs and no Discard counter moves — the exact
+    // "bytes ran out with no frame delivered and no discard counted" branch fdec_line's own
+    // comment (tools/canonical.cpp) and docs/OPEN-QUESTIONS.md document but nothing exercised
+    // (review @ a95b531).
+    const std::string line = omgp::canon::fdec_line(ping, static_cast<size_t>(ping_len) - 1);
+    REQUIRE(line == "ERR BadRequest");
 }
 
 // --- fstream_lines (FSTREAM) ------------------------------------------------------------------
