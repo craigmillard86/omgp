@@ -86,7 +86,12 @@ class Helper:
                     if not ln:  # EOF: helper died mid-block: stop, let the caller
                         break   # report the truncated block as a mismatch instead of spinning
                     block.append(ln)
-                    if ln.startswith("END "):
+                    if not ln.startswith("OK "):
+                        # "END <n>" (normal terminator) or any other line (the helper
+                        # answered something other than the FSTREAM block it promised,
+                        # e.g. "ERR BadRequest" with no END): stop now rather than block
+                        # on a live but stuck process waiting for more output that a
+                        # protocol violation on its side will never produce.
                         break
                 out.append(block)
 

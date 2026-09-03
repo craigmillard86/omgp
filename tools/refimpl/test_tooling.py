@@ -19,6 +19,7 @@ FUZZ = ROOT / "tools" / "fuzz-smoke.sh"
 MUTATE = ROOT / "tools" / "mutate.sh"
 CFG = ROOT / "tools" / "mutate.cfg"
 DIFFCHECK = ROOT / "tools" / "diffcheck.py"
+L3_HELPER = ROOT / "build" / "native" / "l3_helper"
 
 
 # "Tool absent" is simulated through the scripts' own override variables (a nonexistent
@@ -49,6 +50,13 @@ def test_diffcheck_frames_only_discloses_its_blind_spot():
     # --frames-only skips the crc/message/invalid/descriptor corpora (contracts/tooling.md
     # "every fast/partial path states its blind spot"); the summary line must say so, not
     # just print the same "C++ and Python agree" sentence a full run prints.
+    # Otherwise-hermetic (no other test in this file needs a native build): skip honestly
+    # rather than fail when build/native/l3_helper hasn't been built yet, so
+    # `python -m pytest tools/refimpl/` stays runnable standalone on a fresh checkout
+    # (CLAUDE.md: "python -m pytest tools/refimpl/" is documented as a standalone command)
+    # and this test never validates a stale binary left over from an earlier build.
+    if not L3_HELPER.exists():
+        pytest.skip(f"{L3_HELPER} not built (run ./pipeline.sh build first, or the full pipeline)")
     r = subprocess.run([sys.executable, str(DIFFCHECK), "--frames-only"], capture_output=True, text=True,
                        cwd=ROOT, timeout=120)
     assert r.returncode == 0, r.stdout + r.stderr

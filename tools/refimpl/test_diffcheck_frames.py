@@ -112,8 +112,15 @@ def test_run_frames_agrees_reports_case_count():
     assert F.run_frames(FakeHelper(), SEED, count=50) == 50
 
 
-def test_run_frames_reports_first_mismatch():
+def test_run_frames_reports_first_mismatch(capsys):
+    # contracts/frame-vectors.md's acceptance criterion: the first mismatch prints
+    # (seed, index), the verb, and a replay command -- not just that -1 came back.
+    # wrong_at=3 corrupts the 3rd call, which is case index 1's FENC answer (2 calls/case).
     assert F.run_frames(FakeHelper(wrong_at=3), SEED, count=50) == -1
+    out = capsys.readouterr().out
+    assert f"seed={SEED:#x}" in out and "index=1" in out
+    assert "FENC" in out
+    assert "--frame-index 1" in out
 
 
 def test_run_frames_index_replays_a_single_case():
@@ -127,8 +134,14 @@ def test_run_torture_agrees_over_a_small_full_corpus():
     assert n == 20 + 3 * len(torture.CLASSES)
 
 
-def test_run_torture_reports_first_mismatch():
+def test_run_torture_reports_first_mismatch(capsys):
+    # Same acceptance criterion as test_run_frames_reports_first_mismatch, for the
+    # FSTREAM/torture side: (seed, index), the recipe, and a --torture-index replay line.
     assert F.run_torture(FakeHelper(wrong_at=1), SEED, frames=20, per_class=3) == -1
+    out = capsys.readouterr().out
+    assert f"seed={SEED:#x}" in out and "index=0" in out
+    assert "recipe=" in out
+    assert "--torture-index 0" in out
 
 
 def test_run_torture_index_replays_a_single_valid_element():
