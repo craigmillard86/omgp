@@ -1,0 +1,133 @@
+// OMGP trunk L2 — node health tracker implementation: trunk §6, §7; transition table
+// data-model.md §6. Makes tests/unit/test_link_health.cpp (T037) pass.
+#include "link/health.hpp"
+
+#include "omgp_protocol.h"
+
+namespace omgp {
+namespace link {
+
+namespace {
+// data-model.md §1: "kSuspectPollPeriod_us = 10 * TRUNK_T_poll_us". Local to this
+// translation unit — no other engine needs it yet.
+constexpr uint64_t kSuspectPollPeriodUs = 10ull * omgp::TRUNK_T_poll_us;
+// data-model.md §6: OFFLINE threshold is TRUNK_offline_after_suspect_ms of SUSPECT time,
+// but every clock reading in this engine is in microseconds.
+constexpr uint64_t kOfflineThresholdUs =
+    static_cast<uint64_t>(omgp::TRUNK_offline_after_suspect_ms) * 1000; // literal-ok: ms->us unit conversion, not a protocol value
+} // namespace
+
+HealthTracker::HealthTracker(Clock& clock, HealthListener& listener)
+    : clock_(clock), listener_(listener), records_{}, next_probe_addr_(omgp::ADDR_backplane_max) {}
+
+void HealthTracker::notify(Notice notice, uint8_t addr) {
+    listener_.on_notice(notice, addr);
+}
+
+void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
+    assert(addr < kAddrCount);
+    HealthRecord& r = records_[addr];
+    switch (r.state) {
+    case HealthState::UNENROLLED:
+        // trunk §6: UNENROLLED never counts failures, only a valid result enrols it.
+        if (ok) {
+            r.state = HealthState::ENROLLED;
+            r.consecutive_failures = 0;
+            notify(Notice::ENROLLED, addr);
+        }
+        break;
+    case HealthState::ENROLLED:
+        if (ok) {
+            r.consecutive_failures = 0;
+        } else if (++r.consecutive_failures >= omgp::TRUNK_suspect_after_failures) {
+            r.state = HealthState::SUSPECT;
+            r.suspect_since_us = now_us;
+            notify(Notice::SUSPECT, addr);
+        }
+        break;
+    case HealthState::SUSPECT:
+        if (ok) {
+            r.state = HealthState::ENROLLED;
+            r.consecutive_failures = 0;
+            notify(Notice::RECOVERED, addr);
+        } else if (now_us - r.suspect_since_us >= kOfflineThresholdUs) {
+            r.state = HealthState::OFFLINE;
+            notify(Notice::OFFLINE, addr);
+        }
+        break;
+    case HealthState::OFFLINE:
+        if (ok) {
+            r.state = HealthState::ENROLLED;
+            r.consecutive_failures = 0;
+            notify(Notice::RECOVERED, addr);
+        }
+        break;
+    }
+}
+
+void HealthTracker::tick(uint64_t now_us) {
+    // data-model.md §6: the only time-only transition is SUSPECT -> OFFLINE once
+    // kOfflineThresholdUs has elapsed since suspect_since, with no on_result involved.
+    for (size_t addr = 0; addr < kAddrCount; ++addr) {
+        HealthRecord& r = records_[addr];
+        if (r.state == HealthState::SUSPECT && now_us - r.suspect_since_us >= kOfflineThresholdUs) {
+            r.state = HealthState::OFFLINE;
+            notify(Notice::OFFLINE, static_cast<uint8_t>(addr));
+        }
+    }
+}
+
+HealthState HealthTracker::state(uint8_t addr) const {
+    assert(addr < kAddrCount);
+    return records_[addr].state;
+}
+
+bool HealthTracker::poll_due(uint8_t addr, uint64_t now_us) const {
+    assert(addr < kAddrCount);
+    const HealthRecord& r = records_[addr];
+    switch (r.state) {
+    case HealthState::ENROLLED:
+        return true;
+    case HealthState::SUSPECT:
+        return now_us - r.last_poll_us >= kSuspectPollPeriodUs;
+    default: // OFFLINE, UNENROLLED: reached only via next_probe's enrolment rotation
+        return false;
+    }
+}
+
+void HealthTracker::mark_polled(uint8_t addr, uint64_t now_us) {
+    assert(addr < kAddrCount);
+    records_[addr].last_poll_us = now_us;
+}
+
+uint8_t HealthTracker::next_backplane_addr(uint8_t addr) const {
+    return addr < omgp::ADDR_backplane_max ? static_cast<uint8_t>(addr + 1) : omgp::ADDR_backplane_min;
+}
+
+Probe HealthTracker::next_probe(uint64_t /*now_us*/) {
+    // data-model.md §6: round-robin over UNENROLLED/OFFLINE addresses in
+    // [ADDR_backplane_min, ADDR_backplane_max] (0x00 is the host and is never a candidate).
+    // Bounded by the full backplane range so an all-ENROLLED/SUSPECT table can never spin.
+    constexpr size_t kBackplaneCount =
+        static_cast<size_t>(omgp::ADDR_backplane_max) - omgp::ADDR_backplane_min + 1;
+    for (size_t i = 0; i < kBackplaneCount; ++i) {
+        next_probe_addr_ = next_backplane_addr(next_probe_addr_);
+        const HealthState s = records_[next_probe_addr_].state;
+        if (s == HealthState::UNENROLLED || s == HealthState::OFFLINE)
+            return Probe{next_probe_addr_, bit_rate()};
+    }
+    // No eligible address (e.g. every enrolled node is healthy): hand back the last
+    // address visited rather than an undefined one; T043 revisits this under bus fault.
+    return Probe{next_probe_addr_, bit_rate()};
+}
+
+bool HealthTracker::bus_fault() const {
+    return false; // T043 (US5) implements declare/clear; stubbed per tasks.md T038.
+}
+
+uint32_t HealthTracker::bit_rate() const {
+    return omgp::TRUNK_bit_rate; // T043 (US5) pins the recovered rate; stubbed per T038.
+}
+
+} // namespace link
+} // namespace omgp

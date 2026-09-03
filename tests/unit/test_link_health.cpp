@@ -29,6 +29,11 @@ struct RecordingListener : HealthListener {
     };
     std::vector<Entry> entries;
 
+    // Reserves up front so growth during a HEAP_FREE_SCOPE measures HealthTracker's own
+    // allocations, not this recording harness's vector doubling (well above any scripted
+    // sequence's transition count in this file).
+    RecordingListener() { entries.reserve(16); }
+
     void on_notice(Notice notice, uint8_t addr) override {
         entries.push_back({notice, addr});
     }
@@ -308,9 +313,15 @@ TEST_CASE("next_probe rotates round-robin over UNENROLLED/OFFLINE addresses only
     const uint8_t suspect_addr = omgp::ADDR_backplane_min + 1;  // 0x02, must never be returned
     const uint8_t offline_addr = omgp::ADDR_backplane_min + 2;  // 0x03, eligible
 
+    // offline_addr is driven through its whole SUSPECT->OFFLINE cycle at t ~ 0..1e6 first;
+    // suspect_addr only starts failing well after that tick has already landed, so the
+    // same global tick() that carries offline_addr past its threshold cannot also carry
+    // suspect_addr past its own (data-model.md §6 OFFLINE is per-record suspect_since, but
+    // tick(now) is evaluated against every SUSPECT record at once — colliding timestamps
+    // would make both go OFFLINE together, which is not what this test is scripting).
     tracker.on_result(enrolled_addr, true, 0);
-    drive_to_suspect(tracker, suspect_addr);
     drive_to_offline(tracker, offline_addr);
+    drive_to_suspect(tracker, suspect_addr, 2'000'000);
 
     std::vector<uint8_t> eligible;
     for (uint8_t a = omgp::ADDR_backplane_min; a <= omgp::ADDR_backplane_max; ++a)
