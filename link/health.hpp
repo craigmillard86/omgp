@@ -44,12 +44,19 @@ class HealthTracker {
     HealthState state(uint8_t addr) const;
     bool poll_due(uint8_t addr, uint64_t now_us) const;
     void mark_polled(uint8_t addr, uint64_t now_us);
-    Probe next_probe(uint64_t now_us); // enrolment rotation over UNENROLLED/OFFLINE addresses
+    // Enrolment rotation over UNENROLLED/OFFLINE backplane addresses. When no candidate
+    // exists (healthy-rig steady state), returns Probe{ADDR_host, ...} as the sentinel:
+    // ADDR_host is never a real probe target — callers MUST check for it before spending
+    // trunk §6's enrolment slot. Contract amendment proposed in docs/OPEN-QUESTIONS.md
+    // (2026-09-03 next_probe-sentinel entry).
+    Probe next_probe(uint64_t now_us);
 
     bool bus_fault() const;
     uint32_t bit_rate() const;
 
   private:
+    // data-model §6 also lists `ever_answered`; omitted until a transition rule reads it
+    // (recorded divergence, review on #118 — striking it from the data model is a T3 edit).
     struct HealthRecord {
         HealthState state = HealthState::UNENROLLED;
         uint8_t consecutive_failures = 0;

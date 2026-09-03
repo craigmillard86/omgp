@@ -44,6 +44,18 @@ static_assert(ADDR_backplane_max >= ADDR_host,
               "ADDR_backplane_max must be >= ADDR_host or kAddrCount wraps");
 constexpr size_t kAddrCount =
     static_cast<size_t>(ADDR_backplane_max) - static_cast<size_t>(ADDR_host) + 1; // 16
+// Companion to the ordering assert above: every table keyed by address indexes
+// records_[addr] with addr <= ADDR_backplane_max, which is in range only while
+// ADDR_host == 0. A YAML edit moving the host address must fail HERE at compile time,
+// not as a runtime out-of-bounds read in an enrolment rotation (red-team on #118
+// finding 5 demonstrated exactly that with host: 0x01).
+static_assert(
+    static_cast<size_t>(ADDR_backplane_max) < kAddrCount,
+    "node addresses must index a kAddrCount-entry table: ADDR_backplane_max < kAddrCount");
+
+// data-model.md §1: SUSPECT nodes are polled once per 10 superframes (trunk §7);
+// declared here beside kAddrCount per the data model, shared by HealthTracker and tests.
+constexpr uint64_t kSuspectPollPeriod_us = 10ull * TRUNK_T_poll_us;
 
 // trunk §9: 10 bits per byte at 8N1 (1 start + 8 data + 1 stop); integer microseconds
 // per second divided by bits/sec, times 10 bits/byte. Precondition: bit_rate != 0 (every
