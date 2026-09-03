@@ -81,11 +81,12 @@ the enforcement.
     failed logs, fixes on that branch only (TDD where a test was missing,
     pipeline green before pushing) and comments root cause + evidence; an
     environmental failure is re-run, not patched.
-  - **Bound — two attempts, then a human.** Attempts are the PR labels
-    `auto-fix-1` and `auto-fix-2`, one attempt per commit; a failure after
-    the second releases `in-progress` and applies `needs-human` with the
-    failed-run links. The labels are the bound: nothing resets them but a
-    human.
+  - **Bound — `auto_fix_max_attempts` (agent-config; 4 since ruling
+    2026-09-03, was 2), then a human.** Attempts are the `auto-fix-<n>` PR
+    labels, one attempt per commit; a failure after the last releases
+    `in-progress` and applies `needs-human` with the complete failed-run
+    list. The labels are the bound: nothing resets them but a human; an
+    unreadable knob fails closed to 2.
   - **`main` goes to triage.** A failure on `main` files one open
     `ci-failure` + `task` issue per workflow, which `agent-triage` handles
     exactly like `nightly-failure`.

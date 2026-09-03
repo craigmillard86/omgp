@@ -70,6 +70,10 @@ def test_ci_failure_router_wiring():
     assert autofix["permissions"]["id-token"] == "write" and autofix["permissions"]["contents"] == "write"
     assert "id-token" not in route["permissions"] and route["permissions"].get("contents", "read") == "read" and route["permissions"]["actions"] == "read"
     assert "conclusion == 'failure'" in route["if"] and "head_repository.full_name == github.repository" in route["if"]
+    for _job in ("route", "sweep"):
+        _st = next(st for st in wf["jobs"][_job]["steps"] if "actions/github-script" in st.get("uses", ""))
+        assert "MAX_ATTEMPTS" in _st.get("env", {}), _job   # bound is the agent-config knob (ruling 2026-09-03)
+    assert "auto_fix_max_attempts: 4" in (ROOT / ".github" / "agent-config.yml").read_text()
     assert autofix["needs"] == "route" and "route.outputs.route == 'autofix'" in autofix["if"]
     action = next(s for s in autofix["steps"] if "claude-code-action" in s.get("uses", ""))
     assert "claude_code_oauth_token" in action["with"]
@@ -102,7 +106,7 @@ def test_ci_failure_router_delivery_backstop():
     assert "schedule" in sweep["if"] and "inputs.run_id" in sweep["if"]
     script = next(s for s in sweep["steps"] if "actions/github-script" in s.get("uses", ""))["with"]["script"]
     # The sweep decides nothing about the failure: it re-delivers, the bounds stay in `route`.
-    for must in ("agent-authored", "needs-human", "auto-fix-1", "ci-failure-router sha=", "createWorkflowDispatch"):
+    for must in ("agent-authored", "needs-human", "auto-fix-", "ci-failure-router sha=", "createWorkflowDispatch"):
         assert must in script, must
     assert "addLabels" not in script and "claude" not in script.lower()
     route = wf["jobs"]["route"]
@@ -243,7 +247,7 @@ def test_bot_triggered_agent_workflows_allow_their_bot_actors():
 
 def test_router_labels_are_provisioned():
     setup = (ROOT / "tools" / "gh-setup.sh").read_text()
-    for l in ("auto-fix-1", "auto-fix-2", "ci-failure",
+    for l in ("auto-fix-1", "auto-fix-2", "auto-fix-3", "auto-fix-4", "ci-failure",
               "review-fix-1", "review-fix-2", "review-fix-3", "review-fix-4"):
         assert f"L {l} " in setup or f'L "{l}"' in setup, l
 

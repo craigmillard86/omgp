@@ -1065,3 +1065,27 @@ fail-closed parsing). GOVERNANCE §2's cap row updated; OPERATING-POLICY §2's
 "one item in flight" wording is a human-ruling artefact left for the
 maintainer's own hand (same precedent as the §4 loop table).
 **Supersedes:** none.
+
+---
+
+## 2026-09-03 — Auto-fix attempt bound raised to 4, as an agent-config knob
+
+**Context:** the 2-attempt bound (ruled 2026-08-30 with the router) has exhausted on
+real work twice (#108's mutation survivors needed a maintainer @claude mention as a
+third attempt, which then succeeded; #118 escalated needs-human with the failure
+plausibly fixable). Two attempts often covers only "diagnose + one fix"; genuinely
+iterative failures (fuzz findings, mutation triage) can need more.
+**Options:** (1) keep 2 and route third attempts through @claude mentions by hand;
+(2) 4, as `auto_fix_max_attempts` in .github/agent-config.yml — same knob pattern as
+`wip_cap`/`auto_approve_max_tier`, labels auto-fix-1..4, unreadable values failing
+closed to the previously ruled 2; (3) unlimited with a time budget — unbounded spend,
+rejected out of hand.
+**Recommendation:** (2).
+**Ruling:** human, 2026-09-03 ("meant the auto-fix attempt bound should be 4 rather
+than 2", this session): option (2). Router counts `auto-fix-<n>` labels against the
+knob; comments say "attempt n of <max>"; exhaustion says "after <max> attempts";
+labels 3/4 provisioned in gh-setup.sh and created in-repo. Harness re-pinned: two
+priors now yields attempt 3, four priors exhausts, `auto_fix_max_attempts: 2`
+reproduces the original bound exactly, unreadable knob fails closed with a notice.
+**Supersedes:** the bound sentence of "CI-failure auto-resolution" (2026-08-30);
+the rest of that ruling stands.
