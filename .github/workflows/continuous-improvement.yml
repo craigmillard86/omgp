@@ -111,6 +111,14 @@ jobs:
 
       - name: Check the agent produced its outputs
         id: outputs
+        env:
+          # HIGH (review + red team on #125): the agent step above holds unrestricted `Write`
+          # in this same checkout, and Python prepends the cwd to sys.path — so a planted
+          # `json.py` in the repo root would shadow the stdlib and run arbitrary code inside
+          # THIS step and the token-holding "File the governance issue" step. PYTHONSAFEPATH=1
+          # (== `python3 -P`) drops the unsafe cwd entry for every python call in the step, so
+          # `import json` is always the stdlib. Belt: the same env sits on the filing step.
+          PYTHONSAFEPATH: "1"
         run: |
           # Missing outputs FAIL the job. "Decided no update was required" and "crashed, timed
           # out, or could not authenticate" must not share one observable outcome: a silent
@@ -159,6 +167,10 @@ jobs:
         if: steps.outputs.outputs.decision == 'UPDATE_RECOMMENDED'
         env:
           GH_TOKEN: ${{ github.token }}
+          # HIGH (review + red team on #125): GH_TOKEN carries `issues: write` here, so a
+          # `json.py` planted by the agent's Write must not be importable. PYTHONSAFEPATH=1
+          # drops the cwd from sys.path for every python call below, closing the shadow.
+          PYTHONSAFEPATH: "1"
         run: |
           set -euo pipefail
           python3 - <<'PY' > issue-body.md

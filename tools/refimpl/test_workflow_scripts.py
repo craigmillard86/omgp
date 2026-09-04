@@ -485,6 +485,33 @@ def test_continuous_improvement_is_read_only_by_construction():
         assert wide not in granted, wide
 
 
+def test_continuous_improvement_python_steps_do_not_put_the_checkout_on_sys_path():
+    """HIGH (review + red team on #125): the agent holds unrestricted `Write` in the checkout,
+    and Python prepends the cwd to sys.path — so a planted `json.py` in the repo root would
+    shadow the stdlib and run arbitrary code inside the LATER steps, one of which holds
+    GH_TOKEN with `issues: write`. `contents: read` does not stop that: the escalation is
+    code execution in this job's own steps, not a commit. Every step that runs `python3` must
+    therefore drop the unsafe path entry, via `PYTHONSAFEPATH=1` on the step (== `python3 -P`)
+    or `-P` on each invocation, so `import json` is always the stdlib."""
+    wf = yaml.safe_load(CI_IMPROVE.read_text(encoding="utf-8"))
+    py_steps = [s for s in wf["jobs"]["analyse"]["steps"] if "python3" in (s.get("run") or "")]
+    assert py_steps, "expected steps that invoke python3"
+    for s in py_steps:
+        name = s.get("name", s.get("id", "?"))
+        env = s.get("env") or {}
+        safe_env = str(env.get("PYTHONSAFEPATH", "")).strip().lower() in ("1", "true")
+        # If not set for the whole step, every python3 call in it must carry -P itself.
+        run = s["run"]
+        calls = re.findall(r"\bpython3\b(?!\s*-P\b)([^\n]*)", run)
+        # a call is hardened iff it is `python3 -P ...`; the negative-lookahead above
+        # collects only the calls that are NOT `python3 -P`.
+        all_calls_flagged = not calls
+        assert safe_env or all_calls_flagged, (
+            f"continuous-improvement step {name!r} runs python3 without sys.path hardening "
+            f"(set PYTHONSAFEPATH=1 on the step or -P on each call): a planted json.py would "
+            f"shadow the stdlib and execute in a token-holding step")
+
+
 def test_continuous_improvement_prompt_lives_outside_the_workflow():
     """The analysis is the part that will need tuning, and a prompt inlined in a workflow file
     can only be edited with the `workflow` OAuth scope the Claude App token does not carry
