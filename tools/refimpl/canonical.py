@@ -67,7 +67,13 @@ def _int(tok: str) -> int:
     if not _FRAME_UINT_RE.fullmatch(tok):
         raise CanonicalError(f"not an integer: {tok!r}")
     digits = tok.lstrip("+")
-    return int(digits, 16) if digits[:2].lower() == "0x" else int(digits, 10)
+    value = int(digits, 16) if digits[:2].lower() == "0x" else int(digits, 10)
+    # round 16 on #121: parse_uint rejects > UINT_MAX (tools/canonical.cpp); without this,
+    # _int returned an out-of-range value that only failed later as an unmapped struct.error
+    # out of encode_header, never ERR BadRequest. Field-width checks still apply on top.
+    if value > 0xFFFFFFFF:
+        raise CanonicalError(f"integer exceeds uint32 range: {tok!r}")
+    return value
 
 
 def _hexbytes(tok: str) -> bytes:
@@ -451,7 +457,10 @@ def _split_records(text: str) -> list[str]:
     if quoted:
         raise CanonicalError("unterminated string")
     out.append("".join(cur))
-    return [s.strip() for s in out if s.strip()]
+    # round 16 on #121: trim SPACES only (C++ split_records uses find_first_not_of(' ')).
+    # str.strip() also ate TAB/VT/FF/CR, so a DENC record ending in a TAB parsed here while
+    # the C++ side kept the TAB inside the token and parse_uint rejected it.
+    return [s.strip(" ") for s in out if s.strip(" ")]
 
 
 def _record_tokens(chunk: str) -> tuple[str, dict[str, str]]:

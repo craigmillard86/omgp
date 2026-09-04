@@ -286,3 +286,21 @@ def test_int_rejects_the_radix_and_unicode_forms_parse_uint_rejects():
         with pytest.raises(C.CanonicalError):
             C._int(tok)
     assert C._int("+0x10") == 16 and C._int("00") == 0
+
+
+def test_int_rejects_values_above_uint32_like_parse_uint():
+    # round 16 on #121: parse_uint rejects > UINT_MAX; _int must too, or a message field
+    # parses here and only fails later as an unmapped struct.error out of encode_header.
+    with pytest.raises(C.CanonicalError):
+        C._int("0x100000000")
+    with pytest.raises(C.CanonicalError):
+        C._int("4294967296")
+    assert C._int("0xFFFFFFFF") == 0xFFFFFFFF  # the boundary still parses
+
+
+def test_split_records_trims_spaces_only_like_the_cpp_side():
+    # round 16 on #121: str.strip() ate TAB/VT/FF/CR that tools/canonical.cpp keeps in the
+    # token, where parse_uint then rejects them. A tab-terminated record must reach the
+    # token parser (which rejects it) rather than being silently trimmed clean here.
+    recs = C._split_records("PROTOCOL major=1 minor=2\t")
+    assert recs == ["PROTOCOL major=1 minor=2\t"]

@@ -1318,3 +1318,21 @@ human; no agent-authored ruling exists to confirm, and no ruling line anywhere i
 **Supersedes:** none; the prior entry's ruling line is live and this implements it.
 (Relocated to the file tail per review round 11 on #121 — entries stay in
 append order; an ordinary edit, this entry being unmerged.)
+
+---
+
+## 2026-09-04 — Reserved ctrl bits 2-3: is ignore-on-receive a spec rule or just current behaviour?
+
+**Context:** review round 16 on #121 (LOW). trunk §4 (docs/trunk-link-layer.md:38)
+defines ctrl bits 2-3 as "reserved 0" and its discard-conditions bullet lists bad CRC,
+bad length and >=8 stuffing violations — it does NOT state that a receiver must IGNORE
+those bits when set. link/frame.cpp and omgp_link.py both ignore them (mask seq from the
+high nibble, never inspect bits 2-3), and #121's run_streams now pins that behaviour with
+a reserved-ctrl-bit delivery element. The tooling contract briefly attributed the rule to
+"§4 forward compatibility", which overstated the spec's backing.
+**Recommendation:** treat ignore-on-receive as the intended forward-compatibility rule
+(it mirrors L3's "unknown TLV types skipped, unknown events ignored", CLAUDE.md golden
+rule 7) and add one sentence to trunk §4 stating it, so the behaviour the corpus pins has
+a normative source. Until then the tooling contract cites the implementation/test, not §4.
+**Ruling:** pending — human (spec amendment to trunk §4, a human-ruling artefact).
+**Supersedes:** none.
