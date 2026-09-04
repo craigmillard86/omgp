@@ -11,7 +11,7 @@ prints a `reproduce:` command for each.
 | `fuzz_payload` | `[opcode, dir, payload…]` | every typed decoder accepts/rejects without a crash; any decoded value re-encodes byte-identically |
 | `fuzz_descriptor` | raw descriptor blob | cursor/validator never over-read; a validated blob re-emits identically via `add_raw`; every typed decoder is total |
 | `fuzz_roundtrip` | raw message bytes | decode → canonical → parse → encode reproduces the input; rendering is stable |
-| `fuzz_frame` | byte stream, fed both byte-at-a-time and chunked | deframe never over-reads or hangs on arbitrary bytes; the `TooLong`/`kMaxUnstuffed` accumulator bound is never exceeded; byte-at-a-time and chunked feeding of the same input deliver identical frames (`__builtin_trap` on mismatch, `fuzz_frame.cpp:59-63`); a delivered frame re-encodes and re-parses to equal fields |
+| `fuzz_frame` | byte stream, fed byte-at-a-time to two independent `Deframer`s | deframe never over-reads or hangs on arbitrary bytes; the `TooLong`/`kMaxUnstuffed` accumulator bound is never exceeded; two fresh `Deframer`s fed the identical byte sequence deliver identical frames — a determinism check, not a chunk-boundary differential (`feed()` has no notion of chunk boundaries and is called once per byte either way, `fuzz_frame.cpp:27-31`; trap on mismatch, `fuzz_frame.cpp:59-63`); a delivered frame re-encodes and re-parses to equal fields |
 
 Reproduce a finding: `build/fuzz/<target> build/fuzz/artifacts/<target>/<crash-file>`.
 
@@ -73,18 +73,30 @@ reaching the code and must be fixed before the PR is opened.
       ("string-tail checks read exactly len bytes") followed, and the re-run is the PASS
       recorded in the PR #15 body.
 - [x] **Fuzz reaches the `TooLong` bound (spec 002 T026, SC-003 planted-bug half).**
-      SC-003 has two halves: a full-CI-budget (600 s) zero-crash run, established
-      separately by the T2/T3 deep-verify CI job, and "a planted missing bounds check
-      is found within that budget" — only the second half is recorded here, at the
-      60 s local-smoke budget. First, the clean
+      SC-003 is per target: a run at the CI fuzz budget with zero crashes, and
+      "a planted missing bounds check is found within that budget" — only the
+      second half is recorded here. `tools/fuzz-smoke.sh <seconds>` splits its
+      argument evenly across all five targets (`fuzz-smoke.sh:53`), so `fuzz_frame`'s
+      own share is `<seconds>/5`: 12 s for this record's invocation
+      (`./pipeline.sh fuzz` → `tools/fuzz-smoke.sh 60`), versus 120 s under CI
+      deep-verify's `tools/fuzz-smoke.sh 600` (`.github/workflows/ci.yml:150`). The
+      other half of SC-003 — a clean run at that 120 s CI share — is not established
+      by this PR: it is T0 and skips the deep-verify job (`ci.yml:128-131`); it is
+      established by whichever T2/T3 deep-verify run most recently reported
+      `fuzz_frame` clean, not cited here. First, the clean
       baseline: `./pipeline.sh fuzz` (`tools/fuzz-smoke.sh 60`, unmodified tree). Then,
       neutralize `link/frame.cpp` `Deframer::append`'s guard —
       `if (len_ >= kMaxUnstuffed) {` → `if (false) { // ...` (an always-false condition,
       not a deleted check: `len_` stays live via `buf_[len_++] = byte`, so unlike the
       `l3_header.cpp` precedent's `(void)len;` there is no unused-parameter to silence) —
       rebuild the `fuzz` preset, rerun. Expected: with no upper bound, a stream with no
-      FLAG byte for 71+ unstuffed bytes writes past `buf_[kMaxUnstuffed]`; ASan/UBSan catch
-      it in `fuzz_frame`, `findings ≥ 1`, `exit ≠ 0`. Finally, restore the guard
+      FLAG byte for 71+ unstuffed bytes writes past `buf_[kMaxUnstuffed]`. UBSan will
+      diagnose the exact out-of-bounds index, but it is built recoverable here (no
+      `-fno-sanitize-recover=undefined` in `tests/fuzz/CMakeLists.txt:4`, no
+      `UBSAN_OPTIONS` set in `fuzz-smoke.sh`), so a UBSan report alone prints and execution
+      continues; the harness's actual failure signal (`findings ≥ 1`, `exit ≠ 0`,
+      `fuzz-smoke.sh:66-68`) comes from ASan's abort once the same unchecked write reaches
+      a redzone. Finally, restore the guard
       (`git diff -- link/frame.cpp` empty against HEAD), rebuild, rerun a third time —
       expect `findings=0` matching the clean baseline. **Recorded 2026-09-04 (Ubuntu 24.04.4
       LTS, clang 18.1.3):**
@@ -118,11 +130,20 @@ reaching the code and must be fixed before the PR is opened.
       The guard's exact bound is pinpointed by the UBSan line, `index 70 out of bounds
       for type 'uint8_t[70]'` at `link/frame.cpp:79` — the `buf_[len_++]` write the removed
       guard exists to stop. The ASan report that follows is a *consequence* of the same
-      unchecked write continuing past that point, not independent confirmation of it: it
-      fires only once the write has walked far enough to leave the whole 104-byte `Deframer`
-      object (`state_` + `buf_[70]` + padding + `len_` + `stats_`) and hit the stack frame's
-      next variable at offset 136 — the reported address is past the object, not at
-      `buf_[70]`. `git diff -- link/frame.cpp` against HEAD was empty after restoration,
+      unchecked write, not independent confirmation of the bound, and it is not a smooth
+      walk to the object's edge: `buf_` occupies `Deframer` object offsets 1..70 and `len_`
+      (an 8-byte `size_t`) starts at offset 72 (`state_`(1) + `buf_[70]` + 1 byte pad +
+      `len_`(72..79) + `stats_`(80..103) = 104 bytes, matching the report's `[32, 136)` for
+      `d`), so the very next out-of-bounds write, `buf_[71]`, lands on `len_`'s own low byte
+      (little-endian) — the loop's own index is corrupted by its own out-of-bounds write
+      before the access ever reaches a redzone. From there the reported crash address is a
+      function of whatever value that corruption produced, not a fixed offset; this run's
+      corrupted walk happened to land at offset 136, the byte immediately past the whole `d`
+      object (`[32, 136)` in the report, itself annotated "overflows this variable") — not,
+      as an earlier version of this entry said, the frame's *next* variable: `v` sits at
+      `[176, 192)`, well beyond where the access actually landed. (This layout-based
+      mechanism is inferred from `link/frame.hpp:41-44`, not traced with a debugger —
+      labelled per CLAUDE.md rule 11.) `git diff -- link/frame.cpp` against HEAD was empty after restoration,
       confirmed both by direct diff and by the third run's `findings=0` matching the first.
       Source verified identical to HEAD afterwards.
 
