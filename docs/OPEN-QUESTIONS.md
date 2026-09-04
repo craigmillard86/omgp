@@ -1227,6 +1227,56 @@ implemented against the contract's silence.
 
 ---
 
+## 2026-09-03 — A comment-only diff in scope_dirs is indistinguishable from broken instrumentation
+
+**Context:** review + red-team on PR #124 (HIGH, convergent). Moving a `mutant-ok`
+label onto its own comment-only line — the placement `tools/mutate_report.py`'s own
+docstring prescribes for clang-format stability — made that comment the diff's only
+in-scope line. Mull attributes no mutant to a comment, so the report saw zero
+in-scope mutants and took the blind-spot branch ("instrumentation is not reaching
+the code"), failing deep-verify with a bogus FAIL. Demonstrated at 4265f78 (the CI
+run) and by the red-team's saturated-report reproducer: 170 survivors elsewhere in
+the file, exit 1 regardless. Any future PR whose only embedded-path change is a
+comment hits the same wall; `mutation-exempt(no-body)` is not an answer (it is a
+file-level claim about files with no function bodies).
+**Recommendation:** teach the blind-spot check the difference: when every in-scope
+changed line is a comment or blank (strip → empty or starting `//`), report
+"comment-only change: no mutable code in the diff" and pass instead of failing.
+DIRECTION CHANGE, stated plainly (review round 4 on #124): that branch alone
+flips today's fail-closed behaviour to fail-open for exactly the diff shape that
+adds triage labels — a PR whose only scope_dirs change is a new `mutant-ok`
+comment line would produce no survivor report at all, never consult
+`Label.covers()`, and skip the stale-label sweep. So the second clause is PART OF
+the recommendation, not optional: a changed `mutant-ok` label line must pull the
+line it governs into scope, so the labelled survivor is re-examined and the
+label's mutator list is enforced. Gate-scoping semantics either way, so a human
+rules it (both reviewers declined to pick a remedy for the same reason). PR #124
+itself sidesteps it in-diff: a short trailing `// labelled above` marker keeps
+the governed line in scope without disturbing the format-stable label placement.
+**Ruling:** pending — human; the workaround unblocks #124, the tool fix is the
+durable answer.
+**Supersedes:** none.
+
+---
+
+## 2026-09-04 — May a HealthListener re-enter HealthTracker from on_notice?
+
+**Context:** red-team round 6 on #124 showed the notify-after-state-assign ordering in tick()
+is observable only under a re-entrant listener (one that calls on_result/tick
+from inside on_notice), and that no document defines whether re-entrancy is
+allowed — specs/002-trunk-link-layer/contracts/link-cpp.md is silent. F3's
+scheduler is the real listener and its needs are not yet designed.
+**Recommendation:** forbid re-entry for now (a doc sentence on
+HealthListener::on_notice, added in #124 alongside this entry), and let F3's
+design either keep the prohibition or supersede this entry with a defined
+re-entrancy contract plus tests. Forbidding is the safe default: no current
+listener re-enters, and it leaves tick()'s internal ordering an implementation
+detail rather than a promise.
+**Ruling:** pending — F3 design (safe default applied: prohibition documented).
+**Supersedes:** none.
+
+---
+
 ## 2026-09-03 — Frame line out-of-range fields: recommendation landed with T025
 
 **Context:** the 2026-09-03 "Frame line out-of-range fields" entry above carries the HUMAN
