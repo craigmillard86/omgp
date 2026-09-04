@@ -108,11 +108,21 @@ class Helper:
             try:
                 self.p.stdin.write("".join(l + "\n" for l in lines[i:i + CHUNK]))
                 self.p.stdin.flush()
-            except BrokenPipeError:
+            except OSError:
                 # The helper died mid-batch (review round 4 on #121: an early segfault made
                 # the NEXT chunk's write raise an unhandled traceback with no (seed, index)
                 # and no crash attribution). Stop writing; the read side drains to EOF and
                 # the mismatch report — with death_note naming the exit code — fires.
+                #
+                # OSError, not BrokenPipeError: writing to a dead child's stdin raises
+                # EPIPE (-> BrokenPipeError) on POSIX but EINVAL (-> plain OSError, errno 22)
+                # on Windows, so the narrower catch let the very traceback round 4 removed
+                # come back on that platform — demonstrated by this PR's own
+                # test_write_to_a_dead_helper_does_not_raise, which fails on Windows at the
+                # BrokenPipeError version and passes here. Every OSError on this write means
+                # the same thing operationally (the helper cannot receive more input), and
+                # the response is identical: stop writing and let the read side attribute
+                # the death.
                 return
 
     def ask(self, lines: list[str]) -> list[str]:
