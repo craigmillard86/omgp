@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # OMGP pipeline — single definition used by CI, developers, and agents.
 # Usage: ./pipeline.sh [stage...]   (default: all local stages)
-# Stages: codegen quality build unit refimpl diffcheck scenarios esp32 | fuzz (optional, clang)
+# Stages: codegen quality build unit refimpl diffcheck scenarios selftest esp32 | fuzz (optional, clang)
 set -euo pipefail
 cd "$(dirname "$0")"
-STAGES=("${@:-codegen quality build unit refimpl diffcheck scenarios}")
-[ $# -eq 0 ] && STAGES=(codegen quality build unit refimpl diffcheck scenarios)
+STAGES=("${@:-codegen quality build unit refimpl diffcheck scenarios selftest}")
+[ $# -eq 0 ] && STAGES=(codegen quality build unit refimpl diffcheck scenarios selftest)
 BIN=build/native
 CXXFLAGS_BOOT="-std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Ibuild/gen"
 # Counting heap guard for Catch2 tests (tests/support/heap_guard.hpp) — mirrors CMakeLists.txt.
@@ -86,6 +86,28 @@ stage_build() {
 
 stage_unit() {
   if command -v ctest >/dev/null 2>&1 && [ -f build/native/CTestTestfile.cmake ]; then
+    # The ctest path discovers tests from CMakeLists.txt, not the filesystem
+    # (unlike the bootstrap glob below), so a tests/unit|property/test_*.cpp
+    # file whose registration is missing or was dropped runs on no path at
+    # all while this stage still reports green — the check-count floor alone
+    # can't see it when the file's checks are smaller than its slack
+    # (red-team PR #128, findings 1 + 2). Fail loudly instead.
+    local registered f name want orphaned
+    registered=$(grep -oE 'add_test\(\[=\[[A-Za-z0-9_]+\]=\]' build/native/CTestTestfile.cmake \
+                   | sed -E 's/^add_test\(\[=\[//; s/\]=\]$//')
+    orphaned=()
+    for f in tests/unit/test_*.cpp tests/property/test_*.cpp; do
+      [ -f "$f" ] || continue
+      name=$(basename "$f" .cpp)
+      want="$name"
+      [ "$name" = test_smoke ] && want=smoke   # test_smoke keeps its own main; registered as "smoke"
+      printf '%s\n' "$registered" | grep -qx "$want" || orphaned+=("$f")
+    done
+    if [ "${#orphaned[@]}" -gt 0 ]; then
+      echo "unit: test source file(s) not registered as a ctest test: ${orphaned[*]}" >&2
+      return 1
+    fi
+
     ctest --preset native --output-on-failure
     # ctest only prints test-binary stdout inline on failure, so on a green
     # run the "EXECUTED: <n>" line lives in ctest's per-test log instead.
@@ -135,6 +157,25 @@ stage_diffcheck() { python3 tools/diffcheck.py; }
 stage_scenarios() {
   if [ -x "$BIN/scenario_runner" ]; then "$BIN/scenario_runner" tests/scenarios/
   else python3 tools/scenario_lint.py; fi   # lint-only until F4 delivers the runner
+}
+stage_selftest() {
+  # Regression tests for pipeline.sh's own gates. These existed
+  # (test_pipeline_floor.sh, test_pipeline_link_bootstrap.sh) but were
+  # executed by nothing — not CMakeLists.txt, not the bootstrap glob, not any
+  # workflow (red-team PR #128 finding 4). Each script mutates pipeline.sh or
+  # CMakeLists.txt and rebuilds to prove a gate fires, then restores itself;
+  # capture failures rather than let `set -e` abort before the build/native
+  # cleanup below, since a mid-test rebuild can leave it desynced from the
+  # restored files (stale object timestamps vs. the file cmake now sees).
+  # Invoked via `bash` rather than run directly: the executable bit isn't
+  # guaranteed to survive every checkout (test_pipeline_link_bootstrap.sh is
+  # tracked as 100644), and this way it doesn't need to be.
+  local rc=0
+  bash tests/unit/test_pipeline_floor.sh || rc=$?
+  bash tests/unit/test_pipeline_link_bootstrap.sh || rc=$?
+  bash tests/unit/test_pipeline_registration.sh || rc=$?
+  rm -rf build/native
+  return "$rc"
 }
 stage_fuzz() {
   # Optional (not in the default list): libFuzzer smoke over every decoder, clang only.
