@@ -1209,6 +1209,24 @@ intended design, and the recommendation. §8 now marks the question open
 
 ---
 
+## 2026-09-03 — next_probe's "no candidate" sentinel is not in the contract
+
+**Context:** review on PR #118 (MEDIUM). `HealthTracker::next_probe` returns
+`Probe{ADDR_host, ...}` when no UNENROLLED/OFFLINE address exists — the steady
+state of a healthy rig. The behaviour is tested and `ADDR_host` is never a real
+probe target, but `contracts/link-cpp.md` "Health tracker" declares no "none"
+value, so a T039 scheduler written from the contract alone would spend trunk §6's
+one enrolment-probe slot per superframe addressing the host itself.
+**Recommendation:** amend `contracts/link-cpp.md` to state the sentinel, or —
+better for callers — replace it with an explicit `bool valid` on `Probe` in the
+same amendment. Until ruled, the sentinel is documented at the declaration
+(`link/health.hpp`) and pinned by tests; T039 (issue #57) must not be
+implemented against the contract's silence.
+**Ruling:** pending — human, with T039.
+**Supersedes:** none.
+
+---
+
 ## 2026-09-03 — Frame line out-of-range fields: recommendation landed with T025
 
 **Context:** the 2026-09-03 "Frame line out-of-range fields" entry above carries the HUMAN
