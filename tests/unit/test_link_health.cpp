@@ -30,12 +30,12 @@ struct RecordingListener : HealthListener {
     std::vector<Entry> entries;
 
     // Reserves up front so growth during a HEAP_FREE_SCOPE measures HealthTracker's own
-    // allocations, not this recording harness's vector doubling. 32 covers the largest
-    // scripted sequence in this file (the all-backplane cases emit 19 notices — review on
-    // #124: the old 16 was silently exceeded, which a future HEAP_FREE_SCOPE user would
-    // have measured as a tracker allocation).
+    // allocations, not this recording harness's vector doubling. 64 covers the largest
+    // scripted sequence in this file (the whole-table tick case emits 45 notices; reviews
+    // on #124: the old 16, then 32, were silently exceeded, which a future
+    // HEAP_FREE_SCOPE user would have measured as a tracker allocation).
     RecordingListener() {
-        entries.reserve(32);
+        entries.reserve(64);
     }
 
     void on_notice(Notice notice, uint8_t addr) override {
@@ -457,6 +457,35 @@ TEST_CASE("recovery from OFFLINE resets the failure count — three fresh failur
     }
     tracker.on_result(kAddr, false, 2000100);
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
+}
+
+TEST_CASE("one tick offlines every SUSPECT record, not just the first", "[link]") {
+    // red-team round 4 on #124 (their killing case, taken nearly verbatim): every prior
+    // tick case had exactly one live SUSPECT, so an early exit after the first transition
+    // was invisible — a bus-wide fault would heal ~15x slower than data-model §6 states,
+    // and Mull emits no insert-break mutant to cover it.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    for (uint8_t a = omgp::ADDR_backplane_min; a <= omgp::ADDR_backplane_max; ++a)
+        drive_to_suspect(tracker, a, 1000000);
+    const uint64_t suspect_since = 1000000 + omgp::TRUNK_suspect_after_failures;
+
+    const size_t before = listener.entries.size();
+    tracker.tick(suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000); // ONE tick
+
+    std::vector<uint8_t> offlined;
+    for (size_t i = before; i < listener.entries.size(); ++i) {
+        REQUIRE(listener.entries[i].notice == Notice::OFFLINE);
+        offlined.push_back(listener.entries[i].addr);
+    }
+    std::vector<uint8_t> expect;
+    for (uint8_t a = omgp::ADDR_backplane_min; a <= omgp::ADDR_backplane_max; ++a) {
+        expect.push_back(a);
+        REQUIRE(tracker.state(a) == HealthState::OFFLINE);
+    }
+    REQUIRE(offlined == expect);
 }
 
 TEST_CASE("suspect_since is stamped with now, not left at its 0 initialiser", "[link]") {

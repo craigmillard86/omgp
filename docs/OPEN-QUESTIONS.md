@@ -1241,12 +1241,18 @@ comment hits the same wall; `mutation-exempt(no-body)` is not an answer (it is a
 file-level claim about files with no function bodies).
 **Recommendation:** teach the blind-spot check the difference: when every in-scope
 changed line is a comment or blank (strip → empty or starting `//`), report
-"comment-only change: no mutable code in the diff" and pass instead of failing —
-optionally also pulling the line a changed `mutant-ok` label governs into scope so
-the labelled survivor is re-examined. Gate-scoping semantics, so a human rules it
-(both reviewers declined to pick a remedy for the same reason). PR #124 itself
-sidesteps it in-diff: a short trailing `// labelled above` marker keeps the
-governed line in scope without disturbing the format-stable label placement.
+"comment-only change: no mutable code in the diff" and pass instead of failing.
+DIRECTION CHANGE, stated plainly (review round 4 on #124): that branch alone
+flips today's fail-closed behaviour to fail-open for exactly the diff shape that
+adds triage labels — a PR whose only scope_dirs change is a new `mutant-ok`
+comment line would produce no survivor report at all, never consult
+`Label.covers()`, and skip the stale-label sweep. So the second clause is PART OF
+the recommendation, not optional: a changed `mutant-ok` label line must pull the
+line it governs into scope, so the labelled survivor is re-examined and the
+label's mutator list is enforced. Gate-scoping semantics either way, so a human
+rules it (both reviewers declined to pick a remedy for the same reason). PR #124
+itself sidesteps it in-diff: a short trailing `// labelled above` marker keeps
+the governed line in scope without disturbing the format-stable label placement.
 **Ruling:** pending — human; the workaround unblocks #124, the tool fix is the
 durable answer.
 **Supersedes:** none.

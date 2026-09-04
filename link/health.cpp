@@ -89,10 +89,12 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
 void HealthTracker::tick(uint64_t now_us) {
     // data-model.md §6: the only time-only transition is SUSPECT -> OFFLINE once
     // kOfflineThresholdUs has elapsed since suspect_since, with no on_result involved.
-    // Range-for over the fixed array (red-team round 3 on #124): the previous indexed loop
-    // carried the file's last wrap COMPARISON, and its <= mutant read records_[16] — an
-    // intra-object overread ASan does not reliably flag. Here the bound is the array's own
-    // extent, by construction.
+    // Range-for over the fixed array (red-team round 3 on #124): the previous indexed
+    // loop's <= mutant read records_[16] — an intra-object overread ASan does not reliably
+    // flag. Here the bound is the array's own extent, BY CONSTRUCTION. Scope (review
+    // round 4, rule 11): is_node_addr's `addr < kAddrCount` is the file's residual wrap
+    // comparison; its <= mutant is DEMONSTRATED killed by the bad-address cases in
+    // test_link_health.cpp (0x10 writes records_[16], which state(0x10) reads back).
     uint8_t addr = 0;
     for (HealthRecord& r : records_) {
         if (r.state == HealthState::SUSPECT &&
