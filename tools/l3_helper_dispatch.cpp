@@ -28,7 +28,7 @@ std::string dispatch_line(const std::string& line) {
     }
     if (verb == "DEC") {
         return parse_hex(arg, bytes) ? render_message(bytes.data(), bytes.size())
-                                      : "ERR BadRequest";
+                                     : "ERR BadRequest";
     }
     if (verb == "DENC") {
         std::string err;
@@ -36,7 +36,7 @@ std::string dispatch_line(const std::string& line) {
     }
     if (verb == "DDEC") {
         return parse_hex(arg, bytes) ? render_descriptor(bytes.data(), bytes.size())
-                                      : "ERR BadRequest";
+                                     : "ERR BadRequest";
     }
     if (verb == "DVAL") {
         return parse_hex(arg, bytes) ? validate_line(bytes.data(), bytes.size()) : "ERR BadRequest";

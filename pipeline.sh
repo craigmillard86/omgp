@@ -16,7 +16,10 @@ WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=
 # T008/T009 follow-up, raised 2026-08-30 with test_link_types.cpp (was 133821)
 # 197000 = 197100 executed (12 binaries) minus ~100 slack — T014-T017+T022, raised
 # 2026-08-31 with test_link_frame/test_link_stuffing/test_link_resync.cpp (was 133865)
-UNIT_TEST_FLOOR=197000
+# 200580 = 200682 executed (16 binaries) minus ~100 slack — T023-T026 (canonical frame
+# verbs, torture, mock_wire, health) landed since the last raise; T027 checkpoint,
+# raised 2026-09-04 (was 197000)
+UNIT_TEST_FLOOR=200580
 
 stage_codegen() {
   # Constants + vectors header from the YAML, then prove the human-authored docs tables
