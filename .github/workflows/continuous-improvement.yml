@@ -84,7 +84,8 @@ jobs:
           fi
           python3 -c "import json,sys; d=json.load(open('continuous-improvement.json')); \
             sys.exit(0 if d.get('decision') in ('UPDATE_RECOMMENDED','NO_UPDATE_REQUIRED') else 'decision missing or invalid: %r' % d.get('decision'))"
-          echo "decision=$(python3 -c "import json;print(json.load(open('continuous-improvement.json'))['decision'])")" >> "$GITHUB_OUTPUT"
+          decision="$(python3 -c 'import json; print(json.load(open("continuous-improvement.json"))["decision"])')"
+          echo "decision=$decision" >> "$GITHUB_OUTPUT"
           echo "ok=true" >> "$GITHUB_OUTPUT"
 
       - name: Report is an artefact, never a commit
