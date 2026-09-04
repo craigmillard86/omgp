@@ -61,10 +61,13 @@ def _int(tok: str) -> int:
     # whitespace at line level, closing the two layers this claim originally missed).
     if any(c.isspace() or c == "\0" for c in tok):
         raise CanonicalError(f"whitespace/NUL inside integer token: {tok!r}")
-    try:
-        return int(tok, 0)
-    except ValueError:
-        raise CanonicalError(f"not an integer: {tok!r}") from None
+    # round 15 on #121: int(tok, 0) also accepted 0o/0b/1_0 and non-ASCII decimal digits
+    # that parse_uint rejects -- closed for frame lines in round 9, now closed here too by
+    # the same compiled grammar, so message/status/descriptor fields are in lockstep.
+    if not _FRAME_UINT_RE.fullmatch(tok):
+        raise CanonicalError(f"not an integer: {tok!r}")
+    digits = tok.lstrip("+")
+    return int(digits, 16) if digits[:2].lower() == "0x" else int(digits, 10)
 
 
 def _hexbytes(tok: str) -> bytes:
@@ -176,6 +179,12 @@ def _tokens(line: str) -> dict[str, str]:
     # tokenizer keys "\top" as a token (take() fails) or leaves the whitespace inside the
     # last token (parse_uint rejects it since round 12). Reject non-space whitespace up
     # front; SPACES stay fine on both sides — both tokenizers skip empty tokens.
+    # round 15 on #121: pop exactly ONE trailing CR first -- l3_helper's reader does this
+    # for EVERY verb, so a CRLF-terminated message line must parse here too (round 13's
+    # guard alone made the reference STRICTER than the C++ end-to-end path). A second CR
+    # still rejects below, exactly as it does through the helper.
+    if line.endswith("\r"):
+        line = line[:-1]
     if any(c.isspace() and c != " " for c in line):
         raise CanonicalError(f"non-space whitespace in canonical line: {line!r}")
     kv: dict[str, str] = {}
@@ -313,9 +322,8 @@ def canonical_to_frame(line: str) -> link.Frame:
     # (reviews on #121, rounds 4/8/9: strip(), then rstrip(), then rstrip("\r\n") were each
     # broader than that; a doubled CR must reject like any other stray whitespace).
     # parse_frame_line compares the FIRST token to "frame", so leading space rejects too.
-    # (The int-radix forms 0o/0b/1_0 AND the non-ASCII decimal digits int() accepts —
-    # arabic-indic/fullwidth — remain the disclosed gap for the SHARED parsers; the frame
-    # fields below use _frame_uint, whose ASCII-only grammar closes both here.)
+    # (Round 15 closed the former shared-parser gap: _int now enforces the same ASCII
+    # grammar _frame_uint uses, so 0o/0b/1_0 and non-ASCII digits reject on every verb.)
     if line.endswith("\r"):
         line = line[:-1]
     prefix, _, rest = line.partition(" ")

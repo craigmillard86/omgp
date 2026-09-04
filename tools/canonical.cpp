@@ -87,9 +87,9 @@ bool parse_uint(const std::string& tok, unsigned& v) {
     // decimal shape here so a canonical-text token that names one value cannot silently
     // encode a different one (red-team @ 72d3072). "0"/"00"/... (all zero digits) still
     // parse as 0, matching both sides; only a leading zero followed by a *nonzero* digit is
-    // refused. This is not full parity with int(tok, 0): the "0o"/"0b" and "1_0" forms
-    // Python accepts are still rejected here (strtoul has no such syntax), and that gap is
-    // pre-existing, not introduced by this guard.
+    // refused. Round 15 on #121: the Python reference's _int now enforces the same ASCII
+    // decimal/0x-hex grammar (its former int(tok, 0) laxity -- 0o/0b/1_0, non-ASCII
+    // digits -- is closed), so the two sides parse this grammar in lockstep.
     // The digit scan starts after an optional leading '+' (accepted above): keying the guard
     // on tok[0] == '0' alone let "+010" skip it entirely and still reach strtoul's octal
     // reinterpretation (review @ 22f601a) — the exact hazard this guard exists to close, just

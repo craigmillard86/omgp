@@ -174,6 +174,18 @@ def _bad_crc_frame_bytes(rng: random.Random) -> bytes:
     return bytes([link.FLAG]) + link.stuff(body + bytes([c & 0xFF, (c >> 8) & 0xFF])) + bytes([link.FLAG])
 
 
+def _reserved_ctrl_frame_bytes(rng: random.Random) -> bytes:
+    """Wire bytes of a valid frame with trunk section 4's reserved ctrl bits 2-3 SET
+    (red-team round 15 on #121): encode_frame always emits them clear, so no corpus
+    element ever delivered such a frame and the ignore-reserved-bits forward-compat rule
+    had zero differential coverage. Both deframers must DELIVER it, bits ignored."""
+    payload = bytes(_biased_byte(rng) for _ in range(rng.randint(0, 4)))
+    ctrl = (rng.randrange(16) << 4) | 0x0C | rng.randrange(4)
+    body = bytes([rng.choice(_VALID_DST), rng.randrange(0x100), ctrl, len(payload)]) + payload
+    c = link.crc(body)
+    return bytes([link.FLAG]) + link.stuff(body + bytes([c & 0xFF, (c >> 8) & 0xFF])) + bytes([link.FLAG])
+
+
 def run_streams(helper, seed: int, count: int = STREAM_COUNT) -> int:
     """Multi-frame FSTREAM agreement (red-team round 8 on #121): every torture element
     delivers 0 or 1 frame, so "one OK line per delivered frame, IN ORDER" had zero
@@ -183,7 +195,9 @@ def run_streams(helper, seed: int, count: int = STREAM_COUNT) -> int:
     5th-offset-2 a one-over-cap valid-CRC frame pinning the TooLong boundary (round 10),
     and every 5th-offset-3 a bad-CRC frame (round 12). All three discard elements go FIRST
     in their stream, sharing their closing FLAG with the next frame's opener, so the
-    discard->delivery resync of FR-003 is exercised for each discard class."""
+    discard->delivery resync of FR-003 is exercised for each discard class. Every
+    5th-offset-4 appends a frame with trunk section 4's reserved ctrl bits SET, which both
+    sides must DELIVER, bits ignored (round 15)."""
     rng = random.Random(seed ^ _STREAM_SEED_XOR)
     ok = 0
     requests, expects = [], []
@@ -204,9 +218,15 @@ def run_streams(helper, seed: int, count: int = STREAM_COUNT) -> int:
         elif i % 5 == 3:
             stream = _bad_crc_frame_bytes(rng) + stream[1:]
             discards = 1
+        extra_lines = []
+        if i % 5 == 4:
+            extra = _reserved_ctrl_frame_bytes(rng)
+            stream += extra[1:]  # shared FLAG; delivered with the reserved bits ignored
+            extra_lines = [f"OK {C.frame_to_canonical(link.decode_frame(extra))}"]
         requests.append(f"FSTREAM {stream.hex()}")
         expects.append((i, stream,
-                        [f"OK {C.frame_to_canonical(f)}" for f in frames] + [f"END {discards}"]))
+                        [f"OK {C.frame_to_canonical(f)}" for f in frames] + extra_lines
+                        + [f"END {discards}"]))
     blocks = helper.ask_stream(requests)
     if len(blocks) != len(requests):
         # round 10 on #121: same guard as run_frames/run_torture — zip() would silently

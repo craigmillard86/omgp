@@ -296,6 +296,36 @@ def test_run_streams_corpus_has_multiframe_and_reserved_elements():
         resync += delivered_after
     assert multi == 60 and reserved == 12 and toolong == 12 and badcrc == 12
     assert resync == 36  # every discard-carrying stream delivers a frame AFTER its discard
+    # round 15 (red-team LOW): "2-3 frames per stream" was unpinned -- collapsing the
+    # generator to 2 passed everything, since multi only asserts >= 2.
+    assert max(len(F.link.Deframer().feed_bytes(s)) for s in helper.streams) >= 3
+    # round 15 (red-team MED): 12 streams carry a delivered frame whose RESERVED ctrl bits
+    # (trunk section 4, bits 2-3) are set -- encode_frame cannot originate one, so scan the
+    # raw segments for a CRC-valid body with those bits set.
+    resctrl = 0
+    for stream in helper.streams:
+        for seg in stream.split(bytes([F.link.FLAG])):
+            if not seg:
+                continue
+            body = _unstuff_segment(seg)
+            if len(body) >= 6 and body[2] & 0x0C:
+                c = F.link.crc(body[:-2])
+                if body[-2:] == bytes([c & 0xFF, (c >> 8) & 0xFF]):
+                    resctrl += 1
+    assert resctrl == 12
+
+
+def _unstuff_segment(seg: bytes) -> bytes:
+    out, esc = bytearray(), False
+    for b in seg:
+        if esc:
+            out.append(b ^ torture.XOR)
+            esc = False
+        elif b == torture.ESC:
+            esc = True
+        else:
+            out.append(b)
+    return bytes(out)
 
 
 def _unstuffed_body(wire: bytes) -> bytes:
@@ -330,3 +360,17 @@ def test_overlength_and_bad_crc_builders_pin_their_crc_properties():
     assert body[0] != F._RESERVED_DST and body[3] == len(body) - 6
     c = F.link.crc(body[:-2])
     assert body[-2:] != bytes([c & 0xFF, (c >> 8) & 0xFF])  # INVALID crc: exactly one BadCrc
+
+
+def test_reserved_ctrl_builder_pins_its_properties():
+    # round 15: the builder's load-bearing bits -- reserved ctrl bits SET, CRC valid, and
+    # the reference deframer DELIVERS it (forward compat: unknown bits ignored, not fatal).
+    rng = random.Random(0xB17F00D)
+    wire = F._reserved_ctrl_frame_bytes(rng)
+    body = _unstuffed_body(wire)
+    assert body[2] & 0x0C == 0x0C
+    c = F.link.crc(body[:-2])
+    assert body[-2:] == bytes([c & 0xFF, (c >> 8) & 0xFF])
+    d = F.link.Deframer()
+    assert len(d.feed_bytes(wire)) == 1
+    assert sum(v for k, v in d.stats.items() if k != "delivered") == 0

@@ -268,3 +268,21 @@ def test_named_fields_and_message_lines_inherit_the_whitespace_rejection():
         C._tokens("op=PING node=0x01\t")
     with pytest.raises(C.CanonicalError):
         C._tokens("\top=PING node=0x01")
+
+
+def test_message_lines_pop_one_trailing_cr_like_the_helper_reader():
+    # round 15 on #121: l3_helper pops ONE trailing CR for every verb; round 13's guard
+    # alone made the reference reject a CRLF message line the helper accepts. One CR
+    # parses; a second still rejects (it lands inside the last token on the C++ side).
+    C._tokens("op=PING node=0x01\r")
+    with pytest.raises(C.CanonicalError):
+        C._tokens("op=PING node=0x01\r\r")
+
+
+def test_int_rejects_the_radix_and_unicode_forms_parse_uint_rejects():
+    # round 15 on #121: the former disclosed gap is closed -- _int enforces the frame
+    # grammar, so these reject on every verb, not only frame lines.
+    for tok in ("0o11", "0b101", "1_0", "\u0663", "\uff13"):
+        with pytest.raises(C.CanonicalError):
+            C._int(tok)
+    assert C._int("+0x10") == 16 and C._int("00") == 0

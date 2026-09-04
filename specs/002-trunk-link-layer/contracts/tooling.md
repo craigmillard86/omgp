@@ -9,7 +9,8 @@ touches `.github/` — the existing CI already runs every stage this feature ext
   (`FENC`/`FDEC`, ≥ 10 000, seeded), torture elements (`FSTREAM`, `torture.corpus(seed)`),
   and multi-frame streams (`FSTREAM`, ≥ 1 000, seeded: 2-3 frames sharing FLAG delimiters,
   with reserved-dst / over-cap / bad-CRC discard elements placed before valid frames so
-  discard→delivery resync is exercised).
+  discard→delivery resync is exercised, and reserved-ctrl-bit frames that must be
+  DELIVERED, bits ignored -- trunk section 4 forward compatibility).
 - Default run (no flag) includes them, so the pipeline's `diffcheck` stage covers L2;
   `--frames-only` for local iteration. Summary line gains `frames <n>, torture <m>,
   streams <s>`.
