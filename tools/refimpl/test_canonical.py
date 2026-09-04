@@ -256,3 +256,15 @@ def test_frame_uint_accepts_the_plus_and_all_zero_shapes_parse_uint_accepts():
     # accepted "010" as decimal 10 (C++ rejects the leading-zero shape outright).
     f = C.canonical_to_frame("frame dst=+1 src=+0x10 flags=0x00 seq=00 payload=aa")
     assert (f.dst, f.src, f.seq) == (1, 16, 0)
+
+
+def test_named_fields_and_message_lines_inherit_the_whitespace_rejection():
+    # round 13 on #121: _parse_named's bare int() and _tokens' line-level strip() sat one
+    # layer below/above the round-12 guard, so "mt=\t3" and a trailing TAB on a message
+    # line parsed here while C++ answered ERR BadRequest.
+    with pytest.raises(C.CanonicalError):
+        C._parse_named("mt", "\t3")
+    with pytest.raises(C.CanonicalError):
+        C._tokens("op=PING node=0x01\t")
+    with pytest.raises(C.CanonicalError):
+        C._tokens("\top=PING node=0x01")

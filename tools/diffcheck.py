@@ -282,6 +282,10 @@ def run_crc(rng: random.Random, count: int = 200) -> int:
 def run_messages(helper: Helper, seed: int, count: int, only: int | None) -> int:
     rng = random.Random(seed)
     cases = [valid_message(rng) for _ in range(count)]
+    if only is not None and not (0 <= only < count):
+        # round 13 on #121: same guard as --frame-index/--torture-index — a negative index
+        # must not silently wrap to the last case while the report prints -1.
+        sys.exit(f"--index must be 0..{count - 1}")
     indices = [only] if only is not None else range(count)
     requests, expect = [], []
     for i in indices:

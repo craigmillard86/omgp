@@ -42,9 +42,13 @@ _REV = {k: {n: c for c, n in m.items()} for k, m in (
 def _parse_named(kind: str, tok: str) -> int:
     if tok in _REV[kind]:
         return _REV[kind][tok]
+    # round 13 on #121: the numeric fallback routes through _int so named-table fields
+    # (mt/evt/err/state/kind/tlv) inherit the round-12 whitespace/NUL rejection — C++'s
+    # parse_named falls through to the hardened parse_uint, and "\t3" must not name 3
+    # here while it is ERR BadRequest there.
     try:
-        return int(tok, 0)
-    except ValueError:
+        return _int(tok)
+    except CanonicalError:
         raise CanonicalError(f"{kind}: unknown name {tok!r}") from None
 
 
@@ -52,7 +56,9 @@ def _int(tok: str) -> int:
     # round 12 on #121: C++ parse_uint now rejects any token containing whitespace or an
     # embedded NUL (strtoul skipped leading whitespace — re-enabling legacy octal, so
     # "\t011" named 9 — and c_str() truncated at NUL). int(tok, 0) tolerates both; mirror
-    # the rejection here so every verb sharing these parsers stays in lockstep.
+    # the rejection here so every verb sharing these parsers stays in lockstep (round 13:
+    # _parse_named routes its numeric fallback here and _tokens rejects non-space
+    # whitespace at line level, closing the two layers this claim originally missed).
     if any(c.isspace() or c == "\0" for c in tok):
         raise CanonicalError(f"whitespace/NUL inside integer token: {tok!r}")
     try:
@@ -165,8 +171,15 @@ def error_to_canonical(e: l3.L3Error) -> str:
 # --- parsing ---------------------------------------------------------------------------------
 
 def _tokens(line: str) -> dict[str, str]:
+    # round 13 on #121 (review): line-level strip() removed leading/trailing TAB/VT/FF/CR
+    # for every non-frame verb before any token parser could reject them, while the C++
+    # tokenizer keys "\top" as a token (take() fails) or leaves the whitespace inside the
+    # last token (parse_uint rejects it since round 12). Reject non-space whitespace up
+    # front; SPACES stay fine on both sides — both tokenizers skip empty tokens.
+    if any(c.isspace() and c != " " for c in line):
+        raise CanonicalError(f"non-space whitespace in canonical line: {line!r}")
     kv: dict[str, str] = {}
-    for tok in line.strip().split(" "):
+    for tok in line.split(" "):
         if not tok:
             continue
         if "=" not in tok:

@@ -78,6 +78,18 @@ def test_diffcheck_frames_only_discloses_its_blind_spot():
     assert re.search(r"streams [1-9]\d*", r.stdout), r.stdout
 
 
+def test_diffcheck_default_path_stays_inside_the_sc003_budget():
+    if not L3_HELPER.exists():
+        pytest.skip(f"{L3_HELPER} not built (run ./pipeline.sh build first, or the full pipeline)")
+    # review round 13 on #121: SC-002 (--frames-only < 60 s) got a timeout pin; SC-003
+    # (whole diffcheck stage < 2 min) had none, while this PR quadrupled the corpus and
+    # the ceiling was held only by a PR-body figure nothing re-checks.
+    r = subprocess.run([sys.executable, str(DIFFCHECK)], capture_output=True, text=True,
+                       cwd=ROOT, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert re.search(r"streams [1-9]\d*", r.stdout), r.stdout
+
+
 def test_mutate_cfg_parses_and_pins():
     cp = configparser.ConfigParser()
     cp.read(CFG)

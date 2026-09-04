@@ -21,7 +21,6 @@ import canonical as C  # noqa: E402
 import diffcheck_frames as F
 import torture  # noqa: E402
 import omgp_link as link  # noqa: E402
-import torture  # noqa: E402
 
 SEED = 20260903
 
