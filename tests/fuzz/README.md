@@ -11,7 +11,7 @@ prints a `reproduce:` command for each.
 | `fuzz_payload` | `[opcode, dir, payload…]` | every typed decoder accepts/rejects without a crash; any decoded value re-encodes byte-identically |
 | `fuzz_descriptor` | raw descriptor blob | cursor/validator never over-read; a validated blob re-emits identically via `add_raw`; every typed decoder is total |
 | `fuzz_roundtrip` | raw message bytes | decode → canonical → parse → encode reproduces the input; rendering is stable |
-| `fuzz_frame` | byte stream, fed byte-at-a-time to two independent `Deframer`s | deframe never over-reads or hangs on arbitrary bytes; the `TooLong`/`kMaxUnstuffed` accumulator bound is never exceeded; two fresh `Deframer`s fed the identical byte sequence deliver identical frames — a determinism check, not a chunk-boundary differential (`feed()` has no notion of chunk boundaries and is called once per byte either way, `fuzz_frame.cpp:27-31`; trap on mismatch, `fuzz_frame.cpp:59-63`); a delivered frame re-encodes and re-parses to equal fields |
+| `fuzz_frame` | byte stream, fed byte-at-a-time to two independent `Deframer`s | deframe never over-reads or hangs on arbitrary bytes; an accumulator write past `buf_[kMaxUnstuffed]` that reaches **outside** the `Deframer` object aborts (ASan redzone) — a smaller intra-object overrun is UBSan-**diagnostic only** here (recoverable, no `findings`/`exit` failure; see Planted-bug evidence below), so this row traps an escaping overrun, not every off-by-one; two fresh `Deframer`s fed the identical byte sequence deliver identical frames — a determinism check, not a chunk-boundary differential (`feed()` has no notion of chunk boundaries and is called once per byte either way, `fuzz_frame.cpp:27-33`; trap on mismatch, `fuzz_frame.cpp:59-63`); a delivered frame re-encodes and re-parses to equal fields |
 
 Reproduce a finding: `build/fuzz/<target> build/fuzz/artifacts/<target>/<crash-file>`.
 
@@ -80,10 +80,12 @@ reaching the code and must be fixed before the PR is opened.
       own share is `<seconds>/5`: 12 s for this record's invocation
       (`./pipeline.sh fuzz` → `tools/fuzz-smoke.sh 60`), versus 120 s under CI
       deep-verify's `tools/fuzz-smoke.sh 600` (`.github/workflows/ci.yml:150`). The
-      other half of SC-003 — a clean run at that 120 s CI share — is not established
-      by this PR: it is T0 and skips the deep-verify job (`ci.yml:128-131`); it is
-      established by whichever T2/T3 deep-verify run most recently reported
-      `fuzz_frame` clean, not cited here. First, the clean
+      other half of SC-003 — a clean run at that 120 s CI share — is **pending**, not
+      established by this PR: it is T0, so the `deep-verify` job runs but gates its heavy
+      steps (including the 600 s fuzz) on `steps.tier.outputs.deep` (`ci.yml:128-131`),
+      which is false at T0. That clean-at-CI-share run is left for a T2/T3 `deep-verify`
+      pass over `link/`; none is cited here, so this half is recorded as not-yet-shown
+      rather than asserted. First, the clean
       baseline: `./pipeline.sh fuzz` (`tools/fuzz-smoke.sh 60`, unmodified tree). Then,
       neutralize `link/frame.cpp` `Deframer::append`'s guard —
       `if (len_ >= kMaxUnstuffed) {` → `if (false) { // ...` (an always-false condition,
