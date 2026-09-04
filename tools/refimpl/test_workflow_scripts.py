@@ -430,159 +430,121 @@ def test_codeowners_still_protects_ground_truth_and_governance():
         assert must in owned, must
 
 
-# --- reviewer capability parity (G1/G2, continuous-improvement dry run 2026-09-04) --------------
-
-def test_verdict_producing_workflows_can_execute_what_they_judge():
-    """A workflow whose verdict the approval gate parses must be able to RUN the code it is
-    judging. Found by measuring, not by anything failing: claude-review held only read tools
-    while red-team held ./pipeline.sh, so 26% of verdict-bearing reviews in the fortnight to
-    2026-09-04 reported running nothing, and a real cross-platform defect (BrokenPipeError vs
-    OSError on a dead pipe) survived 17 reading-only rounds on #121 before one pytest run
-    found it. Nothing in CI failed while the reviewer could not verify — hence this test.
-
-    Scope is deliberately narrow: workflows that emit `VERDICT(<kind>)`. agent-converge-audit
-    also reasons about tests but is a read-only drift audit that backs no approval, so it is
-    correctly outside this rule.
-
-    The check is per-JOB, not per-file: a workflow can have jobs that never touch the verdict
-    (e.g. red-team's monthly attack-protocol job), so toolchain/tool checks are scoped to the
-    job that actually contains the verdict-producing claude-code-action step. Flattening steps
-    across all jobs let a job with no toolchain hide behind an unrelated job that has one
-    (2026-09-04 review round on #127)."""
-    for wfn in ("claude-review.yml", "red-team.yml"):
-        wf = yaml.safe_load((ROOT / ".github" / "workflows" / wfn).read_text(encoding="utf-8"))
-        found_verdict_job = False
-        for jobname, job in wf["jobs"].items():
-            steps = job.get("steps", [])
-            actions = [s for s in steps if "claude-code-action" in s.get("uses", "")]
-            verdict_actions = [a for a in actions if "VERDICT(" in a["with"].get("prompt", "")]
-            if not verdict_actions:
-                continue                      # not a verdict-producing job (e.g. attack-protocol)
-            found_verdict_job = True
-            where = f"{wfn}:{jobname}"
-            for a in verdict_actions:
-                tools = a["with"].get("claude_args", "")
-                assert "Bash(./pipeline.sh*)" in tools, (
-                    f"{where}: emits a VERDICT the approval gate parses but cannot run ./pipeline.sh")
-                assert any(t in tools for t in ("Bash(python3*)", "Bash(g++*)", "Bash(ctest*)")), (
-                    f"{where}: no way to run a test directly")
-            # ...and the toolchain those tools need must actually be installed in THIS job, not
-            # merely somewhere in the file, and not disabled behind a falsifying `if: false`.
-            # YAML parses a literal `if: false` as the Python bool False, not the string
-            # "false" (an expression like steps.tier.outputs.deep == 'true' stays a str);
-            # `if: ${{ false }}` is a THIRD form -- a string that is neither -- and survived
-            # here undetected (red-team round 2 on #127, mutation "toolchain disabled via
-            # `if: ${{ false }}`"). All three must be treated as unconditionally disabling.
-            def disabled(s):
-                v = s.get("if")
-                if v is False:
-                    return True
-                if isinstance(v, str):
-                    v = v.strip()
-                    if v.startswith("${{") and v.endswith("}}"):
-                        v = v[3:-2].strip()
-                    return v.lower() == "false"
-                return False
-            py_steps = [s for s in steps if "setup-python" in s.get("uses", "")]
-            assert py_steps, f"{where}: no python"
-            assert not all(disabled(s) for s in py_steps), (
-                f"{where}: python setup is unconditionally disabled")
-            install_steps = [s for s in steps if "apt-get install" in (s.get("run") or "")]
-            assert any("cmake" in (s.get("run") or "") and "ninja" in (s.get("run") or "")
-                       for s in install_steps), f"{where}: no cmake/ninja"
-            assert not all(disabled(s) for s in install_steps), (
-                f"{where}: toolchain install is unconditionally disabled")
-            assert any("pytest" in (s.get("run") or "") for s in steps), f"{where}: no pytest"
-        assert found_verdict_job, f"{wfn}: no job emits a VERDICT(...) at all"
+# --- reviewer safety: it verifies by READING CI results, never by executing PR code ------------
+# F1 (red team on #127): the earlier design gave the verdict-signing reviewer a toolchain and a
+# checkout of the PR head so it could RUN the diff's tests. But this job holds the claude[bot]
+# App token the approval gate trusts, and executed test code (a conftest.py, a modified
+# pipeline.sh) is not bound by --allowedTools — so it could post a forged `VERDICT(review):
+# clean` and auto-merge (auto_merge_max_tier=2 covers T0/T1/T2; this workflow runs at every
+# tier). The fix is structural: the reviewer executes NOTHING and grounds its verdict in the
+# results the `native` / `deep-verify` jobs already produced. These tests pin that.
 
 
-def test_review_checks_out_the_code_it_reviews_but_only_after_vetting_it():
-    """Running the diff's tests requires the diff — and executing PR-controlled code demands
-    an order. Everything before the PR checkout runs from a TRUSTED tree, in particular
-    `risk-tier`, a LOCAL composite action whose shell body is read from the checkout and run
-    with GH_TOKEN while the workflow holds `pull-requests: write`.
-
-    F3 correction (red team on #127): a bare `actions/checkout` on a `pull_request` event
-    resolves to `refs/pull/<n>/merge`, which INCLUDES the PR's own files — so "no ref" is
-    NOT the trusted default branch, it is the PR merge ref. The first checkout must PIN the
-    base branch explicitly (`github.event.pull_request.base.ref`, with `default_branch` as
-    the workflow_dispatch fallback), never the PR head and never the implicit merge ref.
-
-    The same-repo guard must cover BOTH trigger arms. The job-level `if` covers `pull_request`
-    only; on `workflow_dispatch` there is no `github.event.pull_request`, so a ref expression
-    falling through to `refs/pull/<n>/head` resolves to a FORK's code for a fork PR (red team
-    on #127). That was inert while nothing executed; it is not inert now."""
+def _review_action():
     wf = yaml.safe_load((ROOT / ".github" / "workflows" / "claude-review.yml").read_text(encoding="utf-8"))
     steps = wf["jobs"]["review"]["steps"]
+    action = next(s for s in steps if "claude-code-action" in s.get("uses", ""))
+    return wf, steps, action
+
+
+# Read-only surface the auto-merge-tier reviewer is allowed to hold. Everything here READS
+# (the diff, the CI results, the linked issue) or posts the single verdict comment.
+_REVIEWER_ALLOWED = {
+    "Bash(gh pr view*)", "Bash(gh pr diff*)", "Bash(gh pr checks*)", "Bash(gh pr comment*)",
+    "Bash(gh run view*)", "Bash(gh run list*)", "Bash(gh issue view*)",
+    "Read", "Grep", "Glob",
+}
+# Grants that execute arbitrary commands or forge/apply anything — never for the reviewer.
+# (cmake -E env <cmd>, ctest -S <script>, python3 -c '<anything>', g++ -wrapper <prog> all
+# run arbitrary programs; gh pr review/merge/api reach the approval path; Edit/Write mutate.)
+_REVIEWER_FORBIDDEN = {
+    "Bash(./pipeline.sh*)", "Bash(python3*)", "Bash(python3 -m pytest*)", "Bash(python*)",
+    "Bash(ctest*)", "Bash(cmake*)", "Bash(g++*)", "Bash(bash*)", "Bash(sh*)",
+    "Bash(gh*)", "Bash(gh pr review*)", "Bash(gh pr merge*)", "Bash(gh api*)", "Bash(*)",
+    "Edit", "Write",
+}
+
+
+def test_the_auto_merge_tier_reviewer_never_executes_pr_code():
+    """The verdict this workflow emits is trusted by agent-approve/agent-merge at every tier it
+    can auto-merge (auto_merge_max_tier=2 → T0/T1/T2). So the job that produces it must not run
+    PR-controlled code: no PR-head/merge-ref checkout, no toolchain step, and no execution tool
+    in the allowlist. It reads CI results instead (see the prompt). red-team.yml is a SEPARATE,
+    accepted case — it must execute PR code to write and run adversarial repros, and runs only
+    at T2/T3; whether that exposure is acceptable at auto_merge_max_tier=2 is its own open
+    question (red team F5 on #127), not enforced here."""
+    wf, steps, action = _review_action()
+    # No checkout may reference the PR head or the implicit merge ref.
+    for s in steps:
+        if "actions/checkout" not in s.get("uses", ""):
+            continue
+        ref = str((s.get("with") or {}).get("ref", ""))
+        assert "steps.head" not in ref and "head.sha" not in ref and "head.ref" not in ref, (
+            f"the reviewer must not check out the PR head: {ref!r}")
+        assert "refs/pull/" not in ref, f"refs/pull/<n>/* is PR-controlled code: {ref!r}"
+    # No toolchain: nothing that installs a compiler/test runner into this job.
+    for s in steps:
+        run = s.get("run") or ""
+        assert "apt-get install" not in run, "the reviewer must not install a toolchain"
+        assert "setup-python" not in s.get("uses", ""), "the reviewer needs no python runtime"
+    # No execution tool, and the prompt must tell it to read CI output rather than run.
+    granted = set(re.search(r'--allowedTools "([^"]*)"', action["with"]["claude_args"]).group(1).split(","))
+    assert granted <= _REVIEWER_ALLOWED, f"reviewer holds tools outside the read-only set: {granted - _REVIEWER_ALLOWED}"
+    assert "Bash(gh run view*)" in granted, "the reviewer needs to READ the CI job logs"
+    prompt = action["with"]["prompt"]
+    assert "gh run view" in prompt and "DO NOT run" in prompt, (
+        "the prompt must direct the reviewer to READ CI results, not execute the diff")
+
+
+def test_reviewer_holds_no_execution_or_approval_grant():
+    """Belt for the set-subset check above, in the grammar's own terms: no arbitrary-command
+    executor and no approval/write path may appear, however the allowlist is edited. Every
+    forbidden form is an escape the red team demonstrated (cmake -E env, ctest -S, python3 -c,
+    g++ -wrapper) or a direct approval path (gh pr review/merge/api)."""
+    _wf, _steps, action = _review_action()
+    args = action["with"]["claude_args"]
+    granted = set(re.search(r'--allowedTools "([^"]*)"', args).group(1).split(","))
+    for forbidden in _REVIEWER_FORBIDDEN:
+        assert forbidden not in granted, f"reviewer holds an execution/approval grant: {forbidden}"
+    # No CLI escape hatch that makes the allowlist moot.
+    assert "--dangerously-skip-permissions" not in args and "--permission-mode" not in args
+    assert len(re.findall(r'--allowedTools "', args)) == 1, "exactly one --allowedTools flag"
+    # The verdict must stay unforgeable from inside the job: no approval path anywhere in args.
+    for banned in ("gh pr review", "gh pr merge", "gh api"):
+        assert banned not in args, banned
+
+
+def test_review_checks_out_only_the_trusted_base():
+    """Exactly one checkout, pinned to the trusted base branch — never the PR head or the
+    implicit `refs/pull/<n>/merge` (which INCLUDES PR files, red team F3). `risk-tier`, a local
+    composite action whose shell body is read from the checkout and run with GH_TOKEN under
+    `pull-requests: write`, must therefore run from trusted code. The fork guard still resolves
+    the head sha the prompt stamps and refuses a fork on the workflow_dispatch arm."""
+    wf, steps, _action = _review_action()
     checkouts = [i for i, s in enumerate(steps) if "actions/checkout" in s.get("uses", "")]
-    assert len(checkouts) == 2, "expected a trusted checkout, then the PR head"
-    trusted, untrusted = checkouts
-    # F3: the first checkout must be pinned to a TRUSTED base ref — not "no ref" (which is the
-    # PR merge ref on a pull_request event), and not the PR head. risk-tier runs from it.
-    trusted_ref = (steps[trusted].get("with") or {}).get("ref", "")
-    assert trusted_ref, "the first checkout must PIN a trusted ref, not default to refs/pull/<n>/merge"
-    assert ("base.ref" in trusted_ref or "default_branch" in trusted_ref), (
-        f"the first checkout must pin the base/default branch, got: {trusted_ref!r}")
-    assert "steps.head" not in trusted_ref and "head.sha" not in trusted_ref, (
-        "the first checkout must not be the PR head — risk-tier's shell body would be PR-controlled")
-    assert steps[untrusted]["with"]["ref"], "the second checkout must pin a resolved ref"
-    # F7: the PR-head checkout must not persist the job token into .git/config for executed
-    # test code to reach.
-    assert steps[untrusted]["with"].get("persist-credentials") is False, (
-        "the PR-head checkout must set persist-credentials: false")
+    assert len(checkouts) == 1, "the reviewer checks out only the trusted base"
+    trusted_ref = (steps[checkouts[0]].get("with") or {}).get("ref", "")
+    assert trusted_ref, "the checkout must PIN a trusted ref, not default to refs/pull/<n>/merge"
+    assert "base.ref" in trusted_ref or "default_branch" in trusted_ref, (
+        f"the checkout must pin the base/default branch, got: {trusted_ref!r}")
 
-    # The guard resolves the head and refuses a fork, and it runs BEFORE the PR checkout.
-    guard = next(i for i, s in enumerate(steps) if s.get("id") == "head")
-    assert trusted < guard < untrusted, "the fork guard must sit between the two checkouts"
-    # An advisory guard is no guard: `continue-on-error: true` would let the fork-refusal
-    # `exit 1` be swallowed and the job carry on to check out (and execute) the fork's code
-    # anyway (red-team round 2 on #127, mutation "guard made advisory" — survived before this
-    # assertion existed).
-    assert steps[guard].get("continue-on-error") is not True, (
-        "the fork guard must not be advisory: continue-on-error would swallow its exit 1")
-    body = steps[guard]["run"]
-    assert "head.repo.full_name" in body, "the guard must resolve the head repo"
-    # The exit must be INSIDE the fork branch. A bare `"exit 1" in body` also matches the
-    # guard's OTHER exit (the empty-sha check), so it passes with the fork refusal gutted --
-    # caught here by mutation rather than in review, which is the point of running them.
-    fork_branch = re.search(r'if \[ "\$repo" != "\$GITHUB_REPOSITORY" \];(.*?)\n *fi', body, re.S)
-    assert fork_branch, "no fork-refusal branch comparing head repo to GITHUB_REPOSITORY"
-    assert "exit 1" in fork_branch.group(1), "the fork branch must exit non-zero, not merely log"
-    # The published output must be an actual commit, not a mutable ref (red-team round 2 on
-    # #127, mutation "guard pins a mutable branch ref, not the sha" — a checkout pinned to
-    # `.head.ref` still races a force-push exactly like the unpinned form this guard replaced).
-    assert re.search(r'sha=\$\([^)]*--jq \.head\.sha\)', body), (
-        "the guard must resolve .head.sha for its 'sha' output, not a branch/ref name")
-
-    # risk-tier is a local composite action: it must never be read from PR-controlled code.
-    # Checked across EVERY local (`uses: ./...`) step, not just the one named "risk-tier" --
-    # a second local action added after the untrusted checkout would still satisfy
-    # `tier < untrusted` under a name-scoped check (red-team round 2 on #127, mutation "local
-    # action re-added AFTER the PR checkout" — survived before this assertion existed).
+    # Every local composite action must be read from that trusted checkout (there is no other).
     local_actions = [i for i, s in enumerate(steps) if s.get("uses", "").startswith("./")]
     assert local_actions, "no local composite action found"
-    assert all(i < untrusted for i in local_actions), (
-        "a local composite action runs after the PR checkout — its shell body would be read "
-        "from PR-controlled code and executed with this job's token")
+    assert all(i > checkouts[0] for i in local_actions), "a local action runs before the trusted checkout"
 
-    # The ref must come from the guard's output, not from an unguarded event/input expression.
-    ref = steps[untrusted]["with"]["ref"]
-    assert "steps.head.outputs.sha" in ref, f"PR checkout ref is not the vetted sha: {ref}"
-    assert "refs/pull/" not in ref, "refs/pull/<n>/head resolves to fork code on the dispatch arm"
+    # The fork guard: resolves .head.sha (a commit, not a mutable ref) and refuses a fork,
+    # non-advisory. Kept for the workflow_dispatch arm the job-level `if` does not cover.
+    guard = next(i for i, s in enumerate(steps) if s.get("id") == "head")
+    assert steps[guard].get("continue-on-error") is not True, "the fork guard must not be advisory"
+    body = steps[guard]["run"]
+    fork_branch = re.search(r'if \[ "\$repo" != "\$GITHUB_REPOSITORY" \];(.*?)\n *fi', body, re.S)
+    assert fork_branch and "exit 1" in fork_branch.group(1), "the fork branch must exit non-zero"
+    assert re.search(r'sha=\$\([^)]*--jq \.head\.sha\)', body), "the guard must resolve .head.sha"
+    # The prompt stamps the guard's resolved sha, not a mutable ref.
+    assert "steps.head.outputs.sha" in _action_prompt(steps), "the verdict head must be the vetted sha"
 
 
-def test_review_cannot_shell_out_through_its_test_runner():
-    """`Bash(python3*)` matches `python3 -c '<anything>'`, which reaches `gh` and dissolves an
-    allowlist that deliberately withholds `gh pr review` — demonstrated by the red team on
-    #127, not theorised. A reviewer granted execution must still be granted only execution."""
-    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "claude-review.yml").read_text(encoding="utf-8"))
-    action = next(s for s in wf["jobs"]["review"]["steps"] if "claude-code-action" in s.get("uses", ""))
-    granted = set(re.search(r'--allowedTools "([^"]*)"', action["with"]["claude_args"]).group(1).split(","))
-    assert "Bash(python3*)" not in granted, "bare python3 is an arbitrary-command grant"
-    assert "Bash(python3 -m pytest*)" in granted, "the reviewer still needs to run pytest"
-    for wide in ("Bash(bash*)", "Bash(sh*)", "Bash(python*)", "Bash(gh*)", "Bash(*)", "Edit", "Write"):
-        assert wide not in granted, wide
-    # The verdict must stay unforgeable from inside the job: no approval path.
-    for banned in ("gh pr review", "gh pr merge", "gh api"):
-        assert banned not in action["with"]["claude_args"], banned
+def _action_prompt(steps):
+    return next(s for s in steps if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
 

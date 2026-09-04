@@ -24,6 +24,7 @@ permissions:
   id-token: write   # anthropics/claude-code-action exchanges an OIDC token for its App token; without this every run fails "Could not fetch an OIDC token" (found 2026-08-29)
   contents: read
   checks: read
+  actions: read     # the reviewer READS the native/deep-verify job logs (gh run view --log) instead of re-running the diff (red team on #127, F1)
   pull-requests: write
 
 concurrency:
@@ -36,25 +37,31 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      # ORDER IS LOAD-BEARING (red team on #127, F3). Everything that runs before the PR
-      # head is checked out — in particular `risk-tier`, a LOCAL composite action whose
-      # shell body is read from the checkout and executed with GH_TOKEN while this workflow
-      # holds `pull-requests: write` — must run from TRUSTED code. A bare `actions/checkout`
-      # on a `pull_request` event resolves to `refs/pull/<n>/merge`, which INCLUDES the PR's
-      # own files, so it is not trusted: pin the base branch explicitly. (`base.ref` is the
-      # target branch on the pull_request arm; `default_branch` covers workflow_dispatch.)
+      # THE REVIEWER NEVER EXECUTES THE PR'S CODE (red team on #127, F1). Running the diff's
+      # own tests in this job would put PR-controlled code (a conftest.py, a modified
+      # pipeline.sh, any collected test) in a shell that carries the claude[bot] App token —
+      # the identity agent-approve/agent-merge trust for a `VERDICT(review): clean` final
+      # line. That code could post the forged verdict itself and auto-merge (auto_merge_max_
+      # tier=2 covers T0/T1/T2, and this workflow runs at every tier). Narrowing --allowedTools
+      # cannot bound executed test code, so the fix is structural: the reviewer READS the test
+      # results the `native` / `deep-verify` jobs already produced at this head (gh run view
+      # --log) and never runs anything. Consequently the ONLY checkout is the TRUSTED base
+      # branch — from which risk-tier's local shell body is read — and there is no PR checkout,
+      # no toolchain, and no execution tool in the allowlist below.
+      #
+      # A bare `actions/checkout` on a `pull_request` event resolves to `refs/pull/<n>/merge`,
+      # which INCLUDES the PR's own files (red team F3), so pin the base branch explicitly
+      # (`base.ref` on the pull_request arm; `default_branch` covers workflow_dispatch).
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
           fetch-depth: 0                # trusted base branch, pinned (never the PR merge ref)
 
-      # Same-repo guard for BOTH arms. The job-level `if` covers `pull_request` only; on
-      # `workflow_dispatch` there is no `github.event.pull_request`, so before this step the
-      # ref fell through to `refs/pull/<n>/head` — which for a FORK PR is the fork's code,
-      # executed here with the job's token. That was harmless while the checkout was the
-      # default branch and nothing ran; adding execution is what made it exploitable, so the
-      # guard lands in the same diff. Fails closed: an unresolvable PR reviews nothing.
-      - name: Resolve the head, and refuse anything that is not same-repo
+      # Resolve the head sha (used by the prompt) and refuse a fork on the workflow_dispatch
+      # arm, which the job-level `if` does not cover. Fails closed: an unresolvable PR reviews
+      # nothing. (The reviewer no longer executes PR code, so a fork would be read-safe, but a
+      # fork PR gets no App token and, per GOVERNANCE.md §4b, is not reviewed here regardless.)
+      - name: Resolve the head, and refuse a fork on the dispatch arm
         id: head
         env:
           GH_TOKEN: ${{ github.token }}
@@ -64,33 +71,16 @@ jobs:
           repo=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.repo.full_name)
           sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.sha)
           if [ "$repo" != "$GITHUB_REPOSITORY" ]; then
-            echo "::error::#$PR is from fork $repo — this job executes the checked-out code, \
-          so a fork head is never reviewed here (GOVERNANCE.md §4b)."
+            echo "::error::#$PR is from fork $repo — not reviewed here (GOVERNANCE.md §4b)."
             exit 1
           fi
           [ -n "$sha" ] || { echo "::error::could not resolve the head of #$PR"; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       - id: tier
-        uses: ./.github/actions/risk-tier     # the trusted copy: checkout #1 pinned the base branch, and the PR head is not checked out yet
+        uses: ./.github/actions/risk-tier     # read from the trusted base checkout above
         with: {pr: '${{ github.event.pull_request.number || inputs.pr }}'}
 
-      # Only now the code under review, at the sha the guard blessed. persist-credentials:
-      # false so the job's token is NOT written into .git/config inside the PR-controlled
-      # workspace (red team on #127, F7) — one fewer copy of the credential for executed
-      # test code to reach. (The env GH_TOKEN exposure is F1, a separate, unresolved item.)
-      - uses: actions/checkout@v7
-        with: {ref: '${{ steps.head.outputs.sha }}', fetch-depth: 0, persist-credentials: false}
-      - uses: actions/setup-python@v7
-        with: {python-version: '3.12'}
-      - name: Toolchain (so the review can RUN the tests it judges)
-        # Added 2026-09-04: without this the reviewer could only read. 26% of verdict-bearing
-        # reviews in the fortnight to 2026-09-04 reported running nothing, and a real
-        # cross-platform defect survived 17 reading-only rounds on #121 before one pytest run
-        # found it. red-team has had this since it was written; the reviewer had not.
-        run: |
-          sudo apt-get update && sudo apt-get install -y cmake ninja-build
-          pip install jinja2 pyyaml pytest
       - name: Claude Code — focused review
         # Every tier is reviewed (not only T2/T3) since the 2026-08-31 approval ruling:
         # T0/T1 approvals hang off this verdict, so the verdict must always exist.
@@ -110,14 +100,18 @@ jobs:
                acceptance criteria of the linked issue (`gh issue view <n>`
                — read it, do not infer it from the PR body)? Any weakened or
                suspiciously narrow assertions?
-               RUN THEM. Execute the pipeline stages this diff touches
-               (`./pipeline.sh <stages>`, `python3 -m pytest <paths>`,
-               `ctest --preset native`) before judging test integrity. A
-               finding you demonstrated by running something outranks any
-               number of findings from reading: report the executed result
-               and label it per rule 11. If a command fails for an
-               environmental reason, say so in NOT EXAMINED rather than
-               silently reverting to a reading-only pass.
+               DO NOT run the diff's code — you hold no toolchain and no
+               execution tool, by design (red team on #127, F1: a reviewer
+               that runs PR code in this token-holding job could have its
+               verdict forged). The diff's tests ALREADY RAN at this head in
+               the `native (build + full test suite)` job and, at T2/T3, in
+               `deep-verify`. Ground your test-integrity judgement in that
+               real output: `gh pr checks` for pass/fail, and
+               `gh run view <run-id> --log` (or `--log-failed`) for the
+               actual assertions that ran. A finding grounded in that logged
+               output outranks one from reading alone; label it per rule 11.
+               If a required CI result is missing or unreadable, put that in
+               NOT EXAMINED rather than guessing.
             4. Security: unchecked lengths/bounds in parsers, integer
                overflow in buffer math, injection risks in workflow/tool
                changes.
@@ -140,22 +134,18 @@ jobs:
             NO findings of any severity (NOT EXAMINED entries do not count
             as findings); otherwise `VERDICT(review): findings @ <head sha>`.
             <head sha> is the full 40-char head commit of the PR:
-            ${{ github.event.pull_request.head.sha }} (if that is blank,
+            ${{ steps.head.outputs.sha }} (if that is blank,
             use `gh pr view <n> --json headRefOid`).
             Do not approve, request changes, or modify code.
-          # `Bash(python3 -m pytest*)`, NOT `Bash(python3*)`: the bare form matches
-          # `python3 -c '<anything>'`, which reaches `gh` and dissolves the allowlist that
-          # deliberately withholds `gh pr review` (red team on #127 — demonstrated, not
-          # theorised). The narrow form runs the tests and nothing else.
-          #
-          # ACCEPTED, and bounded rather than eliminated: running the diff's tests executes
-          # the diff's code — a conftest.py in a pytest root runs before any test. That is
-          # inherent to a reviewer that verifies rather than reads, and it is why the
-          # same-repo guard above is not optional: the executed code is always a
-          # collaborator's or an agent's, never an outside contributor's. red-team has
-          # carried the same exposure since it was written; the difference is that it runs
-          # only at T2/T3 while this runs at every tier, so the guard does the bounding.
+          # F1 fix (red team on #127): NO execution tool. The reviewer reads the diff and the
+          # CI results, and never runs PR code, so nothing in this token-holding job can post
+          # a forged verdict. The read-only `gh` verbs are enumerated (an allow-list, not a
+          # denylist): pr view/diff/checks and run view/list to READ the already-run test
+          # output, issue view for the linked issue, pr comment to post the one verdict.
+          # Deliberately absent: any `Bash(python3*)`/`ctest*`/`cmake*`/`./pipeline.sh*` (all
+          # of which execute arbitrary commands — cmake -E env, ctest -S, python3 -c), any
+          # write verb (`gh pr review`/`merge`/`api`), and Edit/Write.
           claude_args: |
             --model claude-opus-5
-            --allowedTools "Bash(./pipeline.sh*),Bash(python3 -m pytest*),Bash(ctest*),Bash(cmake*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Bash(gh issue view*),Read,Grep,Glob"
+            --allowedTools "Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr checks*),Bash(gh pr comment*),Bash(gh run view*),Bash(gh run list*),Bash(gh issue view*),Read,Grep,Glob"
 
