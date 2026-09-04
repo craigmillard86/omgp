@@ -204,7 +204,7 @@ def test_model_tiers_judgement_loops_on_opus_volume_loops_on_default():
     high-volume implementation loops (dispatch, router auto-fix, mentions, review-fix) stay on the
     action default (claude-sonnet-5) behind their mechanical gates."""
     OPUS = ["claude-review.yml", "red-team.yml", "story-enrich.yml",
-            "agent-converge-audit.yml", "agent-triage.yml"]
+            "agent-converge-audit.yml", "agent-triage.yml", "continuous-improvement.yml"]
     DEFAULT = ["agent-dispatch.yml", "ci-failure-router.yml", "claude-mention.yml", "review-fix.yml"]
     for wfn in OPUS:
         steps = _claude_steps(wfn)
@@ -430,6 +430,138 @@ def test_codeowners_still_protects_ground_truth_and_governance():
         assert must in owned, must
 
 
+# --- weekly governance feedback loop (continuous-improvement.yml) -------------------------------
+
+CI_IMPROVE = ROOT / ".github" / "workflows" / "continuous-improvement.yml"
+
+
+def test_continuous_improvement_is_read_only_by_construction():
+    """The loop proposes governance changes and must never make them: CLAUDE.md and the
+    constitution are CODEOWNERS-owned, and GOVERNANCE.md §3 makes an agent-authored T3 change
+    a policy breach signal. `contents: read` is what enforces that — the prompt only says it."""
+    wf = yaml.safe_load(CI_IMPROVE.read_text(encoding="utf-8"))
+    job = wf["jobs"]["analyse"]
+    assert wf["permissions"]["contents"] == "read", "the analyser must not be able to commit"
+    assert wf["permissions"]["issues"] == "write"          # the filing step's channel
+    assert wf["permissions"]["pull-requests"] == "read"    # it reads reviews, never writes them
+    # A job-level `permissions:` block REPLACES the workflow-level one, so asserting only the
+    # top-level grant would let six lines under jobs.analyse hand the job contents: write with
+    # this test still green — the guarantee test not testing the guarantee (red team on #125).
+    assert "permissions" not in job, "a job-level permissions block would override the guarantee above"
+    action = next(s for s in job["steps"] if "claude-code-action" in s.get("uses", ""))
+    tools = action["with"]["claude_args"]
+    # No Edit. NOTE (review on #125): `Write` is not path-restricted, so the tool list alone
+    # does not stop the agent overwriting CLAUDE.md in the workspace — `contents: read`,
+    # asserted above, is what stops that reaching the repository. This assertion narrows the
+    # blast radius; it is not the guarantee.
+    # An ALLOW-LIST, not a denylist. The previous version asserted `"gh api" not in tools`
+    # and friends, which a WIDENING defeats rather than an addition: `Bash(git*)` re-admits
+    # git push, `Bash(gh*)` re-admits gh api — and both broad forms already exist elsewhere
+    # in this repo, so that is not a hypothetical edit shape (red team on #125). A denylist
+    # over a wildcard grammar cannot establish "by construction"; enumeration can.
+    # Exactly one --allowedTools flag, and no CLI escape hatch that makes the enumeration
+    # moot: `--dangerously-skip-permissions` / `--permission-mode` bypass allowedTools
+    # entirely and a second `--allowedTools` (the CLI takes the last) would leave this
+    # `re.search` reading a stale one — both survived the previous, single-match version of
+    # this test (review round 3, #125).
+    allowedtools_matches = re.findall(r'--allowedTools "([^"]*)"', tools)
+    assert len(allowedtools_matches) == 1, "exactly one --allowedTools flag expected"
+    assert "--dangerously-skip-permissions" not in tools
+    assert "--permission-mode" not in tools
+    granted = set(allowedtools_matches[0].split(","))
+    permitted = {
+        # reads over the PR/issue/run stream the analysis is made of
+        "Bash(gh pr list*)", "Bash(gh pr view*)", "Bash(gh pr diff*)",
+        "Bash(gh issue list*)", "Bash(gh issue view*)",
+        "Bash(gh run list*)", "Bash(gh run view*)",
+        # history for Stage 7, and the date for the window
+        "Bash(git log*)", "Bash(git show*)", "Bash(git diff*)", "Bash(git blame*)", "Bash(date*)",
+        # the two report files; see the note below on why Write is not the guarantee
+        "Read", "Grep", "Glob", "Write",
+    }
+    assert granted <= permitted, f"tool grant widened beyond the read-only set: {granted - permitted}"
+    # Belt, in the grammar's own terms: no bare-verb wildcard can appear at all.
+    for wide in ("Bash(git*)", "Bash(gh*)", "Bash(*)", "Edit", "Bash(gh api*)"):
+        assert wide not in granted, wide
+
+
+def test_continuous_improvement_python_steps_do_not_put_the_checkout_on_sys_path():
+    """HIGH (review + red team on #125): the agent holds unrestricted `Write` in the checkout,
+    and Python prepends the cwd to sys.path — so a planted `json.py` in the repo root would
+    shadow the stdlib and run arbitrary code inside the LATER steps, one of which holds
+    GH_TOKEN with `issues: write`. `contents: read` does not stop that: the escalation is
+    code execution in this job's own steps, not a commit. Every step that runs `python3` must
+    therefore drop the unsafe path entry, via `PYTHONSAFEPATH=1` on the step (== `python3 -P`)
+    or `-P` on each invocation, so `import json` is always the stdlib."""
+    wf = yaml.safe_load(CI_IMPROVE.read_text(encoding="utf-8"))
+    py_steps = [s for s in wf["jobs"]["analyse"]["steps"] if "python3" in (s.get("run") or "")]
+    assert py_steps, "expected steps that invoke python3"
+    for s in py_steps:
+        name = s.get("name", s.get("id", "?"))
+        env = s.get("env") or {}
+        safe_env = str(env.get("PYTHONSAFEPATH", "")).strip().lower() in ("1", "true")
+        # If not set for the whole step, every python3 call in it must carry -P itself.
+        run = s["run"]
+        calls = re.findall(r"\bpython3\b(?!\s*-P\b)([^\n]*)", run)
+        # a call is hardened iff it is `python3 -P ...`; the negative-lookahead above
+        # collects only the calls that are NOT `python3 -P`.
+        all_calls_flagged = not calls
+        assert safe_env or all_calls_flagged, (
+            f"continuous-improvement step {name!r} runs python3 without sys.path hardening "
+            f"(set PYTHONSAFEPATH=1 on the step or -P on each call): a planted json.py would "
+            f"shadow the stdlib and execute in a token-holding step")
+
+
+def test_continuous_improvement_prompt_lives_outside_the_workflow():
+    """The analysis is the part that will need tuning, and a prompt inlined in a workflow file
+    can only be edited with the `workflow` OAuth scope the Claude App token does not carry
+    (demonstrated on #113) — so the loop could never improve its own instructions."""
+    wf = yaml.safe_load(CI_IMPROVE.read_text(encoding="utf-8"))
+    action = next(s for s in wf["jobs"]["analyse"]["steps"] if "claude-code-action" in s.get("uses", ""))
+    prompt = action["with"]["prompt"]
+    assert ".github/agent-prompts/continuous-improvement.md" in prompt
+    assert len(prompt) < 1200, "the prompt body belongs in the prompt file, not the workflow"
+    body = (ROOT / ".github" / "agent-prompts" / "continuous-improvement.md").read_text(encoding="utf-8")
+    # The issue is filed by a workflow step with the labels fixed in YAML, never by the agent:
+    # an unconstrained `--label` would have let injected PR text reach `ready`, the label
+    # agent-dispatch claims work by (HIGH, second review round on #125).
+    filing = next(s for s in wf["jobs"]["analyse"]["steps"] if s.get("name") == "File the governance issue")
+    assert "--label converge-audit --label needs-human" in filing["run"]
+    assert "issue_title" in body and "duplicate_of" in body, "the agent must emit the issue as data"
+    # The bindings that stop it reporting fiction about this repository's layout.
+    assert ".specify/memory/constitution.md" in body, "constitution path binding missing"
+    assert "docs/GOVERNANCE.md" in body
+    assert "NO_UPDATE_REQUIRED" in body and "UPDATE_RECOMMENDED" in body
+    for stage in range(1, 13):
+        assert f"# Stage {stage} " in body, f"Stage {stage} missing"
+
+
+def test_continuous_improvement_runs_weekly_and_no_update_is_a_success():
+    wf = yaml.safe_load(CI_IMPROVE.read_text(encoding="utf-8"))
+    on = wf[True] if True in wf else wf["on"]
+    assert on["schedule"], "not scheduled"
+    cron = on["schedule"][0]["cron"].split()
+    assert cron[4] != "*", "not weekly (no day-of-week)"
+    # Must not collide with agent-converge-audit, the other Monday-morning agent job.
+    audit = yaml.safe_load((ROOT / ".github" / "workflows" / "agent-converge-audit.yml").read_text(encoding="utf-8"))
+    aon = audit[True] if True in audit else audit["on"]
+    assert on["schedule"][0]["cron"] != aon["schedule"][0]["cron"], "same slot as agent-converge-audit"
+    # "No update required" must not fail the run: a self-improving system that cannot decline
+    # to add a rule only ever adds rules. Assert the DECISION VALIDATOR accepts both literals
+    # — the previous version of this test asserted `"exit 0" in run and "exit 1" not in run`,
+    # which matched an unrelated branch and would have passed even if the validator were
+    # narrowed to UPDATE_RECOMMENDED only, i.e. it did not test its own claim (review on
+    # #125). It also forbade ever failing on missing outputs, locking in the blind spot the
+    # next assertion now requires.
+    steps = wf["jobs"]["analyse"]["steps"]
+    check = next(s for s in steps if s.get("id") == "outputs")
+    run = check["run"]
+    assert "'UPDATE_RECOMMENDED','NO_UPDATE_REQUIRED'" in run.replace(", ", ",").replace('"', "'"), \
+        "the decision validator must accept both literals"
+    # ...and a run that produced NOTHING must fail, so "no update required" and "crashed" are
+    # never the same observable outcome (review + red team on #125).
+    assert "exit 1" in run, "missing outputs must fail the job, not warn"
+    assert "::error::" in run
 # --- reviewer safety: it verifies by READING CI results, never by executing PR code ------------
 # F1 (red team on #127): the earlier design gave the verdict-signing reviewer a toolchain and a
 # checkout of the PR head so it could RUN the diff's tests. But this job holds the claude[bot]
@@ -547,4 +679,3 @@ def test_review_checks_out_only_the_trusted_base():
 
 def _action_prompt(steps):
     return next(s for s in steps if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
-
