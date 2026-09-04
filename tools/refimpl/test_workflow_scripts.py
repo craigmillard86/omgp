@@ -428,3 +428,43 @@ def test_codeowners_still_protects_ground_truth_and_governance():
     for must in ("/protocol/", "/tests/vectors/", "/docs/protocol-l3.md", "/docs/GOVERNANCE.md",
                  "/docs/OPERATING-POLICY.md", "/.github/", "/CLAUDE.md", "/pipeline.sh"):
         assert must in owned, must
+
+
+# --- reviewer capability parity (G1/G2, continuous-improvement dry run 2026-09-04) --------------
+
+def test_verdict_producing_workflows_can_execute_what_they_judge():
+    """A workflow whose verdict the approval gate parses must be able to RUN the code it is
+    judging. Found by measuring, not by anything failing: claude-review held only read tools
+    while red-team held ./pipeline.sh, so 26% of verdict-bearing reviews in the fortnight to
+    2026-09-04 reported running nothing, and a real cross-platform defect (BrokenPipeError vs
+    OSError on a dead pipe) survived 17 reading-only rounds on #121 before one pytest run
+    found it. Nothing in CI failed while the reviewer could not verify — hence this test.
+
+    Scope is deliberately narrow: workflows that emit `VERDICT(<kind>)`. agent-converge-audit
+    also reasons about tests but is a read-only drift audit that backs no approval, so it is
+    correctly outside this rule."""
+    for wfn in ("claude-review.yml", "red-team.yml"):
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / wfn).read_text(encoding="utf-8"))
+        steps = [s for j in wf["jobs"].values() for s in j.get("steps", [])]
+        actions = [s for s in steps if "claude-code-action" in s.get("uses", "")]
+        assert actions, wfn
+        for a in actions:
+            if "VERDICT(" not in a["with"].get("prompt", ""):
+                continue                      # not a verdict producer (e.g. the protocol red team)
+            tools = a["with"].get("claude_args", "")
+            assert "Bash(./pipeline.sh*)" in tools, (
+                f"{wfn}: emits a VERDICT the approval gate parses but cannot run ./pipeline.sh")
+            assert any(t in tools for t in ("Bash(python3*)", "Bash(g++*)", "Bash(ctest*)")), (
+                f"{wfn}: no way to run a test directly")
+        # ...and the toolchain those tools need must actually be installed in that job.
+        assert any("setup-python" in s.get("uses", "") for s in steps), f"{wfn}: no python"
+        assert any("apt-get install" in (s.get("run") or "") for s in steps), f"{wfn}: no cmake/ninja"
+
+
+def test_review_checks_out_the_code_it_reviews():
+    """Running the diff's tests requires the diff. claude-review checked out the default
+    branch until 2026-09-04, which was harmless only because it never ran anything."""
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "claude-review.yml").read_text(encoding="utf-8"))
+    checkout = next(s for s in wf["jobs"]["review"]["steps"] if "actions/checkout" in s.get("uses", ""))
+    assert "head.sha" in checkout["with"]["ref"], "review must check out the PR head"
+
