@@ -91,7 +91,7 @@ jobs:
       # the agent cannot comment on an existing issue, so deduplication is "skip and report",
       # not "add a note there".
       - name: Claude Code — review-feedback governance analysis
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@8251c103ac8c1d761882c86aba1412c7f583c844   # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: claude,github-actions   # a scheduled run has no actor; a bot-triggered dispatch would otherwise be refused
