@@ -656,7 +656,7 @@ Possible patterns requiring more evidence.
 
 # Final Decision
 
-Return exactly one: **UPDATE RECOMMENDED** or **NO UPDATE REQUIRED**, then briefly explain
+Return exactly one: **UPDATE_RECOMMENDED** or **NO_UPDATE_REQUIRED**, then briefly explain
 the decision.
 
 ---
