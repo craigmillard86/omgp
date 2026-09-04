@@ -141,6 +141,67 @@ def test_frame_round_trip(line, frame):
     assert C.frame_to_canonical(C.canonical_to_frame(line)) == line
 
 
+# Out-of-range frame-line fields must be rejected, not masked or left to crash with a bare
+# ValueError, matching tools/canonical.cpp's parse_frame_line (docs/OPEN-QUESTIONS.md
+# 2026-09-03 "Frame line out-of-range fields": C++ strict rejection is normative, T025 aligns
+# the Python reference). dst=0xFF (reserved, but in-range) and payload lengths 65-0xFF (in
+# text-range, refused by encode_frame's own PayloadTooLong) are deliberately NOT here: those
+# stay valid parses per parse_frame_line's own layering, covered by ENCODE_REFUSALS above.
+OUT_OF_RANGE_FRAME_LINES = [
+    ("dst-overflow", "frame dst=0x100 src=0x00 flags=0x00 seq=0 payload="),
+    ("src-overflow", "frame dst=0x00 src=0x100 flags=0x00 seq=0 payload="),
+    ("flags-above-0x03", "frame dst=0x00 src=0x00 flags=0x04 seq=0 payload="),
+    ("seq-above-0x0f", "frame dst=0x00 src=0x00 flags=0x00 seq=16 payload="),
+    ("payload-longer-than-wire-length-byte", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=" + ("00" * 256)),
+    # Folded in from the concurrent branch's loop-form test (review round 3 on #121:
+    # three tests, one behaviour — the parametrized form names its failing case).
+    ("negative-seq", "frame dst=0x01 src=0x00 flags=0x00 seq=-1 payload="),
+    ("negative-dst", "frame dst=-1 src=0x00 flags=0x00 seq=0 payload="),
+    # review round 4 on #121: parse_frame_line's first-token compare rejects a leading
+    # space; the Python side must not silently tolerate it.
+    ("leading-whitespace", " frame dst=0x00 src=0x00 flags=0x00 seq=0 payload="),
+    # red-team round 8 on #121: rstrip() swallowed non-space trailing whitespace the C++
+    # tokenizer rejects, and bytes.fromhex tolerated whitespace inside the hex token.
+    ("trailing-tab", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=0102\t"),
+    ("trailing-vertical-tab", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=0102\x0b"),
+    ("trailing-form-feed", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=0102\x0c"),
+    ("tab-inside-payload", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=01\t02"),
+    # red-team round 9 on #121: parse_uint rejects the SIGN, so -0 (in-range numerically)
+    # must reject; only ONE trailing CR is popped; and int()'s Unicode-digit tolerance
+    # (arabic-indic, fullwidth) diverged from strtoul.
+    ("negative-zero-dst", "frame dst=-0 src=0x00 flags=0x00 seq=0 payload="),
+    ("negative-zero-seq", "frame dst=0x00 src=0x00 flags=0x00 seq=-0 payload="),
+    ("double-cr", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=\r\r"),
+    ("arabic-indic-digit", "frame dst=١ src=0x00 flags=0x00 seq=0 payload="),
+    ("fullwidth-digit", "frame dst=１ src=0x00 flags=0x00 seq=0 payload="),
+    # round 10 on #121: parse_uint rejects a leading-zero DECIMAL (legacy-octal hazard:
+    # "010" names 8 to strtoul and 10 to int(tok, 10)) unless every digit is zero.
+    ("leading-zero-decimal-dst", "frame dst=010 src=0x00 flags=0x00 seq=0 payload="),
+    ("leading-zero-long-seq", "frame dst=0x00 src=0x00 flags=0x00 seq=0000000001 payload="),
+    ("plus-leading-zero", "frame dst=+010 src=0x00 flags=0x00 seq=0 payload="),
+    # round 12 on #121: C++ c_str() truncated at an embedded NUL ("1\0zz" parsed as 1) and
+    # strtoul skipped leading tab (re-enabling octal). Python already rejected both; these
+    # pin the now-shared strictness.
+    ("nul-in-dst", "frame dst=1\0zz src=0x00 flags=0x00 seq=0 payload="),
+    ("tab-prefixed-dst", "frame dst=\t011 src=0x00 flags=0x00 seq=0 payload="),
+]
+
+
+@pytest.mark.parametrize("line", [c[1] for c in OUT_OF_RANGE_FRAME_LINES],
+                         ids=[c[0] for c in OUT_OF_RANGE_FRAME_LINES])
+def test_canonical_to_frame_rejects_out_of_range_fields(line):
+    with pytest.raises(C.CanonicalError):
+        C.canonical_to_frame(line)
+
+
+def test_canonical_to_frame_does_not_mask_seq():
+    # seq=16 must be rejected outright, never silently reinterpreted as seq=0 (the masking
+    # `encode_frame` itself still applies to an already-valid Frame is a different, narrower
+    # guard than this parse-time check).
+    with pytest.raises(C.CanonicalError):
+        C.canonical_to_frame("frame dst=0x00 src=0x00 flags=0x00 seq=16 payload=")
+
+
 # Hand-crafted bad streams and their expected discard, lifted from the same fixtures
 # test_link.py drives the Deframer with (T012/#30), so the reason names round-trip through
 # the renderer exactly as the Deframer actually reports them, not just as literal strings.
@@ -174,3 +235,82 @@ def test_encode_frame_refusal_renders_err(reason, frame):
         L.encode_frame(frame)
     assert exc.value.reason == reason
     assert C.frame_error_to_canonical(exc.value.reason) == f"ERR {reason}"
+
+# The loop-form duplicate of the parametrized rejects test was folded into
+# OUT_OF_RANGE_FRAME_LINES above (review round 3 on #121: merge-union residue).
+
+
+def test_canonical_to_frame_payload_65_to_255_parses_and_defers_to_the_codec():
+    # contracts/frame-vectors.md carve-out: 65-255 B PARSES (the codec refuses it as
+    # PayloadTooLong); only >= 256 B fails the parser. Locked on the C++ side by
+    # test_canonical_frame.cpp; this is the Python half of the same boundary.
+    f = C.canonical_to_frame("frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=" + "aa" * 65)
+    with pytest.raises(L.FrameError) as e:
+        L.encode_frame(f)
+    assert e.value.reason == "PayloadTooLong"
+
+
+def test_frame_uint_accepts_the_plus_and_all_zero_shapes_parse_uint_accepts():
+    # round 10 on #121: round 9's _frame_uint opened NEW divergences — it rejected "+1"
+    # (C++ parse_uint deliberately accepts a leading '+', red-team @ 65922b5) and
+    # accepted "010" as decimal 10 (C++ rejects the leading-zero shape outright).
+    f = C.canonical_to_frame("frame dst=+1 src=+0x10 flags=0x00 seq=00 payload=aa")
+    assert (f.dst, f.src, f.seq) == (1, 16, 0)
+
+
+def test_named_fields_and_message_lines_inherit_the_whitespace_rejection():
+    # round 13 on #121: _parse_named's bare int() and _tokens' line-level strip() sat one
+    # layer below/above the round-12 guard, so "mt=\t3" and a trailing TAB on a message
+    # line parsed here while C++ answered ERR BadRequest.
+    with pytest.raises(C.CanonicalError):
+        C._parse_named("mt", "\t3")
+    with pytest.raises(C.CanonicalError):
+        C._tokens("op=PING node=0x01\t")
+    with pytest.raises(C.CanonicalError):
+        C._tokens("\top=PING node=0x01")
+
+
+def test_message_lines_pop_one_trailing_cr_like_the_helper_reader():
+    # round 15 on #121: l3_helper pops ONE trailing CR for every verb; round 13's guard
+    # alone made the reference reject a CRLF message line the helper accepts. One CR
+    # parses; a second still rejects (it lands inside the last token on the C++ side).
+    C._tokens("op=PING node=0x01\r")
+    with pytest.raises(C.CanonicalError):
+        C._tokens("op=PING node=0x01\r\r")
+
+
+def test_int_rejects_the_radix_and_unicode_forms_parse_uint_rejects():
+    # round 15 on #121: the former disclosed gap is closed -- _int enforces the frame
+    # grammar, so these reject on every verb, not only frame lines.
+    for tok in ("0o11", "0b101", "1_0", "\u0663", "\uff13"):
+        with pytest.raises(C.CanonicalError):
+            C._int(tok)
+    assert C._int("+0x10") == 16 and C._int("00") == 0
+
+
+def test_int_rejects_values_above_uint32_like_parse_uint():
+    # round 16 on #121: parse_uint rejects > UINT_MAX; _int must too, or a message field
+    # parses here and only fails later as an unmapped struct.error out of encode_header.
+    with pytest.raises(C.CanonicalError):
+        C._int("0x100000000")
+    with pytest.raises(C.CanonicalError):
+        C._int("4294967296")
+    assert C._int("0xFFFFFFFF") == 0xFFFFFFFF  # the boundary still parses
+
+
+def test_split_records_trims_spaces_only_like_the_cpp_side():
+    # round 16 on #121: str.strip() ate TAB/VT/FF/CR that tools/canonical.cpp keeps in the
+    # token, where parse_uint then rejects them. A tab-terminated record must reach the
+    # token parser (which rejects it) rather than being silently trimmed clean here.
+    recs = C._split_records("PROTOCOL major=1 minor=2\t")
+    assert recs == ["PROTOCOL major=1 minor=2\t"]
+
+
+def test_canonical_to_descriptor_pops_one_trailing_cr_like_the_helper():
+    # round 17 on #121: round 16's strip(" ") left a trailing CR inside the last descriptor
+    # token, making the reference reject a CRLF DENC line l3_helper accepts. One CR now
+    # parses identically; a second still rejects (lands inside the token, C++ side too).
+    recs = C.canonical_to_descriptor("PROTOCOL major=1 minor=2\r")
+    assert recs == C.canonical_to_descriptor("PROTOCOL major=1 minor=2")
+    with pytest.raises(C.CanonicalError):
+        C.canonical_to_descriptor("PROTOCOL major=1 minor=2\r\r")

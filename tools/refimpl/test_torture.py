@@ -139,3 +139,24 @@ def test_corpus_honours_explicit_frames_and_per_class_arguments():
     counts = Counter(element.recipe for element in corpus)
     for corruption_class in CLASSES:
         assert counts[corruption_class] >= per_class
+
+
+def test_escaped_overlength_elements_carry_bytes_after_the_escape_pair():
+    # Review round 11 on #121 (MEDIUM): the round-10 tail (1-7 plain bytes AFTER the
+    # escape pair) is what makes the post-TooLong-abort state observable at all — with
+    # the PR#99 clobber, those bytes accumulate and the closing FLAG yields a second
+    # discard. Without this pin, deleting the tail reverts the corpus to "496 elements
+    # reach the abort line, zero observe it" with the entire suite still green.
+    checked = 0
+    for element in T.corpus(SEED):
+        if element.recipe != "overlength":
+            continue
+        body = element.stream[1:-1]
+        i = body.find(bytes([T.ESC]))
+        if i < 0:
+            continue  # plain variant: no ESC anywhere by construction
+        assert len(body) >= i + 3, (
+            f"escaped overlength element ends at its escape pair: {element.stream.hex()}"
+        )
+        checked += 1
+    assert checked >= 250

@@ -17,8 +17,10 @@ frame dst=0x01 src=0x00 flags=0x00 seq=3 payload=0101000000
   `seq` decimal 0–15; `payload` contiguous lowercase hex, empty allowed.
 - Rendering is of the **unstuffed fields**; the wire bytes are the vector's `bytes`.
 - Discards render as `ERR <Discard>` (`ERR BadCrc`, `ERR BadLength`, `ERR BadEscape`,
-  `ERR TooLong`); encode refusals as `ERR <Status>` (`ERR PayloadTooLong`,
-  `ERR ReservedAddress`). Malformed input TEXT — an unparseable canonical line,
+  `ERR TooLong`, `ERR ReservedAddress` — a reserved-dst frame ARRIVING is a discard, so
+  `FDEC` of one answers `ERR ReservedAddress`); encode refusals as `ERR <Status>`
+  (`ERR PayloadTooLong`, `ERR ReservedAddress` — the same spelling for a reserved dst
+  REQUESTED of the encoder). Malformed input TEXT — an unparseable canonical line,
   a field the LINE PARSER rejects as out of range, or bad hex — renders as
   `ERR BadRequest` on every frame verb (`FSTREAM` additionally emits its `END 0`
   terminator — see the table below). Carve-out (red-team round 4 on #122): a

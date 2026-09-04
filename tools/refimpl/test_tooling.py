@@ -18,6 +18,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 FUZZ = ROOT / "tools" / "fuzz-smoke.sh"
 MUTATE = ROOT / "tools" / "mutate.sh"
 CFG = ROOT / "tools" / "mutate.cfg"
+DIFFCHECK = ROOT / "tools" / "diffcheck.py"
+L3_HELPER = ROOT / "build" / "native" / "l3_helper"
 
 
 # "Tool absent" is simulated through the scripts' own override variables (a nonexistent
@@ -42,6 +44,78 @@ def test_fuzz_smoke_without_clang_fails_with_disclosure():
     rc, out, _ = run(FUZZ, "1", env_overrides=NO_CLANG)
     assert rc == 1
     assert "blind spot" in out and "libFuzzer" in out
+
+
+def test_diffcheck_frames_only_discloses_its_blind_spot():
+    # --frames-only skips the crc/message/invalid/descriptor corpora (contracts/tooling.md
+    # "every fast/partial path states its blind spot"); the summary line must say so, not
+    # just print the same "C++ and Python agree" sentence a full run prints.
+    # Otherwise-hermetic (no other test in this file needs a native build): skip honestly
+    # rather than fail when build/native/l3_helper hasn't been built yet, so
+    # `python -m pytest tools/refimpl/` stays runnable standalone on a fresh checkout
+    # (CLAUDE.md: "python -m pytest tools/refimpl/" is documented as a standalone command).
+    # This is an existence check, not a freshness one: a binary left over from an earlier
+    # or different build is used as-is, same as every other consumer of build/native/.
+    if not L3_HELPER.exists():
+        pytest.skip(f"{L3_HELPER} not built (run ./pipeline.sh build first, or the full pipeline)")
+    # `--frames` is passed alongside `--frames-only` deliberately (review on #121): the
+    # flag is a documented no-op today (frames run by default), and this pins that passing
+    # it stays harmless — if the corpora ever move behind an opt-in, this invocation is the
+    # first thing that must keep working.
+    r = subprocess.run([sys.executable, str(DIFFCHECK), "--frames-only", "--frames"], capture_output=True,
+                       text=True, cwd=ROOT, timeout=60)  # 60 pins SC-002 (torture < 60 s; review round 7)
+    assert r.returncode == 0, r.stdout + r.stderr
+    # The DISCLOSURE text itself, not the counts field (review round 3 on #121: plain
+    # "descriptor" also matches the always-printed "descriptors <n>" count, so that
+    # conjunct was true on every exit-0 run — evidence identical either way is no evidence).
+    assert "blind spot: crc/message/invalid/descriptor" in r.stdout, r.stdout
+    # round 14 (red-team LOW): the disclosure TEXT alone can become a lie — also assert the
+    # counts the flag claims to zero really are zero.
+    assert "crc 0, messages 0, invalid 0, descriptors 0" in r.stdout, r.stdout
+    # T025 criterion pinned (review on #121, rounds 5-6): the summary line carries a frame
+    # count AT OR ABOVE the contract threshold ("≥ 10 000" everywhere else — an equality pin
+    # would go red the day FRAME_COUNT is raised) and a nonzero torture count.
+    _frames = re.search(r"frames (\d+)", r.stdout)
+    assert _frames and int(_frames.group(1)) >= 10_000, r.stdout
+    assert re.search(r"torture [1-9]\d*", r.stdout), r.stdout
+    assert re.search(r"streams [1-9]\d*", r.stdout), r.stdout
+
+
+def test_diffcheck_default_path_stays_inside_the_sc003_budget():
+    if not L3_HELPER.exists():
+        pytest.skip(f"{L3_HELPER} not built (run ./pipeline.sh build first, or the full pipeline)")
+    # review round 13 on #121: SC-002 (--frames-only < 60 s) got a timeout pin; SC-003
+    # (whole diffcheck stage < 2 min) had none, while this PR quadrupled the corpus and
+    # the ceiling was held only by a PR-body figure nothing re-checks.
+    r = subprocess.run([sys.executable, str(DIFFCHECK)], capture_output=True, text=True,
+                       cwd=ROOT, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert re.search(r"streams [1-9]\d*", r.stdout), r.stdout
+    # round 14 (red-team MED): this is the ONE test on the path pipeline.sh runs, so the
+    # frame + torture corpora running BY DEFAULT is pinned here — moving them behind an
+    # opt-in previously erased 28000 of 43787 CI cases with the whole suite green.
+    _frames = re.search(r"frames (\d+)", r.stdout)
+    assert _frames and int(_frames.group(1)) >= 10_000, r.stdout
+    assert re.search(r"torture [1-9]\d*", r.stdout), r.stdout
+    # round 14 (red-team LOW): the printed total must equal the sum of its printed parts.
+    m = re.search(r"diffcheck: (\d+) cases.*\(crc (\d+), messages (\d+), invalid (\d+), "
+                  r"descriptors (\d+), frames (\d+), torture (\d+), streams (\d+)\)", r.stdout)
+    assert m and int(m.group(1)) == sum(int(x) for x in m.groups()[1:]), r.stdout
+
+
+def test_replay_flag_guards_reject_bad_combinations_and_ranges():
+    # round 14 on #121: the round-5 fix (replay flags mutually exclusive) and the round-13
+    # fix (--index range guard) were both unpinned — deleting either left the suite green
+    # while --frame-index was silently ignored / --index -1 silently replayed case N-1.
+    r = subprocess.run([sys.executable, str(DIFFCHECK), "--index", "3", "--frame-index", "4"],
+                       capture_output=True, text=True, cwd=ROOT, timeout=60)
+    assert r.returncode != 0 and "not allowed with" in r.stderr, r.stdout + r.stderr
+    if not L3_HELPER.exists():
+        pytest.skip(f"{L3_HELPER} not built (range guard runs after the helper spawns)")
+    r = subprocess.run([sys.executable, str(DIFFCHECK), "--count", "50", "--index", "-1"],
+                       capture_output=True, text=True, cwd=ROOT, timeout=60)
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "--index must be 0..49" in (r.stdout + r.stderr), r.stdout + r.stderr
 
 
 def test_mutate_cfg_parses_and_pins():

@@ -5,10 +5,18 @@ touches `.github/` — the existing CI already runs every stage this feature ext
 
 ## `tools/diffcheck.py --frames`
 
-- Adds two corpora through the one long-lived `l3_helper` process: valid frames
-  (`FENC`/`FDEC`, ≥ 10 000, seeded) and torture elements (`FSTREAM`, `torture.corpus(seed)`).
+- Adds three corpora through the one long-lived `l3_helper` process: valid frames
+  (`FENC`/`FDEC`, ≥ 10 000, seeded), torture elements (`FSTREAM`, `torture.corpus(seed)`),
+  and multi-frame streams (`FSTREAM`, ≥ 1 000, seeded: 2-3 frames sharing FLAG delimiters,
+  with reserved-dst / over-cap / bad-CRC discard elements placed before valid frames so
+  discard→delivery resync is exercised, and reserved-ctrl-bit frames that must be
+  DELIVERED with the reserved ctrl bits 2-3 ignored — forward-compat behaviour that
+  link/frame.cpp implements and the corpus pins; §4 defines those bits as "reserved 0"
+  but states no ignore-on-receive rule, so this is pinned-by-test, not spec-mandated
+  (see docs/OPEN-QUESTIONS.md 2026-09-04, reserved ctrl bits)).
 - Default run (no flag) includes them, so the pipeline's `diffcheck` stage covers L2;
-  `--frames-only` for local iteration. Summary line gains `frames <n>, torture <m>`.
+  `--frames-only` for local iteration. Summary line gains `frames <n>, torture <m>,
+  streams <s>`.
 - Budget: the whole stage stays under 2 minutes on CI (feature-001 SC-003 plus SC-002 of
   this feature: torture < 60 s).
 

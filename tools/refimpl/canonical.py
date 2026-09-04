@@ -6,6 +6,7 @@ identity test used by tools/diffcheck.py and the golden vectors.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from _gen import P
@@ -41,20 +42,46 @@ _REV = {k: {n: c for c, n in m.items()} for k, m in (
 def _parse_named(kind: str, tok: str) -> int:
     if tok in _REV[kind]:
         return _REV[kind][tok]
+    # round 13 on #121: the numeric fallback routes through _int so named-table fields
+    # (mt/evt/err/state/kind/tlv) inherit the round-12 whitespace/NUL rejection — C++'s
+    # parse_named falls through to the hardened parse_uint, and "\t3" must not name 3
+    # here while it is ERR BadRequest there.
     try:
-        return int(tok, 0)
-    except ValueError:
+        return _int(tok)
+    except CanonicalError:
         raise CanonicalError(f"{kind}: unknown name {tok!r}") from None
 
 
 def _int(tok: str) -> int:
-    try:
-        return int(tok, 0)
-    except ValueError:
-        raise CanonicalError(f"not an integer: {tok!r}") from None
+    # round 12 on #121: C++ parse_uint now rejects any token containing whitespace or an
+    # embedded NUL (strtoul skipped leading whitespace — re-enabling legacy octal, so
+    # "\t011" named 9 — and c_str() truncated at NUL). int(tok, 0) tolerates both; mirror
+    # the rejection here so every verb sharing these parsers stays in lockstep (round 13:
+    # _parse_named routes its numeric fallback here and _tokens rejects non-space
+    # whitespace at line level, closing the two layers this claim originally missed).
+    if any(c.isspace() or c == "\0" for c in tok):
+        raise CanonicalError(f"whitespace/NUL inside integer token: {tok!r}")
+    # round 15 on #121: int(tok, 0) also accepted 0o/0b/1_0 and non-ASCII decimal digits
+    # that parse_uint rejects -- closed for frame lines in round 9, now closed here too by
+    # the same compiled grammar, so message/status/descriptor fields are in lockstep.
+    if not _FRAME_UINT_RE.fullmatch(tok):
+        raise CanonicalError(f"not an integer: {tok!r}")
+    digits = tok.lstrip("+")
+    value = int(digits, 16) if digits[:2].lower() == "0x" else int(digits, 10)
+    # round 16 on #121: parse_uint rejects > UINT_MAX (tools/canonical.cpp); without this,
+    # _int returned an out-of-range value that only failed later as an unmapped struct.error
+    # out of encode_header, never ERR BadRequest. Field-width checks still apply on top.
+    if value > 0xFFFFFFFF:
+        raise CanonicalError(f"integer exceeds uint32 range: {tok!r}")
+    return value
 
 
 def _hexbytes(tok: str) -> bytes:
+    # bytes.fromhex silently tolerates ASCII whitespace INSIDE the token; the C++ hex
+    # parsers do not (red-team round 8 on #121: "01\t02" parsed here, ERR BadRequest
+    # there). Contiguous hex only.
+    if any(c.isspace() for c in tok):
+        raise CanonicalError(f"not hex: {tok!r}")
     try:
         return bytes.fromhex(tok)
     except ValueError:
@@ -86,7 +113,10 @@ def unquote_str(q: str) -> bytes:
         if c == "\\":
             nxt = body[i + 1] if i + 1 < len(body) else ""
             if nxt == "x":
-                out.append(int(body[i + 2:i + 4], 16))
+                hexpair = body[i + 2:i + 4]
+                if len(hexpair) != 2 or any(c not in "0123456789abcdefABCDEF" for c in hexpair):
+                    raise CanonicalError(f"bad \\x escape in quoted string: {q!r}")
+                out.append(int(hexpair, 16))
                 i += 4
                 continue
             if nxt in ('"', "\\"):
@@ -152,9 +182,26 @@ def error_to_canonical(e: l3.L3Error) -> str:
 
 # --- parsing ---------------------------------------------------------------------------------
 
+def _pop_one_cr(line: str) -> str:
+    """l3_helper's line reader pops exactly ONE trailing CR before dispatch, for every
+    verb (tools/l3_helper.cpp). Every canonical_to_* entry point mirrors that here, so a
+    CRLF-terminated request parses identically on both sides; a second CR still rejects
+    downstream, as it does through the helper."""
+    return line[:-1] if line.endswith("\r") else line
+
+
 def _tokens(line: str) -> dict[str, str]:
+    # round 13 on #121 (review): line-level strip() removed leading/trailing TAB/VT/FF/CR
+    # for every non-frame verb before any token parser could reject them, while the C++
+    # tokenizer keys "\top" as a token (take() fails) or leaves the whitespace inside the
+    # last token (parse_uint rejects it since round 12). Reject non-space whitespace up
+    # front; SPACES stay fine on both sides — both tokenizers skip empty tokens.
+    line = _pop_one_cr(line)  # round 15: mirror l3_helper's reader (round 13's guard
+    # alone made the reference stricter than the C++ end-to-end path on a CRLF line).
+    if any(c.isspace() and c != " " for c in line):
+        raise CanonicalError(f"non-space whitespace in canonical line: {line!r}")
     kv: dict[str, str] = {}
-    for tok in line.strip().split(" "):
+    for tok in line.split(" "):
         if not tok:
             continue
         if "=" not in tok:
@@ -276,16 +323,62 @@ def frame_to_canonical(f: link.Frame) -> str:
     return f"frame dst={_hex2(f.dst)} src={_hex2(f.src)} flags={_hex2(flags)} seq={f.seq} payload={f.payload.hex()}"
 
 
+# parse_uint's grammar, compiled once (review round 11 on #121: _frame_uint runs 4x per
+# frame line, ~40k times per diffcheck run — no per-call import/regex-cache lookups):
+# optional leading '+', ASCII 0x-hex or decimal, leading-zero decimal only when every
+# digit is zero. Semantics documented at _frame_uint below.
+_FRAME_UINT_RE = re.compile(r"\+?(0[xX][0-9a-fA-F]+|0+|[1-9][0-9]*)")
+
+
 def canonical_to_frame(line: str) -> link.Frame:
-    prefix, _, rest = line.strip().partition(" ")
+    # Exactly ONE trailing '\r' is popped — the l3_helper line reader's behaviour, no more
+    # (reviews on #121, rounds 4/8/9: strip(), then rstrip(), then rstrip("\r\n") were each
+    # broader than that; a doubled CR must reject like any other stray whitespace).
+    # parse_frame_line compares the FIRST token to "frame", so leading space rejects too.
+    # (Round 15 closed the former shared-parser gap: _int now enforces the same ASCII
+    # grammar _frame_uint uses, so 0o/0b/1_0 and non-ASCII digits reject on every verb.)
+    line = _pop_one_cr(line)
+    prefix, _, rest = line.partition(" ")
     if prefix != "frame":
         raise CanonicalError(f"not a frame line: {line!r}")
+    # The C++ tokenizer splits on SPACES only; any other whitespace lands inside a token
+    # (true for the uint path since round 12 — before that, strtoul silently SKIPPED
+    # leading whitespace inside a token, so this guard was load-bearing on its own)
+    # and fails its uint/hex parse (red-team round 8 on #121: trailing TAB/VT/FF parsed
+    # here because the shared _tokens() strips them). Reject before tokenizing.
+    if any(c.isspace() and c != " " for c in rest):
+        raise CanonicalError(f"non-space whitespace in frame line: {line!r}")
     kv = _tokens(rest)
-    dst, src = _int(_take(kv, "dst")), _int(_take(kv, "src"))
-    flags, seq = _int(_take(kv, "flags")), _int(_take(kv, "seq"))
+
+    def _frame_uint(tok: str) -> int:
+        # parse_uint's EXACT shape (rounds 9+10 on #121 — round 9's first cut both over-
+        # and under-shot it): optional leading '+' (C++ deliberately accepts it, red-team
+        # @ 65922b5), no '-', ASCII 0x-hex or decimal, and a leading-zero decimal rejects
+        # UNLESS every digit is zero ("0"/"00" name 0 on both sides; "010" must not
+        # silently rename itself to 10). No 0o/0b/underscore/Unicode forms. Mirrors
+        # tools/canonical.cpp parse_uint, including its digits_start-after-'+' scan.
+        if not _FRAME_UINT_RE.fullmatch(tok):
+            raise CanonicalError(f"not a frame uint: {tok!r}")
+        digits = tok.lstrip("+")
+        return int(digits, 16) if digits[:2].lower() == "0x" else int(digits, 10)
+
+    dst, src = _frame_uint(_take(kv, "dst")), _frame_uint(_take(kv, "src"))
+    flags, seq = _frame_uint(_take(kv, "flags")), _frame_uint(_take(kv, "seq"))
     payload = _hexbytes(_take(kv, "payload"))
     if kv:
         raise CanonicalError(f"unexpected keys {sorted(kv)}")
+    # trunk §4: dst/src are single wire bytes, flags occupies ctrl bits 0-1 (bits 2-3
+    # reserved-0, bits 4-7 are `seq`, supplied separately by this field), seq is a nibble,
+    # and payload length must fit the one-byte wire length field. Reject out-of-range
+    # fields here, at parse time, instead of masking (dropping high bits) or falling
+    # through to a bare ValueError out of encode_frame's byte packing — matches
+    # tools/canonical.cpp's parse_frame_line (docs/OPEN-QUESTIONS.md 2026-09-03 "Frame line
+    # out-of-range fields"). dst=0xFF (reserved, in-range) and payload lengths 65-0xFF
+    # (in-range here, refused by encode_frame's own PayloadTooLong) are deliberately left
+    # for encode_frame's own checks, matching parse_frame_line's layering.
+    if not (0 <= dst <= 0xFF and 0 <= src <= 0xFF and 0 <= flags <= 0x03 and 0 <= seq <= 0x0F
+            and len(payload) <= 0xFF):
+        raise CanonicalError(f"out-of-range frame field in {line!r}")
     return link.Frame(dst=dst, src=src, response=bool(flags & 0x01), retry=bool(flags & 0x02), seq=seq,
                        payload=payload)
 
@@ -370,7 +463,10 @@ def _split_records(text: str) -> list[str]:
     if quoted:
         raise CanonicalError("unterminated string")
     out.append("".join(cur))
-    return [s.strip() for s in out if s.strip()]
+    # round 16 on #121: trim SPACES only (C++ split_records uses find_first_not_of(' ')).
+    # str.strip() also ate TAB/VT/FF/CR, so a DENC record ending in a TAB parsed here while
+    # the C++ side kept the TAB inside the token and parse_uint rejected it.
+    return [s.strip(" ") for s in out if s.strip(" ")]
 
 
 def _record_tokens(chunk: str) -> tuple[str, dict[str, str]]:
@@ -455,7 +551,10 @@ def _parse_record(chunk: str):
 
 
 def canonical_to_descriptor(text: str) -> list:
-    return [_parse_record(chunk) for chunk in _split_records(text)]
+    # round 17 on #121: descriptors were the verb group the round-15 CR-pop rationale
+    # missed, so round 16's strip(" ") left a trailing CR inside the last token and made
+    # the reference reject a CRLF DENC line l3_helper accepts. Mirror the reader here too.
+    return [_parse_record(chunk) for chunk in _split_records(_pop_one_cr(text))]
 
 
 def validate_line(blob: bytes) -> str:
