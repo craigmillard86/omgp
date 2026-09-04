@@ -174,7 +174,7 @@ TEST_CASE("SUSPECT stays SUSPECT via tick just short of the OFFLINE boundary", "
 
     uint64_t suspect_since = drive_to_suspect(tracker, kAddr);
     size_t before = listener.entries.size();
-    tracker.tick(suspect_since + (omgp::TRUNK_offline_after_suspect_ms - 1) * 1000);
+    tracker.tick(suspect_since + kThresholdUs - 1000);
 
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
     REQUIRE(listener.entries.size() == before);
@@ -188,8 +188,7 @@ TEST_CASE("SUSPECT stays SUSPECT via a failing on_result just short of the OFFLI
 
     uint64_t suspect_since = drive_to_suspect(tracker, kAddr);
     size_t before = listener.entries.size();
-    tracker.on_result(kAddr, false,
-                      suspect_since + (omgp::TRUNK_offline_after_suspect_ms - 1) * 1000);
+    tracker.on_result(kAddr, false, suspect_since + kThresholdUs - 1000);
 
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
     REQUIRE(listener.entries.size() == before);
@@ -294,7 +293,7 @@ TEST_CASE("poll_due for a SUSPECT node follows the 10x T_poll reduced-rate rule"
     tracker.mark_polled(kAddr, last_poll);
 
     REQUIRE_FALSE(tracker.poll_due(kAddr, last_poll + 9 * omgp::TRUNK_T_poll_us));
-    REQUIRE(tracker.poll_due(kAddr, last_poll + 10 * omgp::TRUNK_T_poll_us));
+    REQUIRE(tracker.poll_due(kAddr, last_poll + kSuspectPollPeriod_us));
 }
 
 TEST_CASE("poll_due is true for ENROLLED regardless of last poll time", "[link]") {
@@ -308,7 +307,7 @@ TEST_CASE("poll_due is true for ENROLLED regardless of last poll time", "[link]"
 
     REQUIRE(tracker.poll_due(kAddr, last_poll));
     REQUIRE(tracker.poll_due(kAddr, last_poll + 1));
-    REQUIRE(tracker.poll_due(kAddr, last_poll + 10 * omgp::TRUNK_T_poll_us));
+    REQUIRE(tracker.poll_due(kAddr, last_poll + kSuspectPollPeriod_us));
 }
 
 TEST_CASE("poll_due is false for OFFLINE and UNENROLLED", "[link]") {
@@ -323,7 +322,7 @@ TEST_CASE("poll_due is false for OFFLINE and UNENROLLED", "[link]") {
     uint64_t offline_at = suspect_since + kThresholdUs;
     tracker.mark_polled(offline_addr, offline_at);
 
-    REQUIRE_FALSE(tracker.poll_due(offline_addr, offline_at + 10 * omgp::TRUNK_T_poll_us));
+    REQUIRE_FALSE(tracker.poll_due(offline_addr, offline_at + kSuspectPollPeriod_us));
 }
 
 TEST_CASE("next_probe rotates round-robin over UNENROLLED/OFFLINE addresses only", "[link]") {
@@ -579,8 +578,7 @@ TEST_CASE("ADDR_host is not a node: on_result and a hostile lifecycle leave it u
     tracker.on_result(omgp::ADDR_host, true, 0);
     for (uint32_t i = 1; i <= omgp::TRUNK_suspect_after_failures; ++i)
         tracker.on_result(omgp::ADDR_host, false, i);
-    tracker.tick(omgp::TRUNK_suspect_after_failures +
-                 uint64_t{omgp::TRUNK_offline_after_suspect_ms} * 1000);
+    tracker.tick(omgp::TRUNK_suspect_after_failures + kThresholdUs);
     REQUIRE(tracker.state(omgp::ADDR_host) == HealthState::UNENROLLED);
     REQUIRE(listener.entries.empty());
 }
@@ -639,7 +637,7 @@ TEST_CASE("a full on_result/tick/poll_due/next_probe run allocates nothing", "[l
     HEAP_FREE_SCOPE({
         uint64_t suspect_since = drive_to_suspect(tracker, kAddr);
         tracker.mark_polled(kAddr, suspect_since);
-        (void)tracker.poll_due(kAddr, suspect_since + 10 * omgp::TRUNK_T_poll_us);
+        (void)tracker.poll_due(kAddr, suspect_since + kSuspectPollPeriod_us);
         tracker.tick(suspect_since + kThresholdUs);
         (void)tracker.next_probe(suspect_since);
         (void)tracker.state(kAddr);
@@ -678,12 +676,12 @@ TEST_CASE("one tick compares each record against its OWN suspect_since", "[link]
     const uint8_t early = omgp::ADDR_backplane_min;
     const uint8_t late = static_cast<uint8_t>(omgp::ADDR_backplane_min + 1);
     const uint64_t s_early = drive_to_suspect(tracker, early, 0);
-    const uint64_t s_late = drive_to_suspect(tracker, late, 900'000);
+    const uint64_t s_late = drive_to_suspect(tracker, late, 9 * kThresholdUs / 10);
 
     tracker.tick(s_early + kThresholdUs);
 
     REQUIRE(tracker.state(early) == HealthState::OFFLINE);
-    REQUIRE(tracker.state(late) == HealthState::SUSPECT); // 100 ms into ITS 1000 ms window
+    REQUIRE(tracker.state(late) == HealthState::SUSPECT); // still inside ITS own window
     REQUIRE(listener.entries.back().notice == Notice::OFFLINE);
     REQUIRE(listener.entries.back().addr == early);
 
