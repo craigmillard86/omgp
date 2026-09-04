@@ -377,3 +377,24 @@ TEST_CASE("fstream_response matches fstream_lines on well-formed hex", "[frame]"
     REQUIRE(omgp::canon::fstream_response(omgp::canon::hex_lower(ping, ping_len)) ==
             omgp::canon::fstream_lines(ping, ping_len));
 }
+
+// round 12 on #121: strtoul skips leading whitespace (so "\t011" parsed as OCTAL 9 — the
+// silent-renaming hazard the leading-zero guard exists to stop) and c_str() truncates at an
+// embedded NUL (so "1\0zz" parsed as 1). Both made C++ LAXER than the Python reference,
+// the reverse of the strict-rejection ruling; parse_uint now rejects any token containing
+// whitespace or NUL.
+TEST_CASE("parse_frame_line rejects tokens containing whitespace or an embedded NUL", "[frame]") {
+    FrameFields f{};
+    std::vector<uint8_t> payload;
+    std::string error;
+
+    REQUIRE_FALSE(omgp::canon::parse_frame_line(
+        "frame dst=\t011 src=0x00 flags=0x00 seq=0 payload=", f, payload, error));
+    REQUIRE(error == "ERR BadRequest");
+
+    std::string nul_line = "frame dst=1";
+    nul_line += '\0';
+    nul_line += "zz src=0x00 flags=0x00 seq=0 payload=";
+    REQUIRE_FALSE(omgp::canon::parse_frame_line(nul_line, f, payload, error));
+    REQUIRE(error == "ERR BadRequest");
+}

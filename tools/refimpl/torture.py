@@ -142,7 +142,10 @@ def _corrupt_overlength(rng: random.Random, body: bytearray) -> bool:
     # - escaped boundary: exactly the cap in plain bytes, then a VALID escape pair, so
     #   the first over-cap byte arrives via the Escaped state — the 1ad9ad3 bug class
     #   (PR #99: TooLong abort clobbered by the Escaped->InFrame transition), which the
-    #   corpus could not previously express because it excluded ESC entirely.
+    #   corpus could not previously express because it excluded ESC entirely. The pair is
+    #   followed by 1-7 more plain bytes (red-team round 10 on #121): with the ESC pair
+    #   LAST, 496 elements reached the abort line and zero could observe the clobbered
+    #   post-abort state — the regression only shows once further bytes arrive.
     if rng.getrandbits(1):
         extra = rng.randrange(1, MAX_PAYLOAD)
         body[:] = bytes(
@@ -154,7 +157,11 @@ def _corrupt_overlength(rng: random.Random, body: bytearray) -> bool:
             0x00 if b in (FLAG, ESC) else b
             for b in (rng.randrange(0, 256) for _ in range(_MAX_UNSTUFFED))
         )
-        body[:] = plain + bytes([ESC, rng.choice(_GOOD_ESCAPES)])
+        tail = bytes(
+            0x00 if b in (FLAG, ESC) else b
+            for b in (rng.randrange(0, 256) for _ in range(rng.randrange(1, 8)))
+        )
+        body[:] = plain + bytes([ESC, rng.choice(_GOOD_ESCAPES)]) + tail
     return True
 
 
