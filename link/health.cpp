@@ -16,7 +16,7 @@ namespace {
 // in poll_due silently restored a SUSPECT node to full poll rate).
 constexpr uint64_t elapsed_us(uint64_t now_us, uint64_t since_us) {
     // mutant-ok(equivalent, cxx_ge_to_gt): at now_us == since_us both arms yield 0.
-    return now_us >= since_us ? now_us - since_us : 0; // labelled above (see OPEN-QUESTIONS.md)
+    return now_us >= since_us ? now_us - since_us : 0; // labelled above: OPEN-QUESTIONS 2026-09-03
 }
 // data-model.md §6: OFFLINE threshold is TRUNK_offline_after_suspect_ms of SUSPECT time,
 // but every clock reading in this engine is in microseconds.

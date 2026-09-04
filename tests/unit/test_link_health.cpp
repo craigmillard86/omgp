@@ -13,6 +13,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 using namespace omgp::link;
@@ -42,8 +44,13 @@ struct RecordingListener : HealthListener {
         // Red-team on #124: 16 then 32 were outgrown SILENTLY, and the resulting
         // HEAP_FREE_SCOPE failure blamed HealthTracker for this vector's doubling. An
         // overrun now fails naming the real culprit instead of leaking into heap counts.
+        // fprintf+abort, not FAIL (review round 6): Catch's FAIL throws, and this path
+        // unwinds through omgp_link frames compiled -fno-exceptions - the message, not
+        // an unwind, is the point.
         if (entries.size() == entries.capacity()) {
-            FAIL("RecordingListener reservation outgrown - raise reserve(), not a tracker bug");
+            std::fprintf(stderr, "RecordingListener reservation outgrown - raise reserve(), "
+                                 "not a tracker bug\n");
+            std::abort();
         }
         entries.push_back({notice, addr});
     }
@@ -628,4 +635,47 @@ TEST_CASE("a full on_result/tick/poll_due/next_probe run allocates nothing", "[l
         (void)tracker.bus_fault();
         (void)tracker.bit_rate();
     });
+}
+
+// Red-team round 6 on #124, gap 1 (adopted verbatim): every prior tick case ticked ONCE
+// past the threshold, so a guard widened to re-offline already-OFFLINE records shipped
+// green - a permanent notice flood at T_poll into F3's scheduler.
+TEST_CASE("tick is idempotent: a node already OFFLINE is never notified twice", "[link]") {
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    const uint64_t suspect_since = drive_to_suspect(tracker, kAddr, 5'000'000);
+    const size_t before = listener.entries.size();
+    for (int i = 0; i < 8; ++i) // the scheduler ticks every superframe, forever
+        tracker.tick(suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000 +
+                     static_cast<uint64_t>(i) * omgp::TRUNK_T_poll_us);
+
+    REQUIRE(tracker.state(kAddr) == HealthState::OFFLINE);
+    REQUIRE(listener.entries.size() == before + 1); // SC-006: one notice per transition
+    REQUIRE(listener.entries.back().notice == Notice::OFFLINE);
+}
+
+// Red-team round 6 on #124, gap 2 (adopted verbatim): all prior multi-SUSPECT cases used
+// one shared timestamp, so a suspect_since read hoisted out of the tick loop shipped
+// green - one ripe node would drag every SUSPECT node OFFLINE with it.
+TEST_CASE("one tick compares each record against its OWN suspect_since", "[link]") {
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    const uint8_t early = omgp::ADDR_backplane_min;
+    const uint8_t late = static_cast<uint8_t>(omgp::ADDR_backplane_min + 1);
+    const uint64_t s_early = drive_to_suspect(tracker, early, 0);
+    const uint64_t s_late = drive_to_suspect(tracker, late, 900'000);
+
+    tracker.tick(s_early + omgp::TRUNK_offline_after_suspect_ms * 1000);
+
+    REQUIRE(tracker.state(early) == HealthState::OFFLINE);
+    REQUIRE(tracker.state(late) == HealthState::SUSPECT); // 100 ms into ITS 1000 ms window
+    REQUIRE(listener.entries.back().notice == Notice::OFFLINE);
+    REQUIRE(listener.entries.back().addr == early);
+
+    tracker.tick(s_late + omgp::TRUNK_offline_after_suspect_ms * 1000);
+    REQUIRE(tracker.state(late) == HealthState::OFFLINE);
 }

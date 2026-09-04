@@ -18,6 +18,10 @@ namespace link {
 // address the transition applies to (0 for bus-level notices, not yet emitted by this
 // stub). Implemented by F3's scheduler and by a recording listener in tests.
 struct HealthListener {
+    // MUST NOT re-enter the tracker (on_result/tick/poll_due/next_probe): re-entrancy
+    // is outside the contract until F3's scheduler states its needs (OPEN-QUESTIONS
+    // 2026-09-04; red-team round 6 on #124 - the notify-after-assign ordering that makes
+    // one re-entrant recovery happen to work is incidental, not promised).
     virtual void on_notice(Notice notice, uint8_t addr) = 0;
 
   protected:
