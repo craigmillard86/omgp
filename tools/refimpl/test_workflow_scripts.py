@@ -442,23 +442,47 @@ def test_verdict_producing_workflows_can_execute_what_they_judge():
 
     Scope is deliberately narrow: workflows that emit `VERDICT(<kind>)`. agent-converge-audit
     also reasons about tests but is a read-only drift audit that backs no approval, so it is
-    correctly outside this rule."""
+    correctly outside this rule.
+
+    The check is per-JOB, not per-file: a workflow can have jobs that never touch the verdict
+    (e.g. red-team's monthly attack-protocol job), so toolchain/tool checks are scoped to the
+    job that actually contains the verdict-producing claude-code-action step. Flattening steps
+    across all jobs let a job with no toolchain hide behind an unrelated job that has one
+    (2026-09-04 review round on #127)."""
     for wfn in ("claude-review.yml", "red-team.yml"):
         wf = yaml.safe_load((ROOT / ".github" / "workflows" / wfn).read_text(encoding="utf-8"))
-        steps = [s for j in wf["jobs"].values() for s in j.get("steps", [])]
-        actions = [s for s in steps if "claude-code-action" in s.get("uses", "")]
-        assert actions, wfn
-        for a in actions:
-            if "VERDICT(" not in a["with"].get("prompt", ""):
-                continue                      # not a verdict producer (e.g. the protocol red team)
-            tools = a["with"].get("claude_args", "")
-            assert "Bash(./pipeline.sh*)" in tools, (
-                f"{wfn}: emits a VERDICT the approval gate parses but cannot run ./pipeline.sh")
-            assert any(t in tools for t in ("Bash(python3*)", "Bash(g++*)", "Bash(ctest*)")), (
-                f"{wfn}: no way to run a test directly")
-        # ...and the toolchain those tools need must actually be installed in that job.
-        assert any("setup-python" in s.get("uses", "") for s in steps), f"{wfn}: no python"
-        assert any("apt-get install" in (s.get("run") or "") for s in steps), f"{wfn}: no cmake/ninja"
+        found_verdict_job = False
+        for jobname, job in wf["jobs"].items():
+            steps = job.get("steps", [])
+            actions = [s for s in steps if "claude-code-action" in s.get("uses", "")]
+            verdict_actions = [a for a in actions if "VERDICT(" in a["with"].get("prompt", "")]
+            if not verdict_actions:
+                continue                      # not a verdict-producing job (e.g. attack-protocol)
+            found_verdict_job = True
+            where = f"{wfn}:{jobname}"
+            for a in verdict_actions:
+                tools = a["with"].get("claude_args", "")
+                assert "Bash(./pipeline.sh*)" in tools, (
+                    f"{where}: emits a VERDICT the approval gate parses but cannot run ./pipeline.sh")
+                assert any(t in tools for t in ("Bash(python3*)", "Bash(g++*)", "Bash(ctest*)")), (
+                    f"{where}: no way to run a test directly")
+            # ...and the toolchain those tools need must actually be installed in THIS job, not
+            # merely somewhere in the file, and not disabled behind a falsifying `if: false`.
+            # YAML parses a literal `if: false` as the Python bool False, not the string
+            # "false" (an expression like steps.tier.outputs.deep == 'true' stays a str) —
+            # both forms must be treated as unconditionally disabling the step.
+            disabled = lambda s: s.get("if") in (False, "false")
+            py_steps = [s for s in steps if "setup-python" in s.get("uses", "")]
+            assert py_steps, f"{where}: no python"
+            assert not all(disabled(s) for s in py_steps), (
+                f"{where}: python setup is unconditionally disabled")
+            install_steps = [s for s in steps if "apt-get install" in (s.get("run") or "")]
+            assert any("cmake" in (s.get("run") or "") and "ninja" in (s.get("run") or "")
+                       for s in install_steps), f"{where}: no cmake/ninja"
+            assert not all(disabled(s) for s in install_steps), (
+                f"{where}: toolchain install is unconditionally disabled")
+            assert any("pytest" in (s.get("run") or "") for s in steps), f"{where}: no pytest"
+        assert found_verdict_job, f"{wfn}: no job emits a VERDICT(...) at all"
 
 
 def test_review_checks_out_the_code_it_reviews():
