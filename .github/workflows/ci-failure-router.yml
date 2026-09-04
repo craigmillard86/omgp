@@ -67,7 +67,7 @@ jobs:
       actions: write   # read the branch's runs; dispatch this workflow for the ones missed
     steps:
       - name: Dispatch the router for failures it never saw
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const {owner, repo} = context.repo;
@@ -157,7 +157,7 @@ jobs:
           echo "max=$(sed -n 's/^auto_fix_max_attempts: *"\{0,1\}\(-\{0,1\}[0-9][0-9]*\)"\{0,1\}[[:space:]]*\(#.*\)\{0,1\}$/\1/p' .github/agent-config.yml | tail -n1)" >> "$GITHUB_OUTPUT"
       - name: Route the failure by branch
         id: route
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           DISPATCH_RUN_ID: ${{ inputs.run_id }}
           MAX_ATTEMPTS: ${{ steps.cfg.outputs.max }}
@@ -386,7 +386,7 @@ jobs:
 
       - name: Record an attempt that did not complete
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const pr = Number('${{ needs.route.outputs.pr }}');

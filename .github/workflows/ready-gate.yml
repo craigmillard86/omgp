@@ -31,7 +31,7 @@ jobs:
         with:
           sparse-checkout: tools/ci
           sparse-checkout-cone-mode: false
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@v9
         with:
           script: |
             const {owner, repo} = context.repo;
