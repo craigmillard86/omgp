@@ -76,7 +76,8 @@ def test_frame_count_meets_the_contract_threshold():
 def test_random_frame_covers_every_dst_src_and_seq_over_frame_count():
     rng = random.Random(SEED)
     frames = [F.random_frame(rng, i) for i in range(F.FRAME_COUNT)]
-    assert {fr.dst for fr in frames} == set(range(0xFF))  # every non-reserved dst
+    # via F._RESERVED_DST, not a fourth 0xFF hardcoding (review round 8 on #121)
+    assert {fr.dst for fr in frames} == set(d for d in range(0x100) if d != F._RESERVED_DST)
     assert {fr.src for fr in frames} == set(range(0x100))  # every src
     assert {fr.seq for fr in frames} == set(range(16))  # seq 0-15
     # flags: the last unpinned line of the contract's corpus spec (review on #121).
@@ -84,6 +85,12 @@ def test_random_frame_covers_every_dst_src_and_seq_over_frame_count():
                                                          (True, False), (True, True)}
     lengths = {len(fr.payload) for fr in frames}
     assert 0 in lengths and F.MAX_PAYLOAD in lengths  # payload lengths 0-64, boundaries hit
+    # red-team round 8 on #121: the boundary forcing and the 7E/7D bias were satisfied by
+    # plain random draws too — pin the CONSTRUCTED properties, not the coincidence.
+    assert [len(frames[i].payload) for i in range(4)] == [0, 1, F.MAX_PAYLOAD, F.MAX_PAYLOAD - 1]
+    stuffed = sum(b in (F.G.TRUNK_flag_byte, F.G.TRUNK_escape_byte) for fr in frames for b in fr.payload)
+    total = sum(len(fr.payload) for fr in frames)
+    assert stuffed / total > 0.3, f"7E/7D bias missing: {stuffed}/{total}"
 
 
 def test_random_frame_seq_is_not_a_function_of_src():
@@ -107,8 +114,11 @@ def test_random_frame_never_generates_the_reserved_destination():
 
 
 def test_random_frame_is_deterministic():
-    a = [F.random_frame(random.Random(SEED), i) for i in range(500)]
-    b = [F.random_frame(random.Random(SEED), i) for i in range(500)]
+    # Shared rng threaded through successive calls — the shape run_frames actually builds
+    # (review round 8 on #121: fresh-rng-per-call asserted only purity of one draw).
+    rng_a, rng_b = random.Random(SEED), random.Random(SEED)
+    a = [F.random_frame(rng_a, i) for i in range(500)]
+    b = [F.random_frame(rng_b, i) for i in range(500)]
     assert a == b
 
 
@@ -193,3 +203,71 @@ def test_replay_index_range_guards_exit_with_a_diagnostic():
 
 def test_run_torture_index_replays_a_single_corrupted_element():
     assert F.run_torture(FakeHelper(), SEED, only=20, frames=20, per_class=3) == 1
+
+
+# --- run_torture compares FULL blocks; run_streams covers order + ReservedAddress -----------
+# (red-team round 8 on #121)
+
+class _RefStreamHelper:
+    """Honest FSTREAM helper via the reference deframer; `mangle` post-processes blocks."""
+
+    def __init__(self, mangle=None):
+        self.mangle = mangle or (lambda b: b)
+
+    def ask_stream(self, lines):
+        out = []
+        for ln in lines:
+            d = F.link.Deframer()
+            delivered = d.feed_bytes(bytes.fromhex(ln.split(" ", 1)[1]))
+            disc = sum(v for k, v in d.stats.items() if k != "delivered")
+            block = [f"OK {F.C.frame_to_canonical(f)}" for f in delivered] + [f"END {disc}"]
+            out.append(self.mangle(list(block)))
+        return out
+
+
+def test_run_torture_rejects_a_correct_end_with_a_wrong_ok_line():
+    # A terminator-only comparison accepts this; the full-block comparison must not.
+    def lie(block):
+        if len(block) > 1:
+            block[0] = block[0].replace("dst=0x", "dst=1x", 1)
+        return block
+    assert F.run_torture(_RefStreamHelper(lie), SEED, frames=20, per_class=3) == -1
+
+
+def test_run_torture_rejects_a_dropped_ok_line_with_a_correct_end():
+    def drop(block):
+        return block[1:] if len(block) > 1 else block
+    assert F.run_torture(_RefStreamHelper(drop), SEED, frames=20, per_class=3) == -1
+
+
+def test_run_streams_agrees_with_the_reference_and_covers_order_and_reserved():
+    assert F.run_streams(_RefStreamHelper(), SEED, count=60) == 60
+
+
+def test_run_streams_rejects_reversed_frame_order():
+    def rev(block):
+        return list(reversed(block[:-1])) + block[-1:]
+    assert F.run_streams(_RefStreamHelper(rev), SEED, count=60) == -1
+
+
+def test_run_streams_corpus_has_multiframe_and_reserved_elements():
+    # The properties the sub-corpus exists to add: elements delivering >= 2 frames in
+    # order, and the ReservedAddress discard actually occurring.
+    import random as _random
+    rng = _random.Random(SEED ^ F._STREAM_SEED_XOR)
+    multi = reserved = 0
+    for i in range(60):
+        n = 2 + (i % 2)
+        frames = [F.random_frame(rng, rng.randrange(F.FRAME_COUNT)) for _ in range(n)]
+        parts = [F.link.encode_frame(f) for f in frames]
+        stream = parts[0]
+        for part in parts[1:]:
+            stream += part[1:]
+        if i % 5 == 0:
+            stream += F._reserved_dst_frame_bytes(rng)[1:]
+        d = F.link.Deframer()
+        delivered = d.feed_bytes(stream)
+        assert [f.dst for f in delivered] == [f.dst for f in frames]  # order, all delivered
+        multi += len(delivered) >= 2
+        reserved += d.stats.get("ReservedAddress", 0)
+    assert multi == 60 and reserved == 12

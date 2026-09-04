@@ -55,6 +55,11 @@ def _int(tok: str) -> int:
 
 
 def _hexbytes(tok: str) -> bytes:
+    # bytes.fromhex silently tolerates ASCII whitespace INSIDE the token; the C++ hex
+    # parsers do not (red-team round 8 on #121: "01\t02" parsed here, ERR BadRequest
+    # there). Contiguous hex only.
+    if any(c.isspace() for c in tok):
+        raise CanonicalError(f"not hex: {tok!r}")
     try:
         return bytes.fromhex(tok)
     except ValueError:
@@ -277,13 +282,19 @@ def frame_to_canonical(f: link.Frame) -> str:
 
 
 def canonical_to_frame(line: str) -> link.Frame:
-    # rstrip, not strip (review round 4 on #121): parse_frame_line compares the FIRST
-    # token to "frame", so a leading space yields an empty prefix and ERR BadRequest on
-    # the C++ side — tolerating it here was a residual parser divergence. (The int-radix
-    # forms 0o/0b/1_0 that int(tok, 0) accepts remain the disclosed pre-existing gap.)
-    prefix, _, rest = line.rstrip().partition(" ")
+    # rstrip("\r\n"), not strip (reviews on #121, rounds 4+8): parse_frame_line compares
+    # the FIRST token to "frame" (leading space → ERR BadRequest), and l3_helper strips
+    # only a trailing '\r' — a bare rstrip() also swallowed trailing TAB/VT/FF that the
+    # C++ tokenizer rejects. Trailing spaces stay: both tokenizers skip empty tokens.
+    # (The int-radix forms 0o/0b/1_0 that int(tok, 0) accepts remain the disclosed gap.)
+    prefix, _, rest = line.rstrip("\r\n").partition(" ")
     if prefix != "frame":
         raise CanonicalError(f"not a frame line: {line!r}")
+    # The C++ tokenizer splits on SPACES only; any other whitespace lands inside a token
+    # and fails its uint/hex parse (red-team round 8 on #121: trailing TAB/VT/FF parsed
+    # here because the shared _tokens() strips them). Reject before tokenizing.
+    if any(c.isspace() and c != " " for c in rest):
+        raise CanonicalError(f"non-space whitespace in frame line: {line!r}")
     kv = _tokens(rest)
     dst, src = _int(_take(kv, "dst")), _int(_take(kv, "src"))
     flags, seq = _int(_take(kv, "flags")), _int(_take(kv, "seq"))

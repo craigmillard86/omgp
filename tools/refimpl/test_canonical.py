@@ -160,6 +160,12 @@ OUT_OF_RANGE_FRAME_LINES = [
     # review round 4 on #121: parse_frame_line's first-token compare rejects a leading
     # space; the Python side must not silently tolerate it.
     ("leading-whitespace", " frame dst=0x00 src=0x00 flags=0x00 seq=0 payload="),
+    # red-team round 8 on #121: rstrip() swallowed non-space trailing whitespace the C++
+    # tokenizer rejects, and bytes.fromhex tolerated whitespace inside the hex token.
+    ("trailing-tab", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=0102\t"),
+    ("trailing-vertical-tab", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=0102\x0b"),
+    ("trailing-form-feed", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=0102\x0c"),
+    ("tab-inside-payload", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=01\t02"),
 ]
 
 

@@ -75,6 +75,7 @@ def test_diffcheck_frames_only_discloses_its_blind_spot():
     _frames = re.search(r"frames (\d+)", r.stdout)
     assert _frames and int(_frames.group(1)) >= 10_000, r.stdout
     assert re.search(r"torture [1-9]\d*", r.stdout), r.stdout
+    assert re.search(r"streams [1-9]\d*", r.stdout), r.stdout
 
 
 def test_mutate_cfg_parses_and_pins():

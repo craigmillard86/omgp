@@ -3,16 +3,18 @@ valid frames round-tripped through FENC/FDEC, and every torture.corpus(seed) ele
 replayed through FSTREAM — both compared against the Python reference
 (contracts/tooling.md, contracts/frame-vectors.md "l3_helper verbs").
 
-run_frames(helper, seed, count, only) / run_torture(helper, seed, only, frames, per_class)
+run_frames(helper, seed, count, only) / run_torture(helper, seed, only, **corpus_kwargs)
+/ run_streams(helper, seed, count)
 -> number of agreeing cases, or -1 after printing the first mismatch. `helper` only needs
 `.ask(lines) -> list[str]` (FENC/FDEC: one line in, one line out) and
 `.ask_stream(lines) -> list[list[str]]` (FSTREAM: one line in, a variable-length block of
 response lines out, the caller's Helper.ask_stream splits on "END " terminators).
 
-Blind spot (stated per the working agreement; review on #121): the corpus is valid-only
-by construction and FSTREAM reports discards as a count, so the FENC refusal spellings
-(ERR PayloadTooLong/ReservedAddress) and per-reason FDEC discards get no differential
-coverage here — they are pinned by unit tests on each side, not by C++/Python agreement.
+Blind spot (stated per the working agreement; reviews on #121): FSTREAM reports discards
+as a count, so per-REASON discard parity gets no differential coverage here — it is
+pinned by unit tests on each side. The FENC refusal spellings likewise. run_streams
+(red-team round 8) closes two former gaps: multi-frame delivery ORDER (shared-FLAG
+streams of 2-3 frames) and the ReservedAddress discard occurring at all.
 """
 from __future__ import annotations
 
@@ -122,3 +124,51 @@ def run_torture(helper, seed: int, only: int | None = None, **corpus_kwargs) -> 
         if only is not None:
             print(f"  FSTREAM {elem.stream.hex()}\n  both: {block}")
     return len(indices)
+
+
+_STREAM_SEED_XOR = 0x57BEA1
+STREAM_COUNT = 1500
+
+
+def _reserved_dst_frame_bytes(rng: random.Random) -> bytes:
+    """Wire bytes of a well-formed frame addressed to the reserved dst — encode_frame
+    refuses to build one, so it is assembled by hand; both deframers must DISCARD it
+    (ReservedAddress), which no other corpus element ever exercised."""
+    payload = bytes(_biased_byte(rng) for _ in range(rng.randint(0, 4)))
+    body = bytes([_RESERVED_DST, rng.randrange(0x100), 0x00, len(payload)]) + payload
+    c = link.crc(body)
+    return bytes([link.FLAG]) + link.stuff(body + bytes([c & 0xFF, (c >> 8) & 0xFF])) + bytes([link.FLAG])
+
+
+def run_streams(helper, seed: int, count: int = STREAM_COUNT) -> int:
+    """Multi-frame FSTREAM agreement (red-team round 8 on #121): every torture element
+    delivers 0 or 1 frame, so "one OK line per delivered frame, IN ORDER" had zero
+    differential coverage, and the ReservedAddress discard never occurred in any corpus.
+    Each stream here concatenates 2-3 valid frames SHARING delimiters (enc(A)+enc(B)[1:]);
+    every 5th also embeds a reserved-dst frame that both sides must discard."""
+    rng = random.Random(seed ^ _STREAM_SEED_XOR)
+    ok = 0
+    requests, expects = [], []
+    for i in range(count):
+        n = 2 + (i % 2)
+        frames = [random_frame(rng, rng.randrange(FRAME_COUNT)) for _ in range(n)]
+        parts = [link.encode_frame(f) for f in frames]
+        stream = parts[0]
+        for part in parts[1:]:
+            stream += part[1:]  # shared closing/opening FLAG
+        discards = 0
+        if i % 5 == 0:
+            stream += _reserved_dst_frame_bytes(rng)[1:]
+            discards = 1
+        requests.append(f"FSTREAM {stream.hex()}")
+        expects.append((i, stream,
+                        [f"OK {C.frame_to_canonical(f)}" for f in frames] + [f"END {discards}"]))
+    blocks = helper.ask_stream(requests)
+    for (i, stream, want), block in zip(expects, blocks):
+        if block != want:
+            print(f"diffcheck: STREAM MISMATCH (seed={seed:#x}, index={i})\n"
+                  f"  FSTREAM {stream.hex()}\n  C++   : {block}{death_note(helper)}\n  Python: {want}\n"
+                  f"  replay: printf 'FSTREAM {stream.hex()}\\nQUIT\\n' | build/native/l3_helper")
+            return -1
+        ok += 1
+    return ok

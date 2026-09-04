@@ -51,11 +51,13 @@ CHUNK = 400
 # next (tools/canonical.cpp fstream_response()/fstream_lines(): both lines are flushed by
 # l3_helper.cpp in a single write, so they are already sitting in the pipe and arrive well
 # inside this bound). If that wait ever actually times out, the helper is presumed dead for
-# the rest of the batch (Helper._dead, below): every later block, including the first line
-# of blocks that have not started reading yet, returns immediately instead of re-arming this
-# same timeout once per remaining request. Without that stickiness, run_torture's one-call,
-# whole-corpus batches (tools/refimpl/diffcheck_frames.py) would each pay this timeout again
-# for every request after the dead one, rather than once for the whole run.
+# the rest of the PROCESS: Helper._dead is per-Helper and never cleared, so every later
+# block — and every later ask()/ask_stream() on this Helper — returns immediately instead
+# of re-arming this timeout once per remaining request. That breadth is safe today only
+# because main() returns non-zero on the first mismatch, so nothing consults the blanked
+# answers (a control from main()'s current shape, not a Helper property — review round 8
+# on #121). Without the stickiness, run_torture's whole-corpus batches would pay this
+# timeout once per remaining request rather than once per run.
 _STALL_TIMEOUT = 2.0
 
 
@@ -112,6 +114,10 @@ class Helper:
                 return
 
     def ask(self, lines: list[str]) -> list[str]:
+        # SCOPE (review round 8 on #121, rule 11): unlike ask_stream, this read has no
+        # stall guard — a live-but-silent helper would block until the CI timeout.
+        # Unreachable today because l3_helper prints exactly one response string per
+        # request (a repo-contents control, the same one ask_stream's note names).
         self._write(lines)
         return [self._next_line() or "" for _ in lines]
 
@@ -336,7 +342,7 @@ def main(argv=None) -> int:
         ap.error("--index replays a MESSAGE case, which --frames-only skips")
 
     t0 = time.monotonic()
-    crc = msgs = inval = desc = 0
+    crc = msgs = inval = desc = streams = 0
     if not args.frames_only:
         crc = run_crc(random.Random(args.seed))
     helper = Helper(BIN / "l3_helper")
@@ -370,9 +376,12 @@ def main(argv=None) -> int:
             return 1
         if args.torture_index is not None:
             return 0
+        streams = F.run_streams(helper, args.seed)
+        if streams < 0:
+            return 1
     finally:
         helper.close()
-    total = crc + msgs + inval + desc + frames + torture_n
+    total = crc + msgs + inval + desc + frames + torture_n + streams
     notes = []
     if args.frames_only:
         notes.append("blind spot: crc/message/invalid/descriptor corpora not run")
@@ -383,7 +392,7 @@ def main(argv=None) -> int:
     blind_spot = f" ({'; '.join(notes)})" if notes else ""
     print(f"diffcheck: {total} cases, C++ and Python agree "
           f"(crc {crc}, messages {msgs}, invalid {inval}, descriptors {desc}, "
-          f"frames {frames}, torture {torture_n}) in {time.monotonic() - t0:.1f}s{blind_spot}")
+          f"frames {frames}, torture {torture_n}, streams {streams}) in {time.monotonic() - t0:.1f}s{blind_spot}")
     return 0
 
 
