@@ -18,13 +18,12 @@ namespace link {
 // address the transition applies to (0 for bus-level notices, not yet emitted by this
 // stub). Implemented by F3's scheduler and by a recording listener in tests.
 struct HealthListener {
-    // MUST NOT call ANY HealthTracker method from inside on_notice (review round 7 on
-    // #124: an enumerated list reads as exhaustive and licensed the mutating calls it
-    // omitted). Re-entrancy is outside the contract until F3's scheduler states its
-    // needs (OPEN-QUESTIONS 2026-09-04; the notify-after-assign ordering that makes one
-    // re-entrant recovery happen to work is incidental, not promised). The blanket form
-    // deliberately sweeps in the const observers (state/poll_due) as the safe default;
-    // F3's design may narrow it by superseding that entry - it is not settled.
+    // MUST NOT call ANY HealthTracker method from inside on_notice: re-entrancy is
+    // outside the contract until F3's scheduler states its needs (OPEN-QUESTIONS
+    // 2026-09-04). The notify-after-assign ordering that makes one re-entrant recovery
+    // happen to work is incidental, not promised; the blanket form deliberately sweeps
+    // in the const observers (state/poll_due) as the safe default, and F3's design may
+    // narrow it by superseding that entry. (History: reviews on #124.)
     virtual void on_notice(Notice notice, uint8_t addr) = 0;
 
   protected:

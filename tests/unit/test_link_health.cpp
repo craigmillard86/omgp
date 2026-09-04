@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <vector>
 
 using namespace omgp::link;
@@ -30,6 +29,7 @@ struct RecordingListener : HealthListener {
         uint8_t addr;
     };
     std::vector<Entry> entries;
+    bool overrun_noted = false;
 
     // Reserves up front so growth during a HEAP_FREE_SCOPE measures HealthTracker's own
     // allocations, not this recording harness's vector doubling. 64 covers the largest
@@ -44,19 +44,27 @@ struct RecordingListener : HealthListener {
         // Red-team on #124: 16 then 32 were outgrown SILENTLY, and the resulting
         // HEAP_FREE_SCOPE failure blamed HealthTracker for this vector's doubling. An
         // overrun now fails naming the real culprit instead of leaking into heap counts.
-        // fprintf+abort, not FAIL (review round 6): Catch's FAIL throws, and this path
-        // unwinds through omgp_link frames compiled -fno-exceptions - the message, not
-        // an unwind, is the point.
-        if (entries.size() == entries.capacity()) {
-            std::fprintf(stderr, "RecordingListener reservation outgrown - raise reserve(), "
-                                 "not a tracker bug\n");
-            std::abort();
+        // One-shot stderr note; no abort, no attribution (red-team round 9: a runaway
+        // notice storm from a tracker bug reaches this line too, so "raise reserve()"
+        // was a false diagnosis there, and the abort truncated the run at the first
+        // overrun). A reallocation inside a HEAP_FREE_SCOPE still fails that scope's
+        // heap REQUIRE; this note just names both candidate culprits.
+        if (entries.size() == entries.capacity() && !overrun_noted) {
+            overrun_noted = true;
+            std::fprintf(stderr,
+                         "RecordingListener: reserve(%zu) outgrown - undersized "
+                         "reserve or a runaway notice storm\n",
+                         entries.capacity());
         }
         entries.push_back({notice, addr});
     }
 };
 
 constexpr uint8_t kAddr = omgp::ADDR_backplane_min; // 0x01: a representative peer address
+
+// TRUNK_* symbols generate as uint32_t; multiply once, in 64 bits, and use file-wide so
+// no case silently reintroduces a bare 32-bit `* 1000`.
+constexpr uint64_t kThresholdUs = uint64_t{omgp::TRUNK_offline_after_suspect_ms} * 1000;
 
 // Enrols `addr` at `base` then drives exactly TRUNK_suspect_after_failures consecutive
 // failures, landing on SUSPECT with suspect_since == the returned time (data-model.md §6
@@ -72,7 +80,7 @@ uint64_t drive_to_suspect(HealthTracker& tracker, uint8_t addr, uint64_t base = 
 // intervening on_result), landing on OFFLINE. Returns suspect_since.
 uint64_t drive_to_offline(HealthTracker& tracker, uint8_t addr, uint64_t base = 0) {
     uint64_t suspect_since = drive_to_suspect(tracker, addr, base);
-    tracker.tick(suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000);
+    tracker.tick(suspect_since + kThresholdUs);
     return suspect_since;
 }
 
@@ -194,7 +202,7 @@ TEST_CASE("SUSPECT to OFFLINE via tick alone at the boundary, no on_result invol
 
     uint64_t suspect_since = drive_to_suspect(tracker, kAddr);
     size_t before = listener.entries.size();
-    tracker.tick(suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000);
+    tracker.tick(suspect_since + kThresholdUs);
 
     REQUIRE(tracker.state(kAddr) == HealthState::OFFLINE);
     REQUIRE(listener.entries.size() == before + 1);
@@ -209,7 +217,7 @@ TEST_CASE("SUSPECT to OFFLINE via a failing on_result at the boundary", "[link]"
 
     uint64_t suspect_since = drive_to_suspect(tracker, kAddr);
     size_t before = listener.entries.size();
-    tracker.on_result(kAddr, false, suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000);
+    tracker.on_result(kAddr, false, suspect_since + kThresholdUs);
 
     REQUIRE(tracker.state(kAddr) == HealthState::OFFLINE);
     REQUIRE(listener.entries.size() == before + 1);
@@ -224,7 +232,7 @@ TEST_CASE("OFFLINE to ENROLLED (RECOVERED) on a valid result", "[link]") {
 
     uint64_t suspect_since = drive_to_offline(tracker, kAddr);
     size_t before = listener.entries.size();
-    tracker.on_result(kAddr, true, suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000 + 1);
+    tracker.on_result(kAddr, true, suspect_since + kThresholdUs + 1);
 
     REQUIRE(tracker.state(kAddr) == HealthState::ENROLLED);
     REQUIRE(listener.entries.size() == before + 1);
@@ -239,8 +247,7 @@ TEST_CASE("OFFLINE stays OFFLINE on further failures", "[link]") {
 
     uint64_t suspect_since = drive_to_offline(tracker, kAddr);
     size_t before = listener.entries.size();
-    tracker.on_result(kAddr, false,
-                      suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000 + 1);
+    tracker.on_result(kAddr, false, suspect_since + kThresholdUs + 1);
 
     REQUIRE(tracker.state(kAddr) == HealthState::OFFLINE);
     REQUIRE(listener.entries.size() == before);
@@ -261,9 +268,8 @@ TEST_CASE("notice count equals transition count across a full scripted lifecycle
     tracker.on_result(kAddr, false, ++t); // ENROLLED, failures=2             : —
     tracker.on_result(kAddr, false, ++t); // ENROLLED -> SUSPECT              : SUSPECT
     uint64_t suspect_since = t;
-    tracker.tick(suspect_since +
-                 omgp::TRUNK_offline_after_suspect_ms * 1000); // -> OFFLINE : OFFLINE
-    t = suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000;
+    tracker.tick(suspect_since + kThresholdUs); // -> OFFLINE : OFFLINE
+    t = suspect_since + kThresholdUs;
     tracker.on_result(kAddr, false, ++t); // OFFLINE, stays                  : —
     tracker.on_result(kAddr, true, ++t);  // OFFLINE -> ENROLLED             : RECOVERED
 
@@ -314,7 +320,7 @@ TEST_CASE("poll_due is false for OFFLINE and UNENROLLED", "[link]") {
 
     uint8_t offline_addr = omgp::ADDR_backplane_min + 1;
     uint64_t suspect_since = drive_to_offline(tracker, offline_addr);
-    uint64_t offline_at = suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000;
+    uint64_t offline_at = suspect_since + kThresholdUs;
     tracker.mark_polled(offline_addr, offline_at);
 
     REQUIRE_FALSE(tracker.poll_due(offline_addr, offline_at + 10 * omgp::TRUNK_T_poll_us));
@@ -481,12 +487,15 @@ TEST_CASE("one tick offlines every SUSPECT record, not just the first", "[link]"
     RecordingListener listener;
     HealthTracker tracker(clock, listener);
 
-    uint64_t suspect_since = 0; // review round 8 on #124: taken from the helper, not
-    for (uint8_t a = omgp::ADDR_backplane_min; a <= omgp::ADDR_backplane_max; ++a) // its
-        suspect_since = drive_to_suspect(tracker, a, 1000000); // contract re-derived
+    // suspect_since comes from drive_to_suspect's return value rather than re-deriving
+    // the helper's contract at a distance; all 15 calls share one base, so every
+    // iteration returns the same stamp (the initialiser is never the value used).
+    uint64_t suspect_since = 0;
+    for (uint8_t a = omgp::ADDR_backplane_min; a <= omgp::ADDR_backplane_max; ++a)
+        suspect_since = drive_to_suspect(tracker, a, 1000000);
 
     const size_t before = listener.entries.size();
-    tracker.tick(suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000); // ONE tick
+    tracker.tick(suspect_since + kThresholdUs); // ONE tick
 
     std::vector<uint8_t> offlined;
     for (size_t i = before; i < listener.entries.size(); ++i) {
@@ -513,15 +522,14 @@ TEST_CASE("suspect_since is stamped with now, not left at its 0 initialiser", "[
     RecordingListener listener;
     HealthTracker tracker(clock, listener);
 
-    const uint64_t threshold_us = uint64_t{omgp::TRUNK_offline_after_suspect_ms} * 1000;
-    const uint64_t uptime = 5 * threshold_us; // a rig running well past one window
+    const uint64_t uptime = 5 * kThresholdUs; // a rig running well past one window
     const uint64_t since = drive_to_suspect(tracker, kAddr, uptime);
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
 
-    tracker.tick(since + threshold_us / 5); // well inside the window, symbol-derived
+    tracker.tick(since + kThresholdUs / 5); // well inside the window, symbol-derived
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
 
-    tracker.tick(since + threshold_us); // uint64_t: no 32-bit multiply (review round 8)
+    tracker.tick(since + kThresholdUs);
     REQUIRE(tracker.state(kAddr) == HealthState::OFFLINE);
 }
 
@@ -632,7 +640,7 @@ TEST_CASE("a full on_result/tick/poll_due/next_probe run allocates nothing", "[l
         uint64_t suspect_since = drive_to_suspect(tracker, kAddr);
         tracker.mark_polled(kAddr, suspect_since);
         (void)tracker.poll_due(kAddr, suspect_since + 10 * omgp::TRUNK_T_poll_us);
-        tracker.tick(suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000);
+        tracker.tick(suspect_since + kThresholdUs);
         (void)tracker.next_probe(suspect_since);
         (void)tracker.state(kAddr);
         (void)tracker.bus_fault();
@@ -651,7 +659,7 @@ TEST_CASE("tick is idempotent: a node already OFFLINE is never notified twice", 
     const uint64_t suspect_since = drive_to_suspect(tracker, kAddr, 5'000'000);
     const size_t before = listener.entries.size();
     for (int i = 0; i < 8; ++i) // the scheduler ticks every superframe, forever
-        tracker.tick(suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000 +
+        tracker.tick(suspect_since + kThresholdUs +
                      static_cast<uint64_t>(i) * omgp::TRUNK_T_poll_us);
 
     REQUIRE(tracker.state(kAddr) == HealthState::OFFLINE);
@@ -672,20 +680,24 @@ TEST_CASE("one tick compares each record against its OWN suspect_since", "[link]
     const uint64_t s_early = drive_to_suspect(tracker, early, 0);
     const uint64_t s_late = drive_to_suspect(tracker, late, 900'000);
 
-    tracker.tick(s_early + omgp::TRUNK_offline_after_suspect_ms * 1000);
+    tracker.tick(s_early + kThresholdUs);
 
     REQUIRE(tracker.state(early) == HealthState::OFFLINE);
     REQUIRE(tracker.state(late) == HealthState::SUSPECT); // 100 ms into ITS 1000 ms window
     REQUIRE(listener.entries.back().notice == Notice::OFFLINE);
     REQUIRE(listener.entries.back().addr == early);
 
-    tracker.tick(s_late + omgp::TRUNK_offline_after_suspect_ms * 1000);
+    tracker.tick(s_late + kThresholdUs);
     REQUIRE(tracker.state(late) == HealthState::OFFLINE);
 }
 
-// Red-team round 8 on #124 (adopted verbatim): data-model §6 row 2 was asserted only
-// halfway - state stays UNENROLLED, but nothing checked that pre-enrolment failures are
-// not carried into the freshly ENROLLED record, shortening its first SUSPECT window.
+// data-model §6 row 2, consequence half (adopted from red-team round 8 on #124; scope
+// corrected per round 9): this case guards the CONJUNCTION of "count failures while
+// UNENROLLED" and "drop the enrol reset". Either single edit is masked BY CONSTRUCTION:
+// nothing increments consecutive_failures while UNENROLLED, so the reset in the
+// UNENROLLED->ENROLLED arm is a no-op and 0-on-enrol is an invariant either way. A
+// future PR whose deep-verify scope reaches that reset line must label its
+// cxx_assign_const survivor mutant-ok(equivalent) on exactly this argument.
 TEST_CASE("failures seen before enrolment do not shorten the first SUSPECT window", "[link]") {
     FakeClock clock;
     RecordingListener listener;
