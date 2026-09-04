@@ -469,9 +469,20 @@ def test_verdict_producing_workflows_can_execute_what_they_judge():
             # ...and the toolchain those tools need must actually be installed in THIS job, not
             # merely somewhere in the file, and not disabled behind a falsifying `if: false`.
             # YAML parses a literal `if: false` as the Python bool False, not the string
-            # "false" (an expression like steps.tier.outputs.deep == 'true' stays a str) —
-            # both forms must be treated as unconditionally disabling the step.
-            disabled = lambda s: s.get("if") in (False, "false")
+            # "false" (an expression like steps.tier.outputs.deep == 'true' stays a str);
+            # `if: ${{ false }}` is a THIRD form -- a string that is neither -- and survived
+            # here undetected (red-team round 2 on #127, mutation "toolchain disabled via
+            # `if: ${{ false }}`"). All three must be treated as unconditionally disabling.
+            def disabled(s):
+                v = s.get("if")
+                if v is False:
+                    return True
+                if isinstance(v, str):
+                    v = v.strip()
+                    if v.startswith("${{") and v.endswith("}}"):
+                        v = v[3:-2].strip()
+                    return v.lower() == "false"
+                return False
             py_steps = [s for s in steps if "setup-python" in s.get("uses", "")]
             assert py_steps, f"{where}: no python"
             assert not all(disabled(s) for s in py_steps), (
@@ -506,6 +517,12 @@ def test_review_checks_out_the_code_it_reviews_but_only_after_vetting_it():
     # The guard resolves the head and refuses a fork, and it runs BEFORE the PR checkout.
     guard = next(i for i, s in enumerate(steps) if s.get("id") == "head")
     assert trusted < guard < untrusted, "the fork guard must sit between the two checkouts"
+    # An advisory guard is no guard: `continue-on-error: true` would let the fork-refusal
+    # `exit 1` be swallowed and the job carry on to check out (and execute) the fork's code
+    # anyway (red-team round 2 on #127, mutation "guard made advisory" — survived before this
+    # assertion existed).
+    assert steps[guard].get("continue-on-error") is not True, (
+        "the fork guard must not be advisory: continue-on-error would swallow its exit 1")
     body = steps[guard]["run"]
     assert "head.repo.full_name" in body, "the guard must resolve the head repo"
     # The exit must be INSIDE the fork branch. A bare `"exit 1" in body` also matches the
@@ -514,14 +531,26 @@ def test_review_checks_out_the_code_it_reviews_but_only_after_vetting_it():
     fork_branch = re.search(r'if \[ "\$repo" != "\$GITHUB_REPOSITORY" \];(.*?)\n *fi', body, re.S)
     assert fork_branch, "no fork-refusal branch comparing head repo to GITHUB_REPOSITORY"
     assert "exit 1" in fork_branch.group(1), "the fork branch must exit non-zero, not merely log"
+    # The published output must be an actual commit, not a mutable ref (red-team round 2 on
+    # #127, mutation "guard pins a mutable branch ref, not the sha" — a checkout pinned to
+    # `.head.ref` still races a force-push exactly like the unpinned form this guard replaced).
+    assert re.search(r'sha=\$\([^)]*--jq \.head\.sha\)', body), (
+        "the guard must resolve .head.sha for its 'sha' output, not a branch/ref name")
 
     # risk-tier is a local composite action: it must never be read from PR-controlled code.
-    tier = next(i for i, s in enumerate(steps) if "risk-tier" in s.get("uses", ""))
-    assert tier < untrusted, "risk-tier must run from the trusted checkout"
+    # Checked across EVERY local (`uses: ./...`) step, not just the one named "risk-tier" --
+    # a second local action added after the untrusted checkout would still satisfy
+    # `tier < untrusted` under a name-scoped check (red-team round 2 on #127, mutation "local
+    # action re-added AFTER the PR checkout" — survived before this assertion existed).
+    local_actions = [i for i, s in enumerate(steps) if s.get("uses", "").startswith("./")]
+    assert local_actions, "no local composite action found"
+    assert all(i < untrusted for i in local_actions), (
+        "a local composite action runs after the PR checkout — its shell body would be read "
+        "from PR-controlled code and executed with this job's token")
 
     # The ref must come from the guard's output, not from an unguarded event/input expression.
     ref = steps[untrusted]["with"]["ref"]
-    assert "steps.head.outputs" in ref, f"PR checkout ref is not the vetted one: {ref}"
+    assert "steps.head.outputs.sha" in ref, f"PR checkout ref is not the vetted sha: {ref}"
     assert "refs/pull/" not in ref, "refs/pull/<n>/head resolves to fork code on the dispatch arm"
 
 
