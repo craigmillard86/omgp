@@ -271,11 +271,12 @@ def test_run_streams_corpus_has_multiframe_and_reserved_elements():
     helper = Capturing()
     assert F.run_streams(helper, SEED, count=60) == 60
     assert len(helper.streams) == 60
-    multi = reserved = 0
+    multi = reserved = toolong = 0
     for stream in helper.streams:
         assert b"\x7e\x7e" not in stream  # shared delimiters: never two raw FLAGs adjacent
         d = F.link.Deframer()
         delivered = d.feed_bytes(stream)
         multi += len(delivered) >= 2
         reserved += d.stats.get("ReservedAddress", 0)
-    assert multi == 60 and reserved == 12
+        toolong += d.stats.get("TooLong", 0)
+    assert multi == 60 and reserved == 12 and toolong == 12

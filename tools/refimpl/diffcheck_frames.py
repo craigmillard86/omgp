@@ -149,12 +149,27 @@ def _reserved_dst_frame_bytes(rng: random.Random) -> bytes:
     return bytes([link.FLAG]) + link.stuff(body + bytes([c & 0xFF, (c >> 8) & 0xFF])) + bytes([link.FLAG])
 
 
+def _overlength_frame_bytes(rng: random.Random) -> bytes:
+    """Wire bytes of a frame ONE byte over the unstuffed cap (65-byte payload) with a
+    self-consistent length byte and a VALID CRC (red-team round 10 on #121): every other
+    over-cap element in any corpus has a randomised body, so length and CRC essentially
+    never agree and an off-by-one on the TooLong boundary (deliver a 71-byte frame,
+    writing buf_[70]) survived every corpus. Both deframers must discard exactly one
+    TooLong here; a boundary mutant instead DELIVERS on the C++ side -> mismatch."""
+    payload = bytes(rng.randrange(0x100) for _ in range(link.MAX_PAYLOAD + 1))
+    body = bytes([rng.randrange(0xFF), rng.randrange(0x100), 0x00, len(payload)]) + payload
+    c = link.crc(body)
+    return bytes([link.FLAG]) + link.stuff(body + bytes([c & 0xFF, (c >> 8) & 0xFF])) + bytes([link.FLAG])
+
+
 def run_streams(helper, seed: int, count: int = STREAM_COUNT) -> int:
     """Multi-frame FSTREAM agreement (red-team round 8 on #121): every torture element
     delivers 0 or 1 frame, so "one OK line per delivered frame, IN ORDER" had zero
     differential coverage, and the ReservedAddress discard never occurred in any corpus.
     Each stream here concatenates 2-3 valid frames SHARING delimiters (enc(A)+enc(B)[1:]);
-    every 5th also embeds a reserved-dst frame that both sides must discard."""
+    every 5th also embeds a reserved-dst frame that both sides must discard, and every
+    5th-offset-2 embeds a one-over-cap valid-CRC frame pinning the TooLong boundary
+    (round 10)."""
     rng = random.Random(seed ^ _STREAM_SEED_XOR)
     ok = 0
     requests, expects = [], []
@@ -169,10 +184,18 @@ def run_streams(helper, seed: int, count: int = STREAM_COUNT) -> int:
         if i % 5 == 0:
             stream += _reserved_dst_frame_bytes(rng)[1:]
             discards = 1
+        elif i % 5 == 2:
+            stream += _overlength_frame_bytes(rng)[1:]
+            discards = 1
         requests.append(f"FSTREAM {stream.hex()}")
         expects.append((i, stream,
                         [f"OK {C.frame_to_canonical(f)}" for f in frames] + [f"END {discards}"]))
     blocks = helper.ask_stream(requests)
+    if len(blocks) != len(requests):
+        # round 10 on #121: same guard as run_frames/run_torture — zip() would silently
+        # drop uncompared streams. Unreachable via today's Helper; guarded structurally.
+        print(f"diffcheck: STREAM BLOCK COUNT MISMATCH: {len(blocks)} blocks for {len(requests)} requests{death_note(helper)}")
+        return -1
     for (i, stream, want), block in zip(expects, blocks):
         if block != want:
             print(f"diffcheck: STREAM MISMATCH (seed={seed:#x}, index={i})\n"

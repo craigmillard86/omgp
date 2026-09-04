@@ -174,6 +174,11 @@ OUT_OF_RANGE_FRAME_LINES = [
     ("double-cr", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=\r\r"),
     ("arabic-indic-digit", "frame dst=١ src=0x00 flags=0x00 seq=0 payload="),
     ("fullwidth-digit", "frame dst=１ src=0x00 flags=0x00 seq=0 payload="),
+    # round 10 on #121: parse_uint rejects a leading-zero DECIMAL (legacy-octal hazard:
+    # "010" names 8 to strtoul and 10 to int(tok, 10)) unless every digit is zero.
+    ("leading-zero-decimal-dst", "frame dst=010 src=0x00 flags=0x00 seq=0 payload="),
+    ("leading-zero-long-seq", "frame dst=0x00 src=0x00 flags=0x00 seq=0000000001 payload="),
+    ("plus-leading-zero", "frame dst=+010 src=0x00 flags=0x00 seq=0 payload="),
 ]
 
 
@@ -238,3 +243,11 @@ def test_canonical_to_frame_payload_65_to_255_parses_and_defers_to_the_codec():
     with pytest.raises(L.FrameError) as e:
         L.encode_frame(f)
     assert e.value.reason == "PayloadTooLong"
+
+
+def test_frame_uint_accepts_the_plus_and_all_zero_shapes_parse_uint_accepts():
+    # round 10 on #121: round 9's _frame_uint opened NEW divergences — it rejected "+1"
+    # (C++ parse_uint deliberately accepts a leading '+', red-team @ 65922b5) and
+    # accepted "010" as decimal 10 (C++ rejects the leading-zero shape outright).
+    f = C.canonical_to_frame("frame dst=+1 src=+0x10 flags=0x00 seq=00 payload=aa")
+    assert (f.dst, f.src, f.seq) == (1, 16, 0)

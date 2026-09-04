@@ -301,13 +301,17 @@ def canonical_to_frame(line: str) -> link.Frame:
     kv = _tokens(rest)
 
     def _frame_uint(tok: str) -> int:
-        # parse_frame_line's parse_uint shape (red-team round 9 on #121): unsigned decimal
-        # or 0x-hex, ASCII digits only — no sign (so "-0" rejects before any range check),
-        # no 0o/0b/underscore forms, no Unicode digits int() would accept.
+        # parse_uint's EXACT shape (rounds 9+10 on #121 — round 9's first cut both over-
+        # and under-shot it): optional leading '+' (C++ deliberately accepts it, red-team
+        # @ 65922b5), no '-', ASCII 0x-hex or decimal, and a leading-zero decimal rejects
+        # UNLESS every digit is zero ("0"/"00" name 0 on both sides; "010" must not
+        # silently rename itself to 10). No 0o/0b/underscore/Unicode forms. Mirrors
+        # tools/canonical.cpp parse_uint, including its digits_start-after-'+' scan.
         import re as _re
-        if not _re.fullmatch(r"0[xX][0-9a-fA-F]+|[0-9]+", tok):
+        if not _re.fullmatch(r"\+?(0[xX][0-9a-fA-F]+|0+|[1-9][0-9]*)", tok):
             raise CanonicalError(f"not a frame uint: {tok!r}")
-        return int(tok, 16 if tok[:2].lower() == "0x" else 10)
+        digits = tok.lstrip("+")
+        return int(digits, 16) if digits[:2].lower() == "0x" else int(digits, 10)
 
     dst, src = _frame_uint(_take(kv, "dst")), _frame_uint(_take(kv, "src"))
     flags, seq = _frame_uint(_take(kv, "flags")), _frame_uint(_take(kv, "seq"))
