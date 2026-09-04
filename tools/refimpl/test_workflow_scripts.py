@@ -485,10 +485,58 @@ def test_verdict_producing_workflows_can_execute_what_they_judge():
         assert found_verdict_job, f"{wfn}: no job emits a VERDICT(...) at all"
 
 
-def test_review_checks_out_the_code_it_reviews():
-    """Running the diff's tests requires the diff. claude-review checked out the default
-    branch until 2026-09-04, which was harmless only because it never ran anything."""
+def test_review_checks_out_the_code_it_reviews_but_only_after_vetting_it():
+    """Running the diff's tests requires the diff — and executing PR-controlled code demands
+    an order. Everything before the PR checkout runs from the DEFAULT branch, in particular
+    `risk-tier`, a LOCAL composite action whose shell body is read from the checkout and run
+    with GH_TOKEN while the workflow holds `pull-requests: write`.
+
+    The same-repo guard must cover BOTH trigger arms. The job-level `if` covers `pull_request`
+    only; on `workflow_dispatch` there is no `github.event.pull_request`, so a ref expression
+    falling through to `refs/pull/<n>/head` resolves to a FORK's code for a fork PR (red team
+    on #127). That was inert while nothing executed; it is not inert now."""
     wf = yaml.safe_load((ROOT / ".github" / "workflows" / "claude-review.yml").read_text(encoding="utf-8"))
-    checkout = next(s for s in wf["jobs"]["review"]["steps"] if "actions/checkout" in s.get("uses", ""))
-    assert "head.sha" in checkout["with"]["ref"], "review must check out the PR head"
+    steps = wf["jobs"]["review"]["steps"]
+    checkouts = [i for i, s in enumerate(steps) if "actions/checkout" in s.get("uses", "")]
+    assert len(checkouts) == 2, "expected a trusted checkout, then the PR head"
+    trusted, untrusted = checkouts
+    assert "ref" not in (steps[trusted].get("with") or {}), "the first checkout must be the default branch"
+    assert steps[untrusted]["with"]["ref"], "the second checkout must pin a resolved ref"
+
+    # The guard resolves the head and refuses a fork, and it runs BEFORE the PR checkout.
+    guard = next(i for i, s in enumerate(steps) if s.get("id") == "head")
+    assert trusted < guard < untrusted, "the fork guard must sit between the two checkouts"
+    body = steps[guard]["run"]
+    assert "head.repo.full_name" in body, "the guard must resolve the head repo"
+    # The exit must be INSIDE the fork branch. A bare `"exit 1" in body` also matches the
+    # guard's OTHER exit (the empty-sha check), so it passes with the fork refusal gutted --
+    # caught here by mutation rather than in review, which is the point of running them.
+    fork_branch = re.search(r'if \[ "\$repo" != "\$GITHUB_REPOSITORY" \];(.*?)\n *fi', body, re.S)
+    assert fork_branch, "no fork-refusal branch comparing head repo to GITHUB_REPOSITORY"
+    assert "exit 1" in fork_branch.group(1), "the fork branch must exit non-zero, not merely log"
+
+    # risk-tier is a local composite action: it must never be read from PR-controlled code.
+    tier = next(i for i, s in enumerate(steps) if "risk-tier" in s.get("uses", ""))
+    assert tier < untrusted, "risk-tier must run from the trusted checkout"
+
+    # The ref must come from the guard's output, not from an unguarded event/input expression.
+    ref = steps[untrusted]["with"]["ref"]
+    assert "steps.head.outputs" in ref, f"PR checkout ref is not the vetted one: {ref}"
+    assert "refs/pull/" not in ref, "refs/pull/<n>/head resolves to fork code on the dispatch arm"
+
+
+def test_review_cannot_shell_out_through_its_test_runner():
+    """`Bash(python3*)` matches `python3 -c '<anything>'`, which reaches `gh` and dissolves an
+    allowlist that deliberately withholds `gh pr review` — demonstrated by the red team on
+    #127, not theorised. A reviewer granted execution must still be granted only execution."""
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "claude-review.yml").read_text(encoding="utf-8"))
+    action = next(s for s in wf["jobs"]["review"]["steps"] if "claude-code-action" in s.get("uses", ""))
+    granted = set(re.search(r'--allowedTools "([^"]*)"', action["with"]["claude_args"]).group(1).split(","))
+    assert "Bash(python3*)" not in granted, "bare python3 is an arbitrary-command grant"
+    assert "Bash(python3 -m pytest*)" in granted, "the reviewer still needs to run pytest"
+    for wide in ("Bash(bash*)", "Bash(sh*)", "Bash(python*)", "Bash(gh*)", "Bash(*)", "Edit", "Write"):
+        assert wide not in granted, wide
+    # The verdict must stay unforgeable from inside the job: no approval path.
+    for banned in ("gh pr review", "gh pr merge", "gh api"):
+        assert banned not in action["with"]["claude_args"], banned
 
