@@ -1,0 +1,108 @@
+name: continuous-improvement
+# Weekly governance feedback loop: code -> PR -> review -> learning -> governance update.
+# Headless Claude reads the last 14 days of PR review feedback, looks for SYSTEMIC lessons
+# (not per-PR defects), and proposes changes to CLAUDE.md / .specify/memory/constitution.md /
+# docs/GOVERNANCE.md — or, deliberately, proposes nothing.
+#
+# READ-ONLY by construction, not by instruction: `contents: read` means this job cannot
+# commit or push whatever the prompt says. That is required, not merely tidy — CLAUDE.md and
+# the constitution are CODEOWNERS-owned, and GOVERNANCE.md §3 makes an agent-authored T3
+# change a policy breach signal ("it should have escalated `needs-human` instead"). So the
+# output is one issue carrying proposed diffs, which a human applies.
+#
+# The prompt lives in .github/agent-prompts/continuous-improvement.md, NOT inline here: the
+# analysis is the thing that will need tuning, and a prompt kept in a workflow file can only
+# be edited with the `workflow` OAuth scope, which the Claude App token does not carry
+# (demonstrated on #113). Keeping it outside means the loop can improve its own instructions
+# through an ordinary PR.
+#
+# `NO_UPDATE_REQUIRED` is a success, not a failure: a self-improving system that cannot
+# decline to add a rule only ever adds rules.
+#
+# Kill switch: disable this workflow. It runs no code from the analysed PRs — it reads their
+# metadata and comments through `gh` — so there is no untrusted-checkout exposure here.
+on:
+  schedule:
+    - cron: '0 7 * * 1'    # Mondays 07:00 UTC, after agent-converge-audit at 06:00
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Analysis window in days (default 14)'
+        required: false
+        default: '14'
+
+permissions:
+  id-token: write   # anthropics/claude-code-action exchanges an OIDC token for its App token; without this every run fails "Could not fetch an OIDC token" (found 2026-08-29)
+  contents: read    # deliberately NOT write: the proposals are for a human to apply
+  pull-requests: read
+  issues: write     # the one consolidated issue, when an update is recommended
+  actions: read     # CI results for the PRs in the window
+  checks: read
+
+concurrency:
+  group: continuous-improvement
+  cancel-in-progress: false
+
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # Stage 7 reads the history of the governance files themselves
+      - name: Claude Code — review-feedback governance analysis
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: claude,github-actions   # a scheduled run has no actor; a bot-triggered dispatch would otherwise be refused
+          prompt: |
+            Read .github/agent-prompts/continuous-improvement.md and follow it
+            exactly. It is your complete instruction set, including the
+            repository-specific bindings at the top, which override its own
+            generic wording wherever they conflict.
+            Analysis window: the last ${{ inputs.days || '14' }} days, ending
+            today. Derive today's date from `date -u +%F` — never assume it.
+            You cannot commit: this job holds `contents: read`. Produce the two
+            output files, and file the issue only if the decision is
+            UPDATE_RECOMMENDED.
+          claude_args: |
+            --model claude-opus-5
+            --allowedTools "Bash(gh pr list*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh api*),Bash(gh issue list*),Bash(gh issue view*),Bash(gh issue create*),Bash(gh run list*),Bash(gh run view*),Bash(git log*),Bash(git show*),Bash(git diff*),Bash(git blame*),Bash(date*),Read,Grep,Glob,Write"
+
+      - name: Check the agent produced its outputs
+        id: outputs
+        run: |
+          missing=
+          for f in continuous-improvement-report.md continuous-improvement.json; do
+            [ -s "$f" ] || missing="$missing $f"
+          done
+          if [ -n "$missing" ]; then
+            echo "::warning::continuous-improvement: agent produced no$missing — nothing to publish"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 -c "import json,sys; d=json.load(open('continuous-improvement.json')); \
+            sys.exit(0 if d.get('decision') in ('UPDATE_RECOMMENDED','NO_UPDATE_REQUIRED') else 'decision missing or invalid: %r' % d.get('decision'))"
+          echo "decision=$(python3 -c "import json;print(json.load(open('continuous-improvement.json'))['decision'])")" >> "$GITHUB_OUTPUT"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Report is an artefact, never a commit
+        if: steps.outputs.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: continuous-improvement-${{ github.run_id }}
+          path: |
+            continuous-improvement-report.md
+            continuous-improvement.json
+          retention-days: 90   # long enough that the NEXT run's Stage 7 can compare against it
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -s continuous-improvement-report.md ]; then
+            { echo "## Continuous improvement — ${{ steps.outputs.outputs.decision }}"; echo;
+              head -c 60000 continuous-improvement-report.md; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No report produced — see the warning above." >> "$GITHUB_STEP_SUMMARY"
+          fi

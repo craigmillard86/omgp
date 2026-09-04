@@ -204,7 +204,7 @@ def test_model_tiers_judgement_loops_on_opus_volume_loops_on_default():
     high-volume implementation loops (dispatch, router auto-fix, mentions, review-fix) stay on the
     action default (claude-sonnet-5) behind their mechanical gates."""
     OPUS = ["claude-review.yml", "red-team.yml", "story-enrich.yml",
-            "agent-converge-audit.yml", "agent-triage.yml"]
+            "agent-converge-audit.yml", "agent-triage.yml", "continuous-improvement.yml"]
     DEFAULT = ["agent-dispatch.yml", "ci-failure-router.yml", "claude-mention.yml", "review-fix.yml"]
     for wfn in OPUS:
         steps = _claude_steps(wfn)
@@ -428,3 +428,60 @@ def test_codeowners_still_protects_ground_truth_and_governance():
     for must in ("/protocol/", "/tests/vectors/", "/docs/protocol-l3.md", "/docs/GOVERNANCE.md",
                  "/docs/OPERATING-POLICY.md", "/.github/", "/CLAUDE.md", "/pipeline.sh"):
         assert must in owned, must
+
+
+# --- weekly governance feedback loop (continuous-improvement.yml) -------------------------------
+
+CI_IMPROVE = ROOT / ".github" / "workflows" / "continuous-improvement.yml"
+
+
+def test_continuous_improvement_is_read_only_by_construction():
+    """The loop proposes governance changes and must never make them: CLAUDE.md and the
+    constitution are CODEOWNERS-owned, and GOVERNANCE.md §3 makes an agent-authored T3 change
+    a policy breach signal. `contents: read` is what enforces that — the prompt only says it."""
+    wf = yaml.safe_load(CI_IMPROVE.read_text(encoding="utf-8"))
+    job = wf["jobs"]["analyse"]
+    assert wf["permissions"]["contents"] == "read", "the analyser must not be able to commit"
+    assert wf["permissions"]["issues"] == "write"          # its one output channel
+    assert wf["permissions"]["pull-requests"] == "read"    # it reads reviews, never writes them
+    action = next(s for s in job["steps"] if "claude-code-action" in s.get("uses", ""))
+    tools = action["with"]["claude_args"]
+    # No Edit: the two report files are created with Write; tracked files are not touched.
+    assert "Edit" not in tools
+    for banned in ("gh pr create", "gh pr merge", "gh pr review", "git commit", "git push"):
+        assert banned not in tools, banned
+
+
+def test_continuous_improvement_prompt_lives_outside_the_workflow():
+    """The analysis is the part that will need tuning, and a prompt inlined in a workflow file
+    can only be edited with the `workflow` OAuth scope the Claude App token does not carry
+    (demonstrated on #113) — so the loop could never improve its own instructions."""
+    wf = yaml.safe_load(CI_IMPROVE.read_text(encoding="utf-8"))
+    action = next(s for s in wf["jobs"]["analyse"]["steps"] if "claude-code-action" in s.get("uses", ""))
+    prompt = action["with"]["prompt"]
+    assert ".github/agent-prompts/continuous-improvement.md" in prompt
+    assert len(prompt) < 1200, "the prompt body belongs in the prompt file, not the workflow"
+    body = (ROOT / ".github" / "agent-prompts" / "continuous-improvement.md").read_text(encoding="utf-8")
+    # The bindings that stop it reporting fiction about this repository's layout.
+    assert ".specify/memory/constitution.md" in body, "constitution path binding missing"
+    assert "docs/GOVERNANCE.md" in body
+    assert "NO_UPDATE_REQUIRED" in body and "UPDATE_RECOMMENDED" in body
+    for stage in range(1, 13):
+        assert f"# Stage {stage} " in body, f"Stage {stage} missing"
+
+
+def test_continuous_improvement_runs_weekly_and_no_update_is_a_success():
+    wf = yaml.safe_load(CI_IMPROVE.read_text(encoding="utf-8"))
+    on = wf[True] if True in wf else wf["on"]
+    assert on["schedule"], "not scheduled"
+    cron = on["schedule"][0]["cron"].split()
+    assert cron[4] != "*", "not weekly (no day-of-week)"
+    # Must not collide with agent-converge-audit, the other Monday-morning agent job.
+    audit = yaml.safe_load((ROOT / ".github" / "workflows" / "agent-converge-audit.yml").read_text(encoding="utf-8"))
+    aon = audit[True] if True in audit else audit["on"]
+    assert on["schedule"][0]["cron"] != aon["schedule"][0]["cron"], "same slot as agent-converge-audit"
+    # "No update required" must not fail the run: a self-improving system that cannot decline
+    # to add a rule only ever adds rules.
+    steps = wf["jobs"]["analyse"]["steps"]
+    check = next(s for s in steps if s.get("id") == "outputs")
+    assert "exit 0" in check["run"] and "exit 1" not in check["run"]
