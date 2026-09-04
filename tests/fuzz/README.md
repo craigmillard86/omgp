@@ -11,7 +11,7 @@ prints a `reproduce:` command for each.
 | `fuzz_payload` | `[opcode, dir, payload…]` | every typed decoder accepts/rejects without a crash; any decoded value re-encodes byte-identically |
 | `fuzz_descriptor` | raw descriptor blob | cursor/validator never over-read; a validated blob re-emits identically via `add_raw`; every typed decoder is total |
 | `fuzz_roundtrip` | raw message bytes | decode → canonical → parse → encode reproduces the input; rendering is stable |
-| `fuzz_frame` | byte stream, fed both byte-at-a-time and chunked | deframe never over-reads or hangs on arbitrary bytes; the `TooLong`/`kMaxUnstuffed` accumulator bound is never exceeded; a delivered frame re-encodes and re-parses to equal fields |
+| `fuzz_frame` | byte stream, fed both byte-at-a-time and chunked | deframe never over-reads or hangs on arbitrary bytes; the `TooLong`/`kMaxUnstuffed` accumulator bound is never exceeded; byte-at-a-time and chunked feeding of the same input deliver identical frames (`__builtin_trap` on mismatch, `fuzz_frame.cpp:59-63`); a delivered frame re-encodes and re-parses to equal fields |
 
 Reproduce a finding: `build/fuzz/<target> build/fuzz/artifacts/<target>/<crash-file>`.
 
@@ -72,7 +72,11 @@ reaching the code and must be fixed before the PR is opened.
       which a percentage gate would have passed; the deterministic killing test
       ("string-tail checks read exactly len bytes") followed, and the re-run is the PASS
       recorded in the PR #15 body.
-- [x] **Fuzz reaches the `TooLong` bound (spec 002 T026, SC-003).** First, the clean
+- [x] **Fuzz reaches the `TooLong` bound (spec 002 T026, SC-003 planted-bug half).**
+      SC-003 has two halves: a full-CI-budget (600 s) zero-crash run, established
+      separately by the T2/T3 deep-verify CI job, and "a planted missing bounds check
+      is found within that budget" — only the second half is recorded here, at the
+      60 s local-smoke budget. First, the clean
       baseline: `./pipeline.sh fuzz` (`tools/fuzz-smoke.sh 60`, unmodified tree). Then,
       neutralize `link/frame.cpp` `Deframer::append`'s guard —
       `if (len_ >= kMaxUnstuffed) {` → `if (false) { // ...` (an always-false condition,
@@ -111,9 +115,19 @@ reaching the code and must be fixed before the PR is opened.
       restored (after):
       fuzz: fuzz_frame runs=150860 cov=95 findings=0 exit=0
       ```
-      The overflow is attributed to `Deframer::append` writing `buf_[len_++]` past the
-      70-byte accumulator (`kMaxUnstuffed`) — exactly the bound the removed guard exists to
-      enforce, at the exact write site (`link/frame.cpp:79`) the guard normally short-circuits
-      before. `git diff -- link/frame.cpp` against HEAD was empty after restoration, confirmed
-      both by direct diff and by the third run's `findings=0` matching the first. Source
-      verified identical to HEAD afterwards.
+      The guard's exact bound is pinpointed by the UBSan line, `index 70 out of bounds
+      for type 'uint8_t[70]'` at `link/frame.cpp:79` — the `buf_[len_++]` write the removed
+      guard exists to stop. The ASan report that follows is a *consequence* of the same
+      unchecked write continuing past that point, not independent confirmation of it: it
+      fires only once the write has walked far enough to leave the whole 104-byte `Deframer`
+      object (`state_` + `buf_[70]` + padding + `len_` + `stats_`) and hit the stack frame's
+      next variable at offset 136 — the reported address is past the object, not at
+      `buf_[70]`. `git diff -- link/frame.cpp` against HEAD was empty after restoration,
+      confirmed both by direct diff and by the third run's `findings=0` matching the first.
+      Source verified identical to HEAD afterwards.
+
+      Note also that the "broken" block above is not literal `./pipeline.sh fuzz` stdout:
+      on a finding the script's own stdout is only the `fuzz: fuzz_frame runs=… findings=…`
+      line plus five grep'd lines (`fuzz-smoke.sh:70-71`); the full stack trace and report
+      bodies pasted above are copied from `build/fuzz/fuzz_frame.log`, which the script
+      always writes in full regardless of what it echoes to stdout.
