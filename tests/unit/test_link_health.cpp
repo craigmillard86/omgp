@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <vector>
 
 using namespace omgp::link;
@@ -292,8 +293,12 @@ TEST_CASE("poll_due for a SUSPECT node follows the 10x T_poll reduced-rate rule"
     uint64_t last_poll = 1'000'000;
     tracker.mark_polled(kAddr, last_poll);
 
-    REQUIRE_FALSE(tracker.poll_due(kAddr, last_poll + 9 * omgp::TRUNK_T_poll_us));
-    REQUIRE(tracker.poll_due(kAddr, last_poll + kSuspectPollPeriod_us));
+    // review round 11 on #124: asserting with kSuspectPollPeriod_us here reduced the pin
+    // to K >= K — true for ANY multiplier, so a spec divergence (say x20) shipped green.
+    // The expected value is computed independently: the 10 is trunk §7's own multiplier
+    // ("polled once per 10 superframes"), in 64-bit arithmetic.
+    REQUIRE_FALSE(tracker.poll_due(kAddr, last_poll + 10ull * omgp::TRUNK_T_poll_us - 1));
+    REQUIRE(tracker.poll_due(kAddr, last_poll + 10ull * omgp::TRUNK_T_poll_us));
 }
 
 TEST_CASE("poll_due is true for ENROLLED regardless of last poll time", "[link]") {
@@ -716,4 +721,47 @@ TEST_CASE("failures seen before enrolment do not shorten the first SUSPECT windo
     tracker.on_result(kAddr, false, 200);
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
     REQUIRE(listener.entries.size() == 2);
+}
+
+// Red-team round 11 on #124 (both cases adopted verbatim): the is_node_addr guard on
+// state()/poll_due()/mark_polled() was unpinned — every existing bad-address probe used
+// addresses whose modulo alias was UNENROLLED, so an aliasing "guard" gave the right
+// answer anyway, and a DELETED guard read memory ASan happened not to flag (0x10 lands
+// inside the object; 0x42/0xFF land in another live stack frame). 0x11 aliases kAddr.
+TEST_CASE("an aliasing non-node address never reads or writes a live record", "[link]") {
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    constexpr uint8_t kAlias = static_cast<uint8_t>(kAddr + kAddrCount); // 0x11 % 16 == kAddr
+
+    tracker.on_result(kAddr, true, 0); // kAddr ENROLLED: state ENROLLED, always poll-due
+    REQUIRE(tracker.state(kAlias) == HealthState::UNENROLLED);
+    REQUIRE_FALSE(tracker.poll_due(kAlias, 0));
+
+    // mark_polled must not push a live node's reduced-rate poll stamp forward.
+    drive_to_suspect(tracker, kAddr, 1'000'000);
+    const uint64_t polled_at = 2'000'000;
+    tracker.mark_polled(kAddr, polled_at);
+    const uint64_t due_at = polled_at + kSuspectPollPeriod_us;
+    REQUIRE(tracker.poll_due(kAddr, due_at));
+    tracker.mark_polled(kAlias, due_at); // a no-op, not a write to records_[kAddr]
+    REQUIRE(tracker.poll_due(kAddr, due_at));
+}
+
+TEST_CASE("a non-node address never indexes past the health table", "[link]") {
+    // Heap placement (red-team round 11): on the heap, an out-of-bounds records_ read
+    // lands in an ASan redzone instead of a neighbouring stack frame, so a deleted
+    // bounds guard dies here instead of passing silently.
+    FakeClock clock;
+    RecordingListener listener;
+    std::unique_ptr<HealthTracker> tracker(new HealthTracker(clock, listener));
+
+    tracker->on_result(kAddr, true, 0);
+    for (uint8_t bad : {uint8_t{0x11}, uint8_t{0x42}, uint8_t{0xFF}}) {
+        REQUIRE(tracker->state(bad) == HealthState::UNENROLLED);
+        REQUIRE_FALSE(tracker->poll_due(bad, 0));
+        tracker->mark_polled(bad, 5'000'000);
+    }
+    REQUIRE(tracker->state(kAddr) == HealthState::ENROLLED);
+    REQUIRE(tracker->poll_due(kAddr, 0));
 }
