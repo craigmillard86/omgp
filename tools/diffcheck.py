@@ -10,11 +10,13 @@ requests (contracts/canonical-text.md), so the corpus stays inside the per-commi
     python3 tools/diffcheck.py [--count N] [--seed S] [--index I]
     python3 tools/diffcheck.py [--frames] [--frames-only] [--frame-index I] [--torture-index I]
 
-Every case is replayable from (seed, index): `--index I` runs only that message case,
-`--frame-index I` one FENC/FDEC frame case, `--torture-index I` one FSTREAM torture
-element; each prints the request and both results. The frame + torture corpora
-(contracts/frame-vectors.md, tools/refimpl/torture.py) run by default alongside the
-message/descriptor corpora; `--frames-only` restricts a run to just those two, for fast
+Message, frame and torture cases are replayable from (seed, index): `--index I` runs only
+that message case, `--frame-index I` one FENC/FDEC frame case, `--torture-index I` one
+FSTREAM torture element; each prints the request and both results. Stream cases have no
+index flag — their mismatch report prints a self-contained `printf ... | l3_helper`
+replay line instead. The frame, torture and stream corpora (contracts/frame-vectors.md,
+tools/refimpl/{torture,diffcheck_frames}.py) run by default alongside the
+message/descriptor corpora; `--frames-only` restricts a run to just those three, for fast
 local iteration on the link-layer codec (contracts/tooling.md).
 """
 from __future__ import annotations
@@ -136,11 +138,13 @@ class Helper:
                 # After a protocol violation (anything else) -- or once a prior block has
                 # already confirmed the helper dead -- bound the wait for the "END " a
                 # well-formed response always sends next, instead of blocking forever.
-                # SCOPE (review round 4 on #121, rule 11): this guard covers
-                # answered-without-END; a request answered with ZERO lines would still
-                # block on its unarmed first line. Unreachable today only because
-                # l3_helper.cpp always prints exactly one response string per request —
-                # a control from the repo's current contents, not a guarantee.
+                # SCOPE (reviews on #121, rounds 4+9, rule 11): this guard arms only after
+                # a NON-"OK " line. Two silent cases stay unbounded: a request answered
+                # with ZERO lines (first line never arms), and one answered with "OK "
+                # lines that then goes silent (last line keeps the guard off). Both are
+                # unreachable today only because l3_helper's fstream response always ends
+                # with an END line in the same flushed write — a control from the repo's
+                # current contents, not a guarantee.
                 stalled = self._dead or (bool(block) and not block[-1].startswith("OK "))
                 try:
                     ln = self._next_line(timeout=_STALL_TIMEOUT if stalled else None)
@@ -333,8 +337,8 @@ def main(argv=None) -> int:
     # The no-op is pinned by test_tooling's `--frames-only --frames` invocation (review on
     # #121): moving the corpora behind an opt-in must revisit that test, not silently
     # strand this flag.
-    ap.add_argument("--frames", action="store_true", help="include the frame + torture corpora (default)")
-    ap.add_argument("--frames-only", action="store_true", help="run only the frame + torture corpora")
+    ap.add_argument("--frames", action="store_true", help="include the frame/torture/stream corpora (default)")
+    ap.add_argument("--frames-only", action="store_true", help="run only the frame/torture/stream corpora")
     replay.add_argument("--frame-index", type=int, default=None, help="replay one frame (FENC/FDEC) case")
     replay.add_argument("--torture-index", type=int, default=None, help="replay one torture (FSTREAM) element")
     args = ap.parse_args(argv)

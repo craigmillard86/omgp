@@ -282,12 +282,15 @@ def frame_to_canonical(f: link.Frame) -> str:
 
 
 def canonical_to_frame(line: str) -> link.Frame:
-    # rstrip("\r\n"), not strip (reviews on #121, rounds 4+8): parse_frame_line compares
-    # the FIRST token to "frame" (leading space → ERR BadRequest), and l3_helper strips
-    # only a trailing '\r' — a bare rstrip() also swallowed trailing TAB/VT/FF that the
-    # C++ tokenizer rejects. Trailing spaces stay: both tokenizers skip empty tokens.
-    # (The int-radix forms 0o/0b/1_0 that int(tok, 0) accepts remain the disclosed gap.)
-    prefix, _, rest = line.rstrip("\r\n").partition(" ")
+    # Exactly ONE trailing '\r' is popped — the l3_helper line reader's behaviour, no more
+    # (reviews on #121, rounds 4/8/9: strip(), then rstrip(), then rstrip("\r\n") were each
+    # broader than that; a doubled CR must reject like any other stray whitespace).
+    # parse_frame_line compares the FIRST token to "frame", so leading space rejects too.
+    # (The int-radix forms 0o/0b/1_0 that int(tok, 0) accepts remain the disclosed gap for
+    # the SHARED parsers; the frame fields below use _frame_uint, which closes it here.)
+    if line.endswith("\r"):
+        line = line[:-1]
+    prefix, _, rest = line.partition(" ")
     if prefix != "frame":
         raise CanonicalError(f"not a frame line: {line!r}")
     # The C++ tokenizer splits on SPACES only; any other whitespace lands inside a token
@@ -296,8 +299,18 @@ def canonical_to_frame(line: str) -> link.Frame:
     if any(c.isspace() and c != " " for c in rest):
         raise CanonicalError(f"non-space whitespace in frame line: {line!r}")
     kv = _tokens(rest)
-    dst, src = _int(_take(kv, "dst")), _int(_take(kv, "src"))
-    flags, seq = _int(_take(kv, "flags")), _int(_take(kv, "seq"))
+
+    def _frame_uint(tok: str) -> int:
+        # parse_frame_line's parse_uint shape (red-team round 9 on #121): unsigned decimal
+        # or 0x-hex, ASCII digits only — no sign (so "-0" rejects before any range check),
+        # no 0o/0b/underscore forms, no Unicode digits int() would accept.
+        import re as _re
+        if not _re.fullmatch(r"0[xX][0-9a-fA-F]+|[0-9]+", tok):
+            raise CanonicalError(f"not a frame uint: {tok!r}")
+        return int(tok, 16 if tok[:2].lower() == "0x" else 10)
+
+    dst, src = _frame_uint(_take(kv, "dst")), _frame_uint(_take(kv, "src"))
+    flags, seq = _frame_uint(_take(kv, "flags")), _frame_uint(_take(kv, "seq"))
     payload = _hexbytes(_take(kv, "payload"))
     if kv:
         raise CanonicalError(f"unexpected keys {sorted(kv)}")

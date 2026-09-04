@@ -251,23 +251,31 @@ def test_run_streams_rejects_reversed_frame_order():
 
 
 def test_run_streams_corpus_has_multiframe_and_reserved_elements():
-    # The properties the sub-corpus exists to add: elements delivering >= 2 frames in
-    # order, and the ReservedAddress discard actually occurring.
-    import random as _random
-    rng = _random.Random(SEED ^ F._STREAM_SEED_XOR)
+    # red-team round 9 on #121: the earlier version asserted against a COPY of the
+    # generator, pinning nothing about run_streams itself. This one captures the ACTUAL
+    # requests run_streams sends and derives every property from those bytes:
+    # multi-frame delivery, shared delimiters (no doubled FLAG anywhere — unshared
+    # concatenation would put two raw 0x7E bytes back to back), and the ReservedAddress
+    # discard really occurring. Also pins the corpus floor, like FRAME_COUNT.
+    assert F.STREAM_COUNT >= 1000
+
+    class Capturing(_RefStreamHelper):
+        def __init__(self):
+            super().__init__()
+            self.streams = []
+
+        def ask_stream(self, lines):
+            self.streams += [bytes.fromhex(ln.split(" ", 1)[1]) for ln in lines]
+            return super().ask_stream(lines)
+
+    helper = Capturing()
+    assert F.run_streams(helper, SEED, count=60) == 60
+    assert len(helper.streams) == 60
     multi = reserved = 0
-    for i in range(60):
-        n = 2 + (i % 2)
-        frames = [F.random_frame(rng, rng.randrange(F.FRAME_COUNT)) for _ in range(n)]
-        parts = [F.link.encode_frame(f) for f in frames]
-        stream = parts[0]
-        for part in parts[1:]:
-            stream += part[1:]
-        if i % 5 == 0:
-            stream += F._reserved_dst_frame_bytes(rng)[1:]
+    for stream in helper.streams:
+        assert b"\x7e\x7e" not in stream  # shared delimiters: never two raw FLAGs adjacent
         d = F.link.Deframer()
         delivered = d.feed_bytes(stream)
-        assert [f.dst for f in delivered] == [f.dst for f in frames]  # order, all delivered
         multi += len(delivered) >= 2
         reserved += d.stats.get("ReservedAddress", 0)
     assert multi == 60 and reserved == 12

@@ -85,10 +85,12 @@ def test_ask_stream_does_not_hang_on_a_batch_of_requests_to_a_permanently_broken
     only looks at bool(block) and block[-1] is unarmed for that fresh block and
     self._next_line(timeout=None) blocks forever.
 
-    Scope (review round 4 on #121): the guard covers answered-without-END. A request
-    answered with ZERO lines would still block on its unarmed first line — unreachable
-    today because l3_helper prints exactly one response string per request, which is a
-    repo-contents control, not a guarantee."""
+    Scope (reviews on #121, rounds 4+9): the guard arms only after a non-"OK " line.
+    Two silent cases stay unbounded — a request answered with ZERO lines (first line
+    never arms), and one answered with "OK " lines that then go silent (last line keeps
+    the guard off). Both unreachable today because l3_helper's fstream response always
+    ends with an END line in one flushed write — a repo-contents control, not a
+    guarantee."""
     monkeypatch.setattr(D, "_STALL_TIMEOUT", 0.2)  # review on #121: behaviour, not duration
     script = tmp_path / "fake_helper.py"
     script.write_text(FAKE_HELPER_NO_END)
@@ -100,11 +102,13 @@ def test_ask_stream_does_not_hang_on_a_batch_of_requests_to_a_permanently_broken
     t.join(timeout=5)
     try:
         assert not t.is_alive(), "ask_stream hung on the second block of a multi-request batch"
-        # Race-free pin (review round 7 on #121): whether both responses land in block 0
-        # or split across the stall boundary depends on pump timing under load. The
-        # timing-independent properties are the flattened sequence and the block count.
+        # Race-free pin (reviews on #121, rounds 7+9): grouping AND arrival are both
+        # timing-dependent under load — the second response may miss the 0.2 s stall
+        # window entirely. Timing-independent properties: exactly two blocks, every line
+        # that did arrive is the error line, and at least the first arrived.
         flat = [ln for block in result["out"] for ln in block]
-        assert flat == ["ERR BadRequest", "ERR BadRequest"] and len(result["out"]) == 2
+        assert len(result["out"]) == 2
+        assert 1 <= len(flat) <= 2 and all(ln == "ERR BadRequest" for ln in flat)
     finally:
         helper.p.kill()
         helper.p.wait(timeout=5)

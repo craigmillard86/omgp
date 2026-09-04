@@ -92,6 +92,12 @@ def run_frames(helper, seed: int, count: int = FRAME_COUNT, only: int | None = N
         requests += [f"FENC {canon}", f"FDEC {wire_hex}"]
         expect += [(i, "FENC", canon, f"OK {wire_hex}"), (i, "FDEC", wire_hex, f"OK {canon}")]
     answers = helper.ask(requests)
+    if len(answers) != len(requests):
+        # red-team round 9 on #121: zip() silently drops uncompared cases and the count
+        # over-reports. Unreachable via Helper today (one entry per request) — guarded
+        # structurally anyway.
+        print(f"diffcheck: FRAME ANSWER COUNT MISMATCH: {len(answers)} answers for {len(requests)} requests{death_note(helper)}")
+        return -1
     for (i, verb, req, want), got in zip(expect, answers):
         if got != want:
             print(f"diffcheck: FRAME MISMATCH (seed={seed:#x}, index={i})\n  {verb} {req}\n  C++   : {got}{death_note(helper)}\n"
@@ -113,6 +119,9 @@ def run_torture(helper, seed: int, only: int | None = None, **corpus_kwargs) -> 
     indices = [only] if only is not None else range(len(elements))
     requests = [f"FSTREAM {elements[i].stream.hex()}" for i in indices]
     blocks = helper.ask_stream(requests)
+    if len(blocks) != len(requests):
+        print(f"diffcheck: TORTURE BLOCK COUNT MISMATCH: {len(blocks)} blocks for {len(requests)} requests{death_note(helper)}")
+        return -1
     for i, block in zip(indices, blocks):
         elem = elements[i]
         want = [f"OK {C.frame_to_canonical(fr)}" for fr in elem.expected] + [f"END {elem.expected_discards}"]

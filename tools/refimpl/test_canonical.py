@@ -166,6 +166,14 @@ OUT_OF_RANGE_FRAME_LINES = [
     ("trailing-vertical-tab", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=0102\x0b"),
     ("trailing-form-feed", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=0102\x0c"),
     ("tab-inside-payload", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=01\t02"),
+    # red-team round 9 on #121: parse_uint rejects the SIGN, so -0 (in-range numerically)
+    # must reject; only ONE trailing CR is popped; and int()'s Unicode-digit tolerance
+    # (arabic-indic, fullwidth) diverged from strtoul.
+    ("negative-zero-dst", "frame dst=-0 src=0x00 flags=0x00 seq=0 payload="),
+    ("negative-zero-seq", "frame dst=0x00 src=0x00 flags=0x00 seq=-0 payload="),
+    ("double-cr", "frame dst=0x00 src=0x00 flags=0x00 seq=0 payload=\r\r"),
+    ("arabic-indic-digit", "frame dst=١ src=0x00 flags=0x00 seq=0 payload="),
+    ("fullwidth-digit", "frame dst=１ src=0x00 flags=0x00 seq=0 payload="),
 ]
 
 
