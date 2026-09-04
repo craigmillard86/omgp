@@ -15,7 +15,8 @@ namespace {
 // (red-team on #118 finding 2 — one early stamp forced an instant, silent OFFLINE, and
 // in poll_due silently restored a SUSPECT node to full poll rate).
 constexpr uint64_t elapsed_us(uint64_t now_us, uint64_t since_us) {
-    return now_us >= since_us ? now_us - since_us : 0;
+    // mutant-ok(equivalent, cxx_ge_to_gt): at now_us == since_us both arms yield 0.
+    return now_us >= since_us ? now_us - since_us : 0; // labelled above: OPEN-QUESTIONS 2026-09-03
 }
 // data-model.md §6: OFFLINE threshold is TRUNK_offline_after_suspect_ms of SUSPECT time,
 // but every clock reading in this engine is in microseconds.
@@ -27,6 +28,9 @@ constexpr uint64_t kOfflineThresholdUs =
 // address (trunk §5) — it must never grow a peer record, or an echoed src=0x00 frame
 // enrols the host and every notice carries the addr data-model §9 reserves for
 // bus-level events (red-team on #118 finding 1).
+// Scope (rule 11): the `addr < kAddrCount` below is the file's residual wrap comparison;
+// its <= mutant is DEMONSTRATED killed by the bad-address cases in test_link_health.cpp
+// (0x10 writes records_[16], which state(0x10) reads back).
 constexpr bool is_node_addr(uint8_t addr) {
     return addr != omgp::ADDR_host && addr < kAddrCount;
 }
@@ -88,12 +92,15 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
 void HealthTracker::tick(uint64_t now_us) {
     // data-model.md §6: the only time-only transition is SUSPECT -> OFFLINE once
     // kOfflineThresholdUs has elapsed since suspect_since, with no on_result involved.
-    for (size_t addr = 0; addr < kAddrCount; ++addr) {
-        HealthRecord& r = records_[addr];
+    // The loop bound is the array's own extent, BY CONSTRUCTION (an indexed bound's <=
+    // mutant read records_[16], an intra-object overread ASan does not reliably flag),
+    // and addr derives from the record's own position — &r - records_ cannot desync
+    // under a future continue/break the way a parallel counter can. (History: #124.)
+    for (HealthRecord& r : records_) {
         if (r.state == HealthState::SUSPECT &&
             elapsed_us(now_us, r.suspect_since_us) >= kOfflineThresholdUs) {
             r.state = HealthState::OFFLINE;
-            notify(Notice::OFFLINE, static_cast<uint8_t>(addr));
+            notify(Notice::OFFLINE, static_cast<uint8_t>(&r - records_));
         }
     }
 }
