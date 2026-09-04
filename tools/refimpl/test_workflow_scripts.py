@@ -442,23 +442,38 @@ def test_continuous_improvement_is_read_only_by_construction():
     wf = yaml.safe_load(CI_IMPROVE.read_text(encoding="utf-8"))
     job = wf["jobs"]["analyse"]
     assert wf["permissions"]["contents"] == "read", "the analyser must not be able to commit"
-    assert wf["permissions"]["issues"] == "write"          # its one output channel
+    assert wf["permissions"]["issues"] == "write"          # the filing step's channel
     assert wf["permissions"]["pull-requests"] == "read"    # it reads reviews, never writes them
+    # A job-level `permissions:` block REPLACES the workflow-level one, so asserting only the
+    # top-level grant would let six lines under jobs.analyse hand the job contents: write with
+    # this test still green — the guarantee test not testing the guarantee (red team on #125).
+    assert "permissions" not in job, "a job-level permissions block would override the guarantee above"
     action = next(s for s in job["steps"] if "claude-code-action" in s.get("uses", ""))
     tools = action["with"]["claude_args"]
     # No Edit. NOTE (review on #125): `Write` is not path-restricted, so the tool list alone
     # does not stop the agent overwriting CLAUDE.md in the workspace — `contents: read`,
     # asserted above, is what stops that reaching the repository. This assertion narrows the
     # blast radius; it is not the guarantee.
-    assert "Edit" not in tools
-    for banned in ("gh pr create", "gh pr merge", "gh pr review", "git commit", "git push"):
-        assert banned not in tools, banned
-    # `gh api` reads as a read tool and is not one: it takes -X POST/PATCH/DELETE, so the
-    # wildcard grants every write `issues: write` permits. The concrete escalation the red
-    # team found on #125: POST a comment landing as claude[bot] whose final line is
-    # `VERDICT(review): clean @ <head>`, which agent-approve accepts because it checks author
-    # and sha but not which workflow produced it — then agent-merge merges at <= T2.
-    assert "gh api" not in tools, "gh api re-admits writes, including forging the approval verdict"
+    # An ALLOW-LIST, not a denylist. The previous version asserted `"gh api" not in tools`
+    # and friends, which a WIDENING defeats rather than an addition: `Bash(git*)` re-admits
+    # git push, `Bash(gh*)` re-admits gh api — and both broad forms already exist elsewhere
+    # in this repo, so that is not a hypothetical edit shape (red team on #125). A denylist
+    # over a wildcard grammar cannot establish "by construction"; enumeration can.
+    granted = set(re.search(r'--allowedTools "([^"]*)"', tools).group(1).split(","))
+    permitted = {
+        # reads over the PR/issue/run stream the analysis is made of
+        "Bash(gh pr list*)", "Bash(gh pr view*)", "Bash(gh pr diff*)",
+        "Bash(gh issue list*)", "Bash(gh issue view*)",
+        "Bash(gh run list*)", "Bash(gh run view*)",
+        # history for Stage 7, and the date for the window
+        "Bash(git log*)", "Bash(git show*)", "Bash(git diff*)", "Bash(git blame*)", "Bash(date*)",
+        # the two report files; see the note below on why Write is not the guarantee
+        "Read", "Grep", "Glob", "Write",
+    }
+    assert granted <= permitted, f"tool grant widened beyond the read-only set: {granted - permitted}"
+    # Belt, in the grammar's own terms: no bare-verb wildcard can appear at all.
+    for wide in ("Bash(git*)", "Bash(gh*)", "Bash(*)", "Edit", "Bash(gh api*)"):
+        assert wide not in granted, wide
 
 
 def test_continuous_improvement_prompt_lives_outside_the_workflow():
@@ -471,6 +486,12 @@ def test_continuous_improvement_prompt_lives_outside_the_workflow():
     assert ".github/agent-prompts/continuous-improvement.md" in prompt
     assert len(prompt) < 1200, "the prompt body belongs in the prompt file, not the workflow"
     body = (ROOT / ".github" / "agent-prompts" / "continuous-improvement.md").read_text(encoding="utf-8")
+    # The issue is filed by a workflow step with the labels fixed in YAML, never by the agent:
+    # an unconstrained `--label` would have let injected PR text reach `ready`, the label
+    # agent-dispatch claims work by (HIGH, second review round on #125).
+    filing = next(s for s in wf["jobs"]["analyse"]["steps"] if s.get("name") == "File the governance issue")
+    assert "--label converge-audit --label needs-human" in filing["run"]
+    assert "issue_title" in body and "duplicate_of" in body, "the agent must emit the issue as data"
     # The bindings that stop it reporting fiction about this repository's layout.
     assert ".specify/memory/constitution.md" in body, "constitution path binding missing"
     assert "docs/GOVERNANCE.md" in body

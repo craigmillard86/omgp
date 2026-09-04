@@ -66,6 +66,18 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # Stage 7 reads the history of the governance files themselves
+      # THE AGENT HOLDS NO WRITE CAPABILITY OF ANY KIND.
+      #
+      # NO `Bash(gh issue create*)`, removed after the second review round on #125: its
+      # `--label` was unconstrained, so injected PR text could have steered it to
+      # `gh issue create --label task,ready` — and `ready` is the label by which
+      # `agent-dispatch` claims work (GOVERNANCE §2, "humans release all autonomous work").
+      # The dispatched agent then holds Edit/Write/git/gh pr create, so attacker-authored
+      # task text reaches a PR. Binding 7 was the only thing between the ingested stream and
+      # that tool, and binding 7 is prose. Instead the agent writes issue_title/issue_body
+      # into the JSON as DATA, and "File the governance issue" below creates it with the
+      # labels hard-coded in YAML, where nothing the agent emits can change them.
+      #
       # NO `Bash(gh api*)`. It reads as a read tool and is not one: `gh api` takes
       # -X POST/PATCH/DELETE, so the wildcard would grant every write `issues: write`
       # permits. Concretely (found by the red team on #125): this job could POST a comment
@@ -73,10 +85,11 @@ jobs:
       # and `agent-approve` checks the author and the sha but NOT which workflow produced
       # the comment, so at risk:t2 or below `agent-merge` would then merge. It could also
       # `-X DELETE` a `needs-human` label, which GOVERNANCE §4 makes load-bearing. The
-      # narrow `gh pr`/`gh issue`/`gh run` subcommands below cannot write except through
-      # `gh issue create`, which is this job's one intended output.
-      # Cost of the exclusion, stated: inline review comments are not reachable through the
-      # narrow subcommands, so Stage 1 works from `gh pr view --json comments,reviews`.
+      # The narrow `gh pr`/`gh issue`/`gh run` subcommands that remain are reads only.
+      # Cost of the exclusions, stated: inline review comments are not reachable through the
+      # narrow subcommands, so Stage 1 works from `gh pr view --json comments,reviews`; and
+      # the agent cannot comment on an existing issue, so deduplication is "skip and report",
+      # not "add a note there".
       - name: Claude Code — review-feedback governance analysis
         uses: anthropics/claude-code-action@v1
         with:
@@ -94,7 +107,7 @@ jobs:
             UPDATE_RECOMMENDED.
           claude_args: |
             --model claude-opus-5
-            --allowedTools "Bash(gh pr list*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh issue list*),Bash(gh issue view*),Bash(gh issue create*),Bash(gh run list*),Bash(gh run view*),Bash(git log*),Bash(git show*),Bash(git diff*),Bash(git blame*),Bash(date*),Read,Grep,Glob,Write"
+            --allowedTools "Bash(gh pr list*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh issue list*),Bash(gh issue view*),Bash(gh run list*),Bash(gh run view*),Bash(git log*),Bash(git show*),Bash(git diff*),Bash(git blame*),Bash(date*),Read,Grep,Glob,Write"
 
       - name: Check the agent produced its outputs
         id: outputs
@@ -120,6 +133,10 @@ jobs:
           echo "ok=true" >> "$GITHUB_OUTPUT"
 
       - name: Report is an artefact, never a commit
+        # always(): the outputs step above fails loudly on invalid JSON, and the JSON is
+        # exactly what you need to see WHY. Uploading only on success would withhold the
+        # evidence on the one path that needs it (review on #125).
+        if: always() && hashFiles('continuous-improvement.json', 'continuous-improvement-report.md') != ''
         uses: actions/upload-artifact@v7
         with:
           name: continuous-improvement-${{ github.run_id }}
@@ -133,22 +150,38 @@ jobs:
           # deliberate 7-day overlap comes from the issue titles the prompt tells it to check.
           retention-days: 90
 
-      - name: An UPDATE_RECOMMENDED run must leave an issue behind
+      - name: File the governance issue
+        # The ONLY write in this workflow, and it is here rather than in the agent's hands so
+        # that the labels are fixed in YAML: `converge-audit,needs-human`, never `ready` or
+        # `task`, whatever the analysed PR text tried to talk the agent into (HIGH, second
+        # review round on #125). The agent supplies title and body as data; this step decides
+        # what they are labelled and where they go.
         if: steps.outputs.outputs.decision == 'UPDATE_RECOMMENDED'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Otherwise the analysis is recommending a change nobody is told about, and the
-          # only trace is a 90-day artefact (red team on #125). A warning, not a failure: the
-          # report still exists and re-running is cheap.
-          today=$(date -u +%F)
-          if gh issue list --state all --label converge-audit --limit 50 \
-               --json title --jq '.[].title' | grep -qF "Continuous improvement $today"; then
-            echo "issue filed for $today"
-          else
-            echo "::warning::decision=UPDATE_RECOMMENDED but no 'Continuous improvement $today' \
-          issue exists — the recommendation reached nobody; see the run artefact."
+          set -euo pipefail
+          python3 - <<'PY' > issue-body.md
+          import json
+          d = json.load(open('continuous-improvement.json'))
+          print(d.get('issue_body') or '(no issue_body in the JSON — see the run artefact.)')
+          PY
+          title=$(python3 -c "import json;print((json.load(open('continuous-improvement.json')).get('issue_title') or '').strip())")
+          dup=$(python3 -c "import json;print(json.load(open('continuous-improvement.json')).get('duplicate_of') or '')")
+          if [ -n "$dup" ]; then
+            echo "::notice::findings unchanged since #$dup — no new issue filed (prompt binding 8)"
+            exit 0
           fi
+          [ -n "$title" ] || { echo "::error::decision=UPDATE_RECOMMENDED but the JSON carries no issue_title"; exit 1; }
+          # Same-title dedup as a second belt: the 14-day window run weekly overlaps by 7 days.
+          if gh issue list --state all --label converge-audit --limit 100 --json title \
+               --jq '.[].title' | grep -qxF "$title"; then
+            echo "::notice::an issue titled '$title' already exists — not filing a duplicate"
+            exit 0
+          fi
+          url=$(gh issue create --title "$title" --body-file issue-body.md \
+                  --label converge-audit --label needs-human)
+          echo "::notice::filed $url"
 
       - name: Summary
         if: always()
