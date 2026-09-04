@@ -110,7 +110,7 @@ def test_random_frame_seq_is_not_a_function_of_src():
 def test_random_frame_never_generates_the_reserved_destination():
     rng = random.Random(SEED)
     for i in range(F.FRAME_COUNT):
-        assert F.random_frame(rng, i).dst != 0xFF
+        assert F.random_frame(rng, i).dst != F._RESERVED_DST  # round 11: no 4th 0xFF hardcoding
 
 
 def test_random_frame_is_deterministic():

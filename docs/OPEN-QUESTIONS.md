@@ -1061,48 +1061,6 @@ maintainer's own hand (same precedent as the §4 loop table).
 
 ---
 
-## 2026-09-03 — Frame line out-of-range fields: recommendation landed with T025
-
-**Context:** the 2026-09-03 "Frame line out-of-range fields" entry above carries the HUMAN
-ruling (filled 2026-09-03, session Q&A): C++ strict rejection is normative and T025 aligns
-the Python reference — no `seq` masking, no bare `ValueError` for `dst`/`src`. (An earlier
-draft of this entry misquoted that ruling line as still "pending"; corrected per review
-round 6 on #121 — the correction is an ordinary edit, this entry being unmerged.) A review
-on PR #121 (T025, @ ed9f0ae) reported the alignment as not yet implemented, a HIGH finding: `tools/refimpl/canonical.py`'s `canonical_to_frame` still accepted `seq=16` (masked to
-`0` downstream by `omgp_link.encode_frame`), silently dropped high bits of `flags` above `0x03`,
-and raised an unmapped `ValueError` for `dst`/`src` outside `0-0xFF` — none of which match
-`tools/canonical.cpp`'s `parse_frame_line`, so a line invalid on one side of the differential
-could still be `OK` (or crash) on the other, undetected by the frame corpus itself (it is
-valid-only by construction, per `contracts/frame-vectors.md`).
-**Fix:** `canonical_to_frame` now validates `dst`/`src` (0-0xFF), `flags` (0-0x03), `seq`
-(0-0x0F) and `len(payload)` (<=0xFF) before constructing a `Frame`, raising `CanonicalError` —
-the same exception every other malformed-token path in this function already raises — instead
-of masking or falling through to an unmapped `ValueError`. `dst=0xFF` (reserved, in-range) and
-payload lengths 65-0xFF (in-range here, refused by `encode_frame`'s own `PayloadTooLong`) are
-deliberately left to `encode_frame`'s own checks, matching `parse_frame_line`'s own layering
-(the boundary is "does it fit the wire representation at all", not "is it a legal frame").
-TDD: `tools/refimpl/test_canonical.py::test_canonical_to_frame_rejects_out_of_range_fields`
-(5 cases at the time; review rounds 3-4 later folded in `negative-seq`, `negative-dst` and
-`leading-whitespace` for 8) and `test_canonical_to_frame_does_not_mask_seq`, confirmed
-failing pre-fix (`DID NOT RAISE CanonicalError` for all 6 then present), then passing; `./pipeline.sh refimpl diffcheck`
-green (counts as recorded at commit 94eefff, before the concurrent branch's tests were
-unioned in; 42287 cases, frames 10000/torture 18000 still agree — the real corpus is
-valid-only, so this is a regression guard, not a change to today's differential pass/fail).
-**Not done:** the sibling entry above (`l3_helper` frame verbs: `ERR BadRequest` outside the
-contract vocabulary) recommends a `frame_error_to_canonical`-equivalent mapping so a live
-Python-side driver could render `CanonicalError` as `ERR BadRequest` the way `tools/l3_helper`
-does. No such driver exists in this repo (the real differential always talks to the compiled
-`l3_helper` binary; `canonical_to_frame` is invoked directly by tests, `genvectors.py`, and the
-`FakeHelper` fixtures in `test_diffcheck_frames.py`, which now propagate `CanonicalError` the
-same as any other malformed-line failure), so there is nothing to render it into — left for
-that entry, unstarted here.
-**Ruling:** none made here — this entry records the T025 IMPLEMENTATION of the human ruling
-already filled in the entry above (GOVERNANCE §1 keeps spec-ambiguity resolution with the
-human; no agent-authored ruling exists to confirm, and no ruling line anywhere is stale).
-**Supersedes:** none; the prior entry's ruling line is live and this implements it.
-
----
-
 ## 2026-09-03 — Auto-fix attempt bound raised to 4, as an agent-config knob
 
 **Context:** the 2-attempt bound (ruled 2026-08-30 with the router) has exhausted on
@@ -1248,3 +1206,47 @@ intended design, and the recommendation. §8 now marks the question open
 **Ruling:** pending — human; must be ruled before any bridge implementation
 (feature f4), gates nothing in feature 002.
 **Supersedes:** none.
+
+---
+
+## 2026-09-03 — Frame line out-of-range fields: recommendation landed with T025
+
+**Context:** the 2026-09-03 "Frame line out-of-range fields" entry above carries the HUMAN
+ruling (filled 2026-09-03, session Q&A): C++ strict rejection is normative and T025 aligns
+the Python reference — no `seq` masking, no bare `ValueError` for `dst`/`src`. (An earlier
+draft of this entry misquoted that ruling line as still "pending"; corrected per review
+round 6 on #121 — the correction is an ordinary edit, this entry being unmerged.) A review
+on PR #121 (T025, @ ed9f0ae) reported the alignment as not yet implemented, a HIGH finding: `tools/refimpl/canonical.py`'s `canonical_to_frame` still accepted `seq=16` (masked to
+`0` downstream by `omgp_link.encode_frame`), silently dropped high bits of `flags` above `0x03`,
+and raised an unmapped `ValueError` for `dst`/`src` outside `0-0xFF` — none of which match
+`tools/canonical.cpp`'s `parse_frame_line`, so a line invalid on one side of the differential
+could still be `OK` (or crash) on the other, undetected by the frame corpus itself (it is
+valid-only by construction, per `contracts/frame-vectors.md`).
+**Fix:** `canonical_to_frame` now validates `dst`/`src` (0-0xFF), `flags` (0-0x03), `seq`
+(0-0x0F) and `len(payload)` (<=0xFF) before constructing a `Frame`, raising `CanonicalError` —
+the same exception every other malformed-token path in this function already raises — instead
+of masking or falling through to an unmapped `ValueError`. `dst=0xFF` (reserved, in-range) and
+payload lengths 65-0xFF (in-range here, refused by `encode_frame`'s own `PayloadTooLong`) are
+deliberately left to `encode_frame`'s own checks, matching `parse_frame_line`'s own layering
+(the boundary is "does it fit the wire representation at all", not "is it a legal frame").
+TDD: `tools/refimpl/test_canonical.py::test_canonical_to_frame_rejects_out_of_range_fields`
+(5 cases at the time; review rounds 3-4 later folded in `negative-seq`, `negative-dst` and
+`leading-whitespace` for 8) and `test_canonical_to_frame_does_not_mask_seq`, confirmed
+failing pre-fix (`DID NOT RAISE CanonicalError` for all 6 then present), then passing; `./pipeline.sh refimpl diffcheck`
+green (counts as recorded at commit 94eefff, before the concurrent branch's tests were
+unioned in; 42287 cases, frames 10000/torture 18000 still agree — the real corpus is
+valid-only, so this is a regression guard, not a change to today's differential pass/fail).
+**Not done:** the sibling entry above (`l3_helper` frame verbs: `ERR BadRequest` outside the
+contract vocabulary) recommends a `frame_error_to_canonical`-equivalent mapping so a live
+Python-side driver could render `CanonicalError` as `ERR BadRequest` the way `tools/l3_helper`
+does. No such driver exists in this repo (the real differential always talks to the compiled
+`l3_helper` binary; `canonical_to_frame` is invoked directly by tests, `genvectors.py`, and the
+`FakeHelper` fixtures in `test_diffcheck_frames.py`, which now propagate `CanonicalError` the
+same as any other malformed-line failure), so there is nothing to render it into — left for
+that entry, unstarted here.
+**Ruling:** none made here — this entry records the T025 IMPLEMENTATION of the human ruling
+already filled in the entry above (GOVERNANCE §1 keeps spec-ambiguity resolution with the
+human; no agent-authored ruling exists to confirm, and no ruling line anywhere is stale).
+**Supersedes:** none; the prior entry's ruling line is live and this implements it.
+(Relocated to the file tail per review round 11 on #121 — entries stay in
+append order; an ordinary edit, this entry being unmerged.)

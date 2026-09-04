@@ -6,6 +6,7 @@ identity test used by tools/diffcheck.py and the golden vectors.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from _gen import P
@@ -281,6 +282,13 @@ def frame_to_canonical(f: link.Frame) -> str:
     return f"frame dst={_hex2(f.dst)} src={_hex2(f.src)} flags={_hex2(flags)} seq={f.seq} payload={f.payload.hex()}"
 
 
+# parse_uint's grammar, compiled once (review round 11 on #121: _frame_uint runs 4x per
+# frame line, ~40k times per diffcheck run — no per-call import/regex-cache lookups):
+# optional leading '+', ASCII 0x-hex or decimal, leading-zero decimal only when every
+# digit is zero. Semantics documented at _frame_uint below.
+_FRAME_UINT_RE = re.compile(r"\+?(0[xX][0-9a-fA-F]+|0+|[1-9][0-9]*)")
+
+
 def canonical_to_frame(line: str) -> link.Frame:
     # Exactly ONE trailing '\r' is popped — the l3_helper line reader's behaviour, no more
     # (reviews on #121, rounds 4/8/9: strip(), then rstrip(), then rstrip("\r\n") were each
@@ -307,8 +315,7 @@ def canonical_to_frame(line: str) -> link.Frame:
         # UNLESS every digit is zero ("0"/"00" name 0 on both sides; "010" must not
         # silently rename itself to 10). No 0o/0b/underscore/Unicode forms. Mirrors
         # tools/canonical.cpp parse_uint, including its digits_start-after-'+' scan.
-        import re as _re
-        if not _re.fullmatch(r"\+?(0[xX][0-9a-fA-F]+|0+|[1-9][0-9]*)", tok):
+        if not _FRAME_UINT_RE.fullmatch(tok):
             raise CanonicalError(f"not a frame uint: {tok!r}")
         digits = tok.lstrip("+")
         return int(digits, 16) if digits[:2].lower() == "0x" else int(digits, 10)
