@@ -481,9 +481,9 @@ TEST_CASE("one tick offlines every SUSPECT record, not just the first", "[link]"
     RecordingListener listener;
     HealthTracker tracker(clock, listener);
 
-    for (uint8_t a = omgp::ADDR_backplane_min; a <= omgp::ADDR_backplane_max; ++a)
-        drive_to_suspect(tracker, a, 1000000);
-    const uint64_t suspect_since = 1000000 + omgp::TRUNK_suspect_after_failures;
+    uint64_t suspect_since = 0; // review round 8 on #124: taken from the helper, not
+    for (uint8_t a = omgp::ADDR_backplane_min; a <= omgp::ADDR_backplane_max; ++a) // its
+        suspect_since = drive_to_suspect(tracker, a, 1000000); // contract re-derived
 
     const size_t before = listener.entries.size();
     tracker.tick(suspect_since + omgp::TRUNK_offline_after_suspect_ms * 1000); // ONE tick
@@ -518,10 +518,10 @@ TEST_CASE("suspect_since is stamped with now, not left at its 0 initialiser", "[
     const uint64_t since = drive_to_suspect(tracker, kAddr, uptime);
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
 
-    tracker.tick(since + threshold_us / 1000); // far inside the window
+    tracker.tick(since + threshold_us / 5); // well inside the window, symbol-derived
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
 
-    tracker.tick(since + omgp::TRUNK_offline_after_suspect_ms * 1000);
+    tracker.tick(since + threshold_us); // uint64_t: no 32-bit multiply (review round 8)
     REQUIRE(tracker.state(kAddr) == HealthState::OFFLINE);
 }
 
@@ -681,4 +681,29 @@ TEST_CASE("one tick compares each record against its OWN suspect_since", "[link]
 
     tracker.tick(s_late + omgp::TRUNK_offline_after_suspect_ms * 1000);
     REQUIRE(tracker.state(late) == HealthState::OFFLINE);
+}
+
+// Red-team round 8 on #124 (adopted verbatim): data-model §6 row 2 was asserted only
+// halfway - state stays UNENROLLED, but nothing checked that pre-enrolment failures are
+// not carried into the freshly ENROLLED record, shortening its first SUSPECT window.
+TEST_CASE("failures seen before enrolment do not shorten the first SUSPECT window", "[link]") {
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    for (uint32_t i = 0; i < 2 * omgp::TRUNK_suspect_after_failures; ++i)
+        tracker.on_result(kAddr, false, i);
+    REQUIRE(tracker.state(kAddr) == HealthState::UNENROLLED);
+    REQUIRE(listener.entries.empty());
+
+    tracker.on_result(kAddr, true, 100); // the first valid result enrols it
+    REQUIRE(tracker.state(kAddr) == HealthState::ENROLLED);
+
+    for (uint32_t i = 1; i < omgp::TRUNK_suspect_after_failures; ++i) {
+        tracker.on_result(kAddr, false, 100 + i);
+        REQUIRE(tracker.state(kAddr) == HealthState::ENROLLED); // pre-enrolment count leaked?
+    }
+    tracker.on_result(kAddr, false, 200);
+    REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
+    REQUIRE(listener.entries.size() == 2);
 }

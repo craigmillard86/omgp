@@ -22,7 +22,9 @@ struct HealthListener {
     // #124: an enumerated list reads as exhaustive and licensed the mutating calls it
     // omitted). Re-entrancy is outside the contract until F3's scheduler states its
     // needs (OPEN-QUESTIONS 2026-09-04; the notify-after-assign ordering that makes one
-    // re-entrant recovery happen to work is incidental, not promised).
+    // re-entrant recovery happen to work is incidental, not promised). The blanket form
+    // deliberately sweeps in the const observers (state/poll_due) as the safe default;
+    // F3's design may narrow it by superseding that entry - it is not settled.
     virtual void on_notice(Notice notice, uint8_t addr) = 0;
 
   protected:
