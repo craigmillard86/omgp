@@ -175,7 +175,7 @@ TEST_CASE("SUSPECT stays SUSPECT via tick just short of the OFFLINE boundary", "
 
     uint64_t suspect_since = drive_to_suspect(tracker, kAddr);
     size_t before = listener.entries.size();
-    tracker.tick(suspect_since + kThresholdUs - 1000);
+    tracker.tick(suspect_since + kThresholdUs - 1);
 
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
     REQUIRE(listener.entries.size() == before);
@@ -189,7 +189,7 @@ TEST_CASE("SUSPECT stays SUSPECT via a failing on_result just short of the OFFLI
 
     uint64_t suspect_since = drive_to_suspect(tracker, kAddr);
     size_t before = listener.entries.size();
-    tracker.on_result(kAddr, false, suspect_since + kThresholdUs - 1000);
+    tracker.on_result(kAddr, false, suspect_since + kThresholdUs - 1);
 
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
     REQUIRE(listener.entries.size() == before);
@@ -754,7 +754,7 @@ TEST_CASE("a non-node address never indexes past the health table", "[link]") {
     // bounds guard dies here instead of passing silently.
     FakeClock clock;
     RecordingListener listener;
-    std::unique_ptr<HealthTracker> tracker(new HealthTracker(clock, listener));
+    auto tracker = std::make_unique<HealthTracker>(clock, listener);
 
     tracker->on_result(kAddr, true, 0);
     for (uint8_t bad : {uint8_t{0x11}, uint8_t{0x42}, uint8_t{0xFF}}) {
