@@ -1274,3 +1274,90 @@ listener re-enters, and it leaves tick()'s internal ordering an implementation
 detail rather than a promise.
 **Ruling:** pending — F3 design (safe default applied: prohibition documented).
 **Supersedes:** none.
+
+---
+
+## 2026-09-03 — Frame line out-of-range fields: recommendation landed with T025
+
+**Context:** the 2026-09-03 "Frame line out-of-range fields" entry above carries the HUMAN
+ruling (filled 2026-09-03, session Q&A): C++ strict rejection is normative and T025 aligns
+the Python reference — no `seq` masking, no bare `ValueError` for `dst`/`src`. (An earlier
+draft of this entry misquoted that ruling line as still "pending"; corrected per review
+round 6 on #121 — the correction is an ordinary edit, this entry being unmerged.) A review
+on PR #121 (T025, @ ed9f0ae) reported the alignment as not yet implemented, a HIGH finding: `tools/refimpl/canonical.py`'s `canonical_to_frame` still accepted `seq=16` (masked to
+`0` downstream by `omgp_link.encode_frame`), silently dropped high bits of `flags` above `0x03`,
+and raised an unmapped `ValueError` for `dst`/`src` outside `0-0xFF` — none of which match
+`tools/canonical.cpp`'s `parse_frame_line`, so a line invalid on one side of the differential
+could still be `OK` (or crash) on the other, undetected by the frame corpus itself (it is
+valid-only by construction, per `contracts/frame-vectors.md`).
+**Fix:** `canonical_to_frame` now validates `dst`/`src` (0-0xFF), `flags` (0-0x03), `seq`
+(0-0x0F) and `len(payload)` (<=0xFF) before constructing a `Frame`, raising `CanonicalError` —
+the same exception every other malformed-token path in this function already raises — instead
+of masking or falling through to an unmapped `ValueError`. `dst=0xFF` (reserved, in-range) and
+payload lengths 65-0xFF (in-range here, refused by `encode_frame`'s own `PayloadTooLong`) are
+deliberately left to `encode_frame`'s own checks, matching `parse_frame_line`'s own layering
+(the boundary is "does it fit the wire representation at all", not "is it a legal frame").
+TDD: `tools/refimpl/test_canonical.py::test_canonical_to_frame_rejects_out_of_range_fields`
+(5 cases at the time; review rounds 3-4 later folded in `negative-seq`, `negative-dst` and
+`leading-whitespace` for 8) and `test_canonical_to_frame_does_not_mask_seq`, confirmed
+failing pre-fix (`DID NOT RAISE CanonicalError` for all 6 then present), then passing; `./pipeline.sh refimpl diffcheck`
+green (counts as recorded at commit 94eefff, before the concurrent branch's tests were
+unioned in; 42287 cases, frames 10000/torture 18000 still agree — the real corpus is
+valid-only, so this is a regression guard, not a change to today's differential pass/fail).
+**Not done:** the sibling entry above (`l3_helper` frame verbs: `ERR BadRequest` outside the
+contract vocabulary) recommends a `frame_error_to_canonical`-equivalent mapping so a live
+Python-side driver could render `CanonicalError` as `ERR BadRequest` the way `tools/l3_helper`
+does. No such driver exists in this repo (the real differential always talks to the compiled
+`l3_helper` binary; `canonical_to_frame` is invoked directly by tests, `genvectors.py`, and the
+`FakeHelper` fixtures in `test_diffcheck_frames.py`, which now propagate `CanonicalError` the
+same as any other malformed-line failure), so there is nothing to render it into — left for
+that entry, unstarted here.
+**Ruling:** none made here — this entry records the T025 IMPLEMENTATION of the human ruling
+already filled in the entry above (GOVERNANCE §1 keeps spec-ambiguity resolution with the
+human; no agent-authored ruling exists to confirm, and no ruling line anywhere is stale).
+**Supersedes:** none; the prior entry's ruling line is live and this implements it.
+(Relocated to the file tail per review round 11 on #121 — entries stay in
+append order; an ordinary edit, this entry being unmerged.)
+
+---
+
+## 2026-09-04 — Reserved ctrl bits 2-3: is ignore-on-receive a spec rule or just current behaviour?
+
+**Context:** review round 16 on #121 (LOW). trunk §4 (docs/trunk-link-layer.md:38)
+defines ctrl bits 2-3 as "reserved 0" and its discard-conditions bullet lists bad CRC,
+bad length and >=8 stuffing violations — it does NOT state that a receiver must IGNORE
+those bits when set. link/frame.cpp and omgp_link.py both ignore them (mask seq from the
+high nibble, never inspect bits 2-3), and #121's run_streams now pins that behaviour with
+a reserved-ctrl-bit delivery element. The tooling contract briefly attributed the rule to
+"§4 forward compatibility", which overstated the spec's backing.
+**Recommendation:** treat ignore-on-receive as the intended forward-compatibility rule
+(it mirrors L3's "unknown TLV types skipped, unknown events ignored", CLAUDE.md golden
+rule 7) and add one sentence to trunk §4 stating it, so the behaviour the corpus pins has
+a normative source. Until then the tooling contract cites the implementation/test, not §4.
+**Ruling:** pending — human (spec amendment to trunk §4, a human-ruling artefact).
+**Supersedes:** none.
+
+---
+
+## 2026-09-04 — No hostile-TEXT differential corpus for ENC/DENC; two pre-existing message-codec divergences
+
+**Context:** red-team round 17 on #121 (LOW). The differential feeds malformed BYTES to
+DEC/DDEC/DVAL but never malformed canonical TEXT to ENC/DENC, though T025's rounds 12-17
+hardened exactly those shared parsers (_int, _parse_named, _hexbytes, _tokens,
+_split_records). Its absence is what let round 16's descriptor CR regression (fixed at
+round 17) ship green. A PR-vs-merge-base sweep surfaced two divergences, both verified
+PRE-EXISTING against 02507ee, neither introduced by #121: (a) an out-of-range scalar like
+`channel=17500` is silently masked to uint8 on the C++ side (`1052cf00015c`) while the
+Python reference raises `ERR OutOfRange` — the "text names one value, wire carries another"
+hazard the parse_uint guards fight, one field-width layer up; (b) `DENC ... s="\x"` raised
+a bare `ValueError` out of unquote_str (now mapped to CanonicalError here in round 17, so a
+future corpus will not crash diffcheck with a traceback).
+**Recommendation:** add a hostile-text ENC/DENC differential corpus (mirroring run_invalid's
+byte corpus) AND fix the C++ scalar-masking so out-of-range message fields answer
+`ERR OutOfRange`/`ERR BadRequest` on both sides. This is message-codec parity work beyond
+T025's frame-differential scope and touches tools/canonical.cpp's message path; it belongs
+in its own task rather than being bolted onto #121 at round 17. The unquote_str crash is
+closed here as an in-scope robustness fix; the corpus and the masking divergence are
+deferred and flagged for the CODEOWNER handling this PR's needs-human escalation.
+**Ruling:** pending — human (follow-up task scope).
+**Supersedes:** none.
