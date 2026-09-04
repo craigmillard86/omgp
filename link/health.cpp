@@ -95,14 +95,15 @@ void HealthTracker::tick(uint64_t now_us) {
     // round 4, rule 11): is_node_addr's `addr < kAddrCount` is the file's residual wrap
     // comparison; its <= mutant is DEMONSTRATED killed by the bad-address cases in
     // test_link_health.cpp (0x10 writes records_[16], which state(0x10) reads back).
-    uint8_t addr = 0;
+    // addr derives from the record's own position (review round 7 on #124: a counter
+    // running parallel to the range-for desyncs under a future continue/break; &r -
+    // records_ cannot).
     for (HealthRecord& r : records_) {
         if (r.state == HealthState::SUSPECT &&
             elapsed_us(now_us, r.suspect_since_us) >= kOfflineThresholdUs) {
             r.state = HealthState::OFFLINE;
-            notify(Notice::OFFLINE, addr);
+            notify(Notice::OFFLINE, static_cast<uint8_t>(&r - records_));
         }
-        ++addr;
     }
 }
 

@@ -505,17 +505,20 @@ TEST_CASE("suspect_since is stamped with now, not left at its 0 initialiser", "[
     // red-team round 3 on #124 (their killing case, taken nearly verbatim): every prior
     // sequence suspected at t ≈ 0-3 µs, so a record stuck on its 0 initialiser was
     // arithmetically indistinguishable from a stamped one — deleting the data-model §6
-    // `suspect_since = now` assignment left the whole suite green. At 5 s of rig uptime,
-    // an unstamped record would fall OFFLINE 1 ms into the 1000 ms window.
+    // `suspect_since = now` assignment left the whole suite green. Uptime and probe are
+    // multiples/fractions of the SYMBOL (review round 7): with raw literals, growing
+    // offline_after_suspect_ms past the uptime made this case silently stop killing the
+    // mutant it was written for.
     FakeClock clock;
     RecordingListener listener;
     HealthTracker tracker(clock, listener);
 
-    const uint64_t uptime = 5000000; // 5 s: a rig that has been running
+    const uint64_t threshold_us = uint64_t{omgp::TRUNK_offline_after_suspect_ms} * 1000;
+    const uint64_t uptime = 5 * threshold_us; // a rig running well past one window
     const uint64_t since = drive_to_suspect(tracker, kAddr, uptime);
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
 
-    tracker.tick(since + 1000); // 1 ms into a 1000 ms threshold
+    tracker.tick(since + threshold_us / 1000); // far inside the window
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
 
     tracker.tick(since + omgp::TRUNK_offline_after_suspect_ms * 1000);

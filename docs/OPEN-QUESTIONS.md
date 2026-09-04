@@ -1259,13 +1259,14 @@ durable answer.
 
 ---
 
-**2026-09-04 — May a HealthListener re-enter HealthTracker from on_notice?**
-Red-team round 6 on #124 showed the notify-after-state-assign ordering in tick()
+## 2026-09-04 — May a HealthListener re-enter HealthTracker from on_notice?
+
+**Context:** red-team round 6 on #124 showed the notify-after-state-assign ordering in tick()
 is observable only under a re-entrant listener (one that calls on_result/tick
 from inside on_notice), and that no document defines whether re-entrancy is
 allowed — specs/002-trunk-link-layer/contracts/link-cpp.md is silent. F3's
 scheduler is the real listener and its needs are not yet designed.
-**Recommended answer:** forbid re-entry for now (a doc sentence on
+**Recommendation:** forbid re-entry for now (a doc sentence on
 HealthListener::on_notice, added in #124 alongside this entry), and let F3's
 design either keep the prohibition or supersede this entry with a defined
 re-entrancy contract plus tests. Forbidding is the safe default: no current
