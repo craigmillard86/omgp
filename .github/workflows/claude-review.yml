@@ -36,13 +36,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      # ORDER IS LOAD-BEARING (red team on #127). Everything that runs before `head` is
-      # resolved and checked runs from the DEFAULT branch — in particular `risk-tier`, a
-      # LOCAL composite action whose shell body is read from the checkout and executed with
-      # GH_TOKEN while this workflow holds `pull-requests: write`. Checking out PR code first
-      # would hand that to the PR.
+      # ORDER IS LOAD-BEARING (red team on #127, F3). Everything that runs before the PR
+      # head is checked out — in particular `risk-tier`, a LOCAL composite action whose
+      # shell body is read from the checkout and executed with GH_TOKEN while this workflow
+      # holds `pull-requests: write` — must run from TRUSTED code. A bare `actions/checkout`
+      # on a `pull_request` event resolves to `refs/pull/<n>/merge`, which INCLUDES the PR's
+      # own files, so it is not trusted: pin the base branch explicitly. (`base.ref` is the
+      # target branch on the pull_request arm; `default_branch` covers workflow_dispatch.)
       - uses: actions/checkout@v7
-        with: {fetch-depth: 0}          # default branch: trusted
+        with:
+          ref: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
+          fetch-depth: 0                # trusted base branch, pinned (never the PR merge ref)
 
       # Same-repo guard for BOTH arms. The job-level `if` covers `pull_request` only; on
       # `workflow_dispatch` there is no `github.event.pull_request`, so before this step the
@@ -68,12 +72,15 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       - id: tier
-        uses: ./.github/actions/risk-tier     # still the trusted copy: PR code is not checked out yet
+        uses: ./.github/actions/risk-tier     # the trusted copy: checkout #1 pinned the base branch, and the PR head is not checked out yet
         with: {pr: '${{ github.event.pull_request.number || inputs.pr }}'}
 
-      # Only now the code under review, at the sha the guard blessed.
+      # Only now the code under review, at the sha the guard blessed. persist-credentials:
+      # false so the job's token is NOT written into .git/config inside the PR-controlled
+      # workspace (red team on #127, F7) — one fewer copy of the credential for executed
+      # test code to reach. (The env GH_TOKEN exposure is F1, a separate, unresolved item.)
       - uses: actions/checkout@v7
-        with: {ref: '${{ steps.head.outputs.sha }}', fetch-depth: 0}
+        with: {ref: '${{ steps.head.outputs.sha }}', fetch-depth: 0, persist-credentials: false}
       - uses: actions/setup-python@v7
         with: {python-version: '3.12'}
       - name: Toolchain (so the review can RUN the tests it judges)

@@ -498,9 +498,15 @@ def test_verdict_producing_workflows_can_execute_what_they_judge():
 
 def test_review_checks_out_the_code_it_reviews_but_only_after_vetting_it():
     """Running the diff's tests requires the diff — and executing PR-controlled code demands
-    an order. Everything before the PR checkout runs from the DEFAULT branch, in particular
+    an order. Everything before the PR checkout runs from a TRUSTED tree, in particular
     `risk-tier`, a LOCAL composite action whose shell body is read from the checkout and run
     with GH_TOKEN while the workflow holds `pull-requests: write`.
+
+    F3 correction (red team on #127): a bare `actions/checkout` on a `pull_request` event
+    resolves to `refs/pull/<n>/merge`, which INCLUDES the PR's own files — so "no ref" is
+    NOT the trusted default branch, it is the PR merge ref. The first checkout must PIN the
+    base branch explicitly (`github.event.pull_request.base.ref`, with `default_branch` as
+    the workflow_dispatch fallback), never the PR head and never the implicit merge ref.
 
     The same-repo guard must cover BOTH trigger arms. The job-level `if` covers `pull_request`
     only; on `workflow_dispatch` there is no `github.event.pull_request`, so a ref expression
@@ -511,8 +517,19 @@ def test_review_checks_out_the_code_it_reviews_but_only_after_vetting_it():
     checkouts = [i for i, s in enumerate(steps) if "actions/checkout" in s.get("uses", "")]
     assert len(checkouts) == 2, "expected a trusted checkout, then the PR head"
     trusted, untrusted = checkouts
-    assert "ref" not in (steps[trusted].get("with") or {}), "the first checkout must be the default branch"
+    # F3: the first checkout must be pinned to a TRUSTED base ref — not "no ref" (which is the
+    # PR merge ref on a pull_request event), and not the PR head. risk-tier runs from it.
+    trusted_ref = (steps[trusted].get("with") or {}).get("ref", "")
+    assert trusted_ref, "the first checkout must PIN a trusted ref, not default to refs/pull/<n>/merge"
+    assert ("base.ref" in trusted_ref or "default_branch" in trusted_ref), (
+        f"the first checkout must pin the base/default branch, got: {trusted_ref!r}")
+    assert "steps.head" not in trusted_ref and "head.sha" not in trusted_ref, (
+        "the first checkout must not be the PR head — risk-tier's shell body would be PR-controlled")
     assert steps[untrusted]["with"]["ref"], "the second checkout must pin a resolved ref"
+    # F7: the PR-head checkout must not persist the job token into .git/config for executed
+    # test code to reach.
+    assert steps[untrusted]["with"].get("persist-credentials") is False, (
+        "the PR-head checkout must set persist-credentials: false")
 
     # The guard resolves the head and refuses a fork, and it runs BEFORE the PR checkout.
     guard = next(i for i, s in enumerate(steps) if s.get("id") == "head")
