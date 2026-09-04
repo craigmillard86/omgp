@@ -186,6 +186,17 @@ def _reserved_ctrl_frame_bytes(rng: random.Random) -> bytes:
     return bytes([link.FLAG]) + link.stuff(body + bytes([c & 0xFF, (c >> 8) & 0xFF])) + bytes([link.FLAG])
 
 
+def _short_len_frame_bytes(rng: random.Random) -> bytes:
+    """Wire bytes of a frame whose len byte UNDER-states its body, with a VALID CRC over
+    the real body (red-team round 17 on #121): the only shape that distinguishes the
+    deframer's `length != n-6` check from a `length > n-6` mutant, which would deliver a
+    silently truncated payload. Both deframers must discard exactly one BadLength."""
+    payload = bytes(_biased_byte(rng) for _ in range(rng.randint(2, 6)))
+    body = bytes([rng.choice(_VALID_DST), rng.randrange(0x100), 0x00, len(payload) - 1]) + payload
+    c = link.crc(body)
+    return bytes([link.FLAG]) + link.stuff(body + bytes([c & 0xFF, (c >> 8) & 0xFF])) + bytes([link.FLAG])
+
+
 def run_streams(helper, seed: int, count: int = STREAM_COUNT) -> int:
     """Multi-frame FSTREAM agreement (red-team round 8 on #121): every torture element
     delivers 0 or 1 frame, so "one OK line per delivered frame, IN ORDER" had zero
@@ -193,7 +204,8 @@ def run_streams(helper, seed: int, count: int = STREAM_COUNT) -> int:
     Each stream here concatenates 2-3 valid frames SHARING delimiters (enc(A)+enc(B)[1:]);
     every 5th also embeds a reserved-dst frame that both sides must discard, every
     5th-offset-2 a one-over-cap valid-CRC frame pinning the TooLong boundary (round 10),
-    and every 5th-offset-3 a bad-CRC frame (round 12). All three discard elements go FIRST
+    and every 5th-offset-3 a bad-CRC frame (round 12), every 5th-offset-1 a short-len
+    valid-CRC frame (round 17). All four discard elements go FIRST
     in their stream, sharing their closing FLAG with the next frame's opener, so the
     discard->delivery resync of FR-003 is exercised for each discard class. Every
     5th-offset-4 appends a frame with trunk section 4's reserved ctrl bits SET, which both
@@ -211,6 +223,9 @@ def run_streams(helper, seed: int, count: int = STREAM_COUNT) -> int:
         discards = 0
         if i % 5 == 0:
             stream = _reserved_dst_frame_bytes(rng) + stream[1:]  # discard FIRST, shared FLAG
+            discards = 1
+        elif i % 5 == 1:
+            stream = _short_len_frame_bytes(rng) + stream[1:]  # BadLength, valid CRC (round 17)
             discards = 1
         elif i % 5 == 2:
             stream = _overlength_frame_bytes(rng) + stream[1:]

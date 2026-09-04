@@ -1336,3 +1336,28 @@ rule 7) and add one sentence to trunk §4 stating it, so the behaviour the corpu
 a normative source. Until then the tooling contract cites the implementation/test, not §4.
 **Ruling:** pending — human (spec amendment to trunk §4, a human-ruling artefact).
 **Supersedes:** none.
+
+---
+
+## 2026-09-04 — No hostile-TEXT differential corpus for ENC/DENC; two pre-existing message-codec divergences
+
+**Context:** red-team round 17 on #121 (LOW). The differential feeds malformed BYTES to
+DEC/DDEC/DVAL but never malformed canonical TEXT to ENC/DENC, though T025's rounds 12-17
+hardened exactly those shared parsers (_int, _parse_named, _hexbytes, _tokens,
+_split_records). Its absence is what let round 16's descriptor CR regression (fixed at
+round 17) ship green. A PR-vs-merge-base sweep surfaced two divergences, both verified
+PRE-EXISTING against 02507ee, neither introduced by #121: (a) an out-of-range scalar like
+`channel=17500` is silently masked to uint8 on the C++ side (`1052cf00015c`) while the
+Python reference raises `ERR OutOfRange` — the "text names one value, wire carries another"
+hazard the parse_uint guards fight, one field-width layer up; (b) `DENC ... s="\x"` raised
+a bare `ValueError` out of unquote_str (now mapped to CanonicalError here in round 17, so a
+future corpus will not crash diffcheck with a traceback).
+**Recommendation:** add a hostile-text ENC/DENC differential corpus (mirroring run_invalid's
+byte corpus) AND fix the C++ scalar-masking so out-of-range message fields answer
+`ERR OutOfRange`/`ERR BadRequest` on both sides. This is message-codec parity work beyond
+T025's frame-differential scope and touches tools/canonical.cpp's message path; it belongs
+in its own task rather than being bolted onto #121 at round 17. The unquote_str crash is
+closed here as an in-scope robustness fix; the corpus and the masking divergence are
+deferred and flagged for the CODEOWNER handling this PR's needs-human escalation.
+**Ruling:** pending — human (follow-up task scope).
+**Supersedes:** none.

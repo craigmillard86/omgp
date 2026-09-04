@@ -304,3 +304,13 @@ def test_split_records_trims_spaces_only_like_the_cpp_side():
     # token parser (which rejects it) rather than being silently trimmed clean here.
     recs = C._split_records("PROTOCOL major=1 minor=2\t")
     assert recs == ["PROTOCOL major=1 minor=2\t"]
+
+
+def test_canonical_to_descriptor_pops_one_trailing_cr_like_the_helper():
+    # round 17 on #121: round 16's strip(" ") left a trailing CR inside the last descriptor
+    # token, making the reference reject a CRLF DENC line l3_helper accepts. One CR now
+    # parses identically; a second still rejects (lands inside the token, C++ side too).
+    recs = C.canonical_to_descriptor("PROTOCOL major=1 minor=2\r")
+    assert recs == C.canonical_to_descriptor("PROTOCOL major=1 minor=2")
+    with pytest.raises(C.CanonicalError):
+        C.canonical_to_descriptor("PROTOCOL major=1 minor=2\r\r")

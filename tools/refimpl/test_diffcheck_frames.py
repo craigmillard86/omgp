@@ -271,7 +271,7 @@ def test_run_streams_corpus_has_multiframe_and_reserved_elements():
     helper = Capturing()
     assert F.run_streams(helper, SEED, count=60) == 60
     assert len(helper.streams) == 60
-    multi = reserved = toolong = badcrc = resync = 0
+    multi = reserved = toolong = badcrc = badlength = resync = 0
     for stream in helper.streams:
         assert b"\x7e\x7e" not in stream  # shared delimiters: never two raw FLAGs adjacent
         d = F.link.Deframer()
@@ -280,6 +280,7 @@ def test_run_streams_corpus_has_multiframe_and_reserved_elements():
         reserved += d.stats.get("ReservedAddress", 0)
         toolong += d.stats.get("TooLong", 0)
         badcrc += d.stats.get("BadCrc", 0)
+        badlength += d.stats.get("BadLength", 0)
         # round 14 (red-team MED): byte-by-byte replay pinning PLACEMENT. Round 12's
         # comment claimed 'multi == 60' pinned discard-FIRST; it did not — the valid
         # frames deliver wherever the discard element sits. A frame must be delivered
@@ -294,8 +295,8 @@ def test_run_streams_corpus_has_multiframe_and_reserved_elements():
                 delivered_after = True
             discarded = discarded or post > pre
         resync += delivered_after
-    assert multi == 60 and reserved == 12 and toolong == 12 and badcrc == 12
-    assert resync == 36  # every discard-carrying stream delivers a frame AFTER its discard
+    assert multi == 60 and reserved == 12 and toolong == 12 and badcrc == 12 and badlength == 12
+    assert resync == 48  # all four discard classes deliver a frame AFTER their discard
     # round 15 (red-team LOW): "2-3 frames per stream" was unpinned -- collapsing the
     # generator to 2 passed everything, since multi only asserts >= 2.
     assert max(len(F.link.Deframer().feed_bytes(s)) for s in helper.streams) >= 3
@@ -374,3 +375,17 @@ def test_reserved_ctrl_builder_pins_its_properties():
     d = F.link.Deframer()
     assert len(d.feed_bytes(wire)) == 1
     assert sum(v for k, v in d.stats.items() if k != "delivered") == 0
+
+
+def test_short_len_builder_under_states_length_with_a_valid_crc():
+    # round 17 on #121: the load-bearing shape -- len byte SHORT, CRC valid over the real
+    # body -- so a `length != n-6` -> `length > n-6` deframer mutant (deliver a truncated
+    # frame) is distinguished. On correct code both sides discard exactly one BadLength.
+    rng = random.Random(0x5EED17)
+    wire = F._short_len_frame_bytes(rng)
+    body = _unstuffed_body(wire)
+    assert body[3] == len(body) - 6 - 1  # declared len is one short of the true payload
+    c = F.link.crc(body[:-2])
+    assert body[-2:] == bytes([c & 0xFF, (c >> 8) & 0xFF])  # VALID crc
+    d = F.link.Deframer()
+    assert d.feed_bytes(wire) == [] and d.stats.get("BadLength", 0) == 1

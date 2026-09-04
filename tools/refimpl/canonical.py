@@ -113,7 +113,10 @@ def unquote_str(q: str) -> bytes:
         if c == "\\":
             nxt = body[i + 1] if i + 1 < len(body) else ""
             if nxt == "x":
-                out.append(int(body[i + 2:i + 4], 16))
+                hexpair = body[i + 2:i + 4]
+                if len(hexpair) != 2 or any(c not in "0123456789abcdefABCDEF" for c in hexpair):
+                    raise CanonicalError(f"bad \\x escape in quoted string: {q!r}")
+                out.append(int(hexpair, 16))
                 i += 4
                 continue
             if nxt in ('"', "\\"):
@@ -179,18 +182,22 @@ def error_to_canonical(e: l3.L3Error) -> str:
 
 # --- parsing ---------------------------------------------------------------------------------
 
+def _pop_one_cr(line: str) -> str:
+    """l3_helper's line reader pops exactly ONE trailing CR before dispatch, for every
+    verb (tools/l3_helper.cpp). Every canonical_to_* entry point mirrors that here, so a
+    CRLF-terminated request parses identically on both sides; a second CR still rejects
+    downstream, as it does through the helper."""
+    return line[:-1] if line.endswith("\r") else line
+
+
 def _tokens(line: str) -> dict[str, str]:
     # round 13 on #121 (review): line-level strip() removed leading/trailing TAB/VT/FF/CR
     # for every non-frame verb before any token parser could reject them, while the C++
     # tokenizer keys "\top" as a token (take() fails) or leaves the whitespace inside the
     # last token (parse_uint rejects it since round 12). Reject non-space whitespace up
     # front; SPACES stay fine on both sides — both tokenizers skip empty tokens.
-    # round 15 on #121: pop exactly ONE trailing CR first -- l3_helper's reader does this
-    # for EVERY verb, so a CRLF-terminated message line must parse here too (round 13's
-    # guard alone made the reference STRICTER than the C++ end-to-end path). A second CR
-    # still rejects below, exactly as it does through the helper.
-    if line.endswith("\r"):
-        line = line[:-1]
+    line = _pop_one_cr(line)  # round 15: mirror l3_helper's reader (round 13's guard
+    # alone made the reference stricter than the C++ end-to-end path on a CRLF line).
     if any(c.isspace() and c != " " for c in line):
         raise CanonicalError(f"non-space whitespace in canonical line: {line!r}")
     kv: dict[str, str] = {}
@@ -330,8 +337,7 @@ def canonical_to_frame(line: str) -> link.Frame:
     # parse_frame_line compares the FIRST token to "frame", so leading space rejects too.
     # (Round 15 closed the former shared-parser gap: _int now enforces the same ASCII
     # grammar _frame_uint uses, so 0o/0b/1_0 and non-ASCII digits reject on every verb.)
-    if line.endswith("\r"):
-        line = line[:-1]
+    line = _pop_one_cr(line)
     prefix, _, rest = line.partition(" ")
     if prefix != "frame":
         raise CanonicalError(f"not a frame line: {line!r}")
@@ -545,7 +551,10 @@ def _parse_record(chunk: str):
 
 
 def canonical_to_descriptor(text: str) -> list:
-    return [_parse_record(chunk) for chunk in _split_records(text)]
+    # round 17 on #121: descriptors were the verb group the round-15 CR-pop rationale
+    # missed, so round 16's strip(" ") left a trailing CR inside the last token and made
+    # the reference reject a CRLF DENC line l3_helper accepts. Mirror the reader here too.
+    return [_parse_record(chunk) for chunk in _split_records(_pop_one_cr(text))]
 
 
 def validate_line(blob: bytes) -> str:
