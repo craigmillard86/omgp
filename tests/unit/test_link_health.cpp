@@ -39,6 +39,12 @@ struct RecordingListener : HealthListener {
     }
 
     void on_notice(Notice notice, uint8_t addr) override {
+        // Red-team on #124: 16 then 32 were outgrown SILENTLY, and the resulting
+        // HEAP_FREE_SCOPE failure blamed HealthTracker for this vector's doubling. An
+        // overrun now fails naming the real culprit instead of leaking into heap counts.
+        if (entries.size() == entries.capacity()) {
+            FAIL("RecordingListener reservation outgrown - raise reserve(), not a tracker bug");
+        }
         entries.push_back({notice, addr});
     }
 };
