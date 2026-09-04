@@ -337,10 +337,11 @@ def main(argv=None) -> int:
     replay.add_argument("--index", type=int, default=None, help="replay one message case")
     # contracts/tooling.md "tools/diffcheck.py --frames": the frame + torture corpora
     # already run by default (below); --frames is the explicit spelling for scripts that
-    # want to say so, --frames-only restricts a local iteration run to just those two.
-    # The no-op is pinned by test_tooling's `--frames-only --frames` invocation (review on
-    # #121): moving the corpora behind an opt-in must revisit that test, not silently
-    # strand this flag.
+    # want to say so, --frames-only restricts a local iteration run to just those three.
+    # The DEFAULT inclusion is pinned by test_tooling's default-path test (frames >=
+    # 10000 and torture > 0 asserted on a no-flag run — round 14; the earlier claim that
+    # the `--frames-only --frames` invocation pinned it was false, that run passes the
+    # flag). The --frames no-op itself is exercised by that same invocation.
     ap.add_argument("--frames", action="store_true", help="include the frame/torture/stream corpora (default)")
     ap.add_argument("--frames-only", action="store_true", help="run only the frame/torture/stream corpora")
     replay.add_argument("--frame-index", type=int, default=None, help="replay one frame (FENC/FDEC) case")

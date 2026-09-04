@@ -313,8 +313,9 @@ def canonical_to_frame(line: str) -> link.Frame:
     # (reviews on #121, rounds 4/8/9: strip(), then rstrip(), then rstrip("\r\n") were each
     # broader than that; a doubled CR must reject like any other stray whitespace).
     # parse_frame_line compares the FIRST token to "frame", so leading space rejects too.
-    # (The int-radix forms 0o/0b/1_0 that int(tok, 0) accepts remain the disclosed gap for
-    # the SHARED parsers; the frame fields below use _frame_uint, which closes it here.)
+    # (The int-radix forms 0o/0b/1_0 AND the non-ASCII decimal digits int() accepts —
+    # arabic-indic/fullwidth — remain the disclosed gap for the SHARED parsers; the frame
+    # fields below use _frame_uint, whose ASCII-only grammar closes both here.)
     if line.endswith("\r"):
         line = line[:-1]
     prefix, _, rest = line.partition(" ")

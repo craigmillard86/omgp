@@ -271,7 +271,7 @@ def test_run_streams_corpus_has_multiframe_and_reserved_elements():
     helper = Capturing()
     assert F.run_streams(helper, SEED, count=60) == 60
     assert len(helper.streams) == 60
-    multi = reserved = toolong = badcrc = 0
+    multi = reserved = toolong = badcrc = resync = 0
     for stream in helper.streams:
         assert b"\x7e\x7e" not in stream  # shared delimiters: never two raw FLAGs adjacent
         d = F.link.Deframer()
@@ -280,10 +280,22 @@ def test_run_streams_corpus_has_multiframe_and_reserved_elements():
         reserved += d.stats.get("ReservedAddress", 0)
         toolong += d.stats.get("TooLong", 0)
         badcrc += d.stats.get("BadCrc", 0)
+        # round 14 (red-team MED): byte-by-byte replay pinning PLACEMENT. Round 12's
+        # comment claimed 'multi == 60' pinned discard-FIRST; it did not — the valid
+        # frames deliver wherever the discard element sits. A frame must be delivered
+        # AFTER the first discard or FR-003's discard->delivery resync coverage is gone.
+        d2 = F.link.Deframer()
+        discarded = delivered_after = False
+        for b in stream:
+            pre = sum(v for k, v in d2.stats.items() if k != "delivered")
+            got = d2.feed(b)
+            post = sum(v for k, v in d2.stats.items() if k != "delivered")
+            if got is not None and discarded:
+                delivered_after = True
+            discarded = discarded or post > pre
+        resync += delivered_after
     assert multi == 60 and reserved == 12 and toolong == 12 and badcrc == 12
-    # round 12: the discard element sits FIRST in its stream (shared FLAG), so every
-    # discard-carrying stream must STILL deliver its valid frames — pinned by 'multi == 60'
-    # above holding even for the 36 streams whose first frame is discarded.
+    assert resync == 36  # every discard-carrying stream delivers a frame AFTER its discard
 
 
 def _unstuffed_body(wire: bytes) -> bytes:
