@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
 # Regression test for the ctest-registration check in pipeline.sh (stage_unit).
 # Proves that a tests/unit|property/test_*.cpp file the ctest path cannot see
-# — either because its CMakeLists.txt registration was removed (red-team
-# PR #128 finding 1: dropping a whole binary's registration can hide behind
-# the check-count floor's slack) or because it was never registered in the
-# first place (finding 2) — fails the stage loudly instead of the ctest path
-# silently never running it while the stage still reports green.
+# fails the stage loudly instead of the ctest path silently never running it
+# while the stage still reports green. Three ways a file goes dark:
+#   1. its CMakeLists.txt registration is removed outright (red-team PR #128
+#      finding 1: dropping a whole binary's registration can hide behind the
+#      check-count floor's slack);
+#   2. it is a new file, never registered in the first place (finding 2);
+#   3. a registration line's *name* is right but its *source* argument was
+#      repointed at a different test_*.cpp — e.g. a copy-pasted
+#      omgp_add_catch_test line — so the named ctest entry still exists
+#      (and even reports MORE checks, the duplicated file's), leaving the
+#      true source file registered nowhere (red-team PR #128, second review
+#      round, [HIGH]). This is the case a name-only check cannot see; the
+#      fix matches by source path instead, checked here against a
+#      tests/property/ file to cover that glob arm too (a name-only check
+#      previously exercised tests/unit/ alone).
 #
 # Usage: tests/unit/test_pipeline_registration.sh   (run from repo root or anywhere)
 set -euo pipefail
@@ -57,4 +67,16 @@ TEST_CASE("orphaned probe test, never registered") { REQUIRE(true); }
 EOF
 run_expect_orphaned "never registered"
 
-echo "test_pipeline_registration: PASS — both orphaned-test scenarios fail the stage loudly"
+cp "$BACKUP" "$CMAKELISTS"
+
+echo "test_pipeline_registration: repointing test_link_stuffing's registration at a different source file (name stays, tests/property/ arm)"
+python3 - <<'PY'
+s = open('CMakeLists.txt').read()
+needle = 'omgp_add_catch_test(test_link_stuffing tests/property/test_link_stuffing.cpp)\n'
+replacement = 'omgp_add_catch_test(test_link_stuffing tests/property/test_link_resync.cpp)\n'
+assert needle in s, "expected CMakeLists.txt line not found; has it moved?"
+open('CMakeLists.txt', 'w').write(s.replace(needle, replacement))
+PY
+run_expect_orphaned "name right, source repointed"
+
+echo "test_pipeline_registration: PASS — all three orphaned-test scenarios fail the stage loudly"
