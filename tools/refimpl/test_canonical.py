@@ -179,6 +179,11 @@ OUT_OF_RANGE_FRAME_LINES = [
     ("leading-zero-decimal-dst", "frame dst=010 src=0x00 flags=0x00 seq=0 payload="),
     ("leading-zero-long-seq", "frame dst=0x00 src=0x00 flags=0x00 seq=0000000001 payload="),
     ("plus-leading-zero", "frame dst=+010 src=0x00 flags=0x00 seq=0 payload="),
+    # round 12 on #121: C++ c_str() truncated at an embedded NUL ("1\0zz" parsed as 1) and
+    # strtoul skipped leading tab (re-enabling octal). Python already rejected both; these
+    # pin the now-shared strictness.
+    ("nul-in-dst", "frame dst=1\0zz src=0x00 flags=0x00 seq=0 payload="),
+    ("tab-prefixed-dst", "frame dst=\t011 src=0x00 flags=0x00 seq=0 payload="),
 ]
 
 

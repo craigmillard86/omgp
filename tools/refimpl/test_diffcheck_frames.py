@@ -18,7 +18,8 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import canonical as C  # noqa: E402
-import diffcheck_frames as F  # noqa: E402
+import diffcheck_frames as F
+import torture  # noqa: E402
 import omgp_link as link  # noqa: E402
 import torture  # noqa: E402
 
@@ -271,7 +272,7 @@ def test_run_streams_corpus_has_multiframe_and_reserved_elements():
     helper = Capturing()
     assert F.run_streams(helper, SEED, count=60) == 60
     assert len(helper.streams) == 60
-    multi = reserved = toolong = 0
+    multi = reserved = toolong = badcrc = 0
     for stream in helper.streams:
         assert b"\x7e\x7e" not in stream  # shared delimiters: never two raw FLAGs adjacent
         d = F.link.Deframer()
@@ -279,4 +280,42 @@ def test_run_streams_corpus_has_multiframe_and_reserved_elements():
         multi += len(delivered) >= 2
         reserved += d.stats.get("ReservedAddress", 0)
         toolong += d.stats.get("TooLong", 0)
-    assert multi == 60 and reserved == 12 and toolong == 12
+        badcrc += d.stats.get("BadCrc", 0)
+    assert multi == 60 and reserved == 12 and toolong == 12 and badcrc == 12
+    # round 12: the discard element sits FIRST in its stream (shared FLAG), so every
+    # discard-carrying stream must STILL deliver its valid frames — pinned by 'multi == 60'
+    # above holding even for the 36 streams whose first frame is discarded.
+
+
+def _unstuffed_body(wire: bytes) -> bytes:
+    # Reference unstuffer over torture's own ESC/XOR symbols — NOT a copy of any builder
+    # (round 9's copy-drift lesson): it inverts the wire encoding to expose body bytes.
+    assert wire[0] == F.link.FLAG and wire[-1] == F.link.FLAG
+    out, esc = bytearray(), False
+    for b in wire[1:-1]:
+        if esc:
+            out.append(b ^ torture.XOR)
+            esc = False
+        elif b == torture.ESC:
+            esc = True
+        else:
+            out.append(b)
+    assert not esc
+    return bytes(out)
+
+
+def test_overlength_and_bad_crc_builders_pin_their_crc_properties():
+    # red-team round 12 on #121: 'toolong == 12' held whether or not the over-cap element's
+    # CRC was valid (the abort fires before any CRC check), so the property the builder
+    # exists for — a length-consistent body with a VALID CRC, the only shape that can
+    # distinguish the TooLong boundary — was unpinned and silently weakenable.
+    rng = random.Random(0xC0FFEE)
+    body = _unstuffed_body(F._overlength_frame_bytes(rng))
+    assert len(body) == 71 and body[3] == F.link.MAX_PAYLOAD + 1
+    c = F.link.crc(body[:-2])
+    assert body[-2:] == bytes([c & 0xFF, (c >> 8) & 0xFF])  # VALID crc: the load-bearing bit
+
+    body = _unstuffed_body(F._bad_crc_frame_bytes(rng))
+    assert body[0] != F._RESERVED_DST and body[3] == len(body) - 6
+    c = F.link.crc(body[:-2])
+    assert body[-2:] != bytes([c & 0xFF, (c >> 8) & 0xFF])  # INVALID crc: exactly one BadCrc

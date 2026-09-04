@@ -157,8 +157,20 @@ def _overlength_frame_bytes(rng: random.Random) -> bytes:
     writing buf_[70]) survived every corpus. Both deframers must discard exactly one
     TooLong here; a boundary mutant instead DELIVERS on the C++ side -> mismatch."""
     payload = bytes(rng.randrange(0x100) for _ in range(link.MAX_PAYLOAD + 1))
-    body = bytes([rng.randrange(0xFF), rng.randrange(0x100), 0x00, len(payload)]) + payload
+    body = bytes([rng.choice(_VALID_DST), rng.randrange(0x100), 0x00, len(payload)]) + payload
     c = link.crc(body)
+    return bytes([link.FLAG]) + link.stuff(body + bytes([c & 0xFF, (c >> 8) & 0xFF])) + bytes([link.FLAG])
+
+
+def _bad_crc_frame_bytes(rng: random.Random) -> bytes:
+    """A structurally valid frame whose CRC is wrong: exactly one BadCrc discard (red-team
+    round 12 on #121, adopted verbatim). Placed FIRST in its stream so the FLAG that closes
+    the discarded frame must open the next one — the FR-003 interaction no corpus element
+    exercised (every discard-producing element sat LAST, so nothing ever checked that a
+    frame after a discard is still delivered)."""
+    payload = bytes(_biased_byte(rng) for _ in range(rng.randint(0, 4)))
+    body = bytes([rng.choice(_VALID_DST), rng.randrange(0x100), 0x00, len(payload)]) + payload
+    c = link.crc(body) ^ 0xFFFF
     return bytes([link.FLAG]) + link.stuff(body + bytes([c & 0xFF, (c >> 8) & 0xFF])) + bytes([link.FLAG])
 
 
@@ -167,9 +179,11 @@ def run_streams(helper, seed: int, count: int = STREAM_COUNT) -> int:
     delivers 0 or 1 frame, so "one OK line per delivered frame, IN ORDER" had zero
     differential coverage, and the ReservedAddress discard never occurred in any corpus.
     Each stream here concatenates 2-3 valid frames SHARING delimiters (enc(A)+enc(B)[1:]);
-    every 5th also embeds a reserved-dst frame that both sides must discard, and every
-    5th-offset-2 embeds a one-over-cap valid-CRC frame pinning the TooLong boundary
-    (round 10)."""
+    every 5th also embeds a reserved-dst frame that both sides must discard, every
+    5th-offset-2 a one-over-cap valid-CRC frame pinning the TooLong boundary (round 10),
+    and every 5th-offset-3 a bad-CRC frame (round 12). All three discard elements go FIRST
+    in their stream, sharing their closing FLAG with the next frame's opener, so the
+    discard->delivery resync of FR-003 is exercised for each discard class."""
     rng = random.Random(seed ^ _STREAM_SEED_XOR)
     ok = 0
     requests, expects = [], []
@@ -182,10 +196,13 @@ def run_streams(helper, seed: int, count: int = STREAM_COUNT) -> int:
             stream += part[1:]  # shared closing/opening FLAG
         discards = 0
         if i % 5 == 0:
-            stream += _reserved_dst_frame_bytes(rng)[1:]
+            stream = _reserved_dst_frame_bytes(rng) + stream[1:]  # discard FIRST, shared FLAG
             discards = 1
         elif i % 5 == 2:
-            stream += _overlength_frame_bytes(rng)[1:]
+            stream = _overlength_frame_bytes(rng) + stream[1:]
+            discards = 1
+        elif i % 5 == 3:
+            stream = _bad_crc_frame_bytes(rng) + stream[1:]
             discards = 1
         requests.append(f"FSTREAM {stream.hex()}")
         expects.append((i, stream,

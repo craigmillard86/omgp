@@ -8,6 +8,7 @@
 #include "omgp_names.h"
 #include "omgp_protocol.h"
 
+#include <cctype>
 #include <cerrno>
 #include <climits>
 #include <cstdio>
@@ -71,6 +72,15 @@ bool parse_uint(const std::string& tok, unsigned& v) {
     // divergence, not a fix (red-team @ 65922b5).
     if (tok.empty() || tok[0] == '-')
         return false;
+    // strtoul skips leading whitespace and c_str() stops at an embedded NUL, both of which
+    // let a token PARSE here while the Python reference rejects it — and the whitespace
+    // skip even re-enabled the legacy-octal reinterpretation the guard below exists to
+    // stop ("\t011" named 9). The grammar has no whitespace and no NUL; reject the whole
+    // token (reviews on #121, round 12: C++ was LAXER than Python, the reverse of the
+    // strict-rejection ruling).
+    for (const char ch : tok)
+        if (ch == '\0' || std::isspace(static_cast<unsigned char>(ch)))
+            return false;
     // strtoul(..., 0) treats a leading '0' followed by more digits as legacy C octal (e.g.
     // "010" -> 8), but the Python reference's int(tok, 0) rejects that outright — Python 3
     // dropped implicit octal and requires an explicit "0o" prefix. Reject the leading-zero

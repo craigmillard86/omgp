@@ -49,6 +49,12 @@ def _parse_named(kind: str, tok: str) -> int:
 
 
 def _int(tok: str) -> int:
+    # round 12 on #121: C++ parse_uint now rejects any token containing whitespace or an
+    # embedded NUL (strtoul skipped leading whitespace — re-enabling legacy octal, so
+    # "\t011" named 9 — and c_str() truncated at NUL). int(tok, 0) tolerates both; mirror
+    # the rejection here so every verb sharing these parsers stays in lockstep.
+    if any(c.isspace() or c == "\0" for c in tok):
+        raise CanonicalError(f"whitespace/NUL inside integer token: {tok!r}")
     try:
         return int(tok, 0)
     except ValueError:
@@ -302,6 +308,8 @@ def canonical_to_frame(line: str) -> link.Frame:
     if prefix != "frame":
         raise CanonicalError(f"not a frame line: {line!r}")
     # The C++ tokenizer splits on SPACES only; any other whitespace lands inside a token
+    # (true for the uint path since round 12 — before that, strtoul silently SKIPPED
+    # leading whitespace inside a token, so this guard was load-bearing on its own)
     # and fails its uint/hex parse (red-team round 8 on #121: trailing TAB/VT/FF parsed
     # here because the shared _tokens() strips them). Reject before tokenizing.
     if any(c.isspace() and c != " " for c in rest):
