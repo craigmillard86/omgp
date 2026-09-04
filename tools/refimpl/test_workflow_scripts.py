@@ -459,7 +459,16 @@ def test_continuous_improvement_is_read_only_by_construction():
     # git push, `Bash(gh*)` re-admits gh api — and both broad forms already exist elsewhere
     # in this repo, so that is not a hypothetical edit shape (red team on #125). A denylist
     # over a wildcard grammar cannot establish "by construction"; enumeration can.
-    granted = set(re.search(r'--allowedTools "([^"]*)"', tools).group(1).split(","))
+    # Exactly one --allowedTools flag, and no CLI escape hatch that makes the enumeration
+    # moot: `--dangerously-skip-permissions` / `--permission-mode` bypass allowedTools
+    # entirely and a second `--allowedTools` (the CLI takes the last) would leave this
+    # `re.search` reading a stale one — both survived the previous, single-match version of
+    # this test (review round 3, #125).
+    allowedtools_matches = re.findall(r'--allowedTools "([^"]*)"', tools)
+    assert len(allowedtools_matches) == 1, "exactly one --allowedTools flag expected"
+    assert "--dangerously-skip-permissions" not in tools
+    assert "--permission-mode" not in tools
+    granted = set(allowedtools_matches[0].split(","))
     permitted = {
         # reads over the PR/issue/run stream the analysis is made of
         "Bash(gh pr list*)", "Bash(gh pr view*)", "Bash(gh pr diff*)",

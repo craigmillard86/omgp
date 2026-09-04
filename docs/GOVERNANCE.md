@@ -186,10 +186,12 @@ the enforcement.
   Mondays 07:00 UTC, Claude reads the last 14 days of PR review feedback, groups it
   into patterns, and proposes — never applies — changes to `CLAUDE.md`,
   `.specify/memory/constitution.md` or this document.
-  - **Read-only by construction.** The job holds `contents: read` and the agent
-    holds no write tool at all, so a proposal cannot become a change: both
-    governance files are CODEOWNERS-owned and §3 makes an agent-authored T3
-    change a breach signal.
+  - **Read-only by construction.** The job holds `contents: read`, so nothing the
+    agent writes to its ephemeral workspace can reach the repository — a proposal
+    cannot become a change. The agent does hold a `Write` tool (for the two output
+    files below); that is a workspace edit, not a repository one, and both
+    governance files stay CODEOWNERS-owned, with §3 making an agent-authored T3
+    change a breach signal regardless.
   - **The issue is filed by the workflow, not the agent**, with the labels fixed
     in YAML (`converge-audit` + `needs-human`). The agent emits the title and body
     as data in `continuous-improvement.json`. This is deliberate: the loop ingests
