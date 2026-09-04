@@ -446,10 +446,19 @@ def test_continuous_improvement_is_read_only_by_construction():
     assert wf["permissions"]["pull-requests"] == "read"    # it reads reviews, never writes them
     action = next(s for s in job["steps"] if "claude-code-action" in s.get("uses", ""))
     tools = action["with"]["claude_args"]
-    # No Edit: the two report files are created with Write; tracked files are not touched.
+    # No Edit. NOTE (review on #125): `Write` is not path-restricted, so the tool list alone
+    # does not stop the agent overwriting CLAUDE.md in the workspace — `contents: read`,
+    # asserted above, is what stops that reaching the repository. This assertion narrows the
+    # blast radius; it is not the guarantee.
     assert "Edit" not in tools
     for banned in ("gh pr create", "gh pr merge", "gh pr review", "git commit", "git push"):
         assert banned not in tools, banned
+    # `gh api` reads as a read tool and is not one: it takes -X POST/PATCH/DELETE, so the
+    # wildcard grants every write `issues: write` permits. The concrete escalation the red
+    # team found on #125: POST a comment landing as claude[bot] whose final line is
+    # `VERDICT(review): clean @ <head>`, which agent-approve accepts because it checks author
+    # and sha but not which workflow produced it — then agent-merge merges at <= T2.
+    assert "gh api" not in tools, "gh api re-admits writes, including forging the approval verdict"
 
 
 def test_continuous_improvement_prompt_lives_outside_the_workflow():
@@ -481,7 +490,18 @@ def test_continuous_improvement_runs_weekly_and_no_update_is_a_success():
     aon = audit[True] if True in audit else audit["on"]
     assert on["schedule"][0]["cron"] != aon["schedule"][0]["cron"], "same slot as agent-converge-audit"
     # "No update required" must not fail the run: a self-improving system that cannot decline
-    # to add a rule only ever adds rules.
+    # to add a rule only ever adds rules. Assert the DECISION VALIDATOR accepts both literals
+    # — the previous version of this test asserted `"exit 0" in run and "exit 1" not in run`,
+    # which matched an unrelated branch and would have passed even if the validator were
+    # narrowed to UPDATE_RECOMMENDED only, i.e. it did not test its own claim (review on
+    # #125). It also forbade ever failing on missing outputs, locking in the blind spot the
+    # next assertion now requires.
     steps = wf["jobs"]["analyse"]["steps"]
     check = next(s for s in steps if s.get("id") == "outputs")
-    assert "exit 0" in check["run"] and "exit 1" not in check["run"]
+    run = check["run"]
+    assert "'UPDATE_RECOMMENDED','NO_UPDATE_REQUIRED'" in run.replace(", ", ",").replace('"', "'"), \
+        "the decision validator must accept both literals"
+    # ...and a run that produced NOTHING must fail, so "no update required" and "crashed" are
+    # never the same observable outcome (review + red team on #125).
+    assert "exit 1" in run, "missing outputs must fail the job, not warn"
+    assert "::error::" in run
