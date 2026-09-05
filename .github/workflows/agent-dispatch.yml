@@ -46,7 +46,7 @@ jobs:
           echo "cap=$(sed -n 's/^wip_cap: *//p' .github/agent-config.yml)" >> "$GITHUB_OUTPUT"
       - name: Select next task (WIP cap from agent-config, oldest ready first)
         id: select
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           WIP_CAP: ${{ steps.cfg.outputs.cap }}
         with:
@@ -131,7 +131,7 @@ jobs:
 
       - name: Release claim if no PR was opened
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const n = Number('${{ needs.pick.outputs.issue }}');
