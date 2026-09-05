@@ -84,7 +84,7 @@ const quiet = w => !w.log.some(l => l.startsWith('comment@') || /^[+-]/.test(l))
   await gate(w);
   check('review findings at head -> attempt 1 + go', w.outputs.go === 'yes' && w.outputs.attempt === '1' && w.outputs.kinds === 'review' && labels(w, 94).includes('review-fix-1'));
   check('outputs carry the branch and head the fix job checks out', w.outputs.branch === 'task/26' && w.outputs.head === HEAD && w.outputs.pr === '94');
-  check('attempt comment carries the sha marker and states the severity policy', said(w, new RegExp(`review-fix sha=${HEAD}`), 94) && said(w, new RegExp(`attempt 1 of ${MAX}`), 94) && said(w, /LOW finding is fixed only where/, 94));
+  check('attempt comment carries the sha marker and states the scope policy', said(w, new RegExp(`review-fix sha=${HEAD}`), 94) && said(w, new RegExp(`attempt 1 of ${MAX}`), 94) && said(w, /FOLLOW-UP findings outside the linked issue/, 94));
   check('attempt path touches no issue labels', !w.log.some(l => /@26$/.test(l)));
 
   w = world({pr: PR(['agent-authored', 'review-fix-1']), comments: [verdict('review', 'findings', HEAD), verdict('red-team', 'findings', HEAD)]});

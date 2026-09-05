@@ -338,7 +338,7 @@ def test_review_fix_wiring():
     action = next(s for s in fix["steps"] if "claude-code-action" in s.get("uses", ""))
     prompt = action["with"]["prompt"]
     for must in ("CLAUDE.md", "OPERATING-POLICY", "./pipeline.sh", "tests/vectors/",
-                 "protocol/omgp-protocol.yaml", "HIGH and MEDIUM", "DEFERRED"):
+                 "protocol/omgp-protocol.yaml", "SCOPE POLICY", "BLOCKING finding"):
         assert must in prompt, must
     # The bound lives in agent-config.yml, not in the workflow: retuning it must not need a
     # workflow-scope push, because the fixer agent itself cannot edit .github/workflows/*.
@@ -346,9 +346,12 @@ def test_review_fix_wiring():
     assert "review_fix_max_attempts" in gate_script and "ATTEMPT_LABELS" in gate_script
     assert "review-fix-1" not in gate_script.replace("`review-fix-${i + 1}`", "")   # no hard-coded attempt list
     assert "review_fix_max_attempts: 4" in (ROOT / ".github" / "agent-config.yml").read_text()
-    # The severity policy is the point of the loop: LOW findings are not chased on their own.
-    assert "Fix a LOW finding ONLY if it is in code you are already" in prompt
-    assert "If EVERY finding is LOW, change no code at all" in prompt
+    # The scope policy (#134) is the point of the loop: findings route by SCOPE, not severity —
+    # blocking findings are fixed, follow-ups become issues, and a fix may SHRINK the diff
+    # (removing out-of-scope machinery, not only adding) — the lever that ends #128-style creep.
+    assert "A FOLLOW-UP finding" in prompt
+    assert "If EVERY finding is a FOLLOW-UP" in prompt
+    assert "you MAY SHRINK" in prompt   # a blocking fix may remove out-of-scope work, not only add
     # The fixer must not touch the loop's own bounds, open PRs, or approve anything.
     assert ".github/workflows/" in prompt and "Do not approve" in prompt
     tools = action["with"]["claude_args"]

@@ -117,22 +117,36 @@ jobs:
                changes.
             Post ONE review comment: findings with file:line references,
             severity-ordered, or an explicit "no findings" — never pad.
-            Prefix EVERY finding with its severity as one of `[HIGH]`,
-            `[MEDIUM]` or `[LOW]`, exactly those tokens — the review-fix
-            loop routes on them: HIGH/MEDIUM are fixed, LOW is fixed only
-            where the agent is already changing that code. LOW is for
-            style, naming and preference; anything that could produce wrong
-            behaviour, a spec divergence, a security hole or a weakened
-            test is MEDIUM or above.
-            End the comment with a required final section "NOT EXAMINED:"
-            listing what was out of scope of this pass (files skipped,
-            areas not checked, tools not run). If nothing was excluded,
-            state that explicitly: "NOT EXAMINED: nothing excluded".
+            Prefix EVERY finding with its severity — exactly `[HIGH]`,
+            `[MEDIUM]` or `[LOW]` — and CLASSIFY each by scope against the
+            linked issue's acceptance criteria (read them with
+            `gh issue view <n>`; do not infer them from the PR body). Two
+            classes, and the routing rule that #134 established:
+            - BLOCKING: a defect in the CHANGED code, a security hole, a
+              weakened or narrowed test, a spec divergence, an unmet
+              acceptance criterion of the linked issue, or a false claim
+              the PR itself makes (dropping the claim is a valid, and often
+              the smallest, fix). Each BLOCKS, whatever its severity.
+            - FOLLOW-UP: a real improvement, hardening or pre-existing gap
+              OUTSIDE the linked issue's acceptance criteria. Do NOT ask for
+              it in this PR — that only grows the change (this is the
+              accretion #128 spent five rounds on). Propose it as a new
+              issue instead. Raise a FOLLOW-UP only for MEDIUM-or-above
+              substance; pure style/naming/preference is a noted `[LOW]`.
+            NEVER route a defect, security hole, weakened test, spec
+            divergence or unmet acceptance criterion to FOLLOW-UP — those
+            are BLOCKING at every severity. When unsure, BLOCK.
+            List BLOCKING findings first (severity-ordered, file:line). Then
+            a section headed exactly "## FOLLOW-UPS" — one bullet per
+            proposed issue as "TITLE — one line of why", or "none".
+            End with a required final section "NOT EXAMINED:" listing what
+            was out of scope of this pass (files skipped, areas not checked).
+            If nothing was excluded: "NOT EXAMINED: nothing excluded".
             After NOT EXAMINED, end with ONE final line, alone and exactly
             in this machine-readable form (the auto-approval gate parses it):
-            `VERDICT(review): clean @ <head sha>` if and only if you found
-            NO findings of any severity (NOT EXAMINED entries do not count
-            as findings); otherwise `VERDICT(review): findings @ <head sha>`.
+            `VERDICT(review): clean @ <head sha>` IF AND ONLY IF you found
+            NO BLOCKING findings (FOLLOW-UPS and NOT EXAMINED entries do NOT
+            count); otherwise `VERDICT(review): findings @ <head sha>`.
             <head sha> is the full 40-char head commit of the PR:
             ${{ steps.head.outputs.sha }} (if that is blank,
             use `gh pr view <n> --json headRefOid`).

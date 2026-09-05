@@ -123,13 +123,25 @@ the enforcement.
     loop runs from the DEFAULT-branch definition and a PR cannot rewrite
     its own bounds. Fork heads, human PRs and `needs-human` PRs are never
     touched.
-  - **Severity policy.** HIGH and MEDIUM findings are fixed. A LOW finding
-    is fixed only where the agent is already changing that code;
-    otherwise it is listed as consciously deferred. If every finding is
-    LOW, no code changes at all. Deferred LOWs keep the verdict at
-    `findings`, so the PR is not auto-approved and a human merges it —
-    accepted deliberately: relaxing the verdict would be a T3 change to
-    the approval gate, not a property of this loop.
+  - **Scope policy (ruled 2026-09-05, #134; supersedes the 2026-09-02
+    severity policy).** Findings are routed by SCOPE, not severity.
+    *Blocking* findings — a defect in the changed code, a security hole, a
+    weakened/narrowed test, a spec divergence, an unmet acceptance
+    criterion of the linked issue, or a false claim the PR makes — are
+    fixed here, and a fix may SHRINK the diff (drop an out-of-scope claim
+    or its machinery), not only add code. *Follow-up* findings — real
+    improvements or pre-existing gaps OUTSIDE the linked issue's
+    acceptance criteria — are NOT fixed here; the reviewer proposes each
+    as an issue and the loop leaves the code. `claude-review`'s verdict is
+    `clean` iff there are no blocking findings, so a PR whose only findings
+    are follow-ups is auto-approvable below `auto_approve_max_tier` (the
+    merge stays human for T3 and CODEOWNERS paths per §1). Never
+    deferrable: defects, security, weakened tests, spec divergence and
+    unmet criteria always block, at every severity. The rule rests on the
+    linked issue carrying precise, testable acceptance criteria — weak
+    criteria make "in scope" weak. (`red-team` still emits `findings` for
+    out-of-scope weaknesses today; the loop triages those as follow-ups,
+    and aligning red-team's own verdict is a tracked fast-follow.)
   - **Bound — `review_fix_max_attempts` attempts, then a human.** Labels
     `review-fix-1..N`, at most one attempt per head commit (a red-team
     verdict arriving after a review verdict on the same commit is the same
