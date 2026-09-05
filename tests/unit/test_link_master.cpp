@@ -11,17 +11,25 @@
 //
 // Scope note (AC6, "wrong src/wrong dst/response-bit-clear" frames): MockWire's own
 // Respond/CrcError/Duplicate scheduling (tests/support/mock_wire.cpp, schedule_respond())
-// always mirrors the polled node's true address back as the response's src/dst — there is
-// no MockWire-public mechanism to synthesize a response carrying a WRONG dst or a clear
-// response bit without a second, independently-addressed node actually transmitting on the
-// same wire. Those sub-cases are exercised once a real second Responder exists to produce
-// them honestly (tests/unit/test_link_loop.cpp, T034, which needs T031 first). This file
-// covers the two sub-cases MockWire genuinely supports today: a wrong/stale SEQUENCE
-// arriving during an open response window (a late frame from an earlier, concluded
-// transaction to the SAME node — spec.md US2 AC4's scenario), and a wrong SRC arriving
-// during a different destination's open window (a late Respond from one node queued behind
-// an on-time one to a different node — mock_wire.hpp's RX-queue ordering note; needs only
-// Kind::Respond, implemented today).
+// always mirrors the polled request's own src/dst back into the response's dst/src.
+// schedule_respond() is reachable directly through MockWire::transmit() (a public
+// ByteWire override) by feeding it a hand-encoded "request" with a forged src or dst, with
+// no second Responder and no T034 dependency (PR #137 review, MEDIUM — an earlier version
+// of this note claimed no such mechanism existed for wrong-dst, which was false). Only the
+// response-bit-clear sub-case is genuinely unreachable this way: schedule_respond() always
+// sets response = true, so it needs a real second Responder to produce honestly
+// (tests/unit/test_link_loop.cpp, T034, which needs T031 first). This file covers the
+// three sub-cases reachable today: a wrong/stale SEQUENCE arriving during an open response
+// window (a late frame from an earlier, concluded transaction to the SAME node — spec.md
+// US2 AC4's scenario); a wrong SRC arriving during a different destination's open window
+// (a late Respond from one node queued behind an on-time one to a different node —
+// mock_wire.hpp's RX-queue ordering note; needs only Kind::Respond, implemented today);
+// and a wrong DST, synthesised by injecting a forged request whose src schedule_respond()
+// mirrors into the answer's dst. Every one of these frames must land inside its window
+// without overlapping the transaction's own genuine answer, or MockWire's single
+// time-sorted RX queue hands the engine both frames byte-interleaved and neither can be
+// delivered intact — each test below schedules the genuine answer via an explicit Step
+// whose delay starts it strictly after the spoofed frame's last byte.
 #include "catch_amalgamated.hpp"
 #include "fake_clock.hpp"
 #include "heap_guard.hpp"
@@ -459,6 +467,95 @@ TEST_CASE("a late response from a different, already-concluded destination (wron
     REQUIRE(master.stats(dst).retries == 0); // unaffected by B's stale frame
 }
 
+// --- US2 AC6 (wrong-dst sub-case): a response mis-addressed to someone other than the
+// host is discarded during a transaction's open window ---------------------------------
+
+TEST_CASE("a response mis-addressed to someone other than the host (wrong dst), synthesised "
+          "by injecting a forged request whose src MockWire mirrors into the answer's dst, "
+          "is discarded during a transaction's open window without ending it or corrupting "
+          "its counters",
+          "[link]") {
+    // MockWire::transmit() is the public ByteWire override every real transmitter uses (a
+    // real Master/Responder, or - as here - a test standing in for a second, spoofing
+    // station); schedule_respond() (mock_wire.cpp) always mirrors the polled request's src
+    // into the answer's dst. Feeding transmit() a hand-encoded "request" whose src is not
+    // ADDR_host therefore synthesises a well-formed response frame addressed to someone
+    // other than the host - AC6's wrong-dst sub-case - with no second Responder and no
+    // T034 dependency (PR #137 review, MEDIUM: the file header's prior "no MockWire-public
+    // mechanism" claim for this sub-case did not hold).
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x0E;             // Master's own, real transaction
+    const uint8_t forged_dst_node = 0x03; // the forged "request"'s claimed destination
+    const uint8_t forged_src = 0x0F;      // != ADDR_host: mirrored into the wrong response.dst
+    const uint8_t payload[] = {0x0A};
+
+    const uint64_t tx_end = static_cast<uint64_t>(
+        request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us());
+
+    // The forged "request" MockWire will treat as coming from forged_src, addressed to
+    // forged_dst_node; a zero-length payload keeps its own airtime (and its answer's)
+    // small. wrong_resp_bytes mirrors schedule_respond()'s own field construction exactly
+    // (dst = request.src, src = request.dst, response = true, retry = false), only to
+    // compute its true (possibly stuffed) wire length, never fed to transmit() itself.
+    const std::vector<uint8_t> forged_bytes =
+        encode_expected(forged_dst_node, forged_src, false, false, 0, nullptr, 0);
+    const std::vector<uint8_t> wrong_resp_bytes =
+        encode_expected(forged_src, forged_dst_node, true, false, 0, nullptr, 0);
+
+    // forged_dst_node's own script (delay 0) puts the resulting wrong-dst answer's start
+    // fully under this test's control.
+    const Step forged_script[] = {{forged_dst_node, Kind::Respond, 0}};
+    wire.set_script(forged_dst_node, forged_script, 1);
+
+    const uint32_t margin = 10;
+    const uint64_t forged_tx_now = tx_end + margin;
+    const uint64_t forged_tx_end =
+        forged_tx_now + static_cast<uint64_t>(forged_bytes.size()) * byte_us();
+    const uint64_t wrong_resp_start = forged_tx_end; // the script's delay above is 0
+    const uint64_t wrong_resp_end =
+        wrong_resp_start + static_cast<uint64_t>(wrong_resp_bytes.size()) * byte_us();
+    // Sanity: this test isn't vacuous - the wrong-dst frame really does land inside dst's
+    // open window.
+    REQUIRE(wrong_resp_start > tx_end);
+    REQUIRE(wrong_resp_end < tx_end + omgp::TRUNK_T_resp_us);
+
+    // dst's own (real) answer must start strictly after the wrong-dst frame's last byte, or
+    // MockWire's single time-sorted RX queue (mock_wire.hpp: "sorted by start_us") hands
+    // the engine both frames byte-interleaved and neither can be delivered intact - same
+    // reasoning as the AC4/AC6 wrong-src fixes above (PR #137 review, HIGH). Still
+    // comfortably inside dst's own T_resp window (only the response's START instant has to
+    // fall inside it, per the T_resp-boundary edge case above).
+    const uint32_t legit_delay_us = static_cast<uint32_t>(wrong_resp_end - tx_end) + margin;
+    REQUIRE(legit_delay_us < omgp::TRUNK_T_resp_us);
+    const Step dst_script[] = {{dst, Kind::Respond, legit_delay_us}};
+    wire.set_script(dst, dst_script, 1);
+
+    Master master(wire, clock, omgp::ADDR_host);
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 1);
+
+    // Inject the forged frame directly (standing in for a second, spoofing station);
+    // MockWire records it in the transcript like any other transmitted frame.
+    wire.transmit(forged_bytes.data(), forged_bytes.size(), forged_tx_now);
+    REQUIRE(wire.transcript_size() == 2);
+    REQUIRE(wire.transcript(1).dst == forged_dst_node);
+    REQUIRE(wire.transcript(1).src == forged_src);
+
+    const uint32_t discards_before = master.stats(dst).discards;
+    MasterEvent ev = wire.advance_to(wrong_resp_end, master);
+    REQUIRE(ev.kind == MasterEvent::None); // wrong dst (forged_src, not ADDR_host): discarded
+    REQUIRE(master.stats(dst).discards == discards_before + 1);
+    REQUIRE(master.busy()); // dst's window keeps running
+
+    const uint64_t full_end =
+        response_full_end(tx_end, dst, 0, payload, sizeof payload, legit_delay_us);
+    ev = wire.advance_to(full_end, master);
+    REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(master.stats(dst).transactions == 1);
+    REQUIRE(master.stats(dst).retries == 0); // unaffected by the wrong-dst frame
+}
+
 // --- US2 AC5 (gap half) / data-model.md §4 "Gap" --------------------------------------
 
 TEST_CASE("a second begin() before last_activity + T_gap defers transmission to exactly "
@@ -559,6 +656,31 @@ TEST_CASE("begin() refuses a 65-byte payload before anything reaches the wire", 
     REQUIRE(master.begin(0x01, payload, sizeof payload) == Status::PayloadTooLong);
     REQUIRE(wire.transcript_size() == 0);
     REQUIRE_FALSE(master.busy());
+}
+
+// --- contracts/link-cpp.md: stats() is bounds-checked, not a raw table index -----------
+
+TEST_CASE("stats() for an address outside kAddrCount returns a benign, all-zero record "
+          "rather than indexing past the table",
+          "[link]") {
+    // 0x10..0xFE survive both encode_frame and the Deframer (only dst == 0xFF is refused,
+    // link/frame.cpp), so a wire-derived address reaching stats() is not a hypothetical
+    // caller error (PR #137 review, MEDIUM). stats_ is AddrStats[kAddrCount] (16 entries,
+    // master.hpp); addr >= kAddrCount must not read past it the way HealthTracker's
+    // is_node_addr guard already prevents for the same address-keyed-table shape
+    // (link/health.cpp).
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const AddrStats& oob = master.stats(0xFF);
+    REQUIRE(oob.transactions == 0);
+    REQUIRE(oob.retries == 0);
+    REQUIRE(oob.timeouts == 0);
+    REQUIRE(oob.crc_failures == 0);
+    REQUIRE(oob.discards == 0);
+    REQUIRE(oob.replays_served == 0);
+    REQUIRE(oob.late_responses == 0);
 }
 
 // --- CLAUDE.md rule 5: no dynamic allocation in embedded-path code --------------------

@@ -27,6 +27,13 @@ void Master::set_bit_rate(uint32_t bps) {
 }
 
 const AddrStats& Master::stats(uint8_t addr) const {
+    // addr is wire-derived (encode_frame/the Deframer refuse only dst == 0xFF, so
+    // 0x10..0xFE survive intact); mirror HealthTracker's bounds guard for the same
+    // address-keyed-table shape rather than trust the caller (PR #137 review, MEDIUM;
+    // red-team #118 finding 5 class).
+    static const AddrStats kOutOfRange{};
+    if (addr >= kAddrCount)
+        return kOutOfRange;
     return stats_[addr];
 }
 
