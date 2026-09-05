@@ -130,9 +130,18 @@ stage_unit() {
     # round, [HIGH]). CMakeLists.txt is the only place the name<->source
     # binding is made, so read the source argument directly from it instead
     # of ctest's derived name list.
+    # A test_*.cpp is "declared" iff its source path appears on a NON-COMMENT line of
+    # CMakeLists.txt — the only place the name<->source binding is made. Extracting every
+    # source path (rather than anchoring on `omgp_add_catch_test(<name> ` with a single
+    # space and only the first argument, plus a hardcoded `add_executable(test_smoke`) keeps
+    # the round-2 [HIGH] protection — a source repointed AWAY from a file makes that file's
+    # path vanish here, so it is flagged orphaned — without false-positiving on cosmetic
+    # CMake edits: two spaces, a source wrapped to the next line, a second source argument,
+    # or a second standalone-main executable (review on #128, [LOW] pipeline.sh:134).
+    # Comment lines are dropped so a commented-out path can never mask a real orphan.
     local declared f orphaned
-    declared=$(grep -oE '(omgp_add_catch_test\([A-Za-z0-9_]+ |add_executable\(test_smoke )tests/(unit|property)/test_[A-Za-z0-9_]+\.cpp' CMakeLists.txt \
-                 | grep -oE 'tests/(unit|property)/test_[A-Za-z0-9_]+\.cpp')
+    declared=$(grep -vE '^[[:space:]]*#' CMakeLists.txt \
+                 | grep -oE 'tests/(unit|property)/test_[A-Za-z0-9_]+\.cpp' | sort -u)
     orphaned=()
     for f in tests/unit/test_*.cpp tests/property/test_*.cpp; do
       [ -f "$f" ] || continue
@@ -306,6 +315,12 @@ stage_selftest() {
   # exercised this run (review PR #128 @ eeea8ca, [LOW] pipeline.sh:258-260).
   # Track and echo each script's outcome explicitly instead of only the
   # aggregate exit code.
+  # ORDER MATTERS (review on #128, [LOW] pipeline.sh:291,311): the scripts share one scratch
+  # tree (build/ is not copied, so it starts with no build/gen/). test_pipeline_floor runs
+  # first because it runs `./pipeline.sh codegen build unit` and GENERATES build/gen/ — which
+  # test_pipeline_link_bootstrap's `g++ … -Ibuild/gen` compile then depends on. Reordering so
+  # a script needing build/gen/ runs before floor would fail with a missing-header error that
+  # reads as a bootstrap regression, not an ordering bug. Keep test_pipeline_floor first.
   local script status=()
   for script in test_pipeline_floor test_pipeline_link_bootstrap \
                 test_pipeline_registration test_pipeline_binary_presence; do

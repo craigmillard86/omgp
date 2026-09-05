@@ -66,9 +66,10 @@ in your summary rather than silently choosing.
 ## Build & test
 
 `./pipeline.sh` is the single build/test definition — CI runs it, you run
-it, agents run it. Stages: `codegen build unit refimpl diffcheck scenarios
-esp32`. No cmake available? The build stage falls back to a bootstrap g++
-build with identical sources and sanitizers; CMake presets stay canonical.
+it, agents run it. Stages: `codegen quality build unit refimpl diffcheck
+scenarios selftest esp32` (`fuzz` is optional, clang-only). No cmake
+available? The build stage falls back to a bootstrap g++ build with
+identical sources and sanitizers; CMake presets stay canonical.
 
 ```bash
 ./pipeline.sh                    # all local stages
