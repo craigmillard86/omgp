@@ -22,6 +22,14 @@ uint8_t Master::attempts() const {
 }
 
 void Master::set_bit_rate(uint32_t bps) {
+    // byte_time_us() has a nonzero precondition and the engine calls it on every poll (cadence
+    // and frame-time bounds), so a zero rate accepted here would make the engine violate that
+    // precondition from the inside — an assert in a debug build, a divide-by-zero otherwise
+    // (PR #137 red-team, LOW). Refused rather than clamped: no rate is a defensible stand-in
+    // for "no rate", and trunk §9's rates are all nonzero. rate_changes counts changes actually
+    // applied, so a refused call does not bump it.
+    if (bps == 0)
+        return;
     wire_.set_bit_rate(bps);
     bus_stats_.rate_changes++;
 }
@@ -348,11 +356,11 @@ MasterEvent Master::poll(uint64_t now_us) {
     // the wire for a frame time" from "nobody called poll() for a while", and since
     // TRUNK_T_poll_us (2000) exceeds max_frame_us (1420), the documented superframe cadence
     // (trunk §6) abandoned EVERY gap-deferred transaction and retry on a completely idle wire):
-    //   now_us >= defer_cap_us   — the whole wait budget really has elapsed, AND
-    //   now_us <  deadline_      — the transmit instant is STILL in the future, i.e. activity
-    //                              keeps pushing it out and no T_gap window has been offered.
-    // On an idle bus deadline_ is never pushed, so now_us >= deadline_ and this cannot fire —
-    // fire_pending() below transmits instead, however late the poll arrives. That is exactly
+    //   now_us >= defer_cap_us  — the whole wait budget really has elapsed, AND
+    //   gap_still_denied        — the bus has had activity within the last T_gap, so no window
+    //                             to transmit in has been offered (see its definition below).
+    // On an idle bus last_activity_ stays old, so gap_still_denied is false and this cannot
+    // fire — fire_pending() below transmits instead, however late the poll arrives. That is exactly
     // the rule docs/OPEN-QUESTIONS.md (2026-09-05, babble) recommended: conclude only when the
     // bus has not offered a T_gap window within the budget.
     //
@@ -368,8 +376,18 @@ MasterEvent Master::poll(uint64_t now_us) {
     // trunk §7's "3 consecutive failed transactions -> SUSPECT" (PR #137 review, MEDIUM).
     // Recording the bus condition itself belongs with the bus-fault outcome (#138).
     const uint64_t defer_cap_us = defer_origin_us_ + max_frame_us();
+    // "The bus is still denying a gap window" is asked of last_activity_, which the drain loop
+    // above has just brought up to date — NOT of deadline_, which at this point still holds
+    // whatever the PREVIOUS poll()'s fire_pending() left there. Testing deadline_ made the
+    // condition `now_us - previous_poll < T_gap + byte_time` (~60 us), so any caller polling
+    // less often than that — including at TRUNK_T_poll_us (2000) — could never satisfy it and
+    // the wedge was fully intact at the documented cadence (PR #137 red-team, HIGH). Reading
+    // last_activity_ directly is cadence-independent: under continuous traffic the drain loop
+    // leaves it within a byte time of now_us, and on an idle bus it stays old.
+    const bool gap_still_denied =
+        has_last_activity_ && last_activity_ + omgp::TRUNK_T_gap_us > now_us;
     if (open_ && sub_phase_ == SubPhase::PendingTransmit && event.kind == MasterEvent::None &&
-        now_us >= defer_cap_us && now_us < deadline_) {
+        now_us >= defer_cap_us && gap_still_denied) {
         if (now_us > last_activity_)
             last_activity_ = now_us;
         has_last_activity_ = true;

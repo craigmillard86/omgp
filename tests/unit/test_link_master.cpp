@@ -1264,10 +1264,13 @@ TEST_CASE("continuous bus traffic cannot defer a transmission forever — the ga
     const uint8_t payload[] = {0x5A};
     Master master(wire, clock, omgp::ADDR_host);
 
-    // Babble: back-to-back bytes with no idle gap, long enough to outlast the bound. Content
-    // is irrelevant — every received byte is bus activity for the T_gap rule.
+    // Driven at the DOCUMENTED superframe cadence (TRUNK_T_poll_us, trunk §6), not in
+    // microsecond steps. An earlier version of this test stepped the clock 1 us at a time and
+    // passed against a guard that could only ever fire when polls were less than ~60 us apart
+    // — the wedge was fully intact at the real cadence and this test hid it (PR #137 red-team,
+    // HIGH). Any bound here must be cadence-independent, so the cadence is part of the case.
     const uint64_t babble_start = 100;
-    std::vector<uint8_t> babble(400, 0x5A);
+    std::vector<uint8_t> babble(500, 0x5A);
     const uint64_t babble_end = babble_start + static_cast<uint64_t>(babble.size()) * byte_us();
     wire.inject_bytes(babble.data(), babble.size(), babble_start);
 
@@ -1277,14 +1280,15 @@ TEST_CASE("continuous bus traffic cannot defer a transmission forever — the ga
     REQUIRE(master.busy());
     REQUIRE(wire.transcript_size() == 0); // deferred, bus is busy
 
-    const uint64_t cap = static_cast<uint64_t>(kMaxWire) * byte_us();
-    // Sanity: the babble really does outlast the bound, so this is not vacuous.
-    REQUIRE(babble_end > clock.now_us() + omgp::TRUNK_T_gap_us + cap);
+    const uint64_t budget = omgp::TRUNK_T_gap_us + static_cast<uint64_t>(kMaxWire) * byte_us();
+    // Sanity: the babble outlasts the budget AND the poll cadence, so this is not vacuous —
+    // and the cadence really is coarser than the old guard's ~60 us reachable window.
+    REQUIRE(babble_end > clock.now_us() + budget + omgp::TRUNK_T_poll_us);
+    REQUIRE(omgp::TRUNK_T_poll_us > omgp::TRUNK_T_gap_us + byte_us());
 
-    // Poll through the babble. Under the bug the deferred instant is pushed out on every poll
-    // and this loop never sees the transaction conclude.
     MasterEvent ev{};
-    for (uint64_t t = clock.now_us() + 1; t <= babble_end; ++t) {
+    for (uint64_t t = clock.now_us() + omgp::TRUNK_T_poll_us; t <= babble_end;
+         t += omgp::TRUNK_T_poll_us) {
         ev = wire.advance_to(t, master);
         if (ev.kind != MasterEvent::None)
             break;
