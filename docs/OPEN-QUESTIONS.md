@@ -1445,3 +1445,30 @@ in the already-failing case and removes the amplification entirely; (a) is the s
 Recommend (b), with the bus-level count retained for diagnostics.
 **Ruling:** pending — human (trunk §7 semantics; affects health/SUSPECT accounting).
 **Supersedes:** none.
+
+---
+
+## 2026-09-05 — what should the Master do when the bus is NEVER idle for T_gap? (babble)
+
+**Context:** review round on #137 (red-team, HIGH). `fire_pending()` re-evaluates the
+gap-deferred transmit instant against the latest bus activity, so the engine never transmits
+on top of an arriving frame. The unhandled case is the opposite one: if a station keeps bytes
+on the wire continuously, `last_activity_ + T_gap` advances on every poll and the deferred
+instant is pushed out **indefinitely** — no transmission, no retry, no `Failed`, `busy()` true
+forever. trunk §3's "≥ T_gap of idle before transmitting" is physically unsatisfiable while
+that continues, so *some* deferral is correct; deferring silently and unboundedly is not.
+trunk §7 names babble as a failure mode, but this engine has no path to report it: the only
+outcomes it can produce today are `Answered` and `Failed{Timeout|CrcFailed}`.
+**Recommendation:** do NOT let a transaction sit in `PendingTransmit` indefinitely. Two
+candidate rulings: (a) bound the deferral and conclude `Failed{Timeout}` when the bus has not
+offered a T_gap window within the transaction's own budget — no new outcome type, smallest
+change; or (b) surface a distinct bus-fault outcome/health transition (trunk §7 BUS_FAULT) so
+the caller can tell "the node did not answer" from "the trunk was unusable". Recommend (b) as
+the spec-faithful answer with (a) as the interim, but BOTH are behaviour the spec should state
+rather than something the engine picks — hence this entry rather than a speculative fix.
+Deliberately NOT implemented in #137: two earlier attempts in that PR to reason out this
+engine's timing invariants unaided each introduced a regression the red team then found
+(narrowing `in_frame()`; and this unbounded deferral), which is the evidence that this
+particular invariant needs a stated rule, not another inference.
+**Ruling:** pending — human (trunk §7 babble semantics; may need a new MasterEvent outcome).
+**Supersedes:** none.

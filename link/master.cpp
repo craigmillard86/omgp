@@ -65,8 +65,8 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     // 0xFF: a separate `dst == 0xFF` branch ahead of it was unreachable — dead code, and an
     // un-killable mutant (PR #137 review, LOW). The subsumption is pinned structurally rather
     // than assumed, so it cannot lapse silently if kAddrCount ever changes:
-    static_assert(kAddrCount <= 0xFF,
-                  "kAddrCount must leave trunk §5's reserved 0xFF refused by dst >= kAddrCount");
+    static_assert(kAddrCount <= 0xFF, // literal-ok: trunk §5 reserved address, not an event code
+                  "kAddrCount must leave trunk §5's reserved address refused by dst >= kAddrCount");
     if (dst >= kAddrCount)
         return Status::ReservedAddress;
 
