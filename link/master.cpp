@@ -129,12 +129,11 @@ void Master::fire_pending(uint64_t now_us) {
     // fix in begin() above; kept as a second, independent guard against ever transmitting
     // at a backdated instant (PR #137 review, HIGH) should deadline_ ever again be computed
     // stale by some future caller of fire_pending.
-    // mutant-ok(equivalent): proved by construction, not by mutate.sh (blocked in this
-    // sandbox) — only reached when now_us >= deadline_ (the guard on the line above), so
-    // now_us > deadline_ picks now_us and now_us == deadline_ picks deadline_, which then
-    // equals now_us anyway: every relational flip of this comparison yields now_us either
-    // way, for every input this line can ever see.
     if (open_ && sub_phase_ == SubPhase::PendingTransmit && now_us >= deadline_)
+        // The guard above already establishes now_us >= deadline_, so this ternary's false
+        // branch (deadline_) only executes when the two are equal — the same value as the
+        // true branch either way.
+        // mutant-ok(equivalent, cxx_gt_to_ge): provably equivalent by the max() identity above.
         do_transmit(now_us > deadline_ ? now_us : deadline_);
 }
 
@@ -167,6 +166,11 @@ void Master::end_attempt(uint64_t last_activity_us, MasterEvent::Reason reason,
         // #137 review, MEDIUM) — not concluded a second time here.
         event.kind = MasterEvent::Failed;
         event.reason = reason;
+        // cxx_assign_const substitutes the type's zero value for an assignment's RHS
+        // (0/false/nullptr — see `written = 0`'s label in do_transmit()): open_ is already
+        // being assigned `false`, its own zero value, so the mutated statement is
+        // byte-for-byte identical to this one — nothing for any test to distinguish.
+        // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
         open_ = false;
     }
 }
@@ -233,6 +237,12 @@ MasterEvent Master::poll(uint64_t now_us) {
             event.kind = MasterEvent::Answered;
             event.response =
                 FrameFields{f.dst, f.src, f.response, f.retry, f.seq, f.len, response_buf_};
+            // cxx_assign_const substitutes the type's zero value for an assignment's RHS
+            // (0/false/nullptr — see `written = 0`'s label above): open_ is already being
+            // assigned `false`, its own zero value, so the mutated statement is
+            // byte-for-byte identical to this one. There is nothing for any test to
+            // distinguish (concurrent PR #137 review-fix pass, cross-checked here).
+            // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
             open_ = false;
             last_activity_ = byte_end_us;
             has_last_activity_ = true;

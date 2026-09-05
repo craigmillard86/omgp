@@ -991,6 +991,45 @@ TEST_CASE("a second begin() well after last_activity + T_gap transmits at the cu
     REQUIRE(master.stats(dst).timeouts == 0); // never spuriously timed out
 }
 
+TEST_CASE("a gap-deferred retry skipped over at poll() time transmits at the actual poll "
+          "instant, not the computed gap deadline",
+          "[timing:T_gap]") {
+    // Mirrors the begin()-side fix above (PR #137 review, HIGH) for fire_pending()'s OTHER
+    // caller: a retry scheduled by end_attempt() (data-model.md §4 "Gap") is just as exposed
+    // if the driving loop's next poll() lands well past the gap deadline instead of exactly on
+    // it. Two separate poll() calls are needed to isolate this: the first lands exactly at the
+    // (old) response deadline, which both times out attempt 0 AND computes the retry's gap
+    // deadline in the same call, leaving nothing to distinguish (data-model.md §4). Only a
+    // SECOND, later poll() call - with the retry already parked in PendingTransmit from the
+    // first - exercises fire_pending() with now_us strictly past its own deadline_.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x0D;
+    const Step silence[] = {{dst, Kind::Silence}};
+    wire.set_script(dst, silence, 1);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t payload[] = {0x09};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) * byte_us();
+    const uint64_t timeout_instant = tx_end + omgp::TRUNK_T_resp_us;
+
+    // Lands exactly at the response deadline: times out attempt 0 and schedules the retry
+    // (PendingTransmit, deadline_ = timeout_instant + T_gap) without yet transmitting it.
+    MasterEvent ev = wire.advance_to(timeout_instant, master);
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE(wire.transcript_size() == 1);
+
+    const uint64_t retry_gap_deadline = timeout_instant + omgp::TRUNK_T_gap_us;
+    const uint64_t later = retry_gap_deadline + 7 * byte_us();
+    ev = wire.advance_to(later, master);
+    REQUIRE(wire.transcript_size() == 2);
+    // Must transmit at `later` (now), never backdated to the already-elapsed gap deadline.
+    REQUIRE(wire.transcript(1).tx_start_us == later);
+    REQUIRE(wire.transcript(1).retry);
+}
+
 // --- Edge case: sequence number wrap ---------------------------------------------------
 
 TEST_CASE("new (non-retry) transactions to one destination use seq 0..15 then wrap to 0",
