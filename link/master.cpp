@@ -101,6 +101,7 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     // in this sandbox). (Rule 11 / PR #137 review, LOW: an earlier wording argued only the
     // a == b case, which on its own does not establish equivalence over the whole domain.)
     deadline_ = gap_elapsed_at > now ? gap_elapsed_at : now;
+    defer_cap_us_ = deadline_ + max_frame_us(); // bounded wait for an idle bus — see the member
     fire_pending(now);
     return Status::Ok;
 }
@@ -130,6 +131,10 @@ void Master::do_transmit(uint64_t at_us) {
     sub_phase_ = SubPhase::AwaitResponse;
     window_start_us_ = tx_end;
     deadline_ = tx_end + omgp::TRUNK_T_resp_us;
+}
+
+uint64_t Master::max_frame_us() const {
+    return static_cast<uint64_t>(kMaxWire) * byte_time_us(wire_.bit_rate());
 }
 
 bool Master::frame_arriving(uint64_t now_us) const {
@@ -193,6 +198,7 @@ void Master::end_attempt(uint64_t last_activity_us, MasterEvent::Reason reason,
         // (data-model.md §4 "Gap") — never terminal yet.
         sub_phase_ = SubPhase::PendingTransmit;
         deadline_ = last_activity_ + omgp::TRUNK_T_gap_us;
+        defer_cap_us_ = deadline_ + max_frame_us(); // as in begin() — see the member
         event.kind = MasterEvent::None;
     } else {
         // FR-011a: "transactions" is counted once, at do_transmit()'s first attempt (PR
@@ -327,6 +333,31 @@ MasterEvent Master::poll(uint64_t now_us) {
     if (open_ && sub_phase_ == SubPhase::AwaitResponse && event.kind == MasterEvent::None &&
         now_us >= deadline_ && !frame_pending_in_window) {
         end_attempt(deadline_, MasterEvent::Timeout, event);
+    }
+
+    // Babble bound (PR #137 red-team, HIGH; trunk §7 names babble as a failure mode).
+    // fire_pending() pushes a deferred transmission out for ongoing bus activity so the engine
+    // never drives the line over an arriving frame — but a station holding bytes on the wire
+    // continuously would otherwise push it out forever: no attempt, no retry, no outcome, and
+    // busy() true permanently. Past defer_cap_us_ (one worst-case frame beyond the instant this
+    // transmission was deferred to) the bus is not "briefly busy with a frame", it is
+    // unusable, so the transaction concludes rather than hanging.
+    //
+    // Terminal, not a retry: this attempt never reached the wire (attempt_count_ is untouched,
+    // so `transactions` — which FR-011a counts at first transmission — is correctly not
+    // counted either), and retrying into a bus that is still babbling would only extend the
+    // hang. Reported as Failed{Timeout} because that is the outcome the engine has today;
+    // distinguishing "the node did not answer" from "the trunk was unusable" needs a bus-fault
+    // outcome, which is a spec question recorded in docs/OPEN-QUESTIONS.md (2026-09-05).
+    if (open_ && sub_phase_ == SubPhase::PendingTransmit && event.kind == MasterEvent::None &&
+        now_us >= defer_cap_us_) {
+        stats_[dst_].timeouts++;
+        if (now_us > last_activity_)
+            last_activity_ = now_us;
+        has_last_activity_ = true;
+        event.kind = MasterEvent::Failed;
+        event.reason = MasterEvent::Timeout;
+        open_ = false;
     }
 
     fire_pending(now_us);

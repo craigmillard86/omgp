@@ -1244,6 +1244,60 @@ TEST_CASE("a response whose start bit arrives just inside T_resp is not timed ou
     REQUIRE(master.stats(dst).timeouts == 0);
 }
 
+// --- Liveness: continuous bus traffic must not defer a transmission forever
+// (PR #137 red-team, HIGH; trunk §7 babble) ---------------------------------------------
+
+TEST_CASE("continuous bus traffic cannot defer a transmission forever — the gap deferral is "
+          "bounded and the transaction concludes instead of hanging busy()",
+          "[link][timing:T_gap]") {
+    // fire_pending() pushes the deferred instant out for ongoing bus activity, so the engine
+    // never drives the line over an arriving frame. A station that holds bytes on the wire
+    // continuously would otherwise push it out on every poll: no attempt ever reaches the
+    // wire, no retry, no outcome, busy() true permanently. Deferring is right — trunk §3's
+    // ">= T_gap of idle" is unsatisfiable while that continues — but it is bounded at one
+    // worst-case frame (trunk §4) beyond the deferred instant: long enough for any single
+    // conforming frame already on the wire to finish, and no longer. Past that the bus is
+    // babble (trunk §7), not a frame worth waiting on.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x04;
+    const uint8_t payload[] = {0x5A};
+    Master master(wire, clock, omgp::ADDR_host);
+
+    // Babble: back-to-back bytes with no idle gap, long enough to outlast the bound. Content
+    // is irrelevant — every received byte is bus activity for the T_gap rule.
+    const uint64_t babble_start = 100;
+    std::vector<uint8_t> babble(400, 0x5A);
+    const uint64_t babble_end = babble_start + static_cast<uint64_t>(babble.size()) * byte_us();
+    wire.inject_bytes(babble.data(), babble.size(), babble_start);
+
+    // Let some babble land so last_activity_ is live, then open a transaction: it must defer.
+    wire.advance_to(babble_start + 5 * byte_us(), master);
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(master.busy());
+    REQUIRE(wire.transcript_size() == 0); // deferred, bus is busy
+
+    const uint64_t cap = static_cast<uint64_t>(kMaxWire) * byte_us();
+    // Sanity: the babble really does outlast the bound, so this is not vacuous.
+    REQUIRE(babble_end > clock.now_us() + omgp::TRUNK_T_gap_us + cap);
+
+    // Poll through the babble. Under the bug the deferred instant is pushed out on every poll
+    // and this loop never sees the transaction conclude.
+    MasterEvent ev{};
+    for (uint64_t t = clock.now_us() + 1; t <= babble_end; ++t) {
+        ev = wire.advance_to(t, master);
+        if (ev.kind != MasterEvent::None)
+            break;
+    }
+    REQUIRE(ev.kind == MasterEvent::Failed);
+    REQUIRE(ev.reason == MasterEvent::Timeout);
+    REQUIRE_FALSE(master.busy());         // concluded, not hung
+    REQUIRE(wire.transcript_size() == 0); // and never drove the line over the traffic
+    REQUIRE(master.stats(dst).timeouts == 1);
+    // FR-011a counts a transaction at its FIRST TRANSMISSION; this one never reached the wire.
+    REQUIRE(master.stats(dst).transactions == 0);
+}
+
 // --- US2 AC6 (response-bit-clear sub-case): a frame matching src/seq/dst but with the
 // response bit CLEAR is discarded by the f.response check (PR #137 review MEDIUM /
 // red-team, now reachable via raw injection — no T034 dependency) ----------------------
