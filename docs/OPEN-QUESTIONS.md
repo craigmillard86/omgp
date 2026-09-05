@@ -1476,3 +1476,56 @@ outcome/health transition, which changes `MasterEvent`'s contract and so wants a
 left unimplemented in #137. That is superseded by the above — (a) shipped, (b) did not.
 **Ruling:** pending — human (trunk §7 babble semantics; may need a new MasterEvent outcome).
 **Supersedes:** none.
+
+---
+
+## 2026-09-05 — Master under a never-idle bus: bounded courtesy, then transmit (supersedes the babble entry)
+
+**Context:** seventh review round on #137 (red-team at `afed239`, HIGH). The prior entry's
+option (a) — conclude `Failed{Timeout}` once the bus has "denied a T_gap window" for one
+worst-case frame — was the third bound of that shape to be falsified: sampled at `poll()`
+instants, ONE stray byte per superframe made the bus look permanently busy, so a cheap
+adversary (or a noisy line) blocked every transaction with a false "babble" outcome that
+the caller reads as a node failure. The common root cause of all three: the engine observes
+and transmits only at `poll()` instants, so any inference "the bus is unusable" drawn from
+those samples is spoofable or a false positive, and any `Failed` it synthesises is
+node-shaped. Two corrections to the record while here: (1) trunk §7 does NOT name babble —
+the prior entry's "trunk §7 names babble as a failure mode" is wrong; the only authoritative
+babble text is `specs/002-trunk-link-layer/spec.md` Edge Cases "Babble" ("the host discards
+everything that is not the polled node's frame; the transaction in progress fails or succeeds
+on its own merits; the babbling node's health is not adjusted on the host side"). (2)
+contiguity of bytes within a frame (which `fire_pending()`'s protection argument relies on)
+comes from spec.md's "Assumptions" transmission-time model, not trunk §4.
+**Reading adopted (implemented in #137):** trunk §3 makes the host the only initiator ("no
+multi-master arbitration, no CSMA, no token") and owes ≥ `T_gap` of idle after ITS OWN
+transactions (FR-010's head clause: "the end of one transaction … and the start of the
+next"). Deferring a transmission for bytes that are not the host's own is a courtesy on top
+of that, bounded at `defer_origin + max_frame + T_gap` — long enough for any single frame
+already on the wire at the deferred instant to finish AND receive its full gap (established
+by construction in `fire_pending()`; demonstrated by `tests/unit/test_link_master.cpp`'s
+"worst-case-length frame starting exactly at the deferred instant" case). Past the cap the
+engine transmits on schedule and the transaction fails or succeeds on its own merits.
+`MasterEvent::Failed` reasons stay exactly `Timeout | CrcFailed`; nothing is ever concluded
+from the bus state. A trunk that stays jammed is found the way trunk §7 designed: every node's
+transactions time out → BUS_FAULT via the per-node accounting (data-model §7).
+**Tension acknowledged:** FR-010's parenthetical ("last byte transmitted or received") read
+literally is unsatisfiable under continuous foreign traffic, so every option departs from a
+literal reading somewhere; this one departs only for a station that is itself violating §3.
+**Trade-off (assumed, re F3):** under a stuck driver each transaction now concludes after its
+full three attempts (≈17 ms at the superframe cadence) instead of the falsified bound's ≈1.7 ms
+false-Fail, so BUS_FAULT is reached ~10× later — in exchange no bus condition is ever misread
+as a node outcome.
+**Contract text:** `contracts/link-cpp.md` ("Master engine") and `data-model.md` §4 "Gap" are
+amended in #137 to state the bound, marked *pending a ruling*; their previous wording
+("deferred to that instant", "no earlier than `last_activity + T_gap`") described the
+unbounded behaviour. Ruling wanted on the reading AND the amendment together.
+**Still open (#138):** option (b) of the prior entry — a distinct bus-level outcome/counter so a
+caller can tell "node silent" from "trunk unusable" (also wanted by the CRC-attribution entry
+above for its bus-level count); and `begin()` transmitting without first draining the wire,
+which means the cap's protection guarantee for a fresh `begin()` assumes `poll(now)` ran
+immediately before it (true of every test and the intended F3 loop; not enforced). trunk §10
+(open questions) has six numbered items; this deserves a seventh — a human edit to an
+authoritative doc.
+**Ruling:** pending — human (trunk §3/§7 reading; contract amendment; T3 artefacts).
+**Supersedes:** the 2026-09-05 entry "what should the Master do when the bus is NEVER idle for
+T_gap? (babble)" — its option (a) is withdrawn as falsified; its option (b) remains open in #138.

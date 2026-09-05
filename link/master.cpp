@@ -161,24 +161,69 @@ void Master::fire_pending(uint64_t now_us) {
     if (!(open_ && sub_phase_ == SubPhase::PendingTransmit))
         return;
     // The bus must be idle for >= T_gap before the engine transmits (data-model.md §4 "Gap";
-    // trunk §3). The instant computed at defer time is only a LOWER bound — two things push
-    // it out, both re-evaluated on every poll (PR #137 red-team, MEDIUM: the deferred instant
-    // was computed once and never pushed back, so a frame arriving during the gap let the
-    // master transmit over an in-flight frame / 0 µs after a discarded one's last byte):
-    //  (1) a frame the drain loop already delivered/discarded during the deferral advanced
-    //      last_activity_ — never transmit with less than T_gap of idle after it;
-    if (has_last_activity_ && last_activity_ + omgp::TRUNK_T_gap_us > deadline_)
-        deadline_ = last_activity_ + omgp::TRUNK_T_gap_us;
+    // trunk §3). The instant computed at defer time is only a LOWER bound: activity the drain
+    // loop has since seen pushes it out, re-evaluated on every poll (PR #137 red-team, MEDIUM:
+    // the deferred instant was computed once and never pushed back, so a frame arriving during
+    // the gap let the master transmit over an in-flight frame / 0 µs after a discarded one's
+    // last byte). Never transmit with less than T_gap of idle after the last byte received.
+    //
     // That single clause is also what keeps the engine off a frame that is still ARRIVING
     // (PR #137 red-team, HIGH: the master drove the line into a frame another station had
     // already started). No second in-flight branch is needed here, and adding one would be an
     // unkillable duplicate (red-team M5): every received byte sets last_activity_ to that
-    // BYTE'S END, and within a frame bytes are contiguous — at any poll instant `now`, the
-    // last byte drained is the one with start <= now < start + byte_time, so its end is
+    // BYTE'S END, and within a frame bytes are contiguous (spec.md "Assumptions", transmission-
+    // time model: each byte starts where the previous one ended) — at any poll instant `now`,
+    // the last byte drained is the one with start <= now < start + byte_time, so its end is
     // strictly greater than `now`. Hence last_activity_ > now, and the deferred instant
     // (last_activity_ + T_gap) stays ahead of `now` for as long as bytes keep coming, at any
-    // bit rate. Proved by construction from the drain loop's unconditional recording plus
-    // contiguous framing (trunk §4) — not merely by the tests that exercise it.
+    // bit rate. Proved by construction from the drain loop's unconditional recording plus that
+    // contiguity — not merely by the tests that exercise it.
+    uint64_t want_us = deadline_;
+    if (has_last_activity_ && last_activity_ + omgp::TRUNK_T_gap_us > want_us)
+        want_us = last_activity_ + omgp::TRUNK_T_gap_us;
+
+    // ...but the push-out is BOUNDED (PR #137 red-team, HIGH: a station holding bytes on the
+    // wire continuously pushed the instant out on every poll — no attempt, no retry, no
+    // outcome, busy() true permanently). trunk §3: the host is the ONLY initiator ("no
+    // multi-master arbitration, no CSMA, no token"), and the >= T_gap of idle it owes is
+    // between ITS OWN transactions (FR-010's head clause). Deferring for activity that is not
+    // the host's own is a courtesy on top of that, and it ends one worst-case frame plus T_gap
+    // past the instant the transmission was first deferred to (defer_origin_us_): long enough
+    // for any single frame already on the wire at that instant to finish AND receive its full
+    // gap, and no longer. Past the cap the engine transmits on schedule and the transaction
+    // "fails or succeeds on its own merits" (spec.md Edge Cases, "Babble") — a station still
+    // occupying the wire then is a §3 violator, and a trunk that stays jammed is found by §7's
+    // failure accounting on the REAL outcomes (every node failing -> BUS_FAULT), never by this
+    // engine synthesising a Failed from how busy the bus looked at its poll instants. Three
+    // earlier revisions did exactly that and each was falsified: elapsed time abandoned idle-bus
+    // transactions at the superframe cadence; a stale deadline_ made the bound unreachable at
+    // that cadence; a single-instant "gap still denied" was held true forever by one stray byte
+    // per superframe. The engine observes and transmits only at poll() instants, so ANY
+    // inference "the bus is unusable" drawn from them is spoofable or a false positive, and any
+    // Failed it produces is read by the caller as a NODE outcome.
+    //
+    // What the cap establishes, each by construction from this function's contents:
+    //  - liveness: after this statement deadline_ <= cap_us always, so any poll at or after
+    //    cap_us transmits, whatever the cadence and whatever is on the wire;
+    //  - the cap can only LOWER the instant, so it never re-creates the elapsed-time misfire
+    //    on an idle bus (there want_us is already <= cap_us and is transmitted at unchanged);
+    //  - protection: a frame whose start bit lands at or before defer_origin_us_ + T_gap is
+    //    never transmitted over (its last byte ends by defer_origin + T_gap + max_frame, i.e.
+    //    no later than the cap), and one starting at or before defer_origin_us_ additionally
+    //    gets its full T_gap.
+    //    Any frame starting later than that is a §3 violator on every path into this state
+    //    (a retry's origin is already > T_turn_max past the polled node's window; a fresh
+    //    begin()'s origin is >= T_gap after the last byte seen).
+    // max_frame_us() is kMaxWire (142) byte times — the codec's sizing bound, deliberately
+    // above SC-008's 140-byte achievable worst case — recomputed here so a set_bit_rate()
+    // during the deferral is honoured at once (PR #137 review, LOW).
+    const uint64_t cap_us = defer_origin_us_ + max_frame_us() + omgp::TRUNK_T_gap_us;
+    // mutant-ok(equivalent, cxx_gt_to_ge): `a > b ? b : a` and `a >= b ? b : a` both compute
+    // min(a, b) for ALL inputs — they pick different branches only when a == b, where both
+    // branches yield the same value.
+    if (want_us > cap_us)
+        want_us = cap_us;
+    deadline_ = want_us;
     if (now_us >= deadline_)
         do_transmit(now_us);
 }
@@ -341,59 +386,6 @@ MasterEvent Master::poll(uint64_t now_us) {
     if (open_ && sub_phase_ == SubPhase::AwaitResponse && event.kind == MasterEvent::None &&
         now_us >= deadline_ && !frame_pending_in_window) {
         end_attempt(deadline_, MasterEvent::Timeout, event);
-    }
-
-    // Babble bound (PR #137 red-team, HIGH; trunk §7 names babble as a failure mode).
-    // fire_pending() pushes a deferred transmission out for ongoing bus activity so the engine
-    // never drives the line over an arriving frame — but a station holding bytes on the wire
-    // continuously would otherwise push it out forever: no attempt, no retry, no outcome, and
-    // busy() true permanently. Past defer_cap_us_ (one worst-case frame beyond the instant this
-    // transmission was originally deferred to) the bus is not "briefly busy with a frame", it is
-    // unusable, so the transaction concludes rather than hanging.
-    //
-    // The test is that the bus is STILL DENYING a gap window, not that time has passed
-    // (PR #137 red-team, HIGH — an elapsed-time-only guard could not tell "a station has held
-    // the wire for a frame time" from "nobody called poll() for a while", and since
-    // TRUNK_T_poll_us (2000) exceeds max_frame_us (1420), the documented superframe cadence
-    // (trunk §6) abandoned EVERY gap-deferred transaction and retry on a completely idle wire):
-    //   now_us >= defer_cap_us  — the whole wait budget really has elapsed, AND
-    //   gap_still_denied        — the bus has had activity within the last T_gap, so no window
-    //                             to transmit in has been offered (see its definition below).
-    // On an idle bus last_activity_ stays old, so gap_still_denied is false and this cannot
-    // fire — fire_pending() below transmits instead, however late the poll arrives. That is exactly
-    // the rule docs/OPEN-QUESTIONS.md (2026-09-05, babble) recommended: conclude only when the
-    // bus has not offered a T_gap window within the budget.
-    //
-    // Terminal, not a retry: this attempt never reached the wire (attempt_count_ is untouched,
-    // so `transactions` — which FR-011a counts at first transmission — is correctly not
-    // counted either), and retrying into a bus that is still babbling would only extend the
-    // hang. Reported as Failed{Timeout} because that is the outcome the engine has today;
-    // distinguishing "the node did not answer" from "the trunk was unusable" needs a bus-fault
-    // outcome, which is a spec question recorded in docs/OPEN-QUESTIONS.md and tracked in #138.
-    //
-    // No per-node counter is charged: the request never reached dst_, so booking it a timeout
-    // would mark an innocent node on a bus condition it had no part in — three of those feed
-    // trunk §7's "3 consecutive failed transactions -> SUSPECT" (PR #137 review, MEDIUM).
-    // Recording the bus condition itself belongs with the bus-fault outcome (#138).
-    const uint64_t defer_cap_us = defer_origin_us_ + max_frame_us();
-    // "The bus is still denying a gap window" is asked of last_activity_, which the drain loop
-    // above has just brought up to date — NOT of deadline_, which at this point still holds
-    // whatever the PREVIOUS poll()'s fire_pending() left there. Testing deadline_ made the
-    // condition `now_us - previous_poll < T_gap + byte_time` (~60 us), so any caller polling
-    // less often than that — including at TRUNK_T_poll_us (2000) — could never satisfy it and
-    // the wedge was fully intact at the documented cadence (PR #137 red-team, HIGH). Reading
-    // last_activity_ directly is cadence-independent: under continuous traffic the drain loop
-    // leaves it within a byte time of now_us, and on an idle bus it stays old.
-    const bool gap_still_denied =
-        has_last_activity_ && last_activity_ + omgp::TRUNK_T_gap_us > now_us;
-    if (open_ && sub_phase_ == SubPhase::PendingTransmit && event.kind == MasterEvent::None &&
-        now_us >= defer_cap_us && gap_still_denied) {
-        if (now_us > last_activity_)
-            last_activity_ = now_us;
-        has_last_activity_ = true;
-        event.kind = MasterEvent::Failed;
-        event.reason = MasterEvent::Timeout;
-        open_ = false;
     }
 
     fire_pending(now_us);

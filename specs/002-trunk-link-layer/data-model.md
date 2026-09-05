@@ -64,7 +64,7 @@ violations" clause is satisfied trivially (ruling Q1).
 Transaction { u8 dst; u8 seq; u8 attempt (0..2); u8 payload[64]; u8 len;
               u64 tx_start_us, tx_end_us; Outcome }
 Outcome ∈ { Pending, Answered, Failed(Timeout | Crc) }     -- Crc: last attempt saw a CRC-failed frame
-Master state ∈ { Idle, Transmitting(until tx_end), AwaitResponse(until tx_end + T_resp), Gap(until last_activity + T_gap) }
+Master state ∈ { Idle, Transmitting(until tx_end), AwaitResponse(until tx_end + T_resp), Gap(until min(last_activity + T_gap, defer_origin + max_frame + T_gap)) }
 ```
 
 - **Receive path**: `poll(now)` first drains `ByteWire::receive()` into the engine's
@@ -81,7 +81,15 @@ Master state ∈ { Idle, Transmitting(until tx_end), AwaitResponse(until tx_end 
 - **Gap**: `last_activity` = end of the accepted response's last byte, or the last
   byte of a discarded frame, or the timeout instant; `begin()` before `last_activity +
   T_gap` is accepted but transmission is deferred to that instant (the engine, not the
-  caller, guarantees the gap).
+  caller, guarantees the gap). `last_activity` advances with every byte received during the
+  deferral, so the engine never transmits over an arriving frame — but only up to a bound:
+  `defer_origin + max_frame + T_gap`, where `defer_origin` is the instant first deferred to
+  and `max_frame` is one worst-case frame (`kMaxWire` byte times at the current rate, trunk
+  §4 / SC-008). trunk §3 owes the gap after the host's OWN transactions; deferring for
+  anyone else's bytes is a courtesy, and past the cap the host transmits on schedule and
+  the transaction fails or succeeds on its own merits (spec.md Edge Cases "Babble"). No
+  outcome is ever derived from the bus state. *(Amended in PR #137 — pending a ruling, see
+  `docs/OPEN-QUESTIONS.md` 2026-09-05 "bounded courtesy".)*
 - **Events** returned by `poll(now)`: `None`, `Answered{payload view}`, `Failed{reason}`;
   each transaction yields exactly one terminal event.
 

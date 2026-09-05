@@ -81,7 +81,17 @@ Behaviour (tests assert each): a new transaction uses the destination's next 4-b
 sequence; retries reuse it and set `retry`; at most `TRUNK_retries` retries; response
 window `[tx_end, tx_end + TRUNK_T_resp_us)`; a CRC-failed frame in the window ends the
 attempt at once; frames failing any acceptance check are discarded and counted; the next
-transmission starts no earlier than `last_activity + TRUNK_T_gap_us`.
+transmission starts no earlier than `last_activity + TRUNK_T_gap_us`, where `last_activity`
+is re-read on every `poll()` so a byte arriving during the deferral pushes the instant out.
+That push-out is bounded: deferral for activity that is not the host's own ends at
+`defer_origin + max_frame + TRUNK_T_gap_us` (`defer_origin` = the instant the transmission
+was first deferred to; `max_frame` = `kMaxWire` byte times at the current rate — one
+worst-case frame, trunk §4 / SC-008), and past that the host transmits on schedule (trunk §3:
+the host is the only initiator, no CSMA; a station still occupying the wire is a §3
+violator, and the transaction proceeds "on its own merits", spec.md Edge Cases "Babble").
+`Failed` reasons remain exactly `Timeout | Crc`: the engine never concludes a transaction
+from the bus state. *(Amended in PR #137 — pending a ruling, see `docs/OPEN-QUESTIONS.md`
+2026-09-05 "bounded courtesy".)*
 
 ## Responder engine (`responder.hpp`) — trunk §3, §7
 
