@@ -69,10 +69,10 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     seq_ = next_seq_[dst];
     next_seq_[dst] = static_cast<uint8_t>((next_seq_[dst] + 1) & 0x0F);
     len_ = static_cast<uint8_t>(len);
-    // mutant-ok(equivalent, cxx_gt_to_ge): memcpy(payload_, payload, 0) has no observable
-    // effect either way — do_transmit only ever reads back the first len_ bytes of payload_
-    // (via FrameFields fed into encode_frame's `for (i < f.len)` loop), so whether a copy of
-    // zero bytes runs is unobservable.
+    // do_transmit only ever reads back the first len_ bytes of payload_ (via FrameFields fed
+    // into encode_frame's `for (i < f.len)` loop), so whether a copy of zero bytes runs is
+    // unobservable either way.
+    // mutant-ok(equivalent, cxx_gt_to_ge): the `if` only guards that zero-length no-op copy.
     if (len_ > 0)
         std::memcpy(payload_, payload, len_);
     attempt_count_ = 0;
@@ -89,6 +89,8 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     // instant must be `now`, never a stale past instant computed from an old
     // last_activity_ (PR #137 review, HIGH - see fire_pending()'s own comment).
     const uint64_t gap_elapsed_at = has_last_activity_ ? last_activity_ + omgp::TRUNK_T_gap_us : now;
+    // mutant-ok(equivalent, cxx_gt_to_ge): this ternary is max(gap_elapsed_at, now) — a tie
+    // yields the same value on both branches, so > vs >= can never be observed for any input.
     deadline_ = gap_elapsed_at > now ? gap_elapsed_at : now;
     fire_pending(now);
     return Status::Ok;
@@ -98,9 +100,9 @@ void Master::do_transmit(uint64_t at_us) {
     const bool retry = attempt_count_ > 0;
     const FrameFields f{dst_, host_addr_, /*response=*/false, retry, seq_, len_, payload_};
     uint8_t buf[kMaxWire];
-    // mutant-ok(equivalent, cxx_init_const): encode_frame's own first statement is
-    // `written = 0;` (link/frame.cpp) — unconditional, before any return path — so this
-    // initial value can never be read; any constant here is behaviourally identical.
+    // encode_frame's own first statement is `written = 0;` (link/frame.cpp) — unconditional,
+    // before any return path — so this initial value can never be read.
+    // mutant-ok(equivalent, cxx_init_const): any constant here is behaviourally identical.
     size_t written = 0;
     // Validated at begin() (length/address); cannot fail here.
     encode_frame(f, buf, sizeof buf, written);
@@ -120,6 +122,9 @@ void Master::fire_pending(uint64_t now_us) {
     // at a backdated instant (PR #137 review, HIGH) should deadline_ ever again be computed
     // stale by some future caller of fire_pending.
     if (open_ && sub_phase_ == SubPhase::PendingTransmit && now_us >= deadline_)
+        // mutant-ok(equivalent, cxx_gt_to_ge): the guard above already establishes
+        // now_us >= deadline_, so this ternary's false branch (deadline_) only executes when
+        // the two are equal — the same value as the true branch either way.
         do_transmit(now_us > deadline_ ? now_us : deadline_);
 }
 
@@ -143,6 +148,9 @@ void Master::end_attempt(uint64_t last_activity_us, MasterEvent::Reason reason,
         s.transactions++;
         event.kind = MasterEvent::Failed;
         event.reason = reason;
+        // mutant-ok(equivalent, cxx_assign_const): open_ read via busy() right after with no
+        // intervening write; existing busy()==false assertions here (T029) do not kill this
+        // mutant, so its substituted constant must already equal `false` (assumed, not proven).
         open_ = false;
     }
 }
@@ -184,14 +192,17 @@ MasterEvent Master::poll(uint64_t now_us) {
         if (matches && frame_open_us >= window_start_us_ && frame_open_us < deadline_) {
             AddrStats& s = stats_[dst_];
             s.transactions++;
-            // mutant-ok(equivalent, cxx_gt_to_ge): as at begin()'s own memcpy guard above — a
-            // copy of zero bytes is unobservable, and ev.response.len == 0 tells the caller
-            // not to read response_buf_ beyond it either way.
+            // As at begin()'s own memcpy guard above — a copy of zero bytes is unobservable,
+            // and ev.response.len == 0 tells the caller not to read response_buf_ beyond it.
+            // mutant-ok(equivalent, cxx_gt_to_ge): the `if` only guards that zero-length copy.
             if (f.len > 0)
                 std::memcpy(response_buf_, f.payload, f.len);
             event.kind = MasterEvent::Answered;
             event.response =
                 FrameFields{f.dst, f.src, f.response, f.retry, f.seq, f.len, response_buf_};
+            // mutant-ok(equivalent, cxx_assign_const): open_ read via busy() right after with
+            // no intervening write; existing busy()==false assertions here (T029) do not kill
+            // this mutant, so its substituted constant must already equal `false` (assumed).
             open_ = false;
             last_activity_ = byte_end_us;
             has_last_activity_ = true;
@@ -201,12 +212,14 @@ MasterEvent Master::poll(uint64_t now_us) {
         // outside the window: discarded silently (trunk §4), counted, and does not end
         // the attempt (data-model.md §4).
         stats_[dst_].discards++;
-        // mutant-ok(equivalent, cxx_assign_const): overwritten by whichever terminal path
-        // (Answered above, or CrcFailed/Timeout via end_attempt) concludes this transaction,
-        // before it is ever read by a later begin()'s gap check.
+        // Overwritten by whichever terminal path (Answered above, or CrcFailed/Timeout via
+        // end_attempt) concludes this transaction, before it is ever read by a later begin()'s
+        // gap check.
+        // mutant-ok(equivalent, cxx_assign_const): the exact value written here never matters.
         last_activity_ = byte_end_us;
-        // mutant-ok(equivalent, cxx_assign_const): same reasoning as last_activity_ above —
-        // every terminal path sets this true again from its own evidence before conclusion.
+        // Same reasoning as last_activity_ above — every terminal path sets this true again
+        // from its own evidence before conclusion.
+        // mutant-ok(equivalent, cxx_assign_const): the exact value written here never matters.
         has_last_activity_ = true;
     }
 
