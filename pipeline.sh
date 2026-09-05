@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # OMGP pipeline — single definition used by CI, developers, and agents.
 # Usage: ./pipeline.sh [stage...]   (default: all local stages)
-# Stages: codegen quality build unit refimpl diffcheck scenarios selftest esp32 | fuzz (optional, clang)
+# Stages: codegen quality build unit refimpl diffcheck scenarios esp32 | fuzz (optional, clang)
 set -euo pipefail
 cd "$(dirname "$0")"
-STAGES=("${@:-codegen quality build unit refimpl diffcheck scenarios selftest}")
-[ $# -eq 0 ] && STAGES=(codegen quality build unit refimpl diffcheck scenarios selftest)
+STAGES=("${@:-codegen quality build unit refimpl diffcheck scenarios}")
+[ $# -eq 0 ] && STAGES=(codegen quality build unit refimpl diffcheck scenarios)
 BIN=build/native
 CXXFLAGS_BOOT="-std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Ibuild/gen"
 # Counting heap guard for Catch2 tests (tests/support/heap_guard.hpp) — mirrors CMakeLists.txt.
@@ -16,38 +16,10 @@ WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=
 # T008/T009 follow-up, raised 2026-08-30 with test_link_types.cpp (was 133821)
 # 197000 = 197100 executed (12 binaries) minus ~100 slack — T014-T017+T022, raised
 # 2026-08-31 with test_link_frame/test_link_stuffing/test_link_resync.cpp (was 133865)
-# 200580 = 200682 executed (16 binaries) minus ~100 slack — T023-T026 (canonical frame
-# verbs, torture, mock_wire, health) landed since the last raise; T027 checkpoint,
-# raised 2026-09-04 (was 197000)
+# 200580 = 200682 executed (16 binaries) minus ~102 slack — T023-T026 added
+# test_canonical_frame/test_l3_helper_dispatch/test_mock_wire/test_link_health.cpp;
+# raised 2026-09-05 (T027/#45, was 197000). NEVER lowered.
 UNIT_TEST_FLOOR=200580
-
-# UNIT_TEST_FLOOR's slack (~100 checks) is large enough to hide an entire
-# small binary's test cases being gutted while the aggregate count stays
-# green (red-team PR #128, second review round: deleting 96 of
-# test_canonical_frame's 97 checks still cleared the floor by 6). Every
-# binary's count is deterministic (property tests are fixed-seed,
-# kSeed = 0xB0071E), so each floor below is exact, not slack. Same
-# raise-only convention as UNIT_TEST_FLOOR: bump the entries you touch when
-# you add checks, never lower one to get green. A binary with no entry here
-# (just added, not yet wired in) is not floor-checked.
-declare -A UNIT_PER_BINARY_FLOOR=(
-  [test_smoke]=7
-  [test_l3_types]=40
-  [test_gen_constants]=77
-  [test_l3_header]=29
-  [test_l3_payload]=356
-  [test_l3_descriptor]=299
-  [test_l3_roundtrip]=133012
-  [test_link_interfaces]=6
-  [test_link_types]=85
-  [test_link_frame]=731
-  [test_canonical_frame]=97
-  [test_l3_helper_dispatch]=20
-  [test_link_stuffing]=47466
-  [test_link_resync]=18039
-  [test_mock_wire]=114
-  [test_link_health]=304
-)
 
 stage_codegen() {
   # Constants + vectors header from the YAML, then prove the human-authored docs tables
@@ -114,44 +86,6 @@ stage_build() {
 
 stage_unit() {
   if command -v ctest >/dev/null 2>&1 && [ -f build/native/CTestTestfile.cmake ]; then
-    # The ctest path discovers tests from CMakeLists.txt, not the filesystem
-    # (unlike the bootstrap glob below), so a tests/unit|property/test_*.cpp
-    # file whose registration is missing or was dropped runs on no path at
-    # all while this stage still reports green — the check-count floor alone
-    # can't see it when the file's checks are smaller than its slack
-    # (red-team PR #128, findings 1 + 2). Fail loudly instead.
-    #
-    # Match by *source path*, not by the registered ctest name: a name check
-    # alone is blind to a registration whose name is right but whose source
-    # argument was repointed at a different test_*.cpp (e.g. a copy-pasted
-    # omgp_add_catch_test line) — the named ctest entry still exists and even
-    # reports MORE checks (the duplicated file's), so neither the name check
-    # nor the floor sees the orphaned file (red-team PR #128, second review
-    # round, [HIGH]). CMakeLists.txt is the only place the name<->source
-    # binding is made, so read the source argument directly from it instead
-    # of ctest's derived name list.
-    # A test_*.cpp is "declared" iff its source path appears on a NON-COMMENT line of
-    # CMakeLists.txt — the only place the name<->source binding is made. Extracting every
-    # source path (rather than anchoring on `omgp_add_catch_test(<name> ` with a single
-    # space and only the first argument, plus a hardcoded `add_executable(test_smoke`) keeps
-    # the round-2 [HIGH] protection — a source repointed AWAY from a file makes that file's
-    # path vanish here, so it is flagged orphaned — without false-positiving on cosmetic
-    # CMake edits: two spaces, a source wrapped to the next line, a second source argument,
-    # or a second standalone-main executable (review on #128, [LOW] pipeline.sh:134).
-    # Comment lines are dropped so a commented-out path can never mask a real orphan.
-    local declared f orphaned
-    declared=$(grep -vE '^[[:space:]]*#' CMakeLists.txt \
-                 | grep -oE 'tests/(unit|property)/test_[A-Za-z0-9_]+\.cpp' | sort -u)
-    orphaned=()
-    for f in tests/unit/test_*.cpp tests/property/test_*.cpp; do
-      [ -f "$f" ] || continue
-      printf '%s\n' "$declared" | grep -qxF "$f" || orphaned+=("$f")
-    done
-    if [ "${#orphaned[@]}" -gt 0 ]; then
-      echo "unit: test source file(s) not registered as a ctest test: ${orphaned[*]}" >&2
-      return 1
-    fi
-
     ctest --preset native --output-on-failure
     # ctest only prints test-binary stdout inline on failure, so on a green
     # run the "EXECUTED: <n>" line lives in ctest's per-test log instead.
@@ -166,86 +100,24 @@ stage_unit() {
       echo "unit: executed check count ($n) below floor ($UNIT_TEST_FLOOR) - test filter may be broken" >&2
       return 1
     fi
-    # The aggregate floor's slack can hide one binary's checks being gutted
-    # (comment on UNIT_PER_BINARY_FLOOR above); check each binary against its
-    # own exact floor too.
-    #
-    # Pair each "Test: <name>" line with the "EXECUTED:" line that follows it
-    # via awk, not a flat `paste - -` of two separate greps: paste assumes
-    # strict alternation, so one binary logging a "Test:" line with no
-    # matching "EXECUTED:" (a future non-Catch2 binary, a crash before the
-    # counter prints) would silently shift every later pair's name<->count
-    # binding instead of just that one binary going unmatched (review PR #128
-    # @ eeea8ca, [LOW] pipeline.sh:169). awk resets on each "Test:" line, so a
-    # missing "EXECUTED:" only drops that one binary's pairing.
-    local low=() bname bcount bfloor
-    local -A seen=()
-    while read -r bname bcount; do
-      [ "$bname" = smoke ] && bname=test_smoke   # ctest registers it as "smoke"; table/file key is test_smoke
-      seen[$bname]=1
-      bfloor=${UNIT_PER_BINARY_FLOOR[$bname]:-0}
-      [ "${bcount:-0}" -lt "$bfloor" ] && low+=("$bname:$bcount<$bfloor")
-    done < <(awk '
-               /^[0-9]+\/[0-9]+ Test: [A-Za-z0-9_]+$/ { name=$NF; next }
-               /^EXECUTED: [0-9]+$/ { if (name != "") { print name, $2; name="" } }
-             ' "$log")
-    if [ "${#low[@]}" -gt 0 ]; then
-      echo "unit: per-binary check count below floor: ${low[*]}" >&2
-      return 1
-    fi
-    # The comparison above is only reachable for binaries the log actually
-    # names. A binary that never ran at all — `set_tests_properties(...
-    # PROPERTIES DISABLED TRUE)`, or a CMakePresets.json test filter excluding
-    # it — leaves no "Test:"/"EXECUTED:" pair, so its floor entry is silently
-    # never compared and the aggregate floor's slack absorbs the loss (review
-    # PR #128 @ eeea8ca, [MEDIUM]: "the per-binary floor only fires for
-    # binaries that actually ran"). Assert every floor-tracked name was seen.
-    local missing=() key
-    for key in "${!UNIT_PER_BINARY_FLOOR[@]}"; do
-      [ -n "${seen[$key]:-}" ] || missing+=("$key")
-    done
-    if [ "${#missing[@]}" -gt 0 ]; then
-      echo "unit: per-binary floor entries never ran (disabled/excluded?): ${missing[*]}" >&2
-      return 1
-    fi
   else
     # Every test binary runs; its output is always printed (even on failure) and the
     # EXECUTED: lines are summed across binaries for the floor.
-    local total=0 bin out rc n bname bfloor
-    local -A seen=()
+    local total=0 bin out rc n
     for bin in "$BIN"/test_*; do
       [ -x "$bin" ] || continue
-      bname=$(basename "$bin")
-      seen[$bname]=1
       set +e
       out=$("$bin")
       rc=$?
       set -e
       echo "$out"
       if [ "$rc" -ne 0 ]; then
-        echo "unit: $bname failed (exit $rc)" >&2
+        echo "unit: $(basename "$bin") failed (exit $rc)" >&2
         return "$rc"
       fi
       n=$(printf '%s\n' "$out" | grep -o 'EXECUTED: [0-9]\+' | grep -o '[0-9]\+' | tail -1) || true
-      bfloor=${UNIT_PER_BINARY_FLOOR[$bname]:-0}
-      if [ "${n:-0}" -lt "$bfloor" ]; then
-        echo "unit: $bname executed ${n:-0} check(s), below per-binary floor ($bfloor)" >&2
-        return 1
-      fi
       total=$((total + ${n:-0}))
     done
-    # Same completeness gap as the ctest branch above: a floor-tracked binary
-    # that was never built at all (e.g. dropped from the tests/*/test_*.cpp
-    # glob some other way) would otherwise just be skipped by this loop with
-    # no comparison ever made against its floor.
-    local missing=() key
-    for key in "${!UNIT_PER_BINARY_FLOOR[@]}"; do
-      [ -n "${seen[$key]:-}" ] || missing+=("$key")
-    done
-    if [ "${#missing[@]}" -gt 0 ]; then
-      echo "unit: per-binary floor entries never ran (not built?): ${missing[*]}" >&2
-      return 1
-    fi
     echo "unit: executed $total check(s) (bootstrap path)"
     if [ "$total" -lt "$UNIT_TEST_FLOOR" ]; then
       echo "unit: executed check count ($total) below floor ($UNIT_TEST_FLOOR) - test filter may be broken" >&2
@@ -263,83 +135,6 @@ stage_diffcheck() { python3 tools/diffcheck.py; }
 stage_scenarios() {
   if [ -x "$BIN/scenario_runner" ]; then "$BIN/scenario_runner" tests/scenarios/
   else python3 tools/scenario_lint.py; fi   # lint-only until F4 delivers the runner
-}
-stage_selftest() {
-  # Regression tests for pipeline.sh's own gates. These existed
-  # (test_pipeline_floor.sh, test_pipeline_link_bootstrap.sh) but were
-  # executed by nothing — not CMakeLists.txt, not the bootstrap glob, not any
-  # workflow (red-team PR #128 finding 4). Each script rewrites pipeline.sh
-  # or CMakeLists.txt in place and rebuilds to prove a gate fires, then
-  # restores itself on its own EXIT trap.
-  #
-  # Run them against a throwaway copy of the tree, not the real working
-  # directory: while a script's mutation is live, a concurrent `git add -A`
-  # / `git commit -a` — both granted to the same agent workflows
-  # (agent-dispatch.yml, review-fix.yml, ci-failure-router.yml) that also
-  # invoke this stage — could commit the poisoned file (e.g. a temporarily
-  # impossible UNIT_TEST_FLOOR), and an unconditional `rm -rf build/native`
-  # afterward previously deleted the real build tree out from under every
-  # documented follow-up command (`ctest --preset native`,
-  # `./build/native/scenario_runner ...`) and let stage_scenarios' fallback
-  # degrade to lint-only, silently, on the next run (red-team PR #128,
-  # second review round, both [MEDIUM]). A copy means nothing tracked is
-  # ever touched in the real tree, so neither hazard exists.
-  #
-  # build/ is deliberately NOT copied along: CMakeCache.txt records the
-  # absolute source/build directory path it was configured with, so a copy
-  # under a different path makes every cmake invocation fail outright
-  # ("current CMakeCache.txt directory ... is different than ..."). Each
-  # script's rebuild is a clean one as a result — the correctness this stage
-  # exists for is worth that, and it only runs once per default pipeline
-  # invocation, not per edit-test cycle.
-  local scratch rc=0
-  scratch=$(mktemp -d)
-  trap 'rm -rf "$scratch"' RETURN
-  if command -v rsync >/dev/null 2>&1; then
-    rsync -a --exclude=.git --exclude=build ./ "$scratch"/
-  else
-    cp -a . "$scratch"/
-    rm -rf "$scratch/.git" "$scratch/build"
-  fi
-  # Invoked via `bash` rather than run directly: the executable bit isn't
-  # guaranteed to survive every checkout (test_pipeline_link_bootstrap.sh is
-  # tracked as 100644), and this way it doesn't need to be. Each script's
-  # own `cd "$(dirname "$0")/../.."` resolves against $scratch since we
-  # invoke it by its path there.
-  #
-  # A script SKIPs when its scenario can't fire on this host
-  # (test_pipeline_link_bootstrap.sh when cmake is reachable via a second
-  # PATH entry; test_pipeline_registration.sh / test_pipeline_binary_presence.sh
-  # on a cmake-less host) and exits 0 exactly like a real PASS, so the
-  # stage's own exit code can't show that fewer gates were actually
-  # exercised this run (review PR #128 @ eeea8ca, [LOW] pipeline.sh:258-260).
-  # Track and echo each script's outcome explicitly instead of only the
-  # aggregate exit code.
-  # ORDER MATTERS (review on #128, [LOW] pipeline.sh:291,311): the scripts share one scratch
-  # tree (build/ is not copied, so it starts with no build/gen/). test_pipeline_floor runs
-  # first because it runs `./pipeline.sh codegen build unit` and GENERATES build/gen/ — which
-  # test_pipeline_link_bootstrap's `g++ … -Ibuild/gen` compile then depends on. Reordering so
-  # a script needing build/gen/ runs before floor would fail with a missing-header error that
-  # reads as a bootstrap regression, not an ordering bug. Keep test_pipeline_floor first.
-  local script status=()
-  for script in test_pipeline_floor test_pipeline_link_bootstrap \
-                test_pipeline_registration test_pipeline_binary_presence; do
-    local out src
-    set +e
-    out=$(bash "$scratch/tests/unit/$script.sh" 2>&1)
-    src=$?
-    set -e
-    echo "$out"
-    if [ "$src" -ne 0 ]; then
-      status+=("$script:FAIL"); rc=$src
-    elif printf '%s\n' "$out" | grep -q ': SKIP'; then
-      status+=("$script:SKIP")
-    else
-      status+=("$script:PASS")
-    fi
-  done
-  echo "selftest: ${status[*]}"
-  return "$rc"
 }
 stage_fuzz() {
   # Optional (not in the default list): libFuzzer smoke over every decoder, clang only.

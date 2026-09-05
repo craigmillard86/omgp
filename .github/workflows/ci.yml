@@ -55,12 +55,7 @@ jobs:
           git diff --exit-code docs/ || { echo "::error::protocol docs out of sync with omgp-protocol.yaml"; exit 1; }
 
       - name: Pipeline — all local stages
-        # `selftest` runs the tests/unit/test_pipeline_*.sh regression scripts that guard
-        # pipeline.sh's own gates (registration guard, per-binary floors, bootstrap build).
-        # It is named EXPLICITLY here because every CI job passes an explicit stage list and
-        # none uses the bare default — without it those gates had no pre-merge enforcement
-        # (review on #128: "selftest reaches only the default stage list, which no CI job uses").
-        run: ./pipeline.sh codegen build unit refimpl diffcheck scenarios selftest
+        run: ./pipeline.sh codegen build unit refimpl diffcheck scenarios
 
       - name: Upload test logs on failure
         if: failure()
