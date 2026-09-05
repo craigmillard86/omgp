@@ -238,6 +238,75 @@ TEST_CASE("after a terminal Failed{Timeout}, transactions is counted, busy() cle
     REQUIRE_FALSE(wire.transcript(3).retry);
 }
 
+// --- data-model.md §4: Outcome distinguishes Failed{Timeout} from Failed{Crc} ----------
+
+TEST_CASE("a Failed transaction whose final attempt saw a CRC failure reports "
+          "reason == CrcFailed, not Timeout",
+          "[link]") {
+    // Mutation testing (red-team #137, MEDIUM): `event.reason = reason;` in end_attempt()
+    // mutated to always assign MasterEvent::Timeout survives every existing test, because
+    // every terminal Failed{...} case here happens to fail via timeout.
+    // data-model.md §4 "Outcome ∈ {..., Failed(Timeout | Crc)}" makes this distinction
+    // load-bearing: a `core/` health tracker needs it to tell "the node is mute"
+    // (SUSPECT/OFFLINE, trunk §6/§7) from "the bus is noisy".
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x0F;
+    const Step crc[] = {{dst, Kind::CrcError}, {dst, Kind::CrcError}, {dst, Kind::CrcError}};
+    wire.set_script(dst, crc, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t payload[] = {0x22};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    uint64_t tx_end = static_cast<uint64_t>(
+        request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us());
+    MasterEvent ev{};
+    for (uint32_t attempt = 0; attempt <= omgp::TRUNK_retries; ++attempt) {
+        const uint64_t crc_end = response_full_end(tx_end, dst, 0, payload, sizeof payload);
+        ev = wire.advance_to(crc_end, master);
+        if (attempt < omgp::TRUNK_retries) {
+            REQUIRE(ev.kind == MasterEvent::None);
+            const uint64_t retry_start = crc_end + omgp::TRUNK_T_gap_us;
+            wire.advance_to(retry_start, master);
+            tx_end = retry_start +
+                    static_cast<uint64_t>(
+                        request_bytes(dst, 0, true, payload, sizeof payload).size()) *
+                        byte_us();
+        }
+    }
+    REQUIRE(ev.kind == MasterEvent::Failed);
+    REQUIRE(ev.reason == MasterEvent::CrcFailed);
+    REQUIRE(master.stats(dst).crc_failures == omgp::TRUNK_retries + 1);
+    REQUIRE(master.stats(dst).timeouts == 0);
+}
+
+TEST_CASE("the Answered event's response header (dst/src/seq/retry) is pinned, not just "
+          "its payload",
+          "[link]") {
+    // Mutation testing (red-team #137, MEDIUM): swapping response.dst/response.src,
+    // flipping response.retry, or XORing response.seq all survive today - only
+    // response.len/response.payload are asserted anywhere in this suite. A consumer
+    // reading ev.response.src to identify the answering node would get the host's own
+    // address instead, and nothing here would notice.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x02;
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t payload[] = {0x44};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end = static_cast<uint64_t>(
+        request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us());
+    const uint64_t full_end = response_full_end(tx_end, dst, 0, payload, sizeof payload);
+
+    MasterEvent ev = wire.advance_to(full_end, master);
+    REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(ev.response.dst == omgp::ADDR_host); // the host, not the answering node
+    REQUIRE(ev.response.src == dst);             // the answering node, not the host
+    REQUIRE(ev.response.seq == 0);
+    REQUIRE_FALSE(ev.response.retry); // MockWire's responses never set retry (schedule_respond)
+}
+
 // --- Edge case: the T_resp window is exclusive at its end ----------------------------
 
 TEST_CASE("a response at tx_end + T_resp - 1 is accepted; at tx_end + T_resp it is missed",
