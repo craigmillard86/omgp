@@ -17,9 +17,26 @@
 #      tests/property/ file to cover that glob arm too (a name-only check
 #      previously exercised tests/unit/ alone).
 #
-# Usage: tests/unit/test_pipeline_registration.sh   (run from repo root or anywhere)
+# Usage: ./pipeline.sh selftest   (invokes this from a scratch copy of the tree)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+
+# The guard this test proves lives entirely in stage_unit's ctest branch
+# (`command -v ctest && [ -f build/native/CTestTestfile.cmake ]`); the
+# bootstrap g++ branch has no registration concept at all — it just globs
+# every tests/*/test_*.cpp file and builds it, so there is nothing for a
+# missing-registration scenario to catch there. On a cmake-less host all
+# three scenarios below take the bootstrap branch, `./pipeline.sh codegen
+# build unit` exits 0 exactly as CLAUDE.md says it should, and this test
+# would report FAIL for a gate that cannot fire on that host (review PR #128
+# @ eeea8ca, [MEDIUM]: "no cmake guard, so a default ./pipeline.sh fails on
+# the documented cmake-less host"). Mirrors test_pipeline_link_bootstrap.sh's
+# SKIP for the same reason, in the opposite direction (that script needs
+# cmake absent; this one needs it present).
+if ! command -v cmake >/dev/null 2>&1 || ! command -v ctest >/dev/null 2>&1; then
+  echo "test_pipeline_registration: SKIP — no cmake/ctest on this host; the ctest-path registration guard this test exercises only applies there"
+  exit 0
+fi
 
 CMAKELISTS=CMakeLists.txt
 BACKUP=$(mktemp)

@@ -160,34 +160,64 @@ stage_unit() {
     # The aggregate floor's slack can hide one binary's checks being gutted
     # (comment on UNIT_PER_BINARY_FLOOR above); check each binary against its
     # own exact floor too.
+    #
+    # Pair each "Test: <name>" line with the "EXECUTED:" line that follows it
+    # via awk, not a flat `paste - -` of two separate greps: paste assumes
+    # strict alternation, so one binary logging a "Test:" line with no
+    # matching "EXECUTED:" (a future non-Catch2 binary, a crash before the
+    # counter prints) would silently shift every later pair's name<->count
+    # binding instead of just that one binary going unmatched (review PR #128
+    # @ eeea8ca, [LOW] pipeline.sh:169). awk resets on each "Test:" line, so a
+    # missing "EXECUTED:" only drops that one binary's pairing.
     local low=() bname bcount bfloor
+    local -A seen=()
     while read -r bname bcount; do
       [ "$bname" = smoke ] && bname=test_smoke   # ctest registers it as "smoke"; table/file key is test_smoke
+      seen[$bname]=1
       bfloor=${UNIT_PER_BINARY_FLOOR[$bname]:-0}
       [ "${bcount:-0}" -lt "$bfloor" ] && low+=("$bname:$bcount<$bfloor")
-    done < <(grep -E '^[0-9]+/[0-9]+ Test: [A-Za-z0-9_]+$|^EXECUTED: [0-9]+$' "$log" \
-               | sed -E 's#^[0-9]+/[0-9]+ Test: ##; s/^EXECUTED: //' | paste - -)
+    done < <(awk '
+               /^[0-9]+\/[0-9]+ Test: [A-Za-z0-9_]+$/ { name=$NF; next }
+               /^EXECUTED: [0-9]+$/ { if (name != "") { print name, $2; name="" } }
+             ' "$log")
     if [ "${#low[@]}" -gt 0 ]; then
       echo "unit: per-binary check count below floor: ${low[*]}" >&2
+      return 1
+    fi
+    # The comparison above is only reachable for binaries the log actually
+    # names. A binary that never ran at all — `set_tests_properties(...
+    # PROPERTIES DISABLED TRUE)`, or a CMakePresets.json test filter excluding
+    # it — leaves no "Test:"/"EXECUTED:" pair, so its floor entry is silently
+    # never compared and the aggregate floor's slack absorbs the loss (review
+    # PR #128 @ eeea8ca, [MEDIUM]: "the per-binary floor only fires for
+    # binaries that actually ran"). Assert every floor-tracked name was seen.
+    local missing=() key
+    for key in "${!UNIT_PER_BINARY_FLOOR[@]}"; do
+      [ -n "${seen[$key]:-}" ] || missing+=("$key")
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+      echo "unit: per-binary floor entries never ran (disabled/excluded?): ${missing[*]}" >&2
       return 1
     fi
   else
     # Every test binary runs; its output is always printed (even on failure) and the
     # EXECUTED: lines are summed across binaries for the floor.
     local total=0 bin out rc n bname bfloor
+    local -A seen=()
     for bin in "$BIN"/test_*; do
       [ -x "$bin" ] || continue
+      bname=$(basename "$bin")
+      seen[$bname]=1
       set +e
       out=$("$bin")
       rc=$?
       set -e
       echo "$out"
       if [ "$rc" -ne 0 ]; then
-        echo "unit: $(basename "$bin") failed (exit $rc)" >&2
+        echo "unit: $bname failed (exit $rc)" >&2
         return "$rc"
       fi
       n=$(printf '%s\n' "$out" | grep -o 'EXECUTED: [0-9]\+' | grep -o '[0-9]\+' | tail -1) || true
-      bname=$(basename "$bin")
       bfloor=${UNIT_PER_BINARY_FLOOR[$bname]:-0}
       if [ "${n:-0}" -lt "$bfloor" ]; then
         echo "unit: $bname executed ${n:-0} check(s), below per-binary floor ($bfloor)" >&2
@@ -195,6 +225,18 @@ stage_unit() {
       fi
       total=$((total + ${n:-0}))
     done
+    # Same completeness gap as the ctest branch above: a floor-tracked binary
+    # that was never built at all (e.g. dropped from the tests/*/test_*.cpp
+    # glob some other way) would otherwise just be skipped by this loop with
+    # no comparison ever made against its floor.
+    local missing=() key
+    for key in "${!UNIT_PER_BINARY_FLOOR[@]}"; do
+      [ -n "${seen[$key]:-}" ] || missing+=("$key")
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+      echo "unit: per-binary floor entries never ran (not built?): ${missing[*]}" >&2
+      return 1
+    fi
     echo "unit: executed $total check(s) (bootstrap path)"
     if [ "$total" -lt "$UNIT_TEST_FLOOR" ]; then
       echo "unit: executed check count ($total) below floor ($UNIT_TEST_FLOOR) - test filter may be broken" >&2
@@ -255,9 +297,33 @@ stage_selftest() {
   # tracked as 100644), and this way it doesn't need to be. Each script's
   # own `cd "$(dirname "$0")/../.."` resolves against $scratch since we
   # invoke it by its path there.
-  bash "$scratch/tests/unit/test_pipeline_floor.sh" || rc=$?
-  bash "$scratch/tests/unit/test_pipeline_link_bootstrap.sh" || rc=$?
-  bash "$scratch/tests/unit/test_pipeline_registration.sh" || rc=$?
+  #
+  # A script SKIPs when its scenario can't fire on this host
+  # (test_pipeline_link_bootstrap.sh when cmake is reachable via a second
+  # PATH entry; test_pipeline_registration.sh / test_pipeline_binary_presence.sh
+  # on a cmake-less host) and exits 0 exactly like a real PASS, so the
+  # stage's own exit code can't show that fewer gates were actually
+  # exercised this run (review PR #128 @ eeea8ca, [LOW] pipeline.sh:258-260).
+  # Track and echo each script's outcome explicitly instead of only the
+  # aggregate exit code.
+  local script status=()
+  for script in test_pipeline_floor test_pipeline_link_bootstrap \
+                test_pipeline_registration test_pipeline_binary_presence; do
+    local out src
+    set +e
+    out=$(bash "$scratch/tests/unit/$script.sh" 2>&1)
+    src=$?
+    set -e
+    echo "$out"
+    if [ "$src" -ne 0 ]; then
+      status+=("$script:FAIL"); rc=$src
+    elif printf '%s\n' "$out" | grep -q ': SKIP'; then
+      status+=("$script:SKIP")
+    else
+      status+=("$script:PASS")
+    fi
+  done
+  echo "selftest: ${status[*]}"
   return "$rc"
 }
 stage_fuzz() {
