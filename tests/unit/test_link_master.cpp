@@ -1480,14 +1480,20 @@ TEST_CASE("a worst-case-length frame starting exactly at the deferred instant is
 // --- T-3: a whole transaction under continuous babble concludes, via real outcomes, within a
 // bound computed from the spec symbols — at both the fine and the superframe cadence ---------
 
-TEST_CASE("a transaction under continuous babble runs all three attempts and concludes "
-          "Failed{Timeout} on the node's merits within a symbol-derived bound",
+TEST_CASE("a transaction under continuous FLAG-free babble runs all three attempts and "
+          "concludes Failed{Timeout} on the node's merits within a symbol-derived bound",
           "[link][timing:T_gap][timing:retries]") {
     // Each attempt: the courtesy (max_frame + 2 T_gap + one byte of slack for the byte in
     // flight at the deferring poll), the request itself, the T_resp window, and up to two poll
     // periods of detection latency (one to notice the cap, one to notice the timeout). Three
     // attempts:
     //   3 * (F + 2G + B) + 3 * (n * B + R) + 6 * P
+    // This bound holds for FLAG-FREE filler only (0x5A is neither FLAG nor ESC, so the Deframer
+    // stays Hunting and no frame is ever "arriving" — the T_resp in-flight hold is never
+    // entered). A FLAG-delimited stream can additionally hold each attempt's timeout off for
+    // up to one worst-case frame (+F per attempt); the next test pins that larger bound, and
+    // an earlier version of this comment presented the FLAG-free figure as THE bound (PR #137
+    // red-team, MEDIUM — rule 11: it is the bound for this adversary, not for every adversary).
     // The outcome is the NODE's: three timeouts, charged to dst, transactions == 1. trunk §7's
     // failure accounting (all nodes failing -> BUS_FAULT) is how a jammed trunk is detected;
     // the engine itself never converts a bus condition into a Failed.
@@ -1558,6 +1564,224 @@ TEST_CASE("a transaction under continuous babble runs all three attempts and con
     }
 }
 
+// --- T-3b: the WORST-CASE adversary — FLAG-delimited babble that also exploits the T_resp
+// in-flight hold (PR #137 red-team @40355cf, MEDIUM) -----------------------------------------
+
+namespace {
+
+// `appends` escaped FLAGs: 2*appends wire bytes that the Deframer accumulates as `appends`
+// payload bytes. kMaxUnstuffed of them (140 wire bytes) is the longest single accumulation it
+// holds open — the 71st append is Discard::TooLong and returns it to Hunting.
+std::vector<uint8_t> stuffed_body(size_t appends) {
+    std::vector<uint8_t> v;
+    for (size_t i = 0; i < appends; ++i) {
+        v.push_back(static_cast<uint8_t>(omgp::TRUNK_escape_byte));
+        v.push_back(static_cast<uint8_t>(omgp::TRUNK_flag_byte ^ omgp::TRUNK_escape_xor));
+    }
+    return v;
+}
+
+// One hostile station occupying the wire continuously, and placing its bytes to maximum
+// effect: for every request it hears the host transmit it opens a frame on the last wire slot
+// strictly before that attempt's T_resp deadline, then streams the longest accumulation the
+// Deframer will hold open; between bursts it sends FLAG-free filler so last_activity_ never
+// goes stale. It needs only public information (tx_end is observable, T_resp is a published
+// constant) to do so.
+struct Adversary {
+    MockWire& wire;
+    uint64_t bt;
+    uint64_t cursor = 1, flag_at = 0;
+    std::vector<uint8_t> burst;
+    size_t burst_pos = 0;
+    bool burst_started = false;
+    size_t armed = 0;
+    Adversary(MockWire& w, uint64_t byte_time) : wire(w), bt(byte_time) {}
+    void arm(uint64_t deadline_us) {
+        flag_at = deadline_us;
+        burst = stuffed_body(kMaxUnstuffed);
+        burst_pos = 0;
+        burst_started = false;
+    }
+    void fill(uint64_t upto) {
+        while (cursor <= upto) {
+            uint8_t b;
+            if (!burst_started && flag_at != 0 && cursor < flag_at && cursor + bt >= flag_at) {
+                b = static_cast<uint8_t>(omgp::TRUNK_flag_byte);
+                burst_started = true;
+                burst_pos = 0;
+                flag_at = 0;
+            } else if (burst_started && burst_pos < burst.size()) {
+                b = burst[burst_pos++];
+            } else {
+                b = 0x5A; // filler: keeps last_activity_ live, never opens a frame
+            }
+            wire.inject_bytes(&b, 1, cursor);
+            cursor += bt;
+        }
+    }
+};
+
+} // namespace
+
+TEST_CASE("a transaction under FLAG-delimited babble that also rides the T_resp in-flight hold "
+          "still concludes Failed{Timeout} on the node's merits, within one worst-case frame "
+          "per attempt more than the FLAG-free bound",
+          "[link][timing:T_gap][timing:T_resp][timing:retries]") {
+    // The FLAG-free bound (previous test) omits the T_resp in-flight hold: a frame that OPENS
+    // inside the window is allowed to finish (trunk §3: the timeout gates the start bit), and
+    // the Deframer holds an accumulation open for at most kMaxUnstuffed appends (140 stuffed
+    // bytes) before Discard::TooLong returns it to Hunting, after which frame_arriving() is
+    // false one byte time later. So one hostile frame per attempt buys at most
+    // (1 + 2 * kMaxUnstuffed + 1) * B == kMaxWire * B == F of extra hold — by construction from
+    // the Deframer's limit and frame_arriving()'s one-byte slack (a second frame cannot help:
+    // its opening FLAG lands at or after deadline_, outside the window). Hence the bound:
+    //   3 * (F + 2G + B) + 3 * (n * B + R + F) + 6 * P
+    // Measured at 1 us cadence / TRUNK_bit_rate the conclusion lands ~66 us inside it, so the
+    // bound is tight, not loose. What stays true under this adversary as under the FLAG-free
+    // one: Failed{Timeout} (never CrcFailed, never a Failed synthesised from the bus state),
+    // timeouts == 3, three transmissions, busy() clear afterwards.
+    //
+    // trunk §6's "host-visible within ... (<= 2 x T_poll), independent of load" is NOT met
+    // against this station at the superframe cadence (a single transaction alone spans several
+    // superframes here); §6 describes a conforming bus, and a station that transmits outside
+    // its own response window is a §3 violator — the spec's remedy is §7's BUS_FAULT, not a
+    // faster conclusion. Recorded in docs/OPEN-QUESTIONS.md 2026-09-05 "bounded courtesy".
+    const uint64_t cadence = GENERATE(uint64_t{1}, uint64_t{omgp::TRUNK_T_poll_us});
+    const uint32_t rate = GENERATE(omgp::TRUNK_bit_rate, omgp::TRUNK_bit_rate_fallback);
+    CAPTURE(cadence, rate);
+    const uint64_t B = byte_time_us(rate);
+
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x07;
+    const uint8_t payload[] = {0x5A};
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+    if (rate != omgp::TRUNK_bit_rate)
+        master.set_bit_rate(rate);
+
+    const uint64_t F = static_cast<uint64_t>(kMaxWire) * B;
+    const uint64_t G = omgp::TRUNK_T_gap_us;
+    const uint64_t R = omgp::TRUNK_T_resp_us;
+    const uint64_t n_first = request_bytes(dst, 0, false, payload, sizeof payload).size();
+    const uint64_t n_retry = request_bytes(dst, 0, true, payload, sizeof payload).size();
+    const uint64_t n_max = n_first > n_retry ? n_first : n_retry;
+    const uint64_t flag_free_bound = 3 * (F + 2 * G + B) + 3 * (n_max * B + R) + 6 * cadence;
+    const uint64_t bound = flag_free_bound + 3 * F;
+
+    Adversary adv(wire, B);
+    adv.fill(cadence);
+    const uint64_t begin_at = cadence;
+    wire.advance_to(begin_at, master);
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+
+    MasterEvent ev{};
+    uint64_t t = begin_at;
+    while (t <= begin_at + bound) {
+        t += cadence;
+        // Arm one burst per request the host has actually put on the wire, aimed at that
+        // attempt's own T_resp deadline.
+        while (adv.armed < wire.transcript_size()) {
+            const auto& rec = wire.transcript(adv.armed);
+            const uint64_t n = rec.retry ? n_retry : n_first;
+            adv.arm(rec.tx_start_us + n * B + R);
+            ++adv.armed;
+        }
+        adv.fill(t + 2 * B); // the wire is never idle at any instant the engine can observe
+        ev = wire.advance_to(t, master);
+        if (ev.kind != MasterEvent::None)
+            break;
+    }
+    REQUIRE(ev.kind == MasterEvent::Failed);
+    REQUIRE(ev.reason == MasterEvent::Timeout);
+    REQUIRE(t - begin_at <= bound);
+    REQUIRE_FALSE(master.busy());
+    REQUIRE(wire.transcript_size() == 3);
+    REQUIRE(master.attempts() == 3);
+    REQUIRE(master.stats(dst).transactions == 1);
+    REQUIRE(master.stats(dst).retries == 2);
+    REQUIRE(master.stats(dst).timeouts == 3);
+    REQUIRE(master.stats(dst).crc_failures == 0);
+    // Not vacuous: at the fine cadence this adversary really does exceed the FLAG-free bound,
+    // which is what makes the two bounds two different claims (at the superframe cadence the
+    // hold hides inside the poll latency and the smaller figure happens to hold too).
+    if (cadence == 1)
+        REQUIRE(t - begin_at > flag_free_bound);
+}
+
+TEST_CASE("the T_resp in-flight hold is at most one worst-case frame: a frame that opens 1 us "
+          "inside the window and stalls at the Deframer's limit delays the timeout by exactly "
+          "kMaxWire byte times",
+          "[link][timing:T_resp]") {
+    // The per-attempt "+F" of the previous test, isolated and pinned EXACTLY. The stream opens
+    // a frame on the last slot inside the window and streams kMaxUnstuffed escaped FLAGs (140
+    // wire bytes) — the longest accumulation the Deframer holds without Discard::TooLong — then
+    // stops. frame_arriving() stays true for exactly one byte time past the last byte's end, so
+    // the timeout fires at deadline - 1 + (1 + 140) * B + B == deadline + kMaxWire * B. One byte
+    // more (the 71st append) would be TooLong -> Hunting and fire the timeout EARLIER, so this
+    // is the maximum, not merely an instance. Polled every microsecond so the figure is the
+    // engine's, not the cadence's. Also pins frame_arriving()'s `<=`: with `<` the timeout
+    // would fire one microsecond early (PR #137 red-team @40355cf, LOW).
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x07;
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+    REQUIRE(master.begin(dst, nullptr, 0) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, nullptr, 0).size()) * byte_us();
+    const uint64_t deadline = tx_end + omgp::TRUNK_T_resp_us;
+
+    std::vector<uint8_t> burst{static_cast<uint8_t>(omgp::TRUNK_flag_byte)};
+    const auto body = stuffed_body(kMaxUnstuffed);
+    burst.insert(burst.end(), body.begin(), body.end());
+    REQUIRE(burst.size() == 1u + 2u * kMaxUnstuffed);
+    wire.inject_bytes(burst.data(), burst.size(), deadline - 1); // opens 1 us inside the window
+
+    const uint64_t expected_fire = deadline + static_cast<uint64_t>(kMaxWire) * byte_us();
+    for (uint64_t t = 1; t < expected_fire; ++t) {
+        wire.advance_to(t, master);
+        REQUIRE(master.stats(dst).timeouts == 0);
+    }
+    wire.advance_to(expected_fire, master);
+    REQUIRE(master.stats(dst).timeouts == 1);
+}
+
+TEST_CASE("frame_arriving()'s cadence boundary is exactly one byte time past the last byte's "
+          "end: a stalled frame still holds the timeout off at that instant and not one "
+          "microsecond later",
+          "[link][timing:T_resp]") {
+    // master.hpp: "the next byte of a live frame would arrive at last_rx_us_ and be drained by
+    // any poll at or after it — one full byte time of slack". Pinned at extra == 0 (still held),
+    // 1 and 2 (released), so a `<` in place of `<=` is caught here by name (PR #137 red-team
+    // @40355cf, LOW).
+    const uint64_t extra = GENERATE(uint64_t{0}, uint64_t{1}, uint64_t{2});
+    CAPTURE(extra);
+    const uint64_t B = byte_us();
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x07;
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+    REQUIRE(master.begin(dst, nullptr, 0) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, nullptr, 0).size()) * B;
+    const uint64_t deadline = tx_end + omgp::TRUNK_T_resp_us;
+    const uint8_t partial[] = {static_cast<uint8_t>(omgp::TRUNK_flag_byte), 0xAA, 0xBB};
+    wire.inject_bytes(partial, sizeof partial, deadline - 1); // opens inside, then stalls
+    const uint64_t partial_end = (deadline - 1) + static_cast<uint64_t>(sizeof partial) * B;
+    wire.advance_to(partial_end, master);
+    REQUIRE(master.stats(dst).timeouts == 0);
+    wire.advance_to(partial_end + B + extra, master);
+    if (extra == 0)
+        REQUIRE(master.stats(dst).timeouts == 0); // exactly one byte time: still "arriving"
+    else
+        REQUIRE(master.stats(dst).timeouts == 1);
+}
+
 // --- T-4: the cap follows the CURRENT bit rate (PR #137 review, LOW) --------------------
 
 TEST_CASE("a set_bit_rate() during the deferral re-scales the courtesy cap at once — the "
@@ -1566,6 +1790,14 @@ TEST_CASE("a set_bit_rate() during the deferral re-scales the courtesy cap at on
     // max_frame is one kMaxWire-byte frame at the current rate: ~12.3 ms at the fallback rate,
     // 1.42 ms at TRUNK_bit_rate. A cap latched at begin() would hold the fallback figure after
     // the rate changed; recomputing it at check time does not.
+    //
+    // This test asserts the cap RE-SCALE only. It does not establish that the transmit stays off
+    // a frame that was already arriving at the OLD rate when the rate changed: the engine
+    // computes every drained byte's end at the drain-time rate, so slow-rate bytes appear to end
+    // early once the rate rises and the perceived holes can let the transmit out inside such a
+    // frame (PR #137 red-team @40355cf, LOW — open in #138 and docs/OPEN-QUESTIONS.md
+    // 2026-09-06 "rate change mid-stream"). The fresh fast-rate babble below sidesteps exactly
+    // that so the re-scale is what is measured.
     FakeClock clock;
     MockWire wire(clock);
     const uint8_t dst = 0x0A;
@@ -1663,6 +1895,115 @@ TEST_CASE("a gap-deferred transmission on an IDLE bus still goes out when the ca
     REQUIRE(wire.transcript(0).dst == dst);
     REQUIRE(master.busy()); // now awaiting its response
     REQUIRE(master.stats(dst).timeouts == 0);
+}
+
+// --- The acceptance window's LOWER bound, [tx_end, ...): a same-seq frame that OPENED before
+// this attempt's tx_end is neither accepted nor allowed to hold the timeout off, even when it
+// is still arriving inside the window (PR #137 red-team @40355cf, MEDIUM + LOW) ---------------
+
+namespace {
+
+// Attempt 0 times out on an idle bus; another station then holds the wire from the deferred
+// instant so the retry is forced out at the courtesy cap; the polled node's long, valid,
+// same-seq answer to ATTEMPT 0 is placed so that it opened BEFORE the retry's tx_end and is
+// still arriving when the retry's window opens. Reaching this needs the cap: without it the
+// retry would wait for the stale answer to finish and the case could not arise.
+struct StaleAnswerRig {
+    FakeClock clock;
+    MockWire wire{clock};
+    Master master{wire, clock, omgp::ADDR_host};
+    uint8_t dst = 0x07;
+    Step silence[3] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    uint64_t B = byte_us(), n_req = 0, n_retry = 0, d0 = 0, cap = 0, retry_window_start = 0;
+    uint64_t stale_start = 0, stale_end = 0;
+
+    // stale_end_after_window_start: where the stale answer's LAST byte lands relative to the
+    // retry's window start (inside it, or past its deadline).
+    void build(uint64_t stale_end_after_window_start) {
+        wire.set_script(dst, silence, 3);
+        n_req = request_bytes(dst, 0, false, nullptr, 0).size();
+        n_retry = request_bytes(dst, 0, true, nullptr, 0).size();
+        REQUIRE(master.begin(dst, nullptr, 0) == Status::Ok);
+        d0 = n_req * B + omgp::TRUNK_T_resp_us; // attempt 0's deadline
+        for (uint64_t t = 1; t <= d0; ++t)
+            wire.advance_to(t, master);
+        REQUIRE(master.stats(dst).timeouts == 1);
+
+        const uint64_t defer_origin = d0 + omgp::TRUNK_T_gap_us;
+        cap = courtesy_cap_us(defer_origin);
+        retry_window_start = cap + n_retry * B;
+
+        // Maximal stuffing: a payload of FLAG bytes makes the stale answer as long as a
+        // response can be, so it spans from before the retry to well inside its window.
+        std::vector<uint8_t> pay(omgp::LIMIT_max_l3_payload,
+                                 static_cast<uint8_t>(omgp::TRUNK_flag_byte));
+        const auto stale = response_bytes(dst, 0, pay.data(), pay.size());
+        stale_end = retry_window_start + stale_end_after_window_start;
+        stale_start = stale_end - static_cast<uint64_t>(stale.size()) * B;
+        REQUIRE(stale_start > defer_origin);
+        REQUIRE(stale_start < cap);
+        // FLAG-free filler from the deferred instant up to the stale answer keeps the wire busy
+        // so the retry is forced out by the cap rather than let out early by a quiet wire.
+        for (uint64_t u = defer_origin; u < stale_start; u += B) {
+            const uint8_t filler = 0x5A;
+            wire.inject_bytes(&filler, 1, u);
+        }
+        wire.inject_bytes(stale.data(), stale.size(), stale_start);
+    }
+};
+
+} // namespace
+
+TEST_CASE("a same-seq answer to attempt 0 that opened BEFORE the retry's tx_end and is "
+          "delivered inside the retry's window is discarded by the window's lower bound, not "
+          "reported as the retry's Answered",
+          "[link][timing:T_resp][timing:retries]") {
+    // contracts/link-cpp.md: the window is [tx_end, tx_end + T_resp). `frame_open_us <
+    // deadline_` alone would accept this frame (its closing FLAG lands inside the window with a
+    // valid CRC, src, dst, seq); the lower bound is what refuses it. Removing that clause turns
+    // this case into Answered at the stale frame's delivery instant.
+    StaleAnswerRig r;
+    r.build(omgp::TRUNK_T_resp_us / 2); // its LAST byte lands inside the retry's window
+    MasterEvent::Kind seen = MasterEvent::None;
+    uint64_t seen_at = 0;
+    for (uint64_t t = r.d0 + 1; t <= r.stale_end + 4 * omgp::TRUNK_T_resp_us; ++t) {
+        const MasterEvent ev = r.wire.advance_to(t, r.master);
+        if (ev.kind != MasterEvent::None) {
+            seen = ev.kind;
+            seen_at = t;
+            break;
+        }
+    }
+    REQUIRE(r.wire.transcript_size() >= 2);
+    REQUIRE(r.wire.transcript(1).retry);
+    REQUIRE(r.wire.transcript(1).tx_start_us == r.cap); // retry forced out by the cap
+    REQUIRE(r.stale_start < r.retry_window_start);      // opened BEFORE the retry's window
+    REQUIRE(r.stale_end > r.retry_window_start);        // delivered INSIDE it
+    REQUIRE(r.stale_end < r.retry_window_start + omgp::TRUNK_T_resp_us);
+    REQUIRE(seen != MasterEvent::Answered);
+    REQUIRE(seen_at != 0);
+    REQUIRE(seen == MasterEvent::Failed); // the transaction ran on to its own conclusion
+    REQUIRE(r.master.stats(r.dst).discards >= 1);
+    REQUIRE(r.master.stats(r.dst).timeouts == 3);
+}
+
+TEST_CASE("a frame that opened before this attempt's tx_end does not hold its T_resp timeout "
+          "off, even while it is still arriving at the deadline",
+          "[link][timing:T_resp][timing:retries]") {
+    // The in-flight hold (poll()'s frame_pending_in_window) applies to a frame that opened
+    // INSIDE the window; one that opened before tx_end is not this attempt's response and must
+    // not defer its timeout. Without the lower bound the retry's timeout is suppressed until the
+    // stale frame finishes: timeouts stays 1 at the deadline instead of 2.
+    StaleAnswerRig r;
+    r.build(omgp::TRUNK_T_resp_us + 100); // still arriving when the retry's window closes
+    const uint64_t deadline = r.retry_window_start + omgp::TRUNK_T_resp_us;
+    for (uint64_t t = r.d0 + 1; t <= deadline; ++t)
+        r.wire.advance_to(t, r.master);
+    REQUIRE(r.wire.transcript_size() == 2);
+    REQUIRE(r.wire.transcript(1).tx_start_us == r.cap);
+    REQUIRE(r.stale_start < r.retry_window_start);
+    REQUIRE(r.stale_end > deadline);
+    REQUIRE(r.master.stats(r.dst).timeouts == 2);
 }
 
 // --- US2 AC6 (response-bit-clear sub-case): a frame matching src/seq/dst but with the
@@ -1974,6 +2315,28 @@ TEST_CASE("set_bit_rate forwards to the wire and counts each change in bus_stats
     master.set_bit_rate(9600);
     REQUIRE(wire.bit_rate() == 9600);
     REQUIRE(master.bus_stats().rate_changes == 2);
+}
+
+TEST_CASE("set_bit_rate(0) is refused: not forwarded, not counted, and the engine keeps "
+          "polling at the rate it had",
+          "[link]") {
+    // byte_time_us() has a nonzero precondition and the engine calls it on every poll; a zero
+    // rate let through here would trip it from the inside (an assert in a debug build, a
+    // divide-by-zero otherwise). The transaction below is what exercises that path — with the
+    // guard removed it aborts rather than fails an assertion (PR #137 red-team @40355cf, LOW:
+    // the guard was added for an earlier finding but nothing pinned it).
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+    REQUIRE(wire.bit_rate() == omgp::TRUNK_bit_rate);
+    master.set_bit_rate(0);
+    REQUIRE(wire.bit_rate() == omgp::TRUNK_bit_rate); // not forwarded
+    REQUIRE(master.bus_stats().rate_changes == 0);    // not counted
+    REQUIRE(master.begin(0x03, nullptr, 0) == Status::Ok);
+    for (uint64_t t = 1; t <= 3000 && master.busy(); ++t)
+        wire.advance_to(t, master);
+    REQUIRE_FALSE(master.busy());
+    REQUIRE(master.stats(0x03).transactions == 1);
 }
 
 // --- begin() is bounds-checked against its own kAddrCount-entry tables, not just 0xFF ---

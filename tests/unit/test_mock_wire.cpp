@@ -291,7 +291,8 @@ TEST_CASE("Kind::CrcError answers with a CRC-invalid frame of the same wire leng
 
     const std::vector<uint8_t> real_answer = expected_respond_answer(req);
     const uint64_t answer_end =
-        tx_end + 30 + static_cast<uint64_t>(real_answer.size()) * byte_time_us(omgp::TRUNK_bit_rate);
+        tx_end + 30 +
+        static_cast<uint64_t>(real_answer.size()) * byte_time_us(omgp::TRUNK_bit_rate);
     wire.advance_to(answer_end);
 
     Deframer d;
