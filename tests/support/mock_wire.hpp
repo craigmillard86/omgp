@@ -140,8 +140,8 @@ class MockWire : public omgp::link::ByteWire {
     // (crc_hi, unstuffed) XOR 0xFF, at request_end + delay_us.
     void schedule_crc_error(const omgp::link::FrameFields& request, uint64_t tx_end,
                             uint32_t delay_us);
-    // Kind::Duplicate (contracts/mock-wire.md): the real response, then the same bytes
-    // again delay_us after the first copy ends.
+    // Kind::Duplicate (contracts/mock-wire.md): the real (promptly, default-delay)
+    // response, then the same bytes again delay_us after that first copy ends.
     void schedule_duplicate(const omgp::link::FrameFields& request, uint64_t tx_end,
                             uint32_t delay_us);
     void enqueue(uint8_t byte, uint64_t start_us);

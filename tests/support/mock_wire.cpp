@@ -256,10 +256,11 @@ void MockWire::schedule_duplicate(const omgp::link::FrameFields& request, uint64
         return;
     }
     // contracts/mock-wire.md: "the real response, then the same bytes again delay_us
-    // after the first ends" — both copies are the SAME valid encoding (unlike CrcError),
-    // scheduled off the ORIGINAL request's tx_end (a retry, being a separate transmit()
-    // call, draws its own — by then exhausted — script step, per next_step()).
-    const uint64_t first_t0 = tx_end + delay_us;
+    // after the first ends" — the first copy is the ordinary prompt answer (like Respond,
+    // at the default turnaround: this row never restates "first byte at request_end +
+    // delay_us" the way Respond/CrcError's rows do), and delay_us instead names the GAP
+    // before the repeated copy — the one this Kind exists to plant as a late duplicate.
+    const uint64_t first_t0 = tx_end + omgp::TRUNK_T_turn_min_us;
     enqueue_frame(buf, written, first_t0);
     const uint64_t first_end =
         first_t0 + static_cast<uint64_t>(written) * omgp::link::byte_time_us(bit_rate_);
