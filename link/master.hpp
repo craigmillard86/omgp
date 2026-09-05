@@ -85,6 +85,13 @@ class Master {
     // AwaitResponse: the response-window deadline (tx_end + T_resp). PendingTransmit: the
     // instant transmission is deferred to (data-model.md §4 "Gap").
     uint64_t deadline_ = 0;
+    // AwaitResponse only: tx_end of the CURRENT attempt - the acceptance window's lower
+    // bound (contracts/link-cpp.md: "[tx_end, tx_end + T_resp)"). Needed because a retry
+    // reuses the same seq (trunk §7): without it, a same-seq response that arrived just
+    // after a PRIOR attempt's window closed and is only drained once the retry re-enters
+    // AwaitResponse would satisfy frame_open_us < deadline_ and be mistaken for the retry's
+    // own answer (PR #137 review, MEDIUM).
+    uint64_t window_start_us_ = 0;
 
     // last_activity/T_gap is bus-wide (trunk §3 media access governs the shared bus, not
     // a per-destination resource): end of the last accepted response's last byte, the

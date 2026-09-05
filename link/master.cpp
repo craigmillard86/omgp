@@ -57,6 +57,13 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
         return Status::PayloadTooLong;
     if (dst == 0xFF) // literal-ok: trunk §5 reserved broadcast address, not an L3 event code
         return Status::ReservedAddress;
+    // Master's own guard, beyond encode_frame's: next_seq_/stats_ are kAddrCount-entry
+    // tables indexed directly by dst (data-model.md §4 "Sequence", §8 "Statistics"), so any
+    // dst outside that range must be refused here even though encode_frame and the Deframer
+    // let 0x10..0xFE through as syntactically valid trunk addresses (PR #137 review, HIGH:
+    // begin(0x20, ...) previously wrote next_seq_[0x20]/stats_[0x20], past both tables).
+    if (dst >= kAddrCount)
+        return Status::ReservedAddress;
 
     dst_ = dst;
     seq_ = next_seq_[dst];
@@ -72,7 +79,13 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     // called too soon after the last activity on the bus.
     const uint64_t now = clock_.now_us();
     sub_phase_ = SubPhase::PendingTransmit;
-    deadline_ = has_last_activity_ ? last_activity_ + omgp::TRUNK_T_gap_us : now;
+    // trunk §3 requires only ">= T_gap of bus idle", not "exactly T_gap": once the gap has
+    // already elapsed by the time begin() is called (the engine's ordinary operating mode,
+    // e.g. a superframe scheduler invoking begin() once per T_poll >> T_gap), the deferred
+    // instant must be `now`, never a stale past instant computed from an old
+    // last_activity_ (PR #137 review, HIGH - see fire_pending()'s own comment).
+    const uint64_t gap_elapsed_at = has_last_activity_ ? last_activity_ + omgp::TRUNK_T_gap_us : now;
+    deadline_ = gap_elapsed_at > now ? gap_elapsed_at : now;
     fire_pending(now);
     return Status::Ok;
 }
@@ -90,12 +103,17 @@ void Master::do_transmit(uint64_t at_us) {
         stats_[dst_].retries++;
     ++attempt_count_;
     sub_phase_ = SubPhase::AwaitResponse;
+    window_start_us_ = tx_end;
     deadline_ = tx_end + omgp::TRUNK_T_resp_us;
 }
 
 void Master::fire_pending(uint64_t now_us) {
+    // deadline_ is always <= now_us here (the guard above), so this is a no-op given the
+    // fix in begin() above; kept as a second, independent guard against ever transmitting
+    // at a backdated instant (PR #137 review, HIGH) should deadline_ ever again be computed
+    // stale by some future caller of fire_pending.
     if (open_ && sub_phase_ == SubPhase::PendingTransmit && now_us >= deadline_)
-        do_transmit(deadline_);
+        do_transmit(now_us > deadline_ ? now_us : deadline_);
 }
 
 void Master::end_attempt(uint64_t last_activity_us, MasterEvent::Reason reason,
@@ -156,7 +174,7 @@ MasterEvent Master::poll(uint64_t now_us) {
 
         const FrameFields& f = view.f;
         const bool matches = f.response && f.src == dst_ && f.dst == host_addr_ && f.seq == seq_;
-        if (matches && frame_open_us < deadline_) {
+        if (matches && frame_open_us >= window_start_us_ && frame_open_us < deadline_) {
             AddrStats& s = stats_[dst_];
             s.transactions++;
             if (f.len > 0)

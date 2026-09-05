@@ -15,13 +15,35 @@
 namespace omgp_test {
 
 namespace {
+// Whether a raw (unstuffed) byte needs FLAG/ESCAPE byte-stuffing on the wire.
+constexpr bool needs_stuffing(uint8_t b) {
+    return b == omgp::TRUNK_flag_byte || b == omgp::TRUNK_escape_byte;
+}
+
+// The corrupted CRC high byte for Kind::CrcError: definitely wrong, and on the same side
+// of the FLAG/ESCAPE stuffing boundary as `real_hi` (PR #137 review, MEDIUM). A bare XOR
+// 0xFF crosses that boundary for exactly four values (0x7E/0x7D <-> 0x81/0x82), which would
+// silently change the corrupted frame's wire length relative to the real response's and
+// break every timing assertion built on that length (tests/unit/test_link_master.cpp
+// computes expected instants from the UNCORRUPTED response's own encode_frame length).
+uint8_t corrupt_crc_hi(uint8_t real_hi) {
+    const uint8_t naive = static_cast<uint8_t>(real_hi ^ 0xFF);
+    if (needs_stuffing(naive) == needs_stuffing(real_hi))
+        return naive;
+    if (needs_stuffing(real_hi))
+        // real_hi is FLAG or ESCAPE: the other of the two also needs stuffing, and is a
+        // different (still wrong) CRC byte.
+        return real_hi == omgp::TRUNK_flag_byte ? omgp::TRUNK_escape_byte : omgp::TRUNK_flag_byte;
+    // real_hi is 0x81 or 0x82 (naive would land on FLAG/ESCAPE): flip a low bit instead -
+    // still a different, still non-stuffing byte.
+    return static_cast<uint8_t>(real_hi ^ 0x01);
+}
+
 // Kind::CrcError (contracts/mock-wire.md): "the real response with its last CRC byte
-// XOR 0xFF". Duplicates encode_frame's unstuffed-build-then-stuff steps (link/frame.cpp)
-// rather than post-processing its output, so corrupting the CRC can never accidentally
-// land on a byte that needs (or stops needing) stuffing — which would silently change
-// the wire length relative to a real response's and break every timing assertion built
-// on that length (tests/unit/test_link_master.cpp computes expected instants from the
-// UNCORRUPTED response's own encode_frame length). encode_frame's own refusals
+// XOR 0xFF" (approximately - see corrupt_crc_hi() above for the wire-length-preserving
+// exception). Duplicates encode_frame's unstuffed-build-then-stuff steps (link/frame.cpp)
+// rather than post-processing its output, so every byte other than the corrupted CRC high
+// byte is stuffed exactly as a real response's would be. encode_frame's own refusals
 // (PayloadTooLong/ReservedAddress) do not apply here: `request` is a frame this same
 // MockWire just decoded, so `f.dst == request.src` is already a real trunk address.
 size_t encode_crc_corrupted(const omgp::link::FrameFields& f, uint8_t* out, size_t cap) {
@@ -44,7 +66,7 @@ size_t encode_crc_corrupted(const omgp::link::FrameFields& f, uint8_t* out, size
         unstuffed[n++] = f.payload[i];
     const uint16_t c = omgp::crc16_ccitt_false(unstuffed, n);
     unstuffed[n++] = static_cast<uint8_t>(c & 0xFF);
-    unstuffed[n++] = static_cast<uint8_t>(((c >> 8) & 0xFF) ^ 0xFF); // the corruption
+    unstuffed[n++] = corrupt_crc_hi(static_cast<uint8_t>((c >> 8) & 0xFF)); // the corruption
 
     size_t w = 0;
     out[w++] = omgp::TRUNK_flag_byte;

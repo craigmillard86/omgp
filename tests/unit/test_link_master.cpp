@@ -33,6 +33,7 @@
 #include "catch_amalgamated.hpp"
 #include "fake_clock.hpp"
 #include "heap_guard.hpp"
+#include "link/crc16.hpp"
 #include "link/frame.hpp"
 #include "link/link_types.hpp"
 #include "link/master.hpp"
@@ -270,6 +271,66 @@ TEST_CASE("a CRC-failed response ends the attempt immediately, without waiting o
     REQUIRE(wire.transcript(1).tx_start_us == crc_full_end + omgp::TRUNK_T_gap_us);
 }
 
+TEST_CASE("a CrcError response's wire length matches the real response's even when the "
+          "real CRC high byte would need byte-stuffing",
+          "[link]") {
+    // PR #137 review, MEDIUM: mock_wire.cpp's encode_crc_corrupted() used to XOR the real
+    // CRC high byte with 0xFF unconditionally. For a real high byte of
+    // TRUNK_flag_byte ^ 0xFF (0x81), the corrupted byte lands exactly on TRUNK_flag_byte
+    // (0x7E) and needs an extra stuffing byte the real, uncorrupted response never would -
+    // making the corrupted frame one byte_time_us LONGER on the wire than
+    // response_full_end() below (which, like tests/unit/test_link_master.cpp throughout,
+    // derives its expected instant from the UNCORRUPTED response's own encode_frame
+    // length) predicts.
+    //
+    // Found via the engine's own CRC implementation rather than a hand-picked magic byte,
+    // so this keeps reproducing the exact collision class if the CRC polynomial or frame
+    // layout ever changes.
+    uint8_t dst = 0, payload_byte = 0;
+    bool found = false;
+    for (uint16_t d = 1; d < static_cast<uint16_t>(kAddrCount) && !found; ++d) {
+        for (uint16_t p = 0; p < 256 && !found; ++p) {
+            const uint8_t unstuffed[] = {omgp::ADDR_host, static_cast<uint8_t>(d),
+                                        /*ctrl: response=1, retry=0, seq=0*/ 0x01, 0x01,
+                                        static_cast<uint8_t>(p)};
+            const uint16_t c = omgp::crc16_ccitt_false(unstuffed, sizeof unstuffed);
+            if (static_cast<uint8_t>((c >> 8) & 0xFF) ==
+                static_cast<uint8_t>(omgp::TRUNK_flag_byte ^ 0xFF)) {
+                dst = static_cast<uint8_t>(d);
+                payload_byte = static_cast<uint8_t>(p);
+                found = true;
+            }
+        }
+    }
+    REQUIRE(found); // a 15*256-combination sweep always finds this collision class
+
+    FakeClock clock;
+    MockWire wire(clock);
+    const Step crc[] = {{dst, Kind::CrcError}};
+    wire.set_script(dst, crc, 1);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t payload[] = {payload_byte};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+
+    const uint64_t tx_end = static_cast<uint64_t>(
+        request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us());
+    const uint64_t crc_full_end = response_full_end(tx_end, dst, 0, payload, sizeof payload);
+    REQUIRE(crc_full_end < tx_end + omgp::TRUNK_T_resp_us);
+
+    // Checked one byte_time_us early (crc_full_end - 1), not at crc_full_end itself:
+    // MockWire's RX queue releases a byte once clock_.now_us() reaches its own START
+    // instant (mock_wire.cpp receive(): start_us <= now), not its completion instant, so
+    // the reference (uncorrupted) frame's own closing FLAG - whose start precedes
+    // crc_full_end by exactly one byte_time_us - is already available at crc_full_end - 1.
+    // A corrupted frame with an EXTRA byte (the length-changing bug this fix prevents)
+    // would instead place its true closing FLAG's start at crc_full_end, still unavailable
+    // one microsecond earlier - the only instant this test can tell the two apart at.
+    MasterEvent ev = wire.advance_to(crc_full_end - 1, master);
+    REQUIRE(ev.kind == MasterEvent::None); // attempt 0 over, but retries remain
+    REQUIRE(master.stats(dst).crc_failures == 1);
+}
+
 // --- US2 AC4 + AC6 (stale-seq sub-case): late duplicate discarded, next transaction unaffected
 
 TEST_CASE("a late duplicate of a concluded transaction's response is discarded during the "
@@ -358,6 +419,70 @@ TEST_CASE("a late duplicate of a concluded transaction's response is discarded d
     REQUIRE(ev.kind == MasterEvent::Answered);
     REQUIRE(master.stats(dst).transactions == 2);
     REQUIRE(master.stats(dst).retries == 0); // unaffected by the stale frame
+}
+
+// --- Acceptance window has a lower bound, not just T_resp's upper one ------------------
+
+TEST_CASE("a same-seq response that arrived just after attempt 0's window closed is not "
+          "mistaken for the retry's own answer once it is finally drained",
+          "[link]") {
+    // PR #137 review, MEDIUM: contracts/link-cpp.md's acceptance window is
+    // [tx_end, tx_end + T_resp), but master.cpp only checked the upper bound
+    // (frame_open_us < deadline_). poll() stops draining the wire once an attempt times out
+    // (sub_phase_ leaves AwaitResponse), so a response that misses attempt 0's window by a
+    // few microseconds sits queued, undrained, until the gap-deferred retry re-enters
+    // AwaitResponse - at which point it is the FIRST thing the retry's own poll() drains.
+    // Retries reuse the same seq (trunk §7), so src/dst/seq/response-bit all "match"; only a
+    // lower bound on frame_open_us can tell attempt 0's late answer apart from the retry's.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x0C;
+    const uint8_t payload[] = {0x55};
+    // Arrives TRUNK_T_resp_us + margin after tx_end: just past attempt 0's window close.
+    const uint32_t late_delay_us = omgp::TRUNK_T_resp_us + 5;
+    const Step attempt0[] = {{dst, Kind::Respond, late_delay_us}};
+    wire.set_script(dst, attempt0, 1);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end0 =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) * byte_us();
+    const uint64_t stale_full_end = response_full_end(tx_end0, dst, 0, payload, sizeof payload,
+                                                       late_delay_us);
+
+    const uint64_t timeout_instant = tx_end0 + omgp::TRUNK_T_resp_us;
+    const uint64_t retry_tx_start = timeout_instant + omgp::TRUNK_T_gap_us;
+    const uint64_t tx_end1 =
+        retry_tx_start +
+        static_cast<uint64_t>(request_bytes(dst, 0, true, payload, sizeof payload).size()) * byte_us();
+    // Sanity: the stale frame is fully on the wire (and thus fully queued) before the retry
+    // even transmits - this test is about drain ORDER within the retry's window, not about
+    // the stale bytes still arriving mid-retry.
+    REQUIRE(stale_full_end < tx_end1);
+
+    MasterEvent ev = wire.advance_to(retry_tx_start, master); // attempt 0 times out, retry fires
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE(master.stats(dst).timeouts == 1);
+    REQUIRE(wire.transcript_size() == 2);
+
+    // The node's script is exhausted, so its retry request gets MockWire's default Respond
+    // (T_turn_min_us delay) - the retry's genuine answer, landing well after the stale frame.
+    const uint64_t genuine_full_end = response_full_end(tx_end1, dst, 0, payload, sizeof payload);
+
+    // Drain just past the stale frame's own end: with only an upper bound, its frame_open_us
+    // (attempt 0's era, long before the retry's own deadline_) wrongly satisfies
+    // "< deadline_" and this poll() answers the transaction on the spot, using bytes that
+    // were never addressed to this attempt.
+    ev = wire.advance_to(tx_end1 + 1, master);
+    REQUIRE(ev.kind == MasterEvent::None); // correctly discarded, not Answered
+    REQUIRE(master.stats(dst).discards == 1);
+    REQUIRE(master.busy()); // the retry's own window is still open
+
+    ev = wire.advance_to(genuine_full_end, master);
+    REQUIRE(ev.kind == MasterEvent::Answered); // the retry's real answer, drained afterward
+    REQUIRE(master.stats(dst).transactions == 1);
+    REQUIRE(master.stats(dst).retries == 1);
+    REQUIRE_FALSE(master.busy());
 }
 
 // --- US2 AC6 (wrong-src sub-case): a stale response from a different, already-concluded
@@ -593,6 +718,59 @@ TEST_CASE("a second begin() before last_activity + T_gap defers transmission to 
     REQUIRE_FALSE(wire.transcript(1).retry);
 }
 
+TEST_CASE("a second begin() well after last_activity + T_gap transmits at the current "
+          "instant, not at the stale gap boundary",
+          "[timing:T_gap]") {
+    // PR #137 review, HIGH: begin() computed deadline_ = last_activity_ + T_gap
+    // unconditionally, even when that instant is already long past by the time begin() is
+    // called (has_last_activity_ is set from an earlier, unrelated transaction). fire_pending
+    // then transmitted at that stale, past `deadline_` instead of `now`, so the request left
+    // the wire already outside its own response window and the transaction timed out before
+    // any node could plausibly answer - this is the engine's ordinary/main operating mode
+    // (a superframe scheduler calling begin() only once every T_poll, far longer than
+    // T_gap), not a corner case, and no existing test (all of which poll() at-or-inside the
+    // gap boundary) could catch it.
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+    const uint8_t dst = 0x0B;
+    const uint8_t p1[] = {0x01};
+    const uint8_t p2[] = {0x02};
+
+    REQUIRE(master.begin(dst, p1, sizeof p1) == Status::Ok);
+    const uint64_t tx_end0 =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, p1, sizeof p1).size()) * byte_us();
+    const uint64_t full_end0 = response_full_end(tx_end0, dst, 0, p1, sizeof p1);
+
+    MasterEvent ev = wire.advance_to(full_end0, master);
+    REQUIRE(ev.kind == MasterEvent::Answered);
+
+    // Jump the clock far past last_activity (== full_end0) + T_gap with nothing driving the
+    // engine in between - exactly what a superframe scheduler polling every T_poll (2000 us,
+    // 40x T_gap) does between transactions.
+    const uint64_t later = full_end0 + 10 * omgp::TRUNK_T_gap_us;
+    wire.advance_to(later);
+
+    REQUIRE(master.begin(dst, p2, sizeof p2) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 2);
+    // Must transmit at `later` (now), never backdated to the long-elapsed
+    // full_end0 + T_gap instant.
+    REQUIRE(wire.transcript(1).tx_start_us == later);
+
+    const uint64_t tx_end1 =
+        later + static_cast<uint64_t>(request_bytes(dst, 1, false, p2, sizeof p2).size()) * byte_us();
+    // A response window that actually opens after `later` (not one already exhausted at
+    // transmission time): poll() right after transmitting must not immediately time out.
+    ev = wire.advance_to(later + 1, master);
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE(master.busy());
+
+    const uint64_t full_end1 = response_full_end(tx_end1, dst, 1, p2, sizeof p2);
+    ev = wire.advance_to(full_end1, master);
+    REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(master.stats(dst).timeouts == 0); // never spuriously timed out
+}
+
 // --- Edge case: sequence number wrap ---------------------------------------------------
 
 TEST_CASE("new (non-retry) transactions to one destination use seq 0..15 then wrap to 0",
@@ -656,6 +834,33 @@ TEST_CASE("begin() refuses a 65-byte payload before anything reaches the wire", 
     REQUIRE(master.begin(0x01, payload, sizeof payload) == Status::PayloadTooLong);
     REQUIRE(wire.transcript_size() == 0);
     REQUIRE_FALSE(master.busy());
+}
+
+// --- begin() is bounds-checked against its own kAddrCount-entry tables, not just 0xFF ---
+
+TEST_CASE("begin() refuses a dst outside kAddrCount before writing next_seq_/stats_ past "
+          "either table",
+          "[link]") {
+    // PR #137 review, HIGH: encode_frame/the Deframer refuse only dst == 0xFF
+    // (link/frame.cpp), so 0x10..0xFE survive both intact and previously reached
+    // next_seq_[dst] = ... / stats_[dst_] in Master, which are only kAddrCount (16) entries
+    // (master.hpp). begin(0x20, ...) indexed 16 entries past the end of both arrays.
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t payload[] = {0x01};
+    REQUIRE(master.begin(0x20, payload, sizeof payload) != Status::Ok);
+    REQUIRE(wire.transcript_size() == 0);
+    REQUIRE_FALSE(master.busy());
+    // stats() for that address must still read back as untouched (also exercises the
+    // stats() reader's own bounds check from the prior review pass, not just begin()'s).
+    REQUIRE(master.stats(0x20).transactions == 0);
+
+    // The table itself is unharmed: a valid destination still starts at seq 0, not
+    // whatever an out-of-bounds write at 0x20 might have aliased onto it.
+    REQUIRE(master.begin(0x01, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript(0).seq == 0);
 }
 
 // --- contracts/link-cpp.md: stats() is bounds-checked, not a raw table index -----------
