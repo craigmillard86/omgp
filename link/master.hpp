@@ -62,11 +62,32 @@ class Master {
     // "Gap") is honoured, for both a fresh begin() and a scheduled retry.
     void fire_pending(uint64_t now_us);
 
+    // True while a frame is genuinely STILL ARRIVING on the wire at now_us: the Deframer has
+    // an accumulation open AND a byte has been received recently enough that the transmitter
+    // cannot have stopped. Bytes within a frame are contiguous (each byte starts where the
+    // previous one ended), so a silence longer than one byte time means the sender stalled —
+    // a trunk §7 failure class — and nothing is in flight any more.
+    //
+    // This is the "in flight" test both the T_resp wait (trunk §3: the timeout gates the START
+    // BIT, so a frame that has started must be allowed to finish) and the T_gap transmit guard
+    // (never drive the line over someone else's frame) must use. Deframer::in_frame() alone is
+    // a state predicate that never goes false on a quiet wire; narrowing it to `len_ > 0`
+    // instead goes blind for the first byte time of every frame (PR #137 red-team, HIGH).
+    // Pairing state with byte cadence is what makes it both correct at a frame's START and
+    // bounded when a frame STALLS — no unbounded wait, and no fixed worst-case-frame cap that
+    // would starve the superframe for ~1.4 ms after a few stray bytes.
+    bool frame_arriving(uint64_t now_us) const;
+
     ByteWire& wire_;
     Clock& clock_;
     uint8_t host_addr_;
 
     Deframer deframer_;
+    // End instant of the most recent byte RECEIVED from the wire (any byte: delivered,
+    // discarded, or merely accumulating). Distinct from last_activity_, which also absorbs
+    // non-RX instants such as a timeout conclusion — frame_arriving() needs strictly the last
+    // byte actually seen.
+    uint64_t last_rx_us_ = 0;
     // Instant of the FLAG byte that opened the response frame accumulation now in
     // progress — persisted across poll() calls, mirroring MockWire's own open_flag_us_
     // (tests/support/mock_wire.hpp): a response split across two poll() calls must still

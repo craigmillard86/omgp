@@ -1423,3 +1423,25 @@ or a dedicated status) and state it in `contracts/link-cpp.md`, with a test. Low
 no corruption today, only a nonsensical-but-accepted input.
 **Ruling:** pending — human (contract-doc amendment + a small behaviour change to `begin()`).
 **Supersedes:** none.
+
+---
+
+## 2026-09-05 — an in-window CRC failure ends the attempt and is charged to the polled node
+
+**Context:** review round on #137 (red-team, LOW). `Master::poll()` ends the open attempt on
+ANY in-window CRC failure (`end_attempt(CrcFailed)`) without waiting out the rest of `T_resp`,
+and charges `crc_failures` to `dst_`. A bad-CRC frame is by definition unattributable — its
+source field did not survive the CRC check — so a hostile station emitting a short bad-CRC
+frame early in node N's response window costs node N an attempt and a `crc_failure` even though
+node N's own conforming answer arrives later in that same window and would have been accepted.
+Repeated, trunk §7's failure accounting marks an innocent node SUSPECT on traffic it never sent
+— squarely the hostile-module threat model CLAUDE.md names for an open platform.
+**Recommendation:** the fast-fail is a literal reading of trunk §7 ("a CRC-failed response is a
+failure"), so changing it is a spec question, not a code cleanup. Two candidate rulings: (a)
+keep the fast-fail but do NOT charge `crc_failures`/health to `dst_` for a frame whose source
+cannot be authenticated; or (b) do not surrender the attempt at all — count the CRC failure on
+the bus, keep waiting out `T_resp`, and let a genuine answer still win. (b) costs latency only
+in the already-failing case and removes the amplification entirely; (a) is the smaller change.
+Recommend (b), with the bus-level count retained for diagnostics.
+**Ruling:** pending — human (trunk §7 semantics; affects health/SUSPECT accounting).
+**Supersedes:** none.

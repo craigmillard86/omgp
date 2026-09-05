@@ -30,20 +30,24 @@ class Deframer {
     bool feed(uint8_t byte, FrameView& out);
     void reset(); // back to Hunting; counters kept
     const DeframerStats& stats() const;
-    // True while a frame accumulation is actually in progress: a FLAG has opened one AND at
-    // least one byte has since been taken into it (len_ > 0), or an escape is pending
-    // (state_ == Escaped). on_flag() (frame.cpp) sets state_ = InFrame on EVERY FLAG —
-    // including the FLAG that CLOSES a frame, because that same FLAG is also the next frame's
-    // opening delimiter (trunk §4) — and resets len_ to 0. So `state_ != Hunting` ALONE
-    // stayed true after any frame ever seen, with nothing actually accumulating. The len_/
-    // Escaped test distinguishes "a response is genuinely still arriving" (finish it: trunk
-    // §3, the Master's T_resp timeout gates the START BIT, not full delivery) from "a FLAG
-    // closed the last frame and the wire went quiet" (which must NOT hold the timeout off).
-    // PR #137 review/red-team, HIGH: an in-window frame that was merely discarded left
-    // state_ == InFrame with len_ == 0, so the old predicate wedged the Master's timeout
-    // forever — one stray frame from any node stopped the host trunk permanently.
+    // True once a FLAG has opened an accumulation (state_ != Hunting) — including the FLAG
+    // that closed the previous frame, since trunk §4 makes that same byte the next frame's
+    // opening delimiter. This is a STATE predicate only: it says an accumulation is open, NOT
+    // that bytes are still arriving, and on its own it never goes false again on a quiet wire
+    // (only TooLong/BadEscape return the Deframer to Hunting).
+    //
+    // Deliberately NOT narrowed to `len_ > 0 || Escaped`: that reads as "a frame is genuinely
+    // in flight", but it is also false for the whole first byte time of EVERY frame (on_flag()
+    // sets state_ = InFrame with len_ = 0), so a caller using it to mean "in flight" goes
+    // blind exactly when a frame starts — it would time out a response whose start bit did
+    // arrive inside T_resp, and transmit on top of a frame already on the wire (PR #137
+    // red-team, HIGH/MEDIUM: both were caused by exactly that narrowing).
+    //
+    // A caller that needs "is a frame still arriving RIGHT NOW" must combine this with byte
+    // cadence — see Master::frame_arriving(), which pairs it with the instant of the last byte
+    // actually received (contiguous bytes within a frame; a gap means the transmitter stalled).
     bool in_frame() const {
-        return state_ != State::Hunting && (len_ > 0 || state_ == State::Escaped);
+        return state_ != State::Hunting;
     }
 
   private:

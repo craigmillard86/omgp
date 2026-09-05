@@ -1090,20 +1090,24 @@ TEST_CASE("an in-window discarded frame followed by silence still times out and 
     REQUIRE_FALSE(master.busy());
 }
 
-// --- Liveness: a frame that OPENS in-window then stalls mid-flight is timed out, bounded by
-// the worst-case frame time (PR #137 review/red-team, MEDIUM) --------------------------
+// --- Liveness: a frame that OPENS in-window then stalls mid-flight does not hold the timeout
+// off — the in-flight wait is bounded by byte CADENCE (PR #137 review/red-team, MEDIUM) ---
 
-TEST_CASE("a frame that opens inside the window then stalls mid-flight (truncation) times "
-          "out once the worst-case frame time elapses — the in-flight wait is bounded",
+TEST_CASE("a frame that opens inside the window then stalls mid-flight (truncation) does not "
+          "hold the timeout off — the in-flight wait is bounded by byte cadence",
           "[link]") {
     // PR #137 review/red-team, MEDIUM: allowing a genuinely in-flight response to finish past
     // the nominal deadline (trunk §3: the timeout gates the START BIT, not full delivery)
     // must not be UNBOUNDED. A node that emits an opening FLAG plus a few bytes then stops (a
-    // stalled transmitter — trunk §7) would otherwise hold the timeout off forever with
-    // in_frame() legitimately true (len_ > 0). trunk §4 bounds a frame at kMaxWire bytes, so
-    // the wait is capped at resp_open + kMaxWire * byte_time_us; past that no conforming frame
-    // is still arriving. No Respond/CrcError/Duplicate script can leave a frame unterminated,
-    // so this drives the raw wire via MockWire::inject_bytes().
+    // stalled transmitter — trunk §7) held the timeout off forever, because in_frame() alone
+    // never goes false on a quiet wire.
+    //
+    // The bound is byte cadence, not a fixed worst-case-frame cap: bytes within a frame are
+    // contiguous, so once none has arrived for about a byte time the transmitter has stalled
+    // and nothing is in flight (Master::frame_arriving()). A kMaxWire-sized cap would instead
+    // have held busy() for ~1.4 ms after a few stray bytes — starving the superframe (PR #137
+    // red-team). No Respond/CrcError/Duplicate script can leave a frame unterminated, so this
+    // drives the raw wire via MockWire::inject_bytes().
     FakeClock clock;
     MockWire wire(clock);
     const uint8_t dst = 0x07;
@@ -1117,8 +1121,8 @@ TEST_CASE("a frame that opens inside the window then stalls mid-flight (truncati
         static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
         byte_us();
 
-    // An opening FLAG plus two content bytes, then nothing: the Deframer is left genuinely
-    // mid-frame (state InFrame, len_ == 2 > 0), with resp_open == the FLAG's instant.
+    // An opening FLAG plus two content bytes, then nothing: the Deframer is left mid-frame,
+    // with resp_open == the FLAG's instant, but the byte cadence stops.
     const uint32_t margin = 10;
     const uint64_t flag_us = tx_end + margin; // inside the window
     REQUIRE(flag_us > tx_end);
@@ -1126,17 +1130,118 @@ TEST_CASE("a frame that opens inside the window then stalls mid-flight (truncati
     const uint8_t partial[] = {static_cast<uint8_t>(omgp::TRUNK_flag_byte), 0xAA, 0xBB};
     wire.inject_bytes(partial, sizeof partial, flag_us);
 
-    const uint64_t max_frame_us = static_cast<uint64_t>(kMaxWire) * byte_us();
-    // Just before the cap: the frame could still (notionally) be arriving — no timeout yet.
-    MasterEvent ev = wire.advance_to(flag_us + max_frame_us - 1, master);
+    // frame_arriving() goes false about one byte time after the last byte actually received.
+    const uint64_t partial_end = flag_us + static_cast<uint64_t>(sizeof partial) * byte_us();
+    const uint64_t stall_clear = partial_end + byte_us();
+    // Sanity: the stall is detected well inside the window, so it cannot extend the deadline.
+    REQUIRE(stall_clear < tx_end + omgp::TRUNK_T_resp_us);
+
+    // Still inside the window: no timeout yet — nothing to do with the stalled frame.
+    MasterEvent ev = wire.advance_to(tx_end + omgp::TRUNK_T_resp_us - 1, master);
     REQUIRE(ev.kind == MasterEvent::None);
     REQUIRE(master.stats(dst).timeouts == 0);
     REQUIRE(master.busy());
 
-    // At the cap: no conforming frame could still be in flight -> attempt 0 times out. Under
-    // the bug (unbounded) this stays wedged at timeouts == 0 forever.
-    ev = wire.advance_to(flag_us + max_frame_us, master);
+    // At the ordinary deadline: the stalled partial frame does NOT hold the timeout off. It
+    // held it off forever before this PR (in_frame() never goes false on a quiet wire), and
+    // for the full ~1.4 ms worst-case frame time in the kMaxWire-capped revision.
+    ev = wire.advance_to(tx_end + omgp::TRUNK_T_resp_us, master);
     REQUIRE(master.stats(dst).timeouts == 1);
+}
+
+// --- Collision: a gap-deferred transmit must not fire on top of a frame that has already
+// STARTED on the wire (PR #137 red-team, HIGH) -----------------------------------------
+
+TEST_CASE("a gap-deferred transmit does not fire on top of a frame whose opening FLAG is "
+          "already on the wire",
+          "[link][timing:T_gap]") {
+    // PR #137 red-team, HIGH: fire_pending()'s in-flight guard read a predicate that is false
+    // for the first byte time of EVERY frame (on_flag() sets InFrame with len_ == 0), so the
+    // master drove the line one microsecond into a well-formed frame another station had
+    // already begun — and the opening FLAG produces no discard, so the gap clause did not push
+    // the instant out either. Reachable whenever a late response (trunk §7) starts just before
+    // a timeout-scheduled retry's deferred instant.
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    // Establish last_activity via a structurally-discarded frame, so begin() gap-defers.
+    const uint8_t garbage[] = {static_cast<uint8_t>(omgp::TRUNK_flag_byte), 0x11, 0x22,
+                               static_cast<uint8_t>(omgp::TRUNK_flag_byte)};
+    const uint64_t g_start = 100;
+    const uint64_t g_end = g_start + static_cast<uint64_t>(sizeof garbage) * byte_us();
+    wire.inject_bytes(garbage, sizeof garbage, g_start);
+    wire.advance_to(g_end, master);
+
+    const uint8_t payload[] = {0x77};
+    REQUIRE(master.begin(0x06, payload, sizeof payload) == Status::Ok);
+    const uint64_t due = g_end + omgp::TRUNK_T_gap_us;
+    REQUIRE(wire.transcript_size() == 0); // gap-deferred
+
+    // Another station starts a well-formed frame ONE microsecond before the deferred instant.
+    const std::vector<uint8_t> other =
+        encode_expected(omgp::ADDR_host, 0x02, true, false, 0, payload, sizeof payload);
+    const uint64_t other_start = due - 1;
+    const uint64_t other_end = other_start + static_cast<uint64_t>(other.size()) * byte_us();
+    REQUIRE(other_start < due); // its start bit really does precede the deferred instant
+    REQUIRE(other_end > due);   // ...and it is still on the wire at that instant
+    wire.inject_bytes(other.data(), other.size(), other_start);
+
+    // Step microsecond by microsecond so the engine gets a poll exactly at the deferred
+    // instant — the moment it used to transmit into the other station's frame.
+    for (uint64_t t = g_end + 1; t <= other_end + omgp::TRUNK_T_gap_us; ++t) {
+        wire.advance_to(t, master);
+        if (wire.transcript_size() > 0)
+            break;
+    }
+    REQUIRE(wire.transcript_size() == 1);
+    // Never inside the other frame; and once it ends, a full T_gap of idle first.
+    REQUIRE(wire.transcript(0).tx_start_us >= other_end);
+    REQUIRE(wire.transcript(0).tx_start_us == other_end + omgp::TRUNK_T_gap_us);
+}
+
+// --- trunk §3 / FR-007: the T_resp timeout gates the START BIT, including the byte time
+// right after a response's opening FLAG (PR #137 red-team/review, MEDIUM) --------------
+
+TEST_CASE("a response whose start bit arrives just inside T_resp is not timed out when poll() "
+          "lands in the byte time after its opening FLAG",
+          "[link][timing:T_resp]") {
+    // Same root cause as the collision above: the narrowed predicate was false between a
+    // response's opening FLAG and its first content byte, so a poll landing in that byte time
+    // saw "no frame in the window" and timed the attempt out — discarding an answer whose
+    // start bit had genuinely arrived inside T_resp (trunk §3: the timeout gates the START
+    // BIT, not full delivery).
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x0B;
+    const uint8_t payload[] = {0x31};
+    const uint32_t late_delay_us = omgp::TRUNK_T_resp_us - 5; // start bit just inside the window
+    const Step s[] = {{dst, Kind::Respond, late_delay_us}};
+    wire.set_script(dst, s, 1);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
+    const uint64_t deadline = tx_end + omgp::TRUNK_T_resp_us;
+    const uint64_t resp_start = tx_end + late_delay_us;
+    REQUIRE(resp_start < deadline);             // the start bit is inside the window
+    REQUIRE(resp_start + byte_us() > deadline); // ...but the first content byte is not yet due
+
+    // Poll exactly at the deadline: the opening FLAG is on the wire, the first content byte is
+    // not. The attempt must NOT time out.
+    MasterEvent ev = wire.advance_to(deadline, master);
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE(master.stats(dst).timeouts == 0);
+    REQUIRE(master.busy());
+
+    // The response finishes and is accepted — its start bit was inside T_resp.
+    const uint64_t full_end =
+        response_full_end(tx_end, dst, 0, payload, sizeof payload, late_delay_us);
+    ev = wire.advance_to(full_end, master);
+    REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(master.stats(dst).timeouts == 0);
 }
 
 // --- US2 AC6 (response-bit-clear sub-case): a frame matching src/seq/dst but with the

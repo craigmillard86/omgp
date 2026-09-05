@@ -55,13 +55,18 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     // transmit nothing.
     if (len > omgp::LIMIT_max_l3_payload)
         return Status::PayloadTooLong;
-    if (dst == 0xFF) // literal-ok: trunk §5 reserved broadcast address, not an L3 event code
-        return Status::ReservedAddress;
     // Master's own guard, beyond encode_frame's: next_seq_/stats_ are kAddrCount-entry
     // tables indexed directly by dst (data-model.md §4 "Sequence", §8 "Statistics"), so any
     // dst outside that range must be refused here even though encode_frame and the Deframer
     // let 0x10..0xFE through as syntactically valid trunk addresses (PR #137 review, HIGH:
     // begin(0x20, ...) previously wrote next_seq_[0x20]/stats_[0x20], past both tables).
+    //
+    // This single guard also delivers encode_frame's own trunk §5 refusal of the reserved
+    // 0xFF: a separate `dst == 0xFF` branch ahead of it was unreachable — dead code, and an
+    // un-killable mutant (PR #137 review, LOW). The subsumption is pinned structurally rather
+    // than assumed, so it cannot lapse silently if kAddrCount ever changes:
+    static_assert(kAddrCount <= 0xFF,
+                  "kAddrCount must leave trunk §5's reserved 0xFF refused by dst >= kAddrCount");
     if (dst >= kAddrCount)
         return Status::ReservedAddress;
 
@@ -90,9 +95,11 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     // last_activity_ (PR #137 review, HIGH - see fire_pending()'s own comment).
     const uint64_t gap_elapsed_at =
         has_last_activity_ ? last_activity_ + omgp::TRUNK_T_gap_us : now;
-    // mutant-ok(equivalent): proved by construction, not by mutate.sh (blocked in this
-    // sandbox) — at gap_elapsed_at == now both arms of any relational flip here yield the
-    // same value (now == gap_elapsed_at), so this is max(gap_elapsed_at, now) either way.
+    // mutant-ok(equivalent, cxx_gt_to_ge): `a > b ? a : b` and `a >= b ? a : b` both compute
+    // max(a, b) for ALL inputs — they choose different branches only when a == b, and both
+    // branches yield the same value there. Proved by construction, not by mutate.sh (blocked
+    // in this sandbox). (Rule 11 / PR #137 review, LOW: an earlier wording argued only the
+    // a == b case, which on its own does not establish equivalence over the whole domain.)
     deadline_ = gap_elapsed_at > now ? gap_elapsed_at : now;
     fire_pending(now);
     return Status::Ok;
@@ -125,6 +132,18 @@ void Master::do_transmit(uint64_t at_us) {
     deadline_ = tx_end + omgp::TRUNK_T_resp_us;
 }
 
+bool Master::frame_arriving(uint64_t now_us) const {
+    // in_frame(): an accumulation is open (a FLAG has been seen). On its own this stays true
+    // forever on a quiet wire, so it is paired with byte cadence: within a frame each byte
+    // starts exactly where the previous ended, so if more than one byte time has passed since
+    // the last byte was received, the transmitter has stopped and nothing is in flight.
+    // last_rx_us_ is the END of that byte, so the next byte of a live frame would arrive at
+    // last_rx_us_ and be drained by any poll at or after it — one full byte time of slack.
+    if (!deframer_.in_frame())
+        return false;
+    return now_us <= last_rx_us_ + byte_time_us(wire_.bit_rate());
+}
+
 void Master::fire_pending(uint64_t now_us) {
     if (!(open_ && sub_phase_ == SubPhase::PendingTransmit))
         return;
@@ -137,14 +156,16 @@ void Master::fire_pending(uint64_t now_us) {
     //      last_activity_ — never transmit with less than T_gap of idle after it;
     if (has_last_activity_ && last_activity_ + omgp::TRUNK_T_gap_us > deadline_)
         deadline_ = last_activity_ + omgp::TRUNK_T_gap_us;
-    //  (2) a frame still arriving RIGHT NOW (deframer_.in_frame()) means the bus is not idle;
-    //      transmitting would collide with it. Bounded by the worst-case wire frame time from
-    //      its opening FLAG, exactly as poll()'s own T_resp wait is (a stalled partial frame
-    //      must not defer transmission forever): past that bound no conforming frame is still
-    //      in flight, and (1)'s gap already covers a completed one.
-    const uint64_t max_frame_us = static_cast<uint64_t>(kMaxWire) * byte_time_us(wire_.bit_rate());
-    if (deframer_.in_frame() && now_us < resp_open_us_ + max_frame_us)
-        return; // let it finish; poll() calls fire_pending again as its bytes drain
+    // That single clause is also what keeps the engine off a frame that is still ARRIVING
+    // (PR #137 red-team, HIGH: the master drove the line into a frame another station had
+    // already started). No second in-flight branch is needed here, and adding one would be an
+    // unkillable duplicate (red-team M5): every received byte sets last_activity_ to that
+    // BYTE'S END, and within a frame bytes are contiguous — at any poll instant `now`, the
+    // last byte drained is the one with start <= now < start + byte_time, so its end is
+    // strictly greater than `now`. Hence last_activity_ > now, and the deferred instant
+    // (last_activity_ + T_gap) stays ahead of `now` for as long as bytes keep coming, at any
+    // bit rate. Proved by construction from the drain loop's unconditional recording plus
+    // contiguous framing (trunk §4) — not merely by the tests that exercise it.
     if (now_us >= deadline_)
         do_transmit(now_us);
 }
@@ -204,12 +225,6 @@ MasterEvent Master::poll(uint64_t now_us) {
         const uint64_t frame_open_us = resp_open_us_;
         const uint32_t bad_crc_before =
             deframer_.stats().discarded[static_cast<size_t>(Discard::BadCrc)];
-        // Total structural discards across all kinds, to detect a discard the drain loop
-        // does not otherwise observe (feed() returns false for a structural reject exactly as
-        // it does for a byte merely accumulating mid-frame — see the !delivered path below).
-        uint32_t disc_before = 0;
-        for (uint32_t d : deframer_.stats().discarded)
-            disc_before += d;
 
         FrameView view{};
         const bool delivered = deframer_.feed(byte, view);
@@ -218,12 +233,22 @@ MasterEvent Master::poll(uint64_t now_us) {
 
         const uint32_t bad_crc_after =
             deframer_.stats().discarded[static_cast<size_t>(Discard::BadCrc)];
-        uint32_t disc_after = 0;
-        for (uint32_t d : deframer_.stats().discarded)
-            disc_after += d;
         const uint64_t byte_end_us = start_us + byte_time_us(wire_.bit_rate());
         const bool awaiting = open_ && sub_phase_ == SubPhase::AwaitResponse;
         const bool in_window = frame_open_us >= window_start_us_ && frame_open_us < deadline_;
+
+        // EVERY byte off the wire is bus activity, whatever the Deframer then does with it
+        // (deliver, discard, accumulate mid-frame, or ignore while Hunting): FR-010 counts the
+        // "last byte transmitted or received", and data-model.md §4 "Gap" measures idle from
+        // it. Recorded once, here, rather than in each outcome branch — the per-branch
+        // recording missed bytes the Deframer neither delivers nor counts as a discard (PR
+        // #137 red-team, MEDIUM), which let a begin()/retry start with less than T_gap of real
+        // idle after a partial or ignored burst. last_rx_us_ additionally feeds
+        // frame_arriving()'s cadence test, so it tracks received bytes ONLY.
+        last_rx_us_ = byte_end_us;
+        if (byte_end_us > last_activity_)
+            last_activity_ = byte_end_us;
+        has_last_activity_ = true;
 
         if (bad_crc_after > bad_crc_before) {
             if (awaiting && in_window) {
@@ -234,30 +259,14 @@ MasterEvent Master::poll(uint64_t now_us) {
             }
             // A CRC-bad frame outside any open attempt's own window (or with no
             // transaction open at all) is not attributable to a specific dst_ — the
-            // Deframer's own stats() already counts it — but it is still real bus
-            // activity for T_gap purposes (data-model.md §4 "Gap"; PR #137 review,
-            // MEDIUM: this branch used to end the attempt unconditionally, even for a
-            // stray CRC failure that had nothing to do with the open transaction).
-            if (byte_end_us > last_activity_)
-                last_activity_ = byte_end_us;
-            has_last_activity_ = true;
+            // Deframer's own stats() already counts it (PR #137 review, MEDIUM: this branch
+            // used to end the attempt unconditionally, even for a stray CRC failure that had
+            // nothing to do with the open transaction). Its bus activity is already recorded
+            // by the unconditional last_activity_/last_rx_us_ update above.
             continue;
         }
-        if (!delivered) {
-            // A frame the Deframer rejected STRUCTURALLY (BadLength/BadEscape/TooLong/
-            // ReservedAddress — feed() returned false and it is not the bad-CRC case handled
-            // above) is still real bus activity for the T_gap rule (data-model.md §4 "Gap";
-            // FR-010 "last byte transmitted or received"; PR #137 review, MEDIUM: this path
-            // used to skip last_activity_, so a begin()/retry could start with less than
-            // T_gap of real idle after garbage). A byte merely accumulating mid-frame (no
-            // discard) is left to in_frame()/the completion path instead, not recorded here.
-            if (disc_after > disc_before) {
-                if (byte_end_us > last_activity_)
-                    last_activity_ = byte_end_us;
-                has_last_activity_ = true;
-            }
-            continue;
-        }
+        if (!delivered)
+            continue; // accumulating mid-frame, or structurally discarded: activity recorded above
 
         const FrameFields& f = view.f;
         if (awaiting && f.response && f.src == dst_ && f.dst == host_addr_ && f.seq == seq_ &&
@@ -278,9 +287,7 @@ MasterEvent Master::poll(uint64_t now_us) {
             // distinguish (concurrent PR #137 review-fix pass, cross-checked here).
             // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
             open_ = false;
-            last_activity_ = byte_end_us;
-            has_last_activity_ = true;
-            break;
+            break; // this byte's bus activity is already recorded above
         }
         // Wrong src/dst/seq/response-bit, a matching frame whose opening instant fell
         // outside the window, or no transaction open at all: discarded silently (trunk
@@ -293,18 +300,10 @@ MasterEvent Master::poll(uint64_t now_us) {
             stats_[dst_].discards++;
         else if (f.src < kAddrCount)
             stats_[f.src].discards++;
-        // A discarded frame's own last byte is real bus activity for the T_gap rule
-        // (data-model.md §4 "Gap"): record it so a following retry or begin() defers from it,
-        // not from a stale earlier instant. NOT labelled mutant-ok: since end_attempt() takes
-        // the MAX rather than overwriting (:154), a mutation of either assignment below is
-        // observable in gap timing — these lines are killable, not equivalent. (PR #137
-        // review, MEDIUM / rule 11: the prior mutant-ok(equivalent) labels here were false —
-        // has_last_activity_'s especially, as a mutation to `false` would SURVIVE: the
-        // discard-while-idle-then-begin() path has no other writer of it, and no test yet
-        // covers that exact sequence — a tracked follow-up.)
-        if (byte_end_us > last_activity_)
-            last_activity_ = byte_end_us;
-        has_last_activity_ = true;
+        // This frame's bus activity (for the T_gap rule, data-model.md §4 "Gap") is already
+        // recorded by the unconditional last_activity_ update at the top of the loop, which
+        // covers every received byte rather than only the outcomes that used to have their own
+        // recording (PR #137 review/red-team, MEDIUM).
     }
 
     // trunk §3: the timeout gates the START BIT, not full delivery — "if the host sees no
@@ -315,17 +314,16 @@ MasterEvent Master::poll(uint64_t now_us) {
     // review/red-team, HIGH: this previously timed out any response whose payload was
     // long enough that its closing FLAG arrived after tx_end + T_resp, which excludes
     // every payload above ~11 bytes at TRUNK_bit_rate and all of them at the fallback rate).
-    // BOUNDED (PR #137 review/red-team, MEDIUM): "allowed to finish" is not "forever". A
-    // frame that opens in-window may run only up to the worst-case wire frame time (trunk
-    // §4: kMaxWire bytes) from its own opening FLAG (resp_open_us_). Past that, no conforming
-    // response is still arriving — a node that emitted an opening FLAG then stalled mid-frame
-    // (a trunk §7 failure class) must NOT hold the timeout off any longer; the request has
-    // failed (trunk §3). in_frame()'s len_ test already handles a merely-discarded frame
-    // (len_ back to 0); this cap handles a genuine but stalled in-flight one (len_ > 0).
-    const uint64_t max_frame_us = static_cast<uint64_t>(kMaxWire) * byte_time_us(wire_.bit_rate());
+    // BOUNDED (PR #137 review/red-team, MEDIUM): "allowed to finish" is not "forever", and the
+    // bound is byte CADENCE, not a fixed worst-case-frame cap. frame_arriving() is true from
+    // the opening FLAG onward while bytes keep coming, and goes false about one byte time
+    // after they stop — so a genuine response finishes however long it legitimately takes, a
+    // node that opened a frame then stalled (a trunk §7 failure class) stops holding the
+    // timeout off almost immediately, and a frame that merely CLOSED in the window (its
+    // closing FLAG is also the next frame's opening delimiter) no longer suppresses the
+    // timeout at all once the wire goes quiet — the forever-wedge this PR opened with.
     const bool frame_pending_in_window =
-        deframer_.in_frame() && resp_open_us_ >= window_start_us_ && resp_open_us_ < deadline_ &&
-        now_us < resp_open_us_ + max_frame_us;
+        frame_arriving(now_us) && resp_open_us_ >= window_start_us_ && resp_open_us_ < deadline_;
     if (open_ && sub_phase_ == SubPhase::AwaitResponse && event.kind == MasterEvent::None &&
         now_us >= deadline_ && !frame_pending_in_window) {
         end_attempt(deadline_, MasterEvent::Timeout, event);
