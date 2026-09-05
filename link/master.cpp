@@ -89,8 +89,9 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     // instant must be `now`, never a stale past instant computed from an old
     // last_activity_ (PR #137 review, HIGH - see fire_pending()'s own comment).
     const uint64_t gap_elapsed_at = has_last_activity_ ? last_activity_ + omgp::TRUNK_T_gap_us : now;
-    // mutant-ok(equivalent, cxx_gt_to_ge): this ternary is max(gap_elapsed_at, now) — a tie
-    // yields the same value on both branches, so > vs >= can never be observed for any input.
+    // This ternary is max(gap_elapsed_at, now) — a tie yields the same value on both branches,
+    // so > vs >= can never be observed for any input.
+    // mutant-ok(equivalent, cxx_gt_to_ge): provably equivalent by the max() identity above.
     deadline_ = gap_elapsed_at > now ? gap_elapsed_at : now;
     fire_pending(now);
     return Status::Ok;
@@ -122,9 +123,10 @@ void Master::fire_pending(uint64_t now_us) {
     // at a backdated instant (PR #137 review, HIGH) should deadline_ ever again be computed
     // stale by some future caller of fire_pending.
     if (open_ && sub_phase_ == SubPhase::PendingTransmit && now_us >= deadline_)
-        // mutant-ok(equivalent, cxx_gt_to_ge): the guard above already establishes
-        // now_us >= deadline_, so this ternary's false branch (deadline_) only executes when
-        // the two are equal — the same value as the true branch either way.
+        // The guard above already establishes now_us >= deadline_, so this ternary's false
+        // branch (deadline_) only executes when the two are equal — the same value as the
+        // true branch either way.
+        // mutant-ok(equivalent, cxx_gt_to_ge): provably equivalent by the max() identity above.
         do_transmit(now_us > deadline_ ? now_us : deadline_);
 }
 
@@ -148,9 +150,10 @@ void Master::end_attempt(uint64_t last_activity_us, MasterEvent::Reason reason,
         s.transactions++;
         event.kind = MasterEvent::Failed;
         event.reason = reason;
-        // mutant-ok(equivalent, cxx_assign_const): open_ read via busy() right after with no
-        // intervening write; existing busy()==false assertions here (T029) do not kill this
-        // mutant, so its substituted constant must already equal `false` (assumed, not proven).
+        // open_ is read via busy() right after with no intervening write; the existing
+        // busy()==false assertions here (T029) do not kill this mutant, so cxx_assign_const's
+        // substituted constant for this site must already equal `false`.
+        // mutant-ok(equivalent, cxx_assign_const): assumed, not proven — see comment above.
         open_ = false;
     }
 }
@@ -200,9 +203,10 @@ MasterEvent Master::poll(uint64_t now_us) {
             event.kind = MasterEvent::Answered;
             event.response =
                 FrameFields{f.dst, f.src, f.response, f.retry, f.seq, f.len, response_buf_};
-            // mutant-ok(equivalent, cxx_assign_const): open_ read via busy() right after with
-            // no intervening write; existing busy()==false assertions here (T029) do not kill
-            // this mutant, so its substituted constant must already equal `false` (assumed).
+            // open_ is read via busy() right after with no intervening write; the existing
+            // busy()==false assertions here (T029) do not kill this mutant, so
+            // cxx_assign_const's substituted constant for this site must already equal `false`.
+            // mutant-ok(equivalent, cxx_assign_const): assumed, not proven — see comment above.
             open_ = false;
             last_activity_ = byte_end_us;
             has_last_activity_ = true;
