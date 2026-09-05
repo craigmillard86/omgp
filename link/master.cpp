@@ -96,19 +96,20 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     // called too soon after the last activity on the bus.
     const uint64_t now = clock_.now_us();
     sub_phase_ = SubPhase::PendingTransmit;
-    // trunk §3 requires only ">= T_gap of bus idle", not "exactly T_gap": once the gap has
-    // already elapsed by the time begin() is called (the engine's ordinary operating mode,
-    // e.g. a superframe scheduler invoking begin() once per T_poll >> T_gap), the deferred
-    // instant must be `now`, never a stale past instant computed from an old
-    // last_activity_ (PR #137 review, HIGH - see fire_pending()'s own comment).
-    const uint64_t gap_elapsed_at =
-        has_last_activity_ ? last_activity_ + omgp::TRUNK_T_gap_us : now;
-    // mutant-ok(equivalent, cxx_gt_to_ge): `a > b ? a : b` and `a >= b ? a : b` both compute
-    // max(a, b) for ALL inputs — they choose different branches only when a == b, and both
-    // branches yield the same value there. Proved by construction, not by mutate.sh (blocked
-    // in this sandbox). (Rule 11 / PR #137 review, LOW: an earlier wording argued only the
-    // a == b case, which on its own does not establish equivalence over the whole domain.)
-    deadline_ = gap_elapsed_at > now ? gap_elapsed_at : now;
+    // The deferred instant is last_activity_ + T_gap (data-model.md §4 "Gap"), or `now` when
+    // nothing has ever been on the bus. trunk §3 requires only ">= T_gap of bus idle", not
+    // "exactly T_gap": when that instant is already in the past by the time begin() is called
+    // (the engine's ordinary operating mode — a superframe scheduler invoking begin() once per
+    // T_poll >> T_gap), fire_pending() below transmits at `now` because `now >= deadline_`;
+    // the transmit instant is never a stale past one (PR #137 review, HIGH). That property
+    // lives in fire_pending()'s `now_us >= deadline_`, NOT in a max(now, gap_elapsed_at) here:
+    // an earlier revision computed that max and credited it with the fix, but the two are
+    // indistinguishable at every call site — when the gap has elapsed, neither the push clause
+    // (last_activity_ + T_gap is not > either candidate) nor the cap (both candidates are
+    // <= defer_origin + max_frame + T_gap) can bind, and do_transmit(now) runs either way with
+    // defer_origin_us_ then dead until end_attempt() reassigns it (PR #137 red-team @40355cf,
+    // LOW: an unkillable, untagged mutant). Removed rather than tagged.
+    deadline_ = has_last_activity_ ? last_activity_ + omgp::TRUNK_T_gap_us : now;
     defer_origin_us_ = deadline_; // start of the bounded wait — see the member
     fire_pending(now);
     return Status::Ok;
@@ -176,8 +177,14 @@ void Master::fire_pending(uint64_t now_us) {
     // the last byte drained is the one with start <= now < start + byte_time, so its end is
     // strictly greater than `now`. Hence last_activity_ > now, and the deferred instant
     // (last_activity_ + T_gap) stays ahead of `now` for as long as bytes keep coming, at any
-    // bit rate. Proved by construction from the drain loop's unconditional recording plus that
-    // contiguity — not merely by the tests that exercise it.
+    // CONSTANT bit rate. Proved by construction from the drain loop's unconditional recording
+    // plus that contiguity — not merely by the tests that exercise it. The constancy matters:
+    // each byte's end is computed at DRAIN time from the rate then in force, so a set_bit_rate()
+    // upwards while a frame put on the wire at the old rate is still arriving makes those bytes
+    // appear to end early, and the perceived holes can let this transmit out inside that frame
+    // (PR #137 red-team @40355cf, LOW — a byte's own duration is not something ByteWire
+    // reports; open in #138 / docs/OPEN-QUESTIONS.md 2026-09-06 "rate change mid-stream").
+    // Every protection claim below is therefore stated for a constant rate.
     uint64_t want_us = deadline_;
     if (has_last_activity_ && last_activity_ + omgp::TRUNK_T_gap_us > want_us)
         want_us = last_activity_ + omgp::TRUNK_T_gap_us;
@@ -202,7 +209,8 @@ void Master::fire_pending(uint64_t now_us) {
     // inference "the bus is unusable" drawn from them is spoofable or a false positive, and any
     // Failed it produces is read by the caller as a NODE outcome.
     //
-    // What the cap establishes, each by construction from this function's contents:
+    // What the cap establishes, each by construction from this function's contents (at a
+    // constant bit rate — see above):
     //  - liveness: after this statement deadline_ <= cap_us always, so any poll at or after
     //    cap_us transmits, whatever the cadence and whatever is on the wire;
     //  - the cap can only LOWER the instant, so it never re-creates the elapsed-time misfire

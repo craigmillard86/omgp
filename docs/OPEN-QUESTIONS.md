@@ -1529,3 +1529,64 @@ authoritative doc.
 **Ruling:** pending — human (trunk §3/§7 reading; contract amendment; T3 artefacts).
 **Supersedes:** the 2026-09-05 entry "what should the Master do when the bus is NEVER idle for
 T_gap? (babble)" — its option (a) is withdrawn as falsified; its option (b) remains open in #138.
+
+## 2026-09-06 — bounded courtesy: the worst-case conclusion time is larger than the entry above states (FLAG-delimited babble)
+
+**Context:** red-team at `40355cf` (#137, MEDIUM). The entry above and the suite's "within a
+symbol-derived bound" case gave the time for a full three-attempt transaction under continuous
+babble as `3·(F + 2G + B) + 3·(n·B + R) + 6·P` (F = `kMaxWire` byte times, G = `T_gap`,
+B = one byte time, R = `T_resp`, P = poll cadence, n = request bytes). That is the bound for
+FLAG-FREE filler only: the filler never opens a frame, so the `T_resp` in-flight hold ("the
+timeout gates the START BIT — a frame that opened inside the window is allowed to finish",
+trunk §3) is never entered. A station that opens a frame on the last wire slot inside each
+attempt's window and streams `kMaxUnstuffed` escaped FLAGs holds that attempt's timeout off
+for one worst-case frame — exactly `kMaxWire·B` (= F), by construction from the Deframer's
+`Discard::TooLong` limit plus `frame_arriving()`'s one-byte slack; a second frame cannot add
+to it because its opening FLAG lands at or after the deadline, outside the window.
+**Corrected bound (implemented in #137):** `3·(F + 2G + B) + 3·(n·B + R + F) + 6·P` —
+≈ 9.7 ms at a 1 µs cadence / 1 Mb/s (measured 9.66 ms: tight), ≈ 21.7 ms at the superframe
+cadence, ≈ 88.8 ms at the fallback rate and superframe cadence (measured 84 ms). Pinned by
+two new cases in `tests/unit/test_link_master.cpp` (the FLAG-delimited adversary at both
+cadences and both rates; the single-attempt hold pinned EXACTLY at `deadline + kMaxWire·B`).
+The "≈17 ms" in the entry above is therefore the FLAG-free figure; the worst case at the
+superframe cadence is ≈ 21.7 ms, and the "~10× later BUS_FAULT" trade-off becomes ~13×.
+What is unchanged: `Failed{Timeout}` on the node's merits, never `CrcFailed`, never a Failed
+synthesised from the bus state; three transmissions; `busy()` clear afterwards.
+**Tension with trunk §6:** "host-visible within (backplane module-poll period) + (≤ 2 × T_poll),
+independent of load" is not met against such a station — one transaction alone may span up to ~11
+superframes (the bound; 6 measured at 1 Mb/s). §6 describes a conforming bus; a station transmitting outside its own response
+window is a §3 violator and the spec's remedy is §7's BUS_FAULT, not a faster conclusion. If
+the maintainers want a tighter worst case, the lever is the in-flight hold's length (today one
+worst-case frame, i.e. the Deframer's `kMaxUnstuffed`), not the courtesy cap. Recommended:
+accept the figure; note it against §6 in the trunk §10 item the entry above asks for.
+**Ruling:** pending — folded into the "bounded courtesy" ruling above.
+**Amends:** the 2026-09-05 "bounded courtesy" entry's ≈17 ms / ~10× figures (that entry's
+reading and contract text are unchanged).
+
+## 2026-09-06 — a bit-rate change while another station's frame is still arriving: what does the wire model mean?
+
+**Context:** red-team at `40355cf` (#137, LOW). `Master::poll()` computes every drained
+byte's END as `start + byte_time_us(wire.bit_rate())` at DRAIN time; `ByteWire::receive()`
+reports a byte's start instant only, not its duration. After `set_bit_rate()` upwards (trunk
+§7's recovery from the fallback rate back to `TRUNK_bit_rate`), bytes another station put on
+the wire at the OLD, slower rate are recorded as ending ~76 µs early, the engine perceives
+gaps > `T_gap` between them, and a gap-deferred transmit can go out INSIDE that frame
+(reproducer: frame spanning [494, 12706) at the fallback rate, rate raised at 494 + 10 slow
+bytes, host transmits at 1414). `fire_pending()`'s "never transmits over an arriving frame"
+holds by construction only at a CONSTANT rate; its comments and the T-4 case now say so
+(rule 11). Nothing in the suite asserts the collision invariant across a rate change.
+**Options:** (a) treat it as a modelling artefact — on real hardware a UART re-rated mid-frame
+receives framing errors/garbage, not the sender's bytes, so `MockWire` handing the old-rate
+bytes over intact after the change is the unrealistic part; the ByteWire contract
+(`byte-wire-and-clock.md`) would state that bytes already queued at a rate change are
+delivered as garbage / dropped, and no engine change is needed. (b) extend `ByteWire::receive()`
+to report each byte's duration (or the rate it was received at) so the engine can compute true
+ends — an interface change for F3/F4. (c) have the engine hold off for one worst-case frame at
+the OLD rate after any upward rate change — simple, but re-introduces a fixed hold of the kind
+this PR removed elsewhere. **Recommended:** (a), as a contract clarification; it matches the
+physics and keeps the engine's inference honest without new state. Until ruled, the claim in
+`master.cpp` is narrowed rather than the behaviour changed.
+**Where it lives:** #138 (Master follow-ups), alongside the `begin()`-drain assumption, which
+is the same shape of gap (a protection guarantee that holds only under an unstated operating
+assumption).
+**Ruling:** pending — human (ByteWire contract; F3/F4 interface).
