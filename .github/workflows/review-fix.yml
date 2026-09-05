@@ -234,9 +234,13 @@ jobs:
                - A defect, security hole, weakened test, spec divergence or
                  unmet criterion is ALWAYS blocking, whatever its label;
                  when unsure, treat it as blocking.
-               - If EVERY finding is a FOLLOW-UP (nothing blocking), change
-                 no code: post the step-5 comment listing the proposed
-                 issues, and stop.
+               A `findings` verdict means a reviewer found BLOCKING issues,
+               so there is always something to fix — both claude-review and
+               red-team emit `findings` only for blocking findings. If you
+               genuinely believe a finding the reviewer marked blocking is
+               actually out of scope, do not silently stop: rebut it with
+               evidence (step 3) and say the PR needs human triage, so it is
+               not left stalled.
             3. Fix ON THIS BRANCH only — never main, never another branch.
                Where a finding reveals a missing test, work TDD: add the
                failing test first, then the fix. Never weaken, skip or
@@ -254,9 +258,10 @@ jobs:
                re-runs review and CI.
             5. Comment on the PR with `gh pr comment`, containing exactly:
                (a) each finding you FIXED, with file:line and what changed;
-               (b) each finding DEFERRED as LOW, listed verbatim so a human
-               can see what was consciously left; (c) each finding you
-               REBUTTED, with the evidence; (d) evidence for every claim,
+               (b) each finding you judged a FOLLOW-UP (out of scope), with
+               the proposed issue title so a human can file it — the
+               "## FOLLOW-UPS" record; (c) each finding you REBUTTED, with
+               the evidence; (d) evidence for every claim,
                labelled (demonstrated by <named test/stage>, assumed, or
                NOT EXAMINED) per CLAUDE.md rule 11.
             Do not approve the PR, do not merge it, and do not change any

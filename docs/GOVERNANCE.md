@@ -137,11 +137,13 @@ the enforcement.
     are follow-ups is auto-approvable below `auto_approve_max_tier` (the
     merge stays human for T3 and CODEOWNERS paths per §1). Never
     deferrable: defects, security, weakened tests, spec divergence and
-    unmet criteria always block, at every severity. The rule rests on the
-    linked issue carrying precise, testable acceptance criteria — weak
-    criteria make "in scope" weak. (`red-team` still emits `findings` for
-    out-of-scope weaknesses today; the loop triages those as follow-ups,
-    and aligning red-team's own verdict is a tracked fast-follow.)
+    unmet criteria always block, at every severity. Both `claude-review`
+    and `red-team` classify block-vs-follow-up and key `clean` off the
+    absence of BLOCKING findings, so a `findings` verdict always means real
+    work for the loop (no stall). Proposed follow-ups are filed as `task`
+    issues by `review-followups` (dedup'd, `task`-only). The rule rests on
+    the linked issue carrying precise, testable acceptance criteria — weak
+    criteria make "in scope" weak.
   - **Bound — `review_fix_max_attempts` attempts, then a human.** Labels
     `review-fix-1..N`, at most one attempt per head commit (a red-team
     verdict arriving after a review verdict on the same commit is the same

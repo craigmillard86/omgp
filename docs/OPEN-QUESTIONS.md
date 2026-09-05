@@ -1391,10 +1391,14 @@ LOW weakened assertion inside the diff should.
 - **Dependency:** this makes the acceptance criteria the load-bearing contract, so it
   pairs with tighter enrichment (precise, testable criteria); weak criteria make a
   mis-classification able to wave a real gap through into auto-approve.
-- **Fast-follow (not in this change):** `red-team`'s own verdict still reads `findings`
-  for out-of-scope weaknesses (it runs at T2/T3; the loop triages its findings as
-  follow-ups either way). Aligning red-team's verdict to the same block-vs-follow-up
-  rule is deferred to its own task, since it changes what a red-team verdict gates at
-  the T2 auto-merge boundary.
+- **Both reviewers aligned (corrected after the #136 red-team round).** An earlier draft
+  deferred aligning `red-team`'s verdict — the #136 red team showed that deferral created
+  a liveness stall (out-of-scope red-team `findings` → review-fix does nothing → head
+  never moves → the `needs-human` terminal state is unreachable). So `red-team` now
+  classifies block-vs-follow-up and emits `clean` iff no BLOCKING finding, same as
+  `claude-review`; a `findings` verdict always means real work. The guardrails
+  (never-defer defects/security/weakened-tests, verdict-on-blocking) are pinned by tests
+  (`test_scope_routing_guardrails_are_pinned`). Follow-ups are consumed by the new
+  `review-followups` workflow, which files each as a dedup'd `task` issue.
 **Supersedes:** the 2026-09-02 review-fix severity policy (that entry and GOVERNANCE §
 "Review-finding auto-resolution").
