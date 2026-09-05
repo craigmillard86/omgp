@@ -88,7 +88,8 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     // e.g. a superframe scheduler invoking begin() once per T_poll >> T_gap), the deferred
     // instant must be `now`, never a stale past instant computed from an old
     // last_activity_ (PR #137 review, HIGH - see fire_pending()'s own comment).
-    const uint64_t gap_elapsed_at = has_last_activity_ ? last_activity_ + omgp::TRUNK_T_gap_us : now;
+    const uint64_t gap_elapsed_at =
+        has_last_activity_ ? last_activity_ + omgp::TRUNK_T_gap_us : now;
     // mutant-ok(equivalent): proved by construction, not by mutate.sh (blocked in this
     // sandbox) — at gap_elapsed_at == now both arms of any relational flip here yield the
     // same value (now == gap_elapsed_at), so this is max(gap_elapsed_at, now) either way.
@@ -226,8 +227,8 @@ MasterEvent Master::poll(uint64_t now_us) {
             continue;
 
         const FrameFields& f = view.f;
-        if (awaiting && f.response && f.src == dst_ && f.dst == host_addr_ &&
-            f.seq == seq_ && in_window) {
+        if (awaiting && f.response && f.src == dst_ && f.dst == host_addr_ && f.seq == seq_ &&
+            in_window) {
             // As at begin()'s own memcpy guard above — a copy of zero bytes is
             // unobservable, and ev.response.len == 0 tells the caller not to read
             // response_buf_ beyond it.
@@ -259,12 +260,17 @@ MasterEvent Master::poll(uint64_t now_us) {
             stats_[dst_].discards++;
         else if (f.src < kAddrCount)
             stats_[f.src].discards++;
-        // Overwritten by whichever terminal path (Answered above, or CrcFailed/Timeout via
-        // end_attempt) concludes this transaction, before it is ever read by a later
-        // mutant-ok(equivalent, cxx_assign_const): begin()'s gap check — see end_attempt().
-        last_activity_ = byte_end_us;
-        // Same reasoning as last_activity_ above — every terminal path sets this true
-        // mutant-ok(equivalent, cxx_assign_const): again from its own evidence before conclusion.
+        // A discarded frame's own last byte is real bus activity for the T_gap rule
+        // (data-model.md §4 "Gap"): record it so a following retry or begin() defers from it,
+        // not from a stale earlier instant. NOT labelled mutant-ok: since end_attempt() takes
+        // the MAX rather than overwriting (:154), a mutation of either assignment below is
+        // observable in gap timing — these lines are killable, not equivalent. (PR #137
+        // review, MEDIUM / rule 11: the prior mutant-ok(equivalent) labels here were false —
+        // has_last_activity_'s especially, as a mutation to `false` would SURVIVE: the
+        // discard-while-idle-then-begin() path has no other writer of it, and no test yet
+        // covers that exact sequence — a tracked follow-up.)
+        if (byte_end_us > last_activity_)
+            last_activity_ = byte_end_us;
         has_last_activity_ = true;
     }
 
@@ -276,8 +282,17 @@ MasterEvent Master::poll(uint64_t now_us) {
     // review/red-team, HIGH: this previously timed out any response whose payload was
     // long enough that its closing FLAG arrived after tx_end + T_resp, which excludes
     // every payload above ~11 bytes at TRUNK_bit_rate and all of them at the fallback rate).
+    // BOUNDED (PR #137 review/red-team, MEDIUM): "allowed to finish" is not "forever". A
+    // frame that opens in-window may run only up to the worst-case wire frame time (trunk
+    // §4: kMaxWire bytes) from its own opening FLAG (resp_open_us_). Past that, no conforming
+    // response is still arriving — a node that emitted an opening FLAG then stalled mid-frame
+    // (a trunk §7 failure class) must NOT hold the timeout off any longer; the request has
+    // failed (trunk §3). in_frame()'s len_ test already handles a merely-discarded frame
+    // (len_ back to 0); this cap handles a genuine but stalled in-flight one (len_ > 0).
+    const uint64_t max_frame_us = static_cast<uint64_t>(kMaxWire) * byte_time_us(wire_.bit_rate());
     const bool frame_pending_in_window =
-        deframer_.in_frame() && resp_open_us_ >= window_start_us_ && resp_open_us_ < deadline_;
+        deframer_.in_frame() && resp_open_us_ >= window_start_us_ && resp_open_us_ < deadline_ &&
+        now_us < resp_open_us_ + max_frame_us;
     if (open_ && sub_phase_ == SubPhase::AwaitResponse && event.kind == MasterEvent::None &&
         now_us >= deadline_ && !frame_pending_in_window) {
         end_attempt(deadline_, MasterEvent::Timeout, event);

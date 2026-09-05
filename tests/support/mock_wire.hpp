@@ -86,6 +86,17 @@ class MockWire : public omgp::link::ByteWire {
     // 2, before Master/Responder exist).
     void advance_to(uint64_t t);
 
+    // Test helper: enqueues `n` already-encoded bytes onto the very same time-sorted RX
+    // queue receive() drains, one byte_time_us() apart starting at `start_us` — a raw
+    // station on the bus under the test's full control, for wire content the scripted Kinds
+    // cannot produce. Its motivating case (PR #137 review/red-team, MEDIUM): a transmitter
+    // that opens a frame (an opening FLAG plus a few bytes) then STOPS mid-flight — a
+    // truncated/stalled node, a trunk §7 failure class. schedule_respond/crc_error/duplicate
+    // all emit COMPLETE frames, so none can leave the Deframer mid-accumulation to exercise
+    // the Master's bounded in-flight wait. No transcript entry and no scheduled answer:
+    // these bytes model another station's transmission, not a request addressed to a node.
+    void inject_bytes(const uint8_t* bytes, size_t n, uint64_t start_us);
+
     // Test helper (PR #112 review, finding 1): returns the fault recorded since the last
     // take_fault() call (or nullptr if none), and clears it. A test that deliberately drives
     // MockWire into a specific fault (e.g. RX-queue overflow) uses this, plus its own

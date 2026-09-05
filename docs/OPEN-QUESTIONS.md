@@ -1385,3 +1385,23 @@ is implemented, so both implementations corrupt the CRC the same way at every va
 **Ruling:** pending — human (contract-doc amendment; not one of CLAUDE.md's three
 authoritative `docs/` documents, but still a human-ruling artefact per GOVERNANCE §3).
 **Supersedes:** none.
+
+---
+
+## 2026-09-05 — Master::begin() refuses dst >= kAddrCount, beyond encode_frame's contract
+
+**Context:** review round on #137 (LOW). `contracts/link-cpp.md` specifies `begin()`'s
+address refusals "as `encode_frame`", which refuses only `dst == 0xFF` (trunk §5 reserved
+broadcast). `link/master.cpp`'s `begin()` adds a stricter refusal — `dst >= kAddrCount` →
+`Status::ReservedAddress` — because `next_seq_`/`stats_` are `kAddrCount`-entry tables
+indexed directly by `dst`; without it `begin(0x20, …)` wrote past both tables (the HIGH
+that refusal fixed). trunk §5 makes `0x00–0x0F` the only trunk node addresses, so the
+stricter refusal is correct and necessary, but the contract text now diverges from the
+implementation.
+**Recommendation:** amend `contracts/link-cpp.md`'s `begin()` refusal clause to state the
+`dst >= kAddrCount → ReservedAddress` guard explicitly (the same way the Kind::CrcError
+entry above records `corrupt_crc_hi()`'s deviation), so an implementation written from the
+contract matches `master.cpp`.
+**Ruling:** pending — human (contract-doc amendment; not one of CLAUDE.md's three
+authoritative `docs/` documents, but still a human-ruling artefact per GOVERNANCE §3).
+**Supersedes:** none.

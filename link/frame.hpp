@@ -30,12 +30,21 @@ class Deframer {
     bool feed(uint8_t byte, FrameView& out);
     void reset(); // back to Hunting; counters kept
     const DeframerStats& stats() const;
-    // True once a FLAG has opened a frame accumulation not yet closed by its own FLAG
-    // (trunk §3: the Master's T_resp timeout gates the start bit, not full delivery — a
-    // frame already in progress must be allowed to finish, however long that takes, up to
-    // this same accumulator's own kMaxUnstuffed/TooLong bound; PR #137 review/red-team,
-    // HIGH).
-    bool in_frame() const { return state_ != State::Hunting; }
+    // True while a frame accumulation is actually in progress: a FLAG has opened one AND at
+    // least one byte has since been taken into it (len_ > 0), or an escape is pending
+    // (state_ == Escaped). on_flag() (frame.cpp) sets state_ = InFrame on EVERY FLAG —
+    // including the FLAG that CLOSES a frame, because that same FLAG is also the next frame's
+    // opening delimiter (trunk §4) — and resets len_ to 0. So `state_ != Hunting` ALONE
+    // stayed true after any frame ever seen, with nothing actually accumulating. The len_/
+    // Escaped test distinguishes "a response is genuinely still arriving" (finish it: trunk
+    // §3, the Master's T_resp timeout gates the START BIT, not full delivery) from "a FLAG
+    // closed the last frame and the wire went quiet" (which must NOT hold the timeout off).
+    // PR #137 review/red-team, HIGH: an in-window frame that was merely discarded left
+    // state_ == InFrame with len_ == 0, so the old predicate wedged the Master's timeout
+    // forever — one stray frame from any node stopped the host trunk permanently.
+    bool in_frame() const {
+        return state_ != State::Hunting && (len_ > 0 || state_ == State::Escaped);
+    }
 
   private:
     enum class State : uint8_t { Hunting, InFrame, Escaped };

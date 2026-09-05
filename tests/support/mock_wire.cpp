@@ -289,6 +289,14 @@ void MockWire::schedule_duplicate(const omgp::link::FrameFields& request, uint64
     enqueue_frame(buf, written, first_end + delay_us);
 }
 
+void MockWire::inject_bytes(const uint8_t* bytes, size_t n, uint64_t start_us) {
+    // Same RX-queue path a scheduled response takes (enqueue_frame -> enqueue's insertion
+    // sort), so injected bytes interleave with any scripted traffic in start-instant order.
+    // No parser_, no transcript, no next_step: this is raw wire from another station, not a
+    // request MockWire should answer.
+    enqueue_frame(bytes, n, start_us);
+}
+
 uint64_t MockWire::transmit(const uint8_t* bytes, size_t n, uint64_t now_us) {
     using omgp::link::byte_time_us;
     using omgp::link::FrameView;

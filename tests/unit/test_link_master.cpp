@@ -123,7 +123,8 @@ TEST_CASE("idle bus, node answers inside the response window: Answered with the 
 
     const uint64_t tx_end =
         req.tx_start_us +
-        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) * byte_us();
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+            byte_us();
     const uint64_t full_end = response_full_end(tx_end, dst, 0, payload, sizeof payload);
 
     // advance_to(t) (clock-only) runs INFO/REQUIRE (Catch2 macros that allocate) and must
@@ -157,7 +158,8 @@ TEST_CASE("silence for the full response window triggers exactly two retries (sa
     REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
 
     uint64_t tx_end =
-        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) * byte_us();
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
 
     for (uint32_t attempt = 0; attempt < omgp::TRUNK_retries; ++attempt) {
         const uint64_t timeout_instant = tx_end + omgp::TRUNK_T_resp_us;
@@ -172,8 +174,8 @@ TEST_CASE("silence for the full response window triggers exactly two retries (sa
         REQUIRE(retry_rec.tx_start_us == retry_tx_start);
 
         tx_end = retry_tx_start + static_cast<uint64_t>(
-                                       request_bytes(dst, 0, true, payload, sizeof payload).size()) *
-                                       byte_us();
+                                      request_bytes(dst, 0, true, payload, sizeof payload).size()) *
+                                      byte_us();
     }
 
     // Third (final) timeout: no attempts remain -> terminal Failed{Timeout}, no fourth
@@ -205,13 +207,14 @@ TEST_CASE("after a terminal Failed{Timeout}, transactions is counted, busy() cle
     REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
 
     uint64_t tx_end =
-        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) * byte_us();
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
     for (uint32_t attempt = 0; attempt < omgp::TRUNK_retries; ++attempt) {
         const uint64_t retry_tx_start = tx_end + omgp::TRUNK_T_resp_us + omgp::TRUNK_T_gap_us;
         wire.advance_to(retry_tx_start, master);
         tx_end = retry_tx_start + static_cast<uint64_t>(
-                                       request_bytes(dst, 0, true, payload, sizeof payload).size()) *
-                                       byte_us();
+                                      request_bytes(dst, 0, true, payload, sizeof payload).size()) *
+                                      byte_us();
     }
 
     const uint64_t timeout_instant = tx_end + omgp::TRUNK_T_resp_us;
@@ -268,10 +271,10 @@ TEST_CASE("a Failed transaction whose final attempt saw a CRC failure reports "
             REQUIRE(ev.kind == MasterEvent::None);
             const uint64_t retry_start = crc_end + omgp::TRUNK_T_gap_us;
             wire.advance_to(retry_start, master);
-            tx_end = retry_start +
-                    static_cast<uint64_t>(
-                        request_bytes(dst, 0, true, payload, sizeof payload).size()) *
-                        byte_us();
+            tx_end =
+                retry_start +
+                static_cast<uint64_t>(request_bytes(dst, 0, true, payload, sizeof payload).size()) *
+                    byte_us();
         }
     }
     REQUIRE(ev.kind == MasterEvent::Failed);
@@ -371,14 +374,15 @@ TEST_CASE("a genuine response whose opening FLAG lands exactly at the final atte
     REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
 
     uint64_t tx_end =
-        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) * byte_us();
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
     for (uint32_t attempt = 0; attempt < omgp::TRUNK_retries; ++attempt) {
         const uint64_t retry_tx_start = tx_end + omgp::TRUNK_T_resp_us + omgp::TRUNK_T_gap_us;
         MasterEvent retry_ev = wire.advance_to(retry_tx_start, master);
         REQUIRE(retry_ev.kind == MasterEvent::None);
         tx_end = retry_tx_start + static_cast<uint64_t>(
-                                       request_bytes(dst, 0, true, payload, sizeof payload).size()) *
-                                       byte_us();
+                                      request_bytes(dst, 0, true, payload, sizeof payload).size()) *
+                                      byte_us();
     }
 
     // The final (3rd, no-retries-left) attempt's own response fires exactly at ITS T_resp
@@ -463,8 +467,7 @@ TEST_CASE("a conforming node's answer is accepted at every legal payload length,
         // full_end, mid-frame (PR #137 review/red-team, HIGH; the red-team's own
         // reproducer polls every byte-time for exactly this reason).
         MasterEvent ev{};
-        for (uint64_t t = byte_us(); t <= full_end && ev.kind == MasterEvent::None;
-             t += byte_us())
+        for (uint64_t t = byte_us(); t <= full_end && ev.kind == MasterEvent::None; t += byte_us())
             ev = wire.advance_to(t, master);
         REQUIRE(ev.kind == MasterEvent::Answered);
         REQUIRE(ev.response.len == len);
@@ -560,8 +563,8 @@ TEST_CASE("a CRC-failed frame arriving outside any open attempt's own window is 
     REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
     const uint64_t tx_end = static_cast<uint64_t>(
         request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us());
-    const uint64_t crc_end = response_full_end(tx_end, dst, 0, payload, sizeof payload,
-                                               omgp::TRUNK_T_resp_us + 50);
+    const uint64_t crc_end =
+        response_full_end(tx_end, dst, 0, payload, sizeof payload, omgp::TRUNK_T_resp_us + 50);
     // Sanity: the corrupted response really does open outside attempt 0's own window.
     REQUIRE(crc_end > tx_end + omgp::TRUNK_T_resp_us);
 
@@ -593,8 +596,8 @@ TEST_CASE("a CrcError response's wire length matches the real response's even wh
     for (uint16_t d = 1; d < static_cast<uint16_t>(kAddrCount) && !found; ++d) {
         for (uint16_t p = 0; p < 256 && !found; ++p) {
             const uint8_t unstuffed[] = {omgp::ADDR_host, static_cast<uint8_t>(d),
-                                        /*ctrl: response=1, retry=0, seq=0*/ 0x01, 0x01,
-                                        static_cast<uint8_t>(p)};
+                                         /*ctrl: response=1, retry=0, seq=0*/ 0x01, 0x01,
+                                         static_cast<uint8_t>(p)};
             const uint16_t c = omgp::crc16_ccitt_false(unstuffed, sizeof unstuffed);
             if (static_cast<uint8_t>((c >> 8) & 0xFF) ==
                 static_cast<uint8_t>(omgp::TRUNK_flag_byte ^ 0xFF)) {
@@ -659,7 +662,8 @@ TEST_CASE("a late duplicate of a concluded transaction's response is discarded d
     const uint64_t tx1_start = full_end0 + omgp::TRUNK_T_gap_us;
     const uint64_t tx1_end =
         tx1_start +
-        static_cast<uint64_t>(request_bytes(dst, 1, false, payload1, sizeof payload1).size()) * byte_us();
+        static_cast<uint64_t>(request_bytes(dst, 1, false, payload1, sizeof payload1).size()) *
+            byte_us();
 
     // The repeat starts at full_end0 + delay_us (contracts/mock-wire.md: "the same bytes
     // again delay_us after the first ends"); choosing delay_us = (tx1_end - full_end0) +
@@ -748,15 +752,17 @@ TEST_CASE("a same-seq response that arrived just after attempt 0's window closed
 
     REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
     const uint64_t tx_end0 =
-        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) * byte_us();
-    const uint64_t stale_full_end = response_full_end(tx_end0, dst, 0, payload, sizeof payload,
-                                                       late_delay_us);
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
+    const uint64_t stale_full_end =
+        response_full_end(tx_end0, dst, 0, payload, sizeof payload, late_delay_us);
 
     const uint64_t timeout_instant = tx_end0 + omgp::TRUNK_T_resp_us;
     const uint64_t retry_tx_start = timeout_instant + omgp::TRUNK_T_gap_us;
     const uint64_t tx_end1 =
         retry_tx_start +
-        static_cast<uint64_t>(request_bytes(dst, 0, true, payload, sizeof payload).size()) * byte_us();
+        static_cast<uint64_t>(request_bytes(dst, 0, true, payload, sizeof payload).size()) *
+            byte_us();
     // Sanity: the stale frame is fully on the wire (and thus fully queued) before the retry
     // even transmits - this test is about drain ORDER within the retry's window, not about
     // the stale bytes still arriving mid-retry.
@@ -813,19 +819,20 @@ TEST_CASE("a late response from a different, already-concluded destination (wron
     // schedule_respond()), not against whichever attempt is open when it later fires.
     const uint64_t other_tx_end0 = static_cast<uint64_t>(
         request_bytes(other, 0, false, other_payload, sizeof other_payload).size() * byte_us());
-    const uint64_t other_retry_tx_start = other_tx_end0 + omgp::TRUNK_T_resp_us + omgp::TRUNK_T_gap_us;
+    const uint64_t other_retry_tx_start =
+        other_tx_end0 + omgp::TRUNK_T_resp_us + omgp::TRUNK_T_gap_us;
     const uint64_t other_retry_tx_end =
-        other_retry_tx_start + static_cast<uint64_t>(
-                                    request_bytes(other, 0, true, other_payload,
-                                                  sizeof other_payload)
-                                        .size()) *
-                                    byte_us();
+        other_retry_tx_start +
+        static_cast<uint64_t>(
+            request_bytes(other, 0, true, other_payload, sizeof other_payload).size()) *
+            byte_us();
     const uint64_t other_retry_full_end =
         response_full_end(other_retry_tx_end, other, 0, other_payload, sizeof other_payload);
     const uint64_t a_tx_start = other_retry_full_end + omgp::TRUNK_T_gap_us;
     const uint64_t a_tx_end =
         a_tx_start +
-        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) * byte_us();
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+            byte_us();
 
     // The stale answer starts at other_tx_end0 + delay_us (contracts/mock-wire.md
     // "Respond"); choosing delay_us = (a_tx_end - other_tx_end0) + margin lands it just
@@ -897,49 +904,50 @@ TEST_CASE("a late response from a different, already-concluded destination (wron
 // --- US2 AC6 (wrong-dst sub-case): a response mis-addressed to someone other than the
 // host is discarded during a transaction's open window ---------------------------------
 
-TEST_CASE("a response mis-addressed to someone other than the host (wrong dst), synthesised "
-          "by injecting a forged request whose src MockWire mirrors into the answer's dst, "
-          "is discarded during a transaction's open window without ending it or corrupting "
-          "its counters",
+TEST_CASE("a response mis-addressed to someone other than the host (wrong dst), whose src "
+          "and seq otherwise MATCH the open transaction, is discarded by the dst check alone "
+          "during the window without ending it or corrupting its counters",
           "[link]") {
     // MockWire::transmit() is the public ByteWire override every real transmitter uses (a
     // real Master/Responder, or - as here - a test standing in for a second, spoofing
-    // station); schedule_respond() (mock_wire.cpp) always mirrors the polled request's src
-    // into the answer's dst. Feeding transmit() a hand-encoded "request" whose src is not
-    // ADDR_host therefore synthesises a well-formed response frame addressed to someone
-    // other than the host - AC6's wrong-dst sub-case - with no second Responder and no
-    // T034 dependency (PR #137 review, MEDIUM: the file header's prior "no MockWire-public
-    // mechanism" claim for this sub-case did not hold).
+    // station); schedule_respond() (mock_wire.cpp) mirrors the polled request's dst/src into
+    // the answer's src/dst. Feeding transmit() a hand-encoded "request" ADDRESSED TO dst but
+    // claiming a non-host src therefore synthesises a well-formed response whose src == dst_
+    // (so poll()'s f.src == dst_ check passes) and whose seq matches, but whose dst is that
+    // non-host address - AC6's wrong-dst sub-case, with no second Responder and no T034
+    // dependency.
+    //
+    // ISOLATION (PR #137 red-team, MEDIUM: the earlier version of this test forged a request
+    // to a DIFFERENT node, so the resulting frame's src ALSO mismatched dst_ and the f.src ==
+    // dst_ check discarded it regardless - deleting `f.dst == host_addr_` left the whole
+    // suite green, i.e. this test asserted nothing about the dst check). Here src and seq
+    // match, so `f.dst == host_addr_` is the ONLY guard standing between discard and a
+    // wrongful Answered: delete it and this test's `ev.kind == None` fails.
     FakeClock clock;
     MockWire wire(clock);
-    const uint8_t dst = 0x0E;             // Master's own, real transaction
-    const uint8_t forged_dst_node = 0x03; // the forged "request"'s claimed destination
-    const uint8_t forged_src = 0x0F;      // != ADDR_host: mirrored into the wrong response.dst
+    const uint8_t dst = 0x0E;        // Master's own, real transaction (and the forged req's dst)
+    const uint8_t forged_src = 0x0F; // != ADDR_host: mirrored into the wrong response.dst
     const uint8_t payload[] = {0x0A};
 
     const uint64_t tx_end = static_cast<uint64_t>(
         request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us());
 
-    // The forged "request" MockWire will treat as coming from forged_src, addressed to
-    // forged_dst_node; a zero-length payload keeps its own airtime (and its answer's)
-    // small. wrong_resp_bytes mirrors schedule_respond()'s own field construction exactly
-    // (dst = request.src, src = request.dst, response = true, retry = false), only to
-    // compute its true (possibly stuffed) wire length, never fed to transmit() itself.
+    // The forged "request": addressed TO dst, claiming src forged_src, so schedule_respond()
+    // mirrors it into a response with dst = forged_src (!= host) and src = dst (== dst_).
+    // A zero-length payload keeps its own airtime (and its answer's) small. wrong_resp_bytes
+    // mirrors schedule_respond()'s field construction exactly (dst = request.src, src =
+    // request.dst, response = true, retry = false), only to compute its true (possibly
+    // stuffed) wire length, never fed to transmit() itself.
     const std::vector<uint8_t> forged_bytes =
-        encode_expected(forged_dst_node, forged_src, false, false, 0, nullptr, 0);
+        encode_expected(dst, forged_src, false, false, 0, nullptr, 0);
     const std::vector<uint8_t> wrong_resp_bytes =
-        encode_expected(forged_src, forged_dst_node, true, false, 0, nullptr, 0);
-
-    // forged_dst_node's own script (delay 0) puts the resulting wrong-dst answer's start
-    // fully under this test's control.
-    const Step forged_script[] = {{forged_dst_node, Kind::Respond, 0}};
-    wire.set_script(forged_dst_node, forged_script, 1);
+        encode_expected(forged_src, dst, true, false, 0, nullptr, 0);
 
     const uint32_t margin = 10;
     const uint64_t forged_tx_now = tx_end + margin;
     const uint64_t forged_tx_end =
         forged_tx_now + static_cast<uint64_t>(forged_bytes.size()) * byte_us();
-    const uint64_t wrong_resp_start = forged_tx_end; // the script's delay above is 0
+    const uint64_t wrong_resp_start = forged_tx_end; // dst's step-1 delay below is 0
     const uint64_t wrong_resp_end =
         wrong_resp_start + static_cast<uint64_t>(wrong_resp_bytes.size()) * byte_us();
     // Sanity: this test isn't vacuous - the wrong-dst frame really does land inside dst's
@@ -947,31 +955,32 @@ TEST_CASE("a response mis-addressed to someone other than the host (wrong dst), 
     REQUIRE(wrong_resp_start > tx_end);
     REQUIRE(wrong_resp_end < tx_end + omgp::TRUNK_T_resp_us);
 
-    // dst's own (real) answer must start strictly after the wrong-dst frame's last byte, or
-    // MockWire's single time-sorted RX queue (mock_wire.hpp: "sorted by start_us") hands
-    // the engine both frames byte-interleaved and neither can be delivered intact - same
-    // reasoning as the AC4/AC6 wrong-src fixes above (PR #137 review, HIGH). Still
-    // comfortably inside dst's own T_resp window (only the response's START instant has to
-    // fall inside it, per the T_resp-boundary edge case above).
+    // dst answers BOTH requests it sees: step 0 (its own real request, transmitted first) is
+    // the genuine answer, started strictly after the wrong-dst frame's last byte so the two
+    // never interleave on MockWire's single time-sorted RX queue (mock_wire.hpp); step 1 (the
+    // forged request, injected below) produces the wrong-dst frame promptly (delay 0). Only
+    // the genuine answer's START instant has to fall inside dst's window (T_resp-boundary
+    // edge case above).
     const uint32_t legit_delay_us = static_cast<uint32_t>(wrong_resp_end - tx_end) + margin;
     REQUIRE(legit_delay_us < omgp::TRUNK_T_resp_us);
-    const Step dst_script[] = {{dst, Kind::Respond, legit_delay_us}};
-    wire.set_script(dst, dst_script, 1);
+    const Step dst_script[] = {{dst, Kind::Respond, legit_delay_us}, {dst, Kind::Respond, 0}};
+    wire.set_script(dst, dst_script, 2);
 
     Master master(wire, clock, omgp::ADDR_host);
-    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok); // consumes dst step 0
     REQUIRE(wire.transcript_size() == 1);
 
-    // Inject the forged frame directly (standing in for a second, spoofing station);
-    // MockWire records it in the transcript like any other transmitted frame.
+    // Inject the forged frame directly (standing in for a second, spoofing station); it is
+    // addressed to dst, so it consumes dst step 1 and MockWire records it in the transcript.
     wire.transmit(forged_bytes.data(), forged_bytes.size(), forged_tx_now);
     REQUIRE(wire.transcript_size() == 2);
-    REQUIRE(wire.transcript(1).dst == forged_dst_node);
+    REQUIRE(wire.transcript(1).dst == dst);
     REQUIRE(wire.transcript(1).src == forged_src);
 
     const uint32_t discards_before = master.stats(dst).discards;
     MasterEvent ev = wire.advance_to(wrong_resp_end, master);
-    REQUIRE(ev.kind == MasterEvent::None); // wrong dst (forged_src, not ADDR_host): discarded
+    REQUIRE(ev.kind ==
+            MasterEvent::None); // dst == forged_src, not ADDR_host: the dst check discards it
     REQUIRE(master.stats(dst).discards == discards_before + 1);
     REQUIRE(master.busy()); // dst's window keeps running
 
@@ -981,6 +990,136 @@ TEST_CASE("a response mis-addressed to someone other than the host (wrong dst), 
     REQUIRE(ev.kind == MasterEvent::Answered);
     REQUIRE(master.stats(dst).transactions == 1);
     REQUIRE(master.stats(dst).retries == 0); // unaffected by the wrong-dst frame
+}
+
+// --- Liveness: an in-window DISCARDED frame must not suppress the T_resp timeout forever
+// (PR #137 review/red-team, HIGH) ------------------------------------------------------
+
+TEST_CASE("an in-window discarded frame followed by silence still times out and concludes "
+          "Failed{Timeout} — a stray frame in the window must not wedge the engine",
+          "[link][timing:retries]") {
+    // PR #137 review/red-team, HIGH: poll()'s frame_pending_in_window gated on
+    // Deframer::in_frame() == (state_ != Hunting). on_flag() sets state_ = InFrame on EVERY
+    // FLAG, including the one that CLOSES a frame (it is also the next frame's opening
+    // delimiter), so in_frame() stayed true after any frame ever seen even though len_ was
+    // back to 0. A single frame DISCARDED inside the window (wrong src here) therefore held
+    // the timeout off forever: no Failed{Timeout}, no retry, busy() never cleared — one
+    // stray frame from any node stopped the host trunk permanently (trunk §1 "robustness to
+    // a misbehaving node"; §3 "no start bit within T_resp -> failed"). The genuine-answer
+    // tail of the AC6 discard tests above hid it; this one supplies SILENCE after the
+    // discard, so ONLY the timeout can conclude the transaction.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x0E;        // the real transaction; never answers (silence)
+    const uint8_t spoof_node = 0x03; // the forged "request"'s claimed destination
+    const uint8_t spoof_src =
+        0x0F; // != ADDR_host and != dst: mirrored answer is a wrong-src discard
+    const uint8_t payload[] = {0x01};
+
+    // dst is silent across the initial attempt and both retries: no genuine answer ever
+    // arrives, so a working engine can only conclude via timeout.
+    const Step dst_silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, dst_silence, 3);
+    // The spoofing station answers its own forged request promptly (delay 0), landing one
+    // frame inside dst's first response window.
+    const Step spoof_script[] = {{spoof_node, Kind::Respond, 0}};
+    wire.set_script(spoof_node, spoof_script, 1);
+
+    Master master(wire, clock, omgp::ADDR_host);
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end0 =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
+
+    // Inject the forged request just after dst's own request; MockWire mirrors its src into
+    // the answer's dst (dst = spoof_src != host, src = spoof_node != dst), a wrong-src frame.
+    const uint32_t margin = 10;
+    const std::vector<uint8_t> forged =
+        encode_expected(spoof_node, spoof_src, false, false, 0, nullptr, 0);
+    const uint64_t forged_tx_now = tx_end0 + margin;
+    const uint64_t forged_tx_end = forged_tx_now + static_cast<uint64_t>(forged.size()) * byte_us();
+    wire.transmit(forged.data(), forged.size(), forged_tx_now);
+
+    const size_t stray_n =
+        encode_expected(spoof_src, spoof_node, true, false, 0, nullptr, 0).size();
+    const uint64_t stray_start = forged_tx_end; // spoof script delay 0
+    const uint64_t stray_end = stray_start + static_cast<uint64_t>(stray_n) * byte_us();
+    // Sanity: the stray frame really lands fully inside dst's first window (not vacuous).
+    REQUIRE(stray_start > tx_end0);
+    REQUIRE(stray_end < tx_end0 + omgp::TRUNK_T_resp_us);
+
+    MasterEvent ev = wire.advance_to(stray_end, master);
+    REQUIRE(ev.kind == MasterEvent::None); // wrong src: discarded, window keeps running
+    REQUIRE(master.stats(dst).discards == 1);
+    REQUIRE(master.busy());
+
+    // The bug: the stray frame's closing FLAG leaves in_frame() true, so this timeout never
+    // fires (busy() forever, timeouts stuck at 0). Fixed: attempt 0 times out at its own
+    // deadline exactly as pure silence would, then two retries, then terminal Failed{Timeout}.
+    uint64_t tx_end = tx_end0;
+    for (uint32_t attempt = 0; attempt < omgp::TRUNK_retries; ++attempt) {
+        const uint64_t retry_tx_start = tx_end + omgp::TRUNK_T_resp_us + omgp::TRUNK_T_gap_us;
+        ev = wire.advance_to(retry_tx_start, master);
+        REQUIRE(ev.kind == MasterEvent::None);              // retries remain
+        REQUIRE(master.stats(dst).timeouts == attempt + 1); // attempt 0 DID time out
+        tx_end = retry_tx_start + static_cast<uint64_t>(
+                                      request_bytes(dst, 0, true, payload, sizeof payload).size()) *
+                                      byte_us();
+    }
+    ev = wire.advance_to(tx_end + omgp::TRUNK_T_resp_us, master);
+    REQUIRE(ev.kind == MasterEvent::Failed);
+    REQUIRE(ev.reason == MasterEvent::Timeout);
+    REQUIRE(master.stats(dst).timeouts == 3);
+    REQUIRE_FALSE(master.busy());
+}
+
+// --- Liveness: a frame that OPENS in-window then stalls mid-flight is timed out, bounded by
+// the worst-case frame time (PR #137 review/red-team, MEDIUM) --------------------------
+
+TEST_CASE("a frame that opens inside the window then stalls mid-flight (truncation) times "
+          "out once the worst-case frame time elapses — the in-flight wait is bounded",
+          "[link]") {
+    // PR #137 review/red-team, MEDIUM: allowing a genuinely in-flight response to finish past
+    // the nominal deadline (trunk §3: the timeout gates the START BIT, not full delivery)
+    // must not be UNBOUNDED. A node that emits an opening FLAG plus a few bytes then stops (a
+    // stalled transmitter — trunk §7) would otherwise hold the timeout off forever with
+    // in_frame() legitimately true (len_ > 0). trunk §4 bounds a frame at kMaxWire bytes, so
+    // the wait is capped at resp_open + kMaxWire * byte_time_us; past that no conforming frame
+    // is still arriving. No Respond/CrcError/Duplicate script can leave a frame unterminated,
+    // so this drives the raw wire via MockWire::inject_bytes().
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x07;
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t payload[] = {0x22};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
+
+    // An opening FLAG plus two content bytes, then nothing: the Deframer is left genuinely
+    // mid-frame (state InFrame, len_ == 2 > 0), with resp_open == the FLAG's instant.
+    const uint32_t margin = 10;
+    const uint64_t flag_us = tx_end + margin; // inside the window
+    REQUIRE(flag_us > tx_end);
+    REQUIRE(flag_us < tx_end + omgp::TRUNK_T_resp_us);
+    const uint8_t partial[] = {static_cast<uint8_t>(omgp::TRUNK_flag_byte), 0xAA, 0xBB};
+    wire.inject_bytes(partial, sizeof partial, flag_us);
+
+    const uint64_t max_frame_us = static_cast<uint64_t>(kMaxWire) * byte_us();
+    // Just before the cap: the frame could still (notionally) be arriving — no timeout yet.
+    MasterEvent ev = wire.advance_to(flag_us + max_frame_us - 1, master);
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE(master.stats(dst).timeouts == 0);
+    REQUIRE(master.busy());
+
+    // At the cap: no conforming frame could still be in flight -> attempt 0 times out. Under
+    // the bug (unbounded) this stays wedged at timeouts == 0 forever.
+    ev = wire.advance_to(flag_us + max_frame_us, master);
+    REQUIRE(master.stats(dst).timeouts == 1);
 }
 
 // --- US2 AC5 (gap half) / data-model.md §4 "Gap" --------------------------------------
@@ -1060,7 +1199,8 @@ TEST_CASE("a second begin() well after last_activity + T_gap transmits at the cu
     REQUIRE(wire.transcript(1).tx_start_us == later);
 
     const uint64_t tx_end1 =
-        later + static_cast<uint64_t>(request_bytes(dst, 1, false, p2, sizeof p2).size()) * byte_us();
+        later +
+        static_cast<uint64_t>(request_bytes(dst, 1, false, p2, sizeof p2).size()) * byte_us();
     // A response window that actually opens after `later` (not one already exhausted at
     // transmission time): poll() right after transmitting must not immediately time out.
     ev = wire.advance_to(later + 1, master);
@@ -1094,7 +1234,8 @@ TEST_CASE("a gap-deferred retry skipped over at poll() time transmits at the act
     const uint8_t payload[] = {0x09};
     REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
     const uint64_t tx_end =
-        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) * byte_us();
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
     const uint64_t timeout_instant = tx_end + omgp::TRUNK_T_resp_us;
 
     // Lands exactly at the response deadline: times out attempt 0 and schedules the retry
@@ -1133,11 +1274,12 @@ TEST_CASE("new (non-retry) transactions to one destination use seq 0..15 then wr
         REQUIRE_FALSE(req.retry);
 
         const uint64_t tx_end =
-            req.tx_start_us + static_cast<uint64_t>(
-                                  request_bytes(dst, expected_seq, false, payload, sizeof payload)
-                                      .size()) *
-                                  byte_us();
-        const uint64_t full_end = response_full_end(tx_end, dst, expected_seq, payload, sizeof payload);
+            req.tx_start_us +
+            static_cast<uint64_t>(
+                request_bytes(dst, expected_seq, false, payload, sizeof payload).size()) *
+                byte_us();
+        const uint64_t full_end =
+            response_full_end(tx_end, dst, expected_seq, payload, sizeof payload);
 
         MasterEvent ev = wire.advance_to(full_end, master);
         REQUIRE(ev.kind == MasterEvent::Answered);
@@ -1290,7 +1432,8 @@ TEST_CASE("stats() treats kAddrCount as the first out-of-range index; kAddrCount
 
     // The last valid table entry and the out-of-range sentinel must be genuinely different
     // objects: the boundary is at kAddrCount, one past the last valid index.
-    REQUIRE(&master.stats(static_cast<uint8_t>(kAddrCount - 1)) != &master.stats(static_cast<uint8_t>(kAddrCount)));
+    REQUIRE(&master.stats(static_cast<uint8_t>(kAddrCount - 1)) !=
+            &master.stats(static_cast<uint8_t>(kAddrCount)));
     // kAddrCount itself already aliases the same all-zero sentinel a clearly out-of-range
     // address (0xFF) does.
     REQUIRE(&master.stats(static_cast<uint8_t>(kAddrCount)) == &master.stats(0xFF));
@@ -1308,7 +1451,8 @@ TEST_CASE("a full transaction (begin through the terminal event) allocates nothi
     // Pre-computed outside the HEAP_FREE_SCOPE below: encode_expected()'s own std::vector
     // return would otherwise count as an allocation attributed (wrongly) to Master/MockWire.
     const uint64_t tx_end =
-        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) * byte_us();
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
     const uint64_t full_end = response_full_end(tx_end, dst, 0, payload, sizeof payload);
 
     Status begin_st{};
@@ -1371,8 +1515,8 @@ TEST_CASE("a retry after a discarded frame that finished arriving past T_resp st
     REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
     const uint64_t tx_end = static_cast<uint64_t>(
         request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us());
-    const uint64_t resp_end = response_full_end(tx_end, dst, 0, payload, sizeof payload,
-                                                omgp::TRUNK_T_resp_us + 50);
+    const uint64_t resp_end =
+        response_full_end(tx_end, dst, 0, payload, sizeof payload, omgp::TRUNK_T_resp_us + 50);
 
     // One poll, once the late frame has fully arrived: drains (discards) it and times out
     // together, in the same call.
@@ -1408,16 +1552,17 @@ TEST_CASE("the very next begin() after a Failed transaction whose every attempt'
     uint64_t resp_end = 0;
     MasterEvent ev{};
     for (uint32_t attempt = 0; attempt <= omgp::TRUNK_retries; ++attempt) {
-        resp_end = response_full_end(tx_end, dst, 0, payload, sizeof payload,
-                                     omgp::TRUNK_T_resp_us + 50);
+        resp_end =
+            response_full_end(tx_end, dst, 0, payload, sizeof payload, omgp::TRUNK_T_resp_us + 50);
         ev = wire.advance_to(resp_end, master);
         if (attempt < omgp::TRUNK_retries) {
             REQUIRE(ev.kind == MasterEvent::None);
             const uint64_t retry_start = resp_end + omgp::TRUNK_T_gap_us;
             wire.advance_to(retry_start, master);
-            tx_end = retry_start + static_cast<uint64_t>(
-                                       request_bytes(dst, 0, true, payload, sizeof payload).size()) *
-                                       byte_us();
+            tx_end =
+                retry_start +
+                static_cast<uint64_t>(request_bytes(dst, 0, true, payload, sizeof payload).size()) *
+                    byte_us();
         }
     }
     REQUIRE(ev.kind == MasterEvent::Failed);
@@ -1464,7 +1609,8 @@ TEST_CASE("a frame arriving while no transaction is open at all is discarded and
     wire.set_script(forged_dst_node, forged_script, 1);
 
     uint64_t forged_tx_end = 0;
-    HEAP_FREE_SCOPE({ forged_tx_end = wire.transmit(forged_bytes.data(), forged_bytes.size(), 0); });
+    HEAP_FREE_SCOPE(
+        { forged_tx_end = wire.transmit(forged_bytes.data(), forged_bytes.size(), 0); });
     const uint64_t full_end =
         forged_tx_end + static_cast<uint64_t>(unsolicited_bytes.size()) * byte_us();
 
