@@ -30,6 +30,12 @@ class Deframer {
     bool feed(uint8_t byte, FrameView& out);
     void reset(); // back to Hunting; counters kept
     const DeframerStats& stats() const;
+    // True once a FLAG has opened a frame accumulation not yet closed by its own FLAG
+    // (trunk §3: the Master's T_resp timeout gates the start bit, not full delivery — a
+    // frame already in progress must be allowed to finish, however long that takes, up to
+    // this same accumulator's own kMaxUnstuffed/TooLong bound; PR #137 review/red-team,
+    // HIGH).
+    bool in_frame() const { return state_ != State::Hunting; }
 
   private:
     enum class State : uint8_t { Hunting, InFrame, Escaped };

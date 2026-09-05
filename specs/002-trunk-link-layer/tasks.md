@@ -166,6 +166,13 @@ safety in every position (SC-004) and the §7-mode → script mapping (SC-005).
 
 - [ ] T033 [P] [US3] Write `tests/unit/test_link_responder.cpp`: response first byte exactly at `request_end + T_turn_min` by default `[timing:T_turn_min]`; a constructor `turnaround_us` above the maximum is clamped to `T_turn_max` and one below the minimum to `T_turn_min` `[timing:T_turn_max]`; handler invoked once per new seq; retry of the buffered seq → identical bytes retransmitted, handler not invoked, `replays_served == 1`; different seq with retry set → treated as new; retry before any answer → new; frames for other addresses and corrupt frames → nothing transmitted, `discards` counted; never transmits outside a window (no bytes when nothing was addressed to it); first `poll()` after `request_end + T_turn_max` → transmits at once and `late_responses == 1` (spec FR-014); `HEAP_FREE_SCOPE` around handle+respond
 - [ ] T034 [P] [US3] Write `tests/unit/test_link_loop.cpp` (needs T031): real `Master` and real `Responder`s on one `MockWire` (the mock's handler for node *n* is `Responder` *n*); the SC-004 matrix — {drop, duplicate, delay-past-T_resp, corrupt} × {attempt 0, retry 1, retry 2, after give-up} — asserting `handler invocations == 1` per new sequence, `transmissions ≤ 3`, accepted `seq == transaction seq`; plus a comment block mapping each §7 mode (response timeout, CRC-failed response, SUSPECT, OFFLINE, BUS_FAULT, babble, duplicate, wrong-rate probe) to the script that produces it (SC-005; the health rows reference T039/T042 scripts)
+  - Must also cover FR-007/FR-011's "response bit clear" acceptance sub-case (PR #137
+    review, MEDIUM): `tests/unit/test_link_master.cpp` (T029) covers wrong-src/wrong-dst/
+    wrong-seq directly via a forged request on `MockWire`, but a genuinely response-bit-clear
+    frame cannot be synthesised that way (`MockWire::schedule_respond()` always sets
+    `response = true`) — it needs a real second `Responder` answering with the bit clear,
+    which only exists once this task lands. Do not let T034 close #47 (or any AC6 sub-case)
+    without an explicit assertion for this one; it is currently untested anywhere in the repo.
 
 ### Implementation for User Story 3
 

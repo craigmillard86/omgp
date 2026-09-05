@@ -1361,3 +1361,27 @@ closed here as an in-scope robustness fix; the corpus and the masking divergence
 deferred and flagged for the CODEOWNER handling this PR's needs-human escalation.
 **Ruling:** pending — human (follow-up task scope).
 **Supersedes:** none.
+
+---
+
+## 2026-09-05 — Kind::CrcError's corrupted CRC byte is not a literal "XOR 0xFF"
+
+**Context:** review round 4 on #137 (MEDIUM). `contracts/mock-wire.md`'s Step table says
+Kind::CrcError produces "the real response with its last CRC byte XOR 0xFF". A bare XOR
+0xFF crosses the FLAG/ESCAPE byte-stuffing boundary for exactly four real high-byte values
+(0x7E/0x7D <-> 0x81/0x82), which would silently change the corrupted frame's wire length
+relative to the real response's — breaking every timing assertion in
+tests/unit/test_link_master.cpp that computes an expected instant from the UNCORRUPTED
+response's own encode_frame length. `tests/support/mock_wire.cpp`'s `corrupt_crc_hi()`
+deliberately picks a different (still-wrong) byte on the same side of that boundary for
+those four values instead, and is tested for length-preservation
+(`tests/unit/test_link_master.cpp`, "a CrcError response's wire length matches..."). T028
+(#46) is specified to generate the tooling/reference implementation's Kind::CrcError
+behaviour from this same contract table, so an implementation written from the table's
+literal text would not match `mock_wire.cpp`'s behaviour at those four values.
+**Recommendation:** amend `contracts/mock-wire.md`'s CrcError row to state the
+length-preserving exception (or reference `corrupt_crc_hi()`'s rule directly) before T028
+is implemented, so both implementations corrupt the CRC the same way at every value.
+**Ruling:** pending — human (contract-doc amendment; not one of CLAUDE.md's three
+authoritative `docs/` documents, but still a human-ruling artefact per GOVERNANCE §3).
+**Supersedes:** none.
