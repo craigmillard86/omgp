@@ -204,6 +204,12 @@ MasterEvent Master::poll(uint64_t now_us) {
         const uint64_t frame_open_us = resp_open_us_;
         const uint32_t bad_crc_before =
             deframer_.stats().discarded[static_cast<size_t>(Discard::BadCrc)];
+        // Total structural discards across all kinds, to detect a discard the drain loop
+        // does not otherwise observe (feed() returns false for a structural reject exactly as
+        // it does for a byte merely accumulating mid-frame — see the !delivered path below).
+        uint32_t disc_before = 0;
+        for (uint32_t d : deframer_.stats().discarded)
+            disc_before += d;
 
         FrameView view{};
         const bool delivered = deframer_.feed(byte, view);
@@ -212,6 +218,9 @@ MasterEvent Master::poll(uint64_t now_us) {
 
         const uint32_t bad_crc_after =
             deframer_.stats().discarded[static_cast<size_t>(Discard::BadCrc)];
+        uint32_t disc_after = 0;
+        for (uint32_t d : deframer_.stats().discarded)
+            disc_after += d;
         const uint64_t byte_end_us = start_us + byte_time_us(wire_.bit_rate());
         const bool awaiting = open_ && sub_phase_ == SubPhase::AwaitResponse;
         const bool in_window = frame_open_us >= window_start_us_ && frame_open_us < deadline_;
@@ -234,8 +243,21 @@ MasterEvent Master::poll(uint64_t now_us) {
             has_last_activity_ = true;
             continue;
         }
-        if (!delivered)
+        if (!delivered) {
+            // A frame the Deframer rejected STRUCTURALLY (BadLength/BadEscape/TooLong/
+            // ReservedAddress — feed() returned false and it is not the bad-CRC case handled
+            // above) is still real bus activity for the T_gap rule (data-model.md §4 "Gap";
+            // FR-010 "last byte transmitted or received"; PR #137 review, MEDIUM: this path
+            // used to skip last_activity_, so a begin()/retry could start with less than
+            // T_gap of real idle after garbage). A byte merely accumulating mid-frame (no
+            // discard) is left to in_frame()/the completion path instead, not recorded here.
+            if (disc_after > disc_before) {
+                if (byte_end_us > last_activity_)
+                    last_activity_ = byte_end_us;
+                has_last_activity_ = true;
+            }
             continue;
+        }
 
         const FrameFields& f = view.f;
         if (awaiting && f.response && f.src == dst_ && f.dst == host_addr_ && f.seq == seq_ &&

@@ -1189,6 +1189,44 @@ TEST_CASE("a frame matching src/seq/dst but with the response bit CLEAR is disca
     REQUIRE(master.stats(dst).timeouts == 1);
 }
 
+// --- data-model.md §4 "Gap" / FR-010: a STRUCTURALLY-discarded frame is bus activity too
+// (PR #137 review, MEDIUM) -------------------------------------------------------------
+
+TEST_CASE("a structurally-discarded frame updates last_activity, so a following begin() is "
+          "gap-deferred from it — not transmitted with less than T_gap of idle after garbage",
+          "[link][timing:T_gap]") {
+    // poll()'s `if (!delivered) continue` skipped last_activity_ for frames the Deframer
+    // rejects STRUCTURALLY (here a too-short frame -> BadLength), unlike the bad-CRC and
+    // delivered-then-discarded paths that record it. A begin()/retry could then transmit
+    // with less than T_gap of real idle after garbage on the wire (trunk §3; FR-010 "last
+    // byte ... received").
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    // FLAG, two bytes, FLAG: the closing FLAG delivers n == 2 < kHeaderLen + kCrcLen -> the
+    // Deframer discards it as BadLength (feed() returns false, not the bad-CRC path).
+    const uint8_t garbage[] = {static_cast<uint8_t>(omgp::TRUNK_flag_byte), 0x11, 0x22,
+                               static_cast<uint8_t>(omgp::TRUNK_flag_byte)};
+    const uint64_t g_start = 100;
+    const uint64_t g_end = g_start + static_cast<uint64_t>(sizeof garbage) * byte_us();
+    wire.inject_bytes(garbage, sizeof garbage, g_start);
+
+    // Drain the garbage with no transaction open (FR-011 unconditional drain): discarded
+    // structurally, but recorded as bus activity by the fix.
+    wire.advance_to(g_end, master);
+    REQUIRE(master.stats(omgp::ADDR_host).discards == 0); // not attributed to any dst_ (idle)
+
+    const uint8_t payload[] = {0x77};
+    REQUIRE(master.begin(0x06, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 0); // gap-deferred, not transmitted at once
+    wire.advance_to(g_end + omgp::TRUNK_T_gap_us - 1, master);
+    REQUIRE(wire.transcript_size() == 0); // not one microsecond early
+    wire.advance_to(g_end + omgp::TRUNK_T_gap_us, master);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).tx_start_us == g_end + omgp::TRUNK_T_gap_us);
+}
+
 // --- US2 AC5 (gap half) / data-model.md §4 "Gap" --------------------------------------
 
 TEST_CASE("a second begin() before last_activity + T_gap defers transmission to exactly "
