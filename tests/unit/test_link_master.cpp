@@ -456,7 +456,16 @@ TEST_CASE("a conforming node's answer is accepted at every legal payload length,
             static_cast<uint64_t>(request_bytes(dst, 0, false, payload, len).size()) * byte_us();
         const uint64_t full_end = response_full_end(tx_end, dst, 0, payload, len);
 
-        MasterEvent ev = wire.advance_to(full_end, master);
+        // Polled at EVERY byte-time step, not jumped straight to full_end: a single poll()
+        // exactly at full_end drains and delivers the whole frame in one drain-loop pass,
+        // before ever reaching the bottom-of-poll timeout check - hiding this bug entirely.
+        // The bug only shows up when an intermediate poll() lands between deadline_ and
+        // full_end, mid-frame (PR #137 review/red-team, HIGH; the red-team's own
+        // reproducer polls every byte-time for exactly this reason).
+        MasterEvent ev{};
+        for (uint64_t t = byte_us(); t <= full_end && ev.kind == MasterEvent::None;
+             t += byte_us())
+            ev = wire.advance_to(t, master);
         REQUIRE(ev.kind == MasterEvent::Answered);
         REQUIRE(ev.response.len == len);
     }
@@ -482,7 +491,11 @@ TEST_CASE("a conforming node's answer is accepted at the fallback bit rate, whos
     const uint64_t full_end = tx_end + omgp::TRUNK_T_turn_min_us +
                               static_cast<uint64_t>(response_bytes(dst, 0, nullptr, 0).size()) * bt;
 
-    MasterEvent ev = wire.advance_to(full_end, master);
+    // Polled at every byte-time step (see the comment on the sweep test above for why a
+    // single poll() at full_end cannot exercise this bug at all).
+    MasterEvent ev{};
+    for (uint64_t t = bt; t <= full_end && ev.kind == MasterEvent::None; t += bt)
+        ev = wire.advance_to(t, master);
     REQUIRE(ev.kind == MasterEvent::Answered);
 }
 
