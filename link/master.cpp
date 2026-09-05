@@ -126,16 +126,27 @@ void Master::do_transmit(uint64_t at_us) {
 }
 
 void Master::fire_pending(uint64_t now_us) {
-    // deadline_ is always <= now_us here (the guard above), so this is a no-op given the
-    // fix in begin() above; kept as a second, independent guard against ever transmitting
-    // at a backdated instant (PR #137 review, HIGH) should deadline_ ever again be computed
-    // stale by some future caller of fire_pending.
-    if (open_ && sub_phase_ == SubPhase::PendingTransmit && now_us >= deadline_)
-        // The guard above already establishes now_us >= deadline_, so this ternary's false
-        // branch (deadline_) only executes when the two are equal — the same value as the
-        // true branch either way.
-        // mutant-ok(equivalent, cxx_gt_to_ge): provably equivalent by the max() identity above.
-        do_transmit(now_us > deadline_ ? now_us : deadline_);
+    if (!(open_ && sub_phase_ == SubPhase::PendingTransmit))
+        return;
+    // The bus must be idle for >= T_gap before the engine transmits (data-model.md §4 "Gap";
+    // trunk §3). The instant computed at defer time is only a LOWER bound — two things push
+    // it out, both re-evaluated on every poll (PR #137 red-team, MEDIUM: the deferred instant
+    // was computed once and never pushed back, so a frame arriving during the gap let the
+    // master transmit over an in-flight frame / 0 µs after a discarded one's last byte):
+    //  (1) a frame the drain loop already delivered/discarded during the deferral advanced
+    //      last_activity_ — never transmit with less than T_gap of idle after it;
+    if (has_last_activity_ && last_activity_ + omgp::TRUNK_T_gap_us > deadline_)
+        deadline_ = last_activity_ + omgp::TRUNK_T_gap_us;
+    //  (2) a frame still arriving RIGHT NOW (deframer_.in_frame()) means the bus is not idle;
+    //      transmitting would collide with it. Bounded by the worst-case wire frame time from
+    //      its opening FLAG, exactly as poll()'s own T_resp wait is (a stalled partial frame
+    //      must not defer transmission forever): past that bound no conforming frame is still
+    //      in flight, and (1)'s gap already covers a completed one.
+    const uint64_t max_frame_us = static_cast<uint64_t>(kMaxWire) * byte_time_us(wire_.bit_rate());
+    if (deframer_.in_frame() && now_us < resp_open_us_ + max_frame_us)
+        return; // let it finish; poll() calls fire_pending again as its bytes drain
+    if (now_us >= deadline_)
+        do_transmit(now_us);
 }
 
 void Master::end_attempt(uint64_t last_activity_us, MasterEvent::Reason reason,

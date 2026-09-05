@@ -15,17 +15,21 @@
 // schedule_respond() is reachable directly through MockWire::transmit() (a public
 // ByteWire override) by feeding it a hand-encoded "request" with a forged src or dst, with
 // no second Responder and no T034 dependency (PR #137 review, MEDIUM — an earlier version
-// of this note claimed no such mechanism existed for wrong-dst, which was false). Only the
-// response-bit-clear sub-case is genuinely unreachable this way: schedule_respond() always
-// sets response = true, so it needs a real second Responder to produce honestly
-// (tests/unit/test_link_loop.cpp, T034, which needs T031 first). This file covers the
-// three sub-cases reachable today: a wrong/stale SEQUENCE arriving during an open response
-// window (a late frame from an earlier, concluded transaction to the SAME node — spec.md
-// US2 AC4's scenario); a wrong SRC arriving during a different destination's open window
-// (a late Respond from one node queued behind an on-time one to a different node —
-// mock_wire.hpp's RX-queue ordering note; needs only Kind::Respond, implemented today);
-// and a wrong DST, synthesised by injecting a forged request whose src schedule_respond()
-// mirrors into the answer's dst. Every one of these frames must land inside its window
+// of this note claimed no such mechanism existed for wrong-dst, which was false). The
+// response-bit-clear sub-case cannot be produced by any scripted Kind (schedule_respond()
+// always sets response = true), but it IS reachable by injecting the raw frame directly via
+// MockWire::inject_bytes() — a request-shaped frame from another station (PR #137 red-team:
+// the earlier "needs a real Responder / T034" deferral did not hold once a raw-injection
+// path exists; T034 may still add the real-Responder variant). This file now covers all
+// four AC6 sub-cases: a wrong/stale SEQUENCE arriving during an open response window (a late
+// frame from an earlier, concluded transaction to the SAME node — spec.md US2 AC4's
+// scenario); a wrong SRC arriving during a different destination's open window (a late
+// Respond from one node queued behind an on-time one to a different node —
+// mock_wire.hpp's RX-queue ordering note; needs only Kind::Respond, implemented today); a
+// wrong DST, synthesised by a forged request whose src schedule_respond() mirrors into the
+// answer's dst (with src/seq matching so the dst check alone discards it); and a
+// RESPONSE-BIT-CLEAR frame injected raw. Every scripted one of these frames must land inside
+// its window
 // without overlapping the transaction's own genuine answer, or MockWire's single
 // time-sorted RX queue hands the engine both frames byte-interleaved and neither can be
 // delivered intact — each test below schedules the genuine answer via an explicit Step
@@ -758,34 +762,47 @@ TEST_CASE("a same-seq response that arrived just after attempt 0's window closed
         response_full_end(tx_end0, dst, 0, payload, sizeof payload, late_delay_us);
 
     const uint64_t timeout_instant = tx_end0 + omgp::TRUNK_T_resp_us;
-    const uint64_t retry_tx_start = timeout_instant + omgp::TRUNK_T_gap_us;
+    // The stale response opens at tx_end0 + late_delay (just past attempt 0's window) and is a
+    // full ~90us frame, so it is STILL ARRIVING at the naive retry instant
+    // (timeout_instant + T_gap). trunk §3 forbids transmitting until >= T_gap of bus idle, so
+    // the retry must wait for the stale frame to finish, then a further T_gap (PR #137
+    // red-team, MEDIUM: the deferred instant used to be computed once and never pushed back,
+    // so the retry fired at the naive instant, transmitting OVER the in-flight stale frame).
+    const uint64_t naive_retry_instant = timeout_instant + omgp::TRUNK_T_gap_us;
+    // Sanity: the stale frame really does span the naive retry instant (not vacuous).
+    REQUIRE(stale_full_end > naive_retry_instant);
+    const uint64_t retry_tx_start = stale_full_end + omgp::TRUNK_T_gap_us;
     const uint64_t tx_end1 =
         retry_tx_start +
         static_cast<uint64_t>(request_bytes(dst, 0, true, payload, sizeof payload).size()) *
             byte_us();
-    // Sanity: the stale frame is fully on the wire (and thus fully queued) before the retry
-    // even transmits - this test is about drain ORDER within the retry's window, not about
-    // the stale bytes still arriving mid-retry.
-    REQUIRE(stale_full_end < tx_end1);
 
-    MasterEvent ev = wire.advance_to(retry_tx_start, master); // attempt 0 times out, retry fires
+    // At the naive instant: attempt 0 has timed out, but the retry is NOT on the wire - the
+    // stale frame is still arriving, so the engine holds off (the old bug transmitted here,
+    // colliding with the in-flight frame).
+    MasterEvent ev = wire.advance_to(naive_retry_instant, master);
     REQUIRE(ev.kind == MasterEvent::None);
     REQUIRE(master.stats(dst).timeouts == 1);
+    REQUIRE(wire.transcript_size() == 1); // retry deferred, not fired over the in-flight frame
+    REQUIRE(master.busy());
+
+    // Once the stale frame finishes it is discarded - drained during the deferral, before the
+    // retry's own window ever opens, so it can never be mistaken for the retry's answer. Still
+    // no retry on the wire until a full T_gap of idle has elapsed after it.
+    ev = wire.advance_to(stale_full_end, master);
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE(master.stats(dst).discards == 1); // the stale same-seq frame, correctly discarded
+    REQUIRE(wire.transcript_size() == 1);
+
+    // T_gap after the stale frame's last byte: the retry finally transmits, same seq, retry set.
+    ev = wire.advance_to(retry_tx_start, master);
     REQUIRE(wire.transcript_size() == 2);
+    REQUIRE(wire.transcript(1).retry);
+    REQUIRE(wire.transcript(1).seq == 0);
+    REQUIRE(wire.transcript(1).tx_start_us == retry_tx_start);
 
-    // The node's script is exhausted, so its retry request gets MockWire's default Respond
-    // (T_turn_min_us delay) - the retry's genuine answer, landing well after the stale frame.
+    // The retry's own genuine answer (script exhausted -> default prompt Respond) concludes it.
     const uint64_t genuine_full_end = response_full_end(tx_end1, dst, 0, payload, sizeof payload);
-
-    // Drain just past the stale frame's own end: with only an upper bound, its frame_open_us
-    // (attempt 0's era, long before the retry's own deadline_) wrongly satisfies
-    // "< deadline_" and this poll() answers the transaction on the spot, using bytes that
-    // were never addressed to this attempt.
-    ev = wire.advance_to(tx_end1 + 1, master);
-    REQUIRE(ev.kind == MasterEvent::None); // correctly discarded, not Answered
-    REQUIRE(master.stats(dst).discards == 1);
-    REQUIRE(master.busy()); // the retry's own window is still open
-
     ev = wire.advance_to(genuine_full_end, master);
     REQUIRE(ev.kind == MasterEvent::Answered); // the retry's real answer, drained afterward
     REQUIRE(master.stats(dst).transactions == 1);
@@ -1119,6 +1136,56 @@ TEST_CASE("a frame that opens inside the window then stalls mid-flight (truncati
     // At the cap: no conforming frame could still be in flight -> attempt 0 times out. Under
     // the bug (unbounded) this stays wedged at timeouts == 0 forever.
     ev = wire.advance_to(flag_us + max_frame_us, master);
+    REQUIRE(master.stats(dst).timeouts == 1);
+}
+
+// --- US2 AC6 (response-bit-clear sub-case): a frame matching src/seq/dst but with the
+// response bit CLEAR is discarded by the f.response check (PR #137 review MEDIUM /
+// red-team, now reachable via raw injection — no T034 dependency) ----------------------
+
+TEST_CASE("a frame matching src/seq/dst but with the response bit CLEAR is discarded during "
+          "the window — the f.response check is the only guard (AC6 response-bit-clear)",
+          "[link]") {
+    // The one AC6 sub-case MockWire's scripted Kinds cannot produce (schedule_respond()
+    // always sets response = true). It IS reachable by injecting the raw frame directly
+    // (MockWire::inject_bytes): a request-shaped frame (response bit clear) from another
+    // station, addressed to the host, claiming our node's src and seq. It matches every
+    // acceptance clause EXCEPT f.response, so deleting that clause would wrongly Answer it;
+    // here it must be discarded and the transaction must still conclude via timeout. (PR #137
+    // red-team flagged that the earlier "needs a real Responder / T034" deferral did not hold
+    // once a raw-injection path exists.)
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x09;
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t payload[] = {0x44};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
+
+    // dst = host, src = dst, seq = 0, RESPONSE BIT CLEAR — matches src/seq/dst, fails only
+    // the f.response clause.
+    const std::vector<uint8_t> bit_clear = encode_expected(omgp::ADDR_host, dst, /*response=*/false,
+                                                           false, 0, payload, sizeof payload);
+    const uint32_t margin = 10;
+    const uint64_t inj_start = tx_end + margin;
+    const uint64_t inj_end = inj_start + static_cast<uint64_t>(bit_clear.size()) * byte_us();
+    REQUIRE(inj_start > tx_end);
+    REQUIRE(inj_end < tx_end + omgp::TRUNK_T_resp_us); // opens and closes inside the window
+    wire.inject_bytes(bit_clear.data(), bit_clear.size(), inj_start);
+
+    MasterEvent ev = wire.advance_to(inj_end, master);
+    REQUIRE(ev.kind == MasterEvent::None); // response bit clear: discarded, NOT Answered
+    REQUIRE(master.stats(dst).discards == 1);
+    REQUIRE(master.busy());
+
+    // No genuine answer (silence): the transaction still times out — the bit-clear frame
+    // neither answered nor wedged it.
+    ev = wire.advance_to(tx_end + omgp::TRUNK_T_resp_us, master);
     REQUIRE(master.stats(dst).timeouts == 1);
 }
 

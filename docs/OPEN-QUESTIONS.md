@@ -1405,3 +1405,21 @@ contract matches `master.cpp`.
 **Ruling:** pending — human (contract-doc amendment; not one of CLAUDE.md's three
 authoritative `docs/` documents, but still a human-ruling artefact per GOVERNANCE §3).
 **Supersedes:** none.
+
+---
+
+## 2026-09-05 — Master::begin(dst == ADDR_host) is accepted; the host transacts with itself
+
+**Context:** review round on #137 (red-team, LOW). `Master::begin()` refuses `dst == 0xFF`
+and `dst >= kAddrCount`, but `ADDR_host` is itself a valid trunk address (`0x00..0x0F`), so
+`begin(ADDR_host, …)` is accepted: the master transmits a request to itself and can book a
+successful transaction against its own `stats_[ADDR_host]`. It does not crash or over-index
+(ADDR_host is in range) — but a single-master trunk has no reason to address itself, and
+`contracts/link-cpp.md` neither blesses nor forbids it. Adding a refusal is a behaviour
+change to `begin()`'s contract, so it is recorded here rather than implemented speculatively
+(CLAUDE.md working agreement: no speculative behaviour without a ruling or a safe default).
+**Recommendation:** refuse `dst == host_addr_` in `begin()` (e.g. `Status::ReservedAddress`,
+or a dedicated status) and state it in `contracts/link-cpp.md`, with a test. Low priority —
+no corruption today, only a nonsensical-but-accepted input.
+**Ruling:** pending — human (contract-doc amendment + a small behaviour change to `begin()`).
+**Supersedes:** none.
