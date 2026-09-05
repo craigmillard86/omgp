@@ -76,9 +76,14 @@
   remove those labels only to grant fresh attempts. Raising the knob also
   frees an already-escalated PR: remove `needs-human` and the spent labels
   below the new bound stay, so it resumes at the next attempt number.
-  LOW-severity findings are
-  deferred by design, which keeps the verdict at `findings` — such a PR
-  never auto-approves or auto-merges and is yours to merge.
+  Findings route by SCOPE, not severity (#134): BLOCKING findings
+  (defects in the change, security, weakened tests, spec divergence,
+  unmet acceptance criteria) are fixed and keep the verdict at
+  `findings`; FOLLOW-UP findings (real improvements or pre-existing gaps
+  OUTSIDE the linked issue's acceptance criteria) are proposed as issues,
+  not fixed, and do NOT keep the verdict at `findings`. A PR whose only
+  findings are FOLLOW-UPs reads `clean` and is auto-approvable below
+  `auto_merge_max_tier`; T3 / CODEOWNERS PRs are still yours to merge.
 - `ci-failure` issue on `main`: agent-triage takes it like
   `nightly-failure`. If the cause was environmental, close the issue with
   a note; the router files at most one open issue per workflow, so a

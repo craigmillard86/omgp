@@ -88,7 +88,20 @@ jobs:
             REPORT: one PR comment. For each finding: the runnable
             reproducer (inline, copy-pasteable), observed vs expected, and
             severity as one of `[HIGH]`, `[MEDIUM]` or `[LOW]`, exactly
-            those tokens — the review-fix loop routes on them.
+            those tokens. Also CLASSIFY each finding by scope against the
+            linked issue's acceptance criteria (`gh issue view <n>`), the
+            rule #134 set:
+            - BLOCKING: a weakness the change INTRODUCED or enabled — a
+              defect, a security hole, a weakened test, a spec divergence,
+              a regression — or an unmet acceptance criterion. These BLOCK.
+            - FOLLOW-UP: a real, demonstrated weakness that is PRE-EXISTING
+              and OUTSIDE the linked issue's acceptance criteria — the
+              attack found it, the change did not cause it. Still report it
+              (falsification is your job), under a "## FOLLOW-UPS" section,
+              but it does NOT block; it is a proposed issue.
+            NEVER route a weakness the change introduced, a security hole,
+            a weakened test or a spec divergence to FOLLOW-UP. When unsure,
+            BLOCK. List BLOCKING findings first; then "## FOLLOW-UPS".
             If everything you tried passed, say exactly what you
             attacked and concede: "attacked N vectors, change held."
             Never file style opinions. Never modify the PR. A finding
@@ -99,9 +112,11 @@ jobs:
             excluded".
             After NOT EXAMINED, end with ONE final line, alone and exactly
             in this machine-readable form (the auto-approval gate parses it):
-            `VERDICT(red-team): clean @ <head sha>` if and only if every
-            attack held (no CONFIRMED findings; speculation does not count);
-            otherwise `VERDICT(red-team): findings @ <head sha>`. <head sha>
+            `VERDICT(red-team): clean @ <head sha>` if and only if you have
+            no CONFIRMED BLOCKING finding (every attack held, or the only
+            confirmed findings are FOLLOW-UPs outside the acceptance
+            criteria; speculation never counts); otherwise
+            `VERDICT(red-team): findings @ <head sha>`. <head sha>
             is the full 40-char head commit:
             ${{ github.event.pull_request.head.sha }}.
           claude_args: |

@@ -10,14 +10,17 @@ name: review-fix
 # those runs use the DEFAULT-BRANCH workflow definition, so a same-repo PR can never
 # rewrite this loop's own bounds in its own diff.
 #
-# Severity policy (ruled 2026-09-02): fix HIGH and MEDIUM findings. A LOW finding is
-# addressed ONLY when it sits in code the agent is already changing for a HIGH/MEDIUM fix;
-# otherwise it is listed as deliberately deferred and left alone. Rationale: LOW-only churn
-# burns attempts and re-review cycles for no risk reduction. CONSEQUENCE, deliberately
-# accepted: a PR whose only remaining findings are LOW keeps `VERDICT(review): findings`
-# and is therefore never auto-approved — a human merges it (GOVERNANCE.md §1 already makes
-# the merge human). Changing verdict semantics so deferred LOWs read as clean would be a
-# T3 governance change and is NOT done here.
+# Scope policy (ruled 2026-09-05, #134; supersedes the 2026-09-02 severity policy): fix the
+# BLOCKING findings and no others. BLOCKING = a defect in the changed code, a security hole,
+# a weakened/narrowed test, a spec divergence, an unmet acceptance criterion of the linked
+# issue, or a false claim the PR makes. A FOLLOW-UP finding — a real improvement or
+# pre-existing gap OUTSIDE the linked issue's acceptance criteria — is NOT fixed here:
+# growing a PR past its criteria is what turned #128 into five rounds of accretion. The
+# reviewer proposes those as issues; this loop leaves them. Because the review verdict is
+# `clean` iff there are no BLOCKING findings, a PR whose only findings are FOLLOW-UPs is
+# auto-approvable (the merge stays human for T3 / CODEOWNERS paths per GOVERNANCE.md §1).
+# Fixing a blocking finding MAY shrink the diff (drop an out-of-scope claim or its
+# machinery), not only add code.
 #
 # Bound — `review_fix_max_attempts` attempts per PR (.github/agent-config.yml; 4 since the
 # 2026-09-03 ruling), as labels `review-fix-1..N`, at most one per head commit. Nothing
@@ -157,7 +160,7 @@ jobs:
             const n = attempts + 1;
             await github.rest.issues.addLabels({owner, repo, issue_number: number, labels: [`review-fix-${n}`]});
             await github.rest.issues.createComment({owner, repo, issue_number: number,
-              body: `${marker}\n🔧 ${kinds.join(' + ')} findings at ${head.slice(0, 7)} — review-fix attempt ${n} of ${MAX} starting on \`${pr.head.ref}\` (run ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}).\n\nPolicy: HIGH/MEDIUM findings are fixed; a LOW finding is fixed only where the agent is already changing that code, otherwise it is listed as deferred. Disable the \`review-fix\` workflow to stop this loop.`});
+              body: `${marker}\n🔧 ${kinds.join(' + ')} findings at ${head.slice(0, 7)} — review-fix attempt ${n} of ${MAX} starting on \`${pr.head.ref}\` (run ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}).\n\nPolicy (#134): BLOCKING findings — defects in the change, security, weakened tests, spec divergence, unmet acceptance criteria, false claims — are fixed (a fix may SHRINK the diff by dropping out-of-scope work); FOLLOW-UP findings outside the linked issue's acceptance criteria are left for a proposed issue, not fixed here. Disable the \`review-fix\` workflow to stop this loop.`});
             return out('yes', {pr: number, branch: pr.head.ref, head, attempt: n, kinds: kinds.join(',')});
 
   fix:
@@ -211,17 +214,33 @@ jobs:
                `VERDICT(<kind>): findings @ ${{ needs.gate.outputs.head }}`.
                Ignore older comments from earlier heads — they may already
                be fixed. Also read `gh pr diff ${{ needs.gate.outputs.pr }}`.
-            2. SEVERITY POLICY — this is the rule, not a preference:
-               - Fix every HIGH and MEDIUM finding.
-               - Fix a LOW finding ONLY if it is in code you are already
-                 editing for a HIGH/MEDIUM fix. Otherwise leave it alone.
-               - If a finding carries no severity label, judge it: if it
-                 could produce wrong behaviour, a spec divergence, a
-                 security hole, or a weakened test, treat it as MEDIUM or
-                 above. Style, naming, comment wording and preference
-                 opinions are LOW.
-               - If EVERY finding is LOW, change no code at all: post the
-                 comment from step 5 saying exactly that, and stop.
+            2. SCOPE POLICY (#134) — this is the rule, not a preference:
+               - Fix every BLOCKING finding: a defect in the CHANGED code,
+                 a security hole, a weakened/narrowed test, a spec
+                 divergence, an unmet acceptance criterion of the linked
+                 issue (read it: `gh issue view <n>`), or a false claim the
+                 PR makes. Dropping a false or out-of-scope claim — and the
+                 machinery behind it — is a valid fix: you MAY SHRINK the
+                 diff, not only add to it.
+               - A FOLLOW-UP finding — a real improvement, hardening or
+                 pre-existing gap OUTSIDE the acceptance criteria (the
+                 reviewer lists these under "## FOLLOW-UPS") — is NOT fixed
+                 here. Do not grow this PR to satisfy it; if the reviewer
+                 did not already name it as an issue, name the proposed
+                 issue in your step-5 comment and leave the code.
+               - Apply this to red-team findings too: a red-team finding
+                 outside the acceptance criteria is a FOLLOW-UP, not a
+                 reason to expand the change.
+               - A defect, security hole, weakened test, spec divergence or
+                 unmet criterion is ALWAYS blocking, whatever its label;
+                 when unsure, treat it as blocking.
+               A `findings` verdict means a reviewer found BLOCKING issues,
+               so there is always something to fix — both claude-review and
+               red-team emit `findings` only for blocking findings. If you
+               genuinely believe a finding the reviewer marked blocking is
+               actually out of scope, do not silently stop: rebut it with
+               evidence (step 3) and say the PR needs human triage, so it is
+               not left stalled.
             3. Fix ON THIS BRANCH only — never main, never another branch.
                Where a finding reveals a missing test, work TDD: add the
                failing test first, then the fix. Never weaken, skip or
@@ -239,9 +258,10 @@ jobs:
                re-runs review and CI.
             5. Comment on the PR with `gh pr comment`, containing exactly:
                (a) each finding you FIXED, with file:line and what changed;
-               (b) each finding DEFERRED as LOW, listed verbatim so a human
-               can see what was consciously left; (c) each finding you
-               REBUTTED, with the evidence; (d) evidence for every claim,
+               (b) each finding you judged a FOLLOW-UP (out of scope), with
+               the proposed issue title so a human can file it — the
+               "## FOLLOW-UPS" record; (c) each finding you REBUTTED, with
+               the evidence; (d) evidence for every claim,
                labelled (demonstrated by <named test/stage>, assumed, or
                NOT EXAMINED) per CLAUDE.md rule 11.
             Do not approve the PR, do not merge it, and do not change any

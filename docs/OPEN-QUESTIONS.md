@@ -1361,3 +1361,44 @@ closed here as an in-scope robustness fix; the corpus and the masking divergence
 deferred and flagged for the CODEOWNER handling this PR's needs-human escalation.
 **Ruling:** pending — human (follow-up task scope).
 **Supersedes:** none.
+
+---
+
+## 2026-09-05 — Route review findings by scope, not severity (#134)
+
+**Context:** the review-fix loop routed by severity (fix HIGH/MEDIUM, defer LOW),
+which caused scope creep — a review found an adjacent weakness, the fix loop bolted
+on code to satisfy it, and that code generated the next round's findings. PR #128
+(T027) spent four review-fix rounds plus a red-team round on registration/selftest
+gate machinery that was never in #45's acceptance criteria and was itself foolable;
+scoping the PR back to its criteria and filing the durable gate as a new issue (#133)
+reached the right place in one move. Severity and scope are orthogonal: a MEDIUM
+"you could also harden X" outside the criteria should not block a correct PR, while a
+LOW weakened assertion inside the diff should.
+
+**Recommendation / ruling:** ADOPTED (human, via #134). Route findings by scope.
+- BLOCKING (fixed in the PR, counts toward the verdict): a defect in the changed
+  code, a security hole, a weakened/narrowed test, a spec divergence, an unmet
+  acceptance criterion of the linked issue, or a false claim the PR makes (dropping
+  the claim is a valid fix). Never deferrable, at any severity.
+- FOLLOW-UP (proposed as an issue, does NOT count toward the verdict): a real
+  improvement, hardening or pre-existing gap OUTSIDE the linked issue's acceptance
+  criteria. MEDIUM-or-above only; pure style is a noted LOW.
+- `claude-review`'s verdict is `clean` iff there are no BLOCKING findings; `review-fix`
+  fixes only BLOCKING findings and MAY SHRINK the diff (remove out-of-scope machinery),
+  not only add code. Human override stays: the maintainer can pull a deferred finding
+  back into the PR or reject a proposed issue.
+- **Dependency:** this makes the acceptance criteria the load-bearing contract, so it
+  pairs with tighter enrichment (precise, testable criteria); weak criteria make a
+  mis-classification able to wave a real gap through into auto-approve.
+- **Both reviewers aligned (corrected after the #136 red-team round).** An earlier draft
+  deferred aligning `red-team`'s verdict — the #136 red team showed that deferral created
+  a liveness stall (out-of-scope red-team `findings` → review-fix does nothing → head
+  never moves → the `needs-human` terminal state is unreachable). So `red-team` now
+  classifies block-vs-follow-up and emits `clean` iff no BLOCKING finding, same as
+  `claude-review`; a `findings` verdict always means real work. The guardrails
+  (never-defer defects/security/weakened-tests, verdict-on-blocking) are pinned by tests
+  (`test_scope_routing_guardrails_are_pinned`). Follow-ups are consumed by the new
+  `review-followups` workflow, which files each as a dedup'd `task` issue.
+**Supersedes:** the 2026-09-02 review-fix severity policy (that entry and GOVERNANCE §
+"Review-finding auto-resolution").
