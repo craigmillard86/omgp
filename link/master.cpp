@@ -101,7 +101,7 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     // in this sandbox). (Rule 11 / PR #137 review, LOW: an earlier wording argued only the
     // a == b case, which on its own does not establish equivalence over the whole domain.)
     deadline_ = gap_elapsed_at > now ? gap_elapsed_at : now;
-    defer_cap_us_ = deadline_ + max_frame_us(); // bounded wait for an idle bus — see the member
+    defer_origin_us_ = deadline_; // start of the bounded wait — see the member
     fire_pending(now);
     return Status::Ok;
 }
@@ -198,7 +198,7 @@ void Master::end_attempt(uint64_t last_activity_us, MasterEvent::Reason reason,
         // (data-model.md §4 "Gap") — never terminal yet.
         sub_phase_ = SubPhase::PendingTransmit;
         deadline_ = last_activity_ + omgp::TRUNK_T_gap_us;
-        defer_cap_us_ = deadline_ + max_frame_us(); // as in begin() — see the member
+        defer_origin_us_ = deadline_; // as in begin() — see the member
         event.kind = MasterEvent::None;
     } else {
         // FR-011a: "transactions" is counted once, at do_transmit()'s first attempt (PR
@@ -340,18 +340,36 @@ MasterEvent Master::poll(uint64_t now_us) {
     // never drives the line over an arriving frame — but a station holding bytes on the wire
     // continuously would otherwise push it out forever: no attempt, no retry, no outcome, and
     // busy() true permanently. Past defer_cap_us_ (one worst-case frame beyond the instant this
-    // transmission was deferred to) the bus is not "briefly busy with a frame", it is
+    // transmission was originally deferred to) the bus is not "briefly busy with a frame", it is
     // unusable, so the transaction concludes rather than hanging.
+    //
+    // The test is that the bus is STILL DENYING a gap window, not that time has passed
+    // (PR #137 red-team, HIGH — an elapsed-time-only guard could not tell "a station has held
+    // the wire for a frame time" from "nobody called poll() for a while", and since
+    // TRUNK_T_poll_us (2000) exceeds max_frame_us (1420), the documented superframe cadence
+    // (trunk §6) abandoned EVERY gap-deferred transaction and retry on a completely idle wire):
+    //   now_us >= defer_cap_us   — the whole wait budget really has elapsed, AND
+    //   now_us <  deadline_      — the transmit instant is STILL in the future, i.e. activity
+    //                              keeps pushing it out and no T_gap window has been offered.
+    // On an idle bus deadline_ is never pushed, so now_us >= deadline_ and this cannot fire —
+    // fire_pending() below transmits instead, however late the poll arrives. That is exactly
+    // the rule docs/OPEN-QUESTIONS.md (2026-09-05, babble) recommended: conclude only when the
+    // bus has not offered a T_gap window within the budget.
     //
     // Terminal, not a retry: this attempt never reached the wire (attempt_count_ is untouched,
     // so `transactions` — which FR-011a counts at first transmission — is correctly not
     // counted either), and retrying into a bus that is still babbling would only extend the
     // hang. Reported as Failed{Timeout} because that is the outcome the engine has today;
     // distinguishing "the node did not answer" from "the trunk was unusable" needs a bus-fault
-    // outcome, which is a spec question recorded in docs/OPEN-QUESTIONS.md (2026-09-05).
+    // outcome, which is a spec question recorded in docs/OPEN-QUESTIONS.md and tracked in #138.
+    //
+    // No per-node counter is charged: the request never reached dst_, so booking it a timeout
+    // would mark an innocent node on a bus condition it had no part in — three of those feed
+    // trunk §7's "3 consecutive failed transactions -> SUSPECT" (PR #137 review, MEDIUM).
+    // Recording the bus condition itself belongs with the bus-fault outcome (#138).
+    const uint64_t defer_cap_us = defer_origin_us_ + max_frame_us();
     if (open_ && sub_phase_ == SubPhase::PendingTransmit && event.kind == MasterEvent::None &&
-        now_us >= defer_cap_us_) {
-        stats_[dst_].timeouts++;
+        now_us >= defer_cap_us && now_us < deadline_) {
         if (now_us > last_activity_)
             last_activity_ = now_us;
         has_last_activity_ = true;

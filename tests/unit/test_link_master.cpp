@@ -1293,9 +1293,60 @@ TEST_CASE("continuous bus traffic cannot defer a transmission forever — the ga
     REQUIRE(ev.reason == MasterEvent::Timeout);
     REQUIRE_FALSE(master.busy());         // concluded, not hung
     REQUIRE(wire.transcript_size() == 0); // and never drove the line over the traffic
-    REQUIRE(master.stats(dst).timeouts == 1);
+    // Nothing is charged to the node: the request never reached it, so booking it a timeout
+    // would mark an innocent node for a bus condition it had no part in — three of those feed
+    // trunk §7's "3 consecutive failed transactions -> SUSPECT" (PR #137 review, MEDIUM).
     // FR-011a counts a transaction at its FIRST TRANSMISSION; this one never reached the wire.
+    REQUIRE(master.stats(dst).timeouts == 0);
     REQUIRE(master.stats(dst).transactions == 0);
+}
+
+// --- The babble bound must measure BUS BUSY-NESS, not elapsed time: an idle bus polled at the
+// superframe cadence must still transmit (PR #137 red-team, HIGH) -----------------------
+
+TEST_CASE("a gap-deferred transmission on an IDLE bus still goes out when the caller polls at "
+          "the superframe cadence",
+          "[link][timing:T_gap]") {
+    // The babble bound first fired on elapsed time alone, so it could not tell "a station has
+    // held the wire for a whole frame time" from "nobody called poll() for a while".
+    // TRUNK_T_poll_us (2000) EXCEEDS max_frame_us (kMaxWire * 10 = 1420), so at the documented
+    // superframe cadence (trunk §6) every gap-deferred transaction and every retry was
+    // silently abandoned on a completely idle wire — Failed{Timeout} with nothing ever
+    // transmitted, and an innocent node charged for it (three of those feed trunk §7's
+    // SUSPECT rule). The guard now also requires the transmit instant to be STILL in the
+    // future (no T_gap window offered), which an idle bus never satisfies.
+    static_assert(omgp::TRUNK_T_poll_us > omgp::TRUNK_T_gap_us,
+                  "this case is only meaningful if the poll cadence outlasts the gap");
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x03;
+    const uint8_t payload[] = {0x11};
+    Master master(wire, clock, omgp::ADDR_host);
+
+    // Some bus activity, so the following begin() is genuinely gap-deferred rather than
+    // transmitted on the spot — then the wire goes and stays completely idle.
+    const uint8_t garbage[] = {static_cast<uint8_t>(omgp::TRUNK_flag_byte), 0x11, 0x22,
+                               static_cast<uint8_t>(omgp::TRUNK_flag_byte)};
+    const uint64_t g_start = 100;
+    const uint64_t g_end = g_start + static_cast<uint64_t>(sizeof garbage) * byte_us();
+    wire.inject_bytes(garbage, sizeof garbage, g_start);
+    wire.advance_to(g_end, master);
+
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 0); // deferred to g_end + T_gap
+
+    // The next poll arrives a whole superframe later — past the old elapsed-time cap — with the
+    // bus idle throughout. The request must go out, not be abandoned.
+    const uint64_t next_poll = g_end + omgp::TRUNK_T_poll_us;
+    REQUIRE(next_poll > g_end + omgp::TRUNK_T_gap_us +
+                            static_cast<uint64_t>(kMaxWire) * byte_us()); // past the old cap
+    MasterEvent ev = wire.advance_to(next_poll, master);
+
+    REQUIRE(ev.kind != MasterEvent::Failed); // NOT abandoned on an idle bus
+    REQUIRE(wire.transcript_size() == 1);    // the request actually reached the wire
+    REQUIRE(wire.transcript(0).dst == dst);
+    REQUIRE(master.busy()); // now awaiting its response
+    REQUIRE(master.stats(dst).timeouts == 0);
 }
 
 // --- US2 AC6 (response-bit-clear sub-case): a frame matching src/seq/dst but with the

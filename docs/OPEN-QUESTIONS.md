@@ -1459,16 +1459,20 @@ forever. trunk §3's "≥ T_gap of idle before transmitting" is physically unsat
 that continues, so *some* deferral is correct; deferring silently and unboundedly is not.
 trunk §7 names babble as a failure mode, but this engine has no path to report it: the only
 outcomes it can produce today are `Answered` and `Failed{Timeout|CrcFailed}`.
-**Recommendation:** do NOT let a transaction sit in `PendingTransmit` indefinitely. Two
-candidate rulings: (a) bound the deferral and conclude `Failed{Timeout}` when the bus has not
-offered a T_gap window within the transaction's own budget — no new outcome type, smallest
-change; or (b) surface a distinct bus-fault outcome/health transition (trunk §7 BUS_FAULT) so
-the caller can tell "the node did not answer" from "the trunk was unusable". Recommend (b) as
-the spec-faithful answer with (a) as the interim, but BOTH are behaviour the spec should state
-rather than something the engine picks — hence this entry rather than a speculative fix.
-Deliberately NOT implemented in #137: two earlier attempts in that PR to reason out this
-engine's timing invariants unaided each introduced a regression the red team then found
-(narrowing `in_frame()`; and this unbounded deferral), which is the evidence that this
-particular invariant needs a stated rule, not another inference.
+**Recommendation / what #137 now does:** option (a) below is IMPLEMENTED in #137; option (b)
+remains open and is tracked in #138. (a) The engine no longer sits in `PendingTransmit`
+indefinitely: the deferral is bounded by one worst-case frame (trunk §4) beyond the instant it
+was originally deferred to, and — critically — the guard fires only when the bus has actually
+DENIED a T_gap window in that time (the transmit instant is still in the future), never on
+elapsed time alone. An elapsed-time-only guard cannot tell a busy bus from an infrequent
+caller, and since `TRUNK_T_poll_us` (2000) exceeds that budget (1420 at `TRUNK_bit_rate`) it
+abandoned every gap-deferred transaction and retry at the documented superframe cadence on a
+completely idle wire. The transaction concludes `Failed{Timeout}` and NO per-node counter is
+charged, since the request never reached the node and booking it a failure would feed trunk
+§7's SUSPECT rule against an innocent node. (b) Still open: a caller cannot distinguish "the
+node did not answer" from "the trunk was unusable"; that needs a distinct bus-fault
+outcome/health transition, which changes `MasterEvent`'s contract and so wants a ruling.
+**Note on process:** an earlier revision of this entry said the whole question was deliberately
+left unimplemented in #137. That is superseded by the above — (a) shipped, (b) did not.
 **Ruling:** pending — human (trunk §7 babble semantics; may need a new MasterEvent outcome).
 **Supersedes:** none.

@@ -79,8 +79,8 @@ class Master {
     bool frame_arriving(uint64_t now_us) const;
 
     // Worst-case time for one conforming frame on the wire at the current rate (trunk §4:
-    // kMaxWire stuffed bytes). Used as the bound on how long the engine will wait for the bus
-    // to go idle before giving up on transmitting at all — see defer_cap_us_.
+    // kMaxWire stuffed bytes). Used as the budget for how long the engine will wait for the bus
+    // to offer a T_gap window before giving up on transmitting — see defer_origin_us_.
     uint64_t max_frame_us() const;
 
     ByteWire& wire_;
@@ -111,16 +111,26 @@ class Master {
     // AwaitResponse: the response-window deadline (tx_end + T_resp). PendingTransmit: the
     // instant transmission is deferred to (data-model.md §4 "Gap").
     uint64_t deadline_ = 0;
-    // PendingTransmit only: the LATEST instant this transmission may be deferred to. Set when
-    // the transaction is deferred, to one worst-case frame (max_frame_us()) beyond the instant
-    // computed then. deadline_ itself is pushed out by ongoing bus activity so the engine never
-    // transmits over an arriving frame, but that push must be bounded: a station holding bytes
-    // on the wire continuously would otherwise defer transmission forever — no attempt, no
-    // retry, no outcome, busy() true permanently (PR #137 red-team, HIGH). One worst-case frame
-    // is exactly long enough for any single conforming frame already on the wire to finish
+    // PendingTransmit only: the instant this transmission was ORIGINALLY deferred to, latched
+    // when the transaction was deferred. The wait budget is one worst-case frame beyond it,
+    // computed at CHECK time (not latched) so a set_bit_rate() during the deferral is honoured
+    // rather than frozen at the old rate (PR #137 review, LOW).
+    //
+    // deadline_ itself is pushed out by ongoing bus activity so the engine never transmits over
+    // an arriving frame, but that push must be bounded: a station holding bytes on the wire
+    // continuously would otherwise defer transmission forever — no attempt, no retry, no
+    // outcome, busy() true permanently (PR #137 red-team, HIGH). One worst-case frame is
+    // exactly long enough for any single conforming frame already on the wire to finish
     // (trunk §4); traffic still blocking the bus past that is babble (trunk §7), not a frame
     // this transaction should keep waiting on.
-    uint64_t defer_cap_us_ = 0;
+    //
+    // The budget alone is NOT the test: poll() also requires that the transmit instant is still
+    // in the future, i.e. that the bus really has denied a T_gap window. An elapsed-time-only
+    // guard could not tell a busy bus from an infrequent caller, and since TRUNK_T_poll_us
+    // (2000) exceeds this budget (1420 at TRUNK_bit_rate), it abandoned every gap-deferred
+    // transaction and retry at the documented superframe cadence on a completely IDLE wire
+    // (PR #137 red-team, HIGH).
+    uint64_t defer_origin_us_ = 0;
     // AwaitResponse only: tx_end of the CURRENT attempt - the acceptance window's lower
     // bound (contracts/link-cpp.md: "[tx_end, tx_end + T_resp)"). Needed because a retry
     // reuses the same seq (trunk §7): without it, a same-seq response that arrived just
