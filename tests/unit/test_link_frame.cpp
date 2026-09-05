@@ -435,16 +435,16 @@ TEST_CASE("a successful unescape returns to InFrame, not stuck at Escaped/Huntin
     std::vector<uint8_t> body{0x02, 0x00, 0x00, 0x02, 0x7e, 0x05};
     const uint16_t c = omgp::crc16_ccitt_false(body.data(), body.size());
     const uint8_t wire[] = {0x7e,
-                             0x02,
-                             0x00,
-                             0x00,
-                             0x02,
-                             0x7d,
-                             0x5e,
-                             0x05,
-                             static_cast<uint8_t>(c & 0xFF),
-                             static_cast<uint8_t>((c >> 8) & 0xFF),
-                             0x7e};
+                            0x02,
+                            0x00,
+                            0x00,
+                            0x02,
+                            0x7d,
+                            0x5e,
+                            0x05,
+                            static_cast<uint8_t>(c & 0xFF),
+                            static_cast<uint8_t>((c >> 8) & 0xFF),
+                            0x7e};
     Deframer d;
     FrameView view{};
     int delivered = 0;
