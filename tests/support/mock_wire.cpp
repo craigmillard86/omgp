@@ -1,14 +1,85 @@
 // Test-support: MockWire skeleton (spec 002 T010) — Kind::Respond/Silence scheduling
 // and the RX queue/transcript/PRNG machinery every later link/ engine test builds on.
-// contracts/mock-wire.md. Garbage/CrcError/Duplicate/Babble/Rate land in T030.
+// contracts/mock-wire.md. Kind::CrcError/Duplicate are implemented below (T029's own
+// scope: test_link_master.cpp needs exactly these two, neither of which reads
+// Step::count); Garbage/Babble/Rate — and the Step::count widening ruling on issue #48 —
+// remain T030.
 #include "mock_wire.hpp"
 
 #include "catch_amalgamated.hpp"
+#include "link/crc16.hpp"
 #include "link/frame.hpp"
 
 #include <cstring>
 
 namespace omgp_test {
+
+namespace {
+// Kind::CrcError (contracts/mock-wire.md): "the real response with its last CRC byte
+// XOR 0xFF". Duplicates encode_frame's unstuffed-build-then-stuff steps (link/frame.cpp)
+// rather than post-processing its output, so corrupting the CRC can never accidentally
+// land on a byte that needs (or stops needing) stuffing — which would silently change
+// the wire length relative to a real response's and break every timing assertion built
+// on that length (tests/unit/test_link_master.cpp computes expected instants from the
+// UNCORRUPTED response's own encode_frame length). encode_frame's own refusals
+// (PayloadTooLong/ReservedAddress) do not apply here: `request` is a frame this same
+// MockWire just decoded, so `f.dst == request.src` is already a real trunk address.
+size_t encode_crc_corrupted(const omgp::link::FrameFields& f, uint8_t* out, size_t cap) {
+    using namespace omgp::link;
+    // Same worst-case bound as encode_frame (link/frame.cpp), checked up front: this runs
+    // on the engine-under-test's call stack (transmit() -> schedule_crc_error()), so a
+    // capacity refusal must be a return value here, not a REQUIRE (see fault_'s
+    // declaration in mock_wire.hpp for why this file never throws off that stack).
+    const size_t needed = 2 + 2 * (kHeaderLen + static_cast<size_t>(f.len) + kCrcLen);
+    if (cap < needed)
+        return 0;
+    uint8_t unstuffed[kMaxUnstuffed];
+    size_t n = 0;
+    unstuffed[n++] = f.dst;
+    unstuffed[n++] = f.src;
+    unstuffed[n++] = static_cast<uint8_t>((f.response ? 0x01 : 0x00) | (f.retry ? 0x02 : 0x00) |
+                                          static_cast<uint8_t>((f.seq & 0x0F) << 4));
+    unstuffed[n++] = f.len;
+    for (uint8_t i = 0; i < f.len; ++i)
+        unstuffed[n++] = f.payload[i];
+    const uint16_t c = omgp::crc16_ccitt_false(unstuffed, n);
+    unstuffed[n++] = static_cast<uint8_t>(c & 0xFF);
+    unstuffed[n++] = static_cast<uint8_t>(((c >> 8) & 0xFF) ^ 0xFF); // the corruption
+
+    size_t w = 0;
+    out[w++] = omgp::TRUNK_flag_byte;
+    for (size_t i = 0; i < n; ++i) {
+        const uint8_t b = unstuffed[i];
+        if (b == omgp::TRUNK_flag_byte) {
+            out[w++] = omgp::TRUNK_escape_byte;
+            out[w++] = static_cast<uint8_t>(omgp::TRUNK_flag_byte ^ omgp::TRUNK_escape_xor);
+        } else if (b == omgp::TRUNK_escape_byte) {
+            out[w++] = omgp::TRUNK_escape_byte;
+            out[w++] = static_cast<uint8_t>(omgp::TRUNK_escape_byte ^ omgp::TRUNK_escape_xor);
+        } else {
+            out[w++] = b;
+        }
+    }
+    out[w++] = omgp::TRUNK_flag_byte;
+    return w;
+}
+
+// The response FrameFields a conforming node (or MockWire's Respond/CrcError/Duplicate
+// echo) sends back to `request` — dst/src swapped, response bit set, seq echoed. Shared
+// by all three Kinds: they differ only in what bytes reach the wire and when, not in
+// whom the response is addressed to or which payload it carries.
+omgp::link::FrameFields response_fields(const omgp::link::FrameFields& request) {
+    omgp::link::FrameFields r{};
+    r.dst = request.src;
+    r.src = request.dst;
+    r.response = true;
+    r.retry = false;
+    r.seq = request.seq;
+    r.len = request.len;
+    r.payload = request.payload;
+    return r;
+}
+} // namespace
 
 uint32_t xorshift32_next(uint32_t& state) {
     // xorshift32 has a fixed point at state == 0 (every subsequent call returns 0). A
@@ -120,10 +191,14 @@ void MockWire::record_transcript(const omgp::link::FrameFields& f, uint64_t tx_s
     rec.tx_start_us = tx_start_us;
 }
 
+void MockWire::enqueue_frame(const uint8_t* buf, size_t written, uint64_t t0) {
+    for (size_t i = 0; i < written; ++i)
+        enqueue(buf[i], t0 + static_cast<uint64_t>(i) * omgp::link::byte_time_us(bit_rate_));
+}
+
 void MockWire::schedule_respond(const omgp::link::FrameFields& request, uint64_t tx_end,
                                 uint32_t delay_us) {
     using omgp::link::encode_frame;
-    using omgp::link::FrameFields;
     using omgp::link::kMaxWire;
     using omgp::link::Status;
 
@@ -132,14 +207,7 @@ void MockWire::schedule_respond(const omgp::link::FrameFields& request, uint64_t
     // wired in by a later task; this skeleton's own answer is a valid, deterministic
     // response so Respond is directly usable — retry/timeout scripts drive Silence
     // instead where a real answer must not appear).
-    FrameFields response{};
-    response.dst = request.src;
-    response.src = request.dst;
-    response.response = true;
-    response.retry = false;
-    response.seq = request.seq;
-    response.len = request.len;
-    response.payload = request.payload;
+    const auto response = response_fields(request);
     uint8_t buf[kMaxWire];
     size_t written = 0;
     // response.dst == request.src. A well-formed request from a real Master/Responder
@@ -155,10 +223,47 @@ void MockWire::schedule_respond(const omgp::link::FrameFields& request, uint64_t
             fault_ = "MockWire: encode_frame refused a Respond answer (response.dst == 0xFF?)";
         return;
     }
+    enqueue_frame(buf, written, tx_end + delay_us);
+}
 
-    const uint64_t t0 = tx_end + delay_us;
-    for (size_t i = 0; i < written; ++i)
-        enqueue(buf[i], t0 + static_cast<uint64_t>(i) * omgp::link::byte_time_us(bit_rate_));
+void MockWire::schedule_crc_error(const omgp::link::FrameFields& request, uint64_t tx_end,
+                                  uint32_t delay_us) {
+    using omgp::link::kMaxWire;
+
+    const auto response = response_fields(request);
+    uint8_t buf[kMaxWire];
+    const size_t written = encode_crc_corrupted(response, buf, sizeof buf);
+    if (written == 0) {
+        if (fault_ == nullptr)
+            fault_ = "MockWire: encode_crc_corrupted refused a CrcError answer (buffer too small?)";
+        return;
+    }
+    enqueue_frame(buf, written, tx_end + delay_us);
+}
+
+void MockWire::schedule_duplicate(const omgp::link::FrameFields& request, uint64_t tx_end,
+                                  uint32_t delay_us) {
+    using omgp::link::encode_frame;
+    using omgp::link::kMaxWire;
+    using omgp::link::Status;
+
+    const auto response = response_fields(request);
+    uint8_t buf[kMaxWire];
+    size_t written = 0;
+    if (encode_frame(response, buf, sizeof buf, written) != Status::Ok) {
+        if (fault_ == nullptr)
+            fault_ = "MockWire: encode_frame refused a Duplicate answer (response.dst == 0xFF?)";
+        return;
+    }
+    // contracts/mock-wire.md: "the real response, then the same bytes again delay_us
+    // after the first ends" — both copies are the SAME valid encoding (unlike CrcError),
+    // scheduled off the ORIGINAL request's tx_end (a retry, being a separate transmit()
+    // call, draws its own — by then exhausted — script step, per next_step()).
+    const uint64_t first_t0 = tx_end + delay_us;
+    enqueue_frame(buf, written, first_t0);
+    const uint64_t first_end =
+        first_t0 + static_cast<uint64_t>(written) * omgp::link::byte_time_us(bit_rate_);
+    enqueue_frame(buf, written, first_end + delay_us);
 }
 
 uint64_t MockWire::transmit(const uint8_t* bytes, size_t n, uint64_t now_us) {
@@ -228,9 +333,13 @@ uint64_t MockWire::transmit(const uint8_t* bytes, size_t n, uint64_t now_us) {
             break;
         case Kind::Silence:
             break;
-        case Kind::Garbage:
         case Kind::CrcError:
+            schedule_crc_error(view.f, frame_tx_end, delay_us);
+            break;
         case Kind::Duplicate:
+            schedule_duplicate(view.f, frame_tx_end, delay_us);
+            break;
+        case Kind::Garbage:
         case Kind::Babble:
         case Kind::Rate:
             // T030 (tasks.md): not implemented by this skeleton. Recorded via fault_
@@ -239,8 +348,7 @@ uint64_t MockWire::transmit(const uint8_t* bytes, size_t n, uint64_t now_us) {
             // script that schedules one of these would otherwise go green while asserting
             // nothing about the behaviour it names.
             if (fault_ == nullptr)
-                fault_ = "MockWire: Kind::Garbage/CrcError/Duplicate/Babble/Rate not "
-                         "implemented until T030";
+                fault_ = "MockWire: Kind::Garbage/Babble/Rate not implemented until T030";
             break;
         }
     }

@@ -3,10 +3,11 @@
 // contracts/mock-wire.md, contracts/byte-wire-and-clock.md, research.md R-07.
 //
 // Host-only (tests/support/) but allocation-free, per contracts/mock-wire.md, so F4's
-// virtual wire can seed itself from the same code. Only Kind::Respond and Kind::Silence
-// are implemented here; Garbage/CrcError/Duplicate/Babble/Rate are declared so T011/T028
-// can reference the enum, with their behaviour landing in T030 (tasks.md) — see the
-// switch in mock_wire.cpp.
+// virtual wire can seed itself from the same code. Kind::Respond, Kind::Silence,
+// Kind::CrcError and Kind::Duplicate are implemented here (the last two per T029's own
+// scope, ahead of the rest of T030); Garbage/Babble/Rate are declared so T011/T028 can
+// reference the enum, with their behaviour landing in T030 (tasks.md) — see the switch
+// in mock_wire.cpp.
 #pragma once
 
 #include "fake_clock.hpp"
@@ -135,7 +136,18 @@ class MockWire : public omgp::link::ByteWire {
     const Step* next_step(uint8_t node);
     void schedule_respond(const omgp::link::FrameFields& request, uint64_t tx_end,
                           uint32_t delay_us);
+    // Kind::CrcError (contracts/mock-wire.md): the real response with its last CRC byte
+    // (crc_hi, unstuffed) XOR 0xFF, at request_end + delay_us.
+    void schedule_crc_error(const omgp::link::FrameFields& request, uint64_t tx_end,
+                            uint32_t delay_us);
+    // Kind::Duplicate (contracts/mock-wire.md): the real response, then the same bytes
+    // again delay_us after the first copy ends.
+    void schedule_duplicate(const omgp::link::FrameFields& request, uint64_t tx_end,
+                            uint32_t delay_us);
     void enqueue(uint8_t byte, uint64_t start_us);
+    // Queues `written` already-encoded bytes starting at `t0`, one byte_time_us() apart —
+    // the enqueue() loop schedule_respond/schedule_crc_error/schedule_duplicate all share.
+    void enqueue_frame(const uint8_t* buf, size_t written, uint64_t t0);
     void record_transcript(const omgp::link::FrameFields& f, uint64_t tx_start_us);
 
     FakeClock& clock_;

@@ -1,10 +1,11 @@
 // Trunk L2 master transaction engine (spec 002 US2, T029). trunk §3 (media access) and §7
 // (retry rule); contracts/link-cpp.md "Master engine"; data-model.md §4 "Transaction
-// (Master)" and §8 "Statistics"; contracts/mock-wire.md. Written from the C++ contract and
-// spec.md User Story 2 (Acceptance Scenarios 1-7 and the Edge Cases naming T_resp/seq-wrap/
-// "simulated time that does not advance"), not from link/master.{hpp,cpp} directly — those
-// do not exist yet (T031, a separate issue); this file is expected to fail to compile until
-// then. Every assertion is driven through the scripted MockWire + FakeClock harness with
+// (Master)" and §8 "Statistics"; contracts/mock-wire.md. Originally written from the C++
+// contract and spec.md User Story 2 (Acceptance Scenarios 1-7 and the Edge Cases naming
+// T_resp/seq-wrap/"simulated time that does not advance") ahead of link/master.{hpp,cpp}
+// (T031); link/master.{hpp,cpp} and MockWire's Kind::CrcError/Kind::Duplicate (T029's own
+// slice of T030 — Garbage/Babble/Rate remain T030) now implement it, and this suite is
+// green. Every assertion is driven through the scripted MockWire + FakeClock harness with
 // simulated time advanced explicitly (CLAUDE.md rule 3): nothing here sleeps or reads a
 // wall clock.
 //
@@ -214,10 +215,8 @@ TEST_CASE("a response at tx_end + T_resp - 1 is accepted; at tx_end + T_resp it 
 TEST_CASE("a CRC-failed response ends the attempt immediately, without waiting out the "
           "remaining timeout",
           "[link]") {
-    // Kind::CrcError's behaviour lands in T030 (tasks.md); until then, MockWire records a
-    // "not implemented" fault the moment the request is transmitted (mock_wire.cpp), and
-    // this case goes red there rather than reaching the assertions below — expected per
-    // this issue's "out of scope" note, not a defect in this test.
+    // Kind::CrcError is implemented in mock_wire.cpp (T029's own slice of T030): the real
+    // response with its last CRC byte XOR 0xFF, per contracts/mock-wire.md.
     FakeClock clock;
     MockWire wire(clock);
     const uint8_t dst = 0x08;
@@ -257,9 +256,8 @@ TEST_CASE("a CRC-failed response ends the attempt immediately, without waiting o
 TEST_CASE("a late duplicate of a concluded transaction's response is discarded during the "
           "next transaction's open window, without ending it or corrupting its counters",
           "[link]") {
-    // Kind::Duplicate's behaviour lands in T030; until then this case goes red at the
-    // MockWire "not implemented" fault the moment attempt 0 is transmitted, same as the
-    // CRC-failure case above - expected, not a defect in this test.
+    // Kind::Duplicate is implemented in mock_wire.cpp (T029's own slice of T030): the real
+    // response, then the same bytes again, per contracts/mock-wire.md.
     FakeClock clock;
     MockWire wire(clock);
     const uint8_t dst = 0x09;
@@ -288,8 +286,21 @@ TEST_CASE("a late duplicate of a concluded transaction's response is discarded d
     // delay_us = (tx1_end - tx_end0) + margin lands it just after N+1 transmits.
     const uint32_t margin = 10;
     const uint32_t duplicate_delay_us = static_cast<uint32_t>(tx1_end - tx_end0) + margin;
-    const Step tx0_script[] = {{dst, Kind::Duplicate, duplicate_delay_us}};
-    wire.set_script(dst, tx0_script, 1);
+    // N+1's own answer is deliberately delayed past the stale copy's own full length (a
+    // real, 9-byte-on-the-wire frame takes far longer than TRUNK_T_turn_min_us to
+    // transmit) so the two never interleave byte-for-byte on the shared MockWire queue —
+    // exactly as two genuine transmitters could never overlap on a real half-duplex bus.
+    // The retry's own step is explicit only to keep this a fixed 3-slot script (steps are
+    // consumed strictly in per-node request order); its value reproduces the untouched
+    // default (Kind::Respond, TRUNK_T_turn_min_us) so retry_answer_full_end above still
+    // matches.
+    const uint32_t tx1_answer_delay_us = 110; // stale copy (10..100) fully clear before this
+    const Step tx0_script[] = {
+        {dst, Kind::Duplicate, duplicate_delay_us},
+        {dst, Kind::Respond, omgp::TRUNK_T_turn_min_us},
+        {dst, Kind::Respond, tx1_answer_delay_us},
+    };
+    wire.set_script(dst, tx0_script, 3);
 
     Master master(wire, clock, omgp::ADDR_host);
     REQUIRE(master.begin(dst, payload0, sizeof payload0) == Status::Ok);
@@ -306,8 +317,8 @@ TEST_CASE("a late duplicate of a concluded transaction's response is discarded d
     REQUIRE(master.stats(dst).retries == 1);
     REQUIRE_FALSE(master.busy());
 
-    // Transaction N+1 (seq 1), same destination: script exhausted (Duplicate was a
-    // one-shot step) so it falls back to the default prompt Respond.
+    // Transaction N+1 (seq 1), same destination: draws the script's third (explicitly
+    // delayed) Respond step.
     wire.advance_to(tx1_start); // clock only; gap already satisfied by construction
     REQUIRE(master.begin(dst, payload1, sizeof payload1) == Status::Ok);
     REQUIRE(wire.transcript_size() == 3);
@@ -327,7 +338,8 @@ TEST_CASE("a late duplicate of a concluded transaction's response is discarded d
     REQUIRE(master.stats(dst).discards == discards_before + 1);
     REQUIRE(master.busy()); // N+1's window keeps running
 
-    const uint64_t full_end1 = response_full_end(tx1_end, dst, 1, payload1, sizeof payload1);
+    const uint64_t full_end1 =
+        response_full_end(tx1_end, dst, 1, payload1, sizeof payload1, tx1_answer_delay_us);
     ev = wire.advance_to(full_end1, master);
     REQUIRE(ev.kind == MasterEvent::Answered);
     REQUIRE(master.stats(dst).transactions == 2);
