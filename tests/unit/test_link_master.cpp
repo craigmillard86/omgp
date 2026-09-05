@@ -1244,81 +1244,393 @@ TEST_CASE("a response whose start bit arrives just inside T_resp is not timed ou
     REQUIRE(master.stats(dst).timeouts == 0);
 }
 
-// --- Liveness: continuous bus traffic must not defer a transmission forever
-// (PR #137 red-team, HIGH; trunk §7 babble) ---------------------------------------------
+// --- Liveness: foreign bus traffic must not defer a transmission forever (PR #137 red-team,
+// HIGH). trunk §3: the host is the ONLY initiator — "no multi-master arbitration, no CSMA, no
+// token" — and owes >= T_gap of idle after ITS OWN transactions. Deferring for activity that is
+// not the host's own is a courtesy on top of that, bounded at one worst-case frame (kMaxWire
+// bytes, trunk §4) plus T_gap beyond the instant the transmission was first deferred to. Past
+// that the host transmits on schedule and the transaction "fails or succeeds on its own merits"
+// (spec.md Edge Cases, "Babble"); nothing is ever concluded from the bus state itself — every
+// earlier revision of this bound synthesised a Failed from poll-instant samples of the bus, and
+// each was falsified (elapsed time; a stale deadline_; a single-instant "gap still denied" that
+// one stray byte per superframe could hold true forever). ---------------------------------
 
-TEST_CASE("continuous bus traffic cannot defer a transmission forever — the gap deferral is "
-          "bounded and the transaction concludes instead of hanging busy()",
+namespace {
+
+// The bounded courtesy: defer for foreign activity no later than this, then transmit.
+// deferred_to is the instant the transmission was first deferred to (last_activity + T_gap at
+// begin()/retry scheduling), computed here from the test's own timeline, never read back from
+// the engine.
+uint64_t courtesy_cap_us(uint64_t deferred_to, uint32_t bps = omgp::TRUNK_bit_rate) {
+    return deferred_to + static_cast<uint64_t>(kMaxWire) * byte_time_us(bps) + omgp::TRUNK_T_gap_us;
+}
+
+} // namespace
+
+TEST_CASE("continuous bus traffic cannot defer a transmission forever — at the superframe "
+          "cadence the request goes out at the first poll past the bounded courtesy",
           "[link][timing:T_gap]") {
-    // fire_pending() pushes the deferred instant out for ongoing bus activity, so the engine
-    // never drives the line over an arriving frame. A station that holds bytes on the wire
-    // continuously would otherwise push it out on every poll: no attempt ever reaches the
-    // wire, no retry, no outcome, busy() true permanently. Deferring is right — trunk §3's
-    // ">= T_gap of idle" is unsatisfiable while that continues — but it is bounded at one
-    // worst-case frame (trunk §4) beyond the deferred instant: long enough for any single
-    // conforming frame already on the wire to finish, and no longer. Past that the bus is
-    // babble (trunk §7), not a frame worth waiting on.
-    FakeClock clock;
-    MockWire wire(clock);
-    const uint8_t dst = 0x04;
-    const uint8_t payload[] = {0x5A};
-    Master master(wire, clock, omgp::ADDR_host);
-
     // Driven at the DOCUMENTED superframe cadence (TRUNK_T_poll_us, trunk §6), not in
     // microsecond steps. An earlier version of this test stepped the clock 1 us at a time and
     // passed against a guard that could only ever fire when polls were less than ~60 us apart
     // — the wedge was fully intact at the real cadence and this test hid it (PR #137 red-team,
     // HIGH). Any bound here must be cadence-independent, so the cadence is part of the case.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x04;
+    const uint8_t payload[] = {0x5A};
+    // Silence, not the mock's default echo: with no script MockWire::transmit() decodes the
+    // host's request straight off its argument buffer and schedules a Respond interleaved
+    // byte-for-byte with the babble — a mock artefact, not a bus behaviour.
+    const Step s[] = {{dst, Kind::Silence}};
+    wire.set_script(dst, s, 1);
+    Master master(wire, clock, omgp::ADDR_host);
+
     const uint64_t babble_start = 100;
     std::vector<uint8_t> babble(500, 0x5A);
     const uint64_t babble_end = babble_start + static_cast<uint64_t>(babble.size()) * byte_us();
     wire.inject_bytes(babble.data(), babble.size(), babble_start);
 
     // Let some babble land so last_activity_ is live, then open a transaction: it must defer.
-    wire.advance_to(babble_start + 5 * byte_us(), master);
+    // The byte starting exactly at begin_at is drained by that poll, so last_activity is its
+    // END, and the transmission is first deferred to that end + T_gap.
+    const uint64_t begin_at = babble_start + 5 * byte_us();
+    wire.advance_to(begin_at, master);
     REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
     REQUIRE(master.busy());
     REQUIRE(wire.transcript_size() == 0); // deferred, bus is busy
+    const uint64_t deferred_to = begin_at + byte_us() + omgp::TRUNK_T_gap_us;
+    const uint64_t cap = courtesy_cap_us(deferred_to);
 
-    const uint64_t budget = omgp::TRUNK_T_gap_us + static_cast<uint64_t>(kMaxWire) * byte_us();
-    // Sanity: the babble outlasts the budget AND the poll cadence, so this is not vacuous —
-    // and the cadence really is coarser than the old guard's ~60 us reachable window.
-    REQUIRE(babble_end > clock.now_us() + budget + omgp::TRUNK_T_poll_us);
+    // Sanity: the babble outlasts the cap AND the poll cadence, so this is not vacuous — and
+    // the cadence really is coarser than the old guard's ~60 us reachable window.
+    REQUIRE(babble_end > cap + omgp::TRUNK_T_poll_us);
     REQUIRE(omgp::TRUNK_T_poll_us > omgp::TRUNK_T_gap_us + byte_us());
 
+    // The first poll at or past the cap is the one that must transmit — the babble is still
+    // running at that instant, so nothing but the cap can let the request out.
+    uint64_t first_poll_past_cap = 0;
     MasterEvent ev{};
-    for (uint64_t t = clock.now_us() + omgp::TRUNK_T_poll_us; t <= babble_end;
+    for (uint64_t t = begin_at + omgp::TRUNK_T_poll_us; t <= babble_end;
          t += omgp::TRUNK_T_poll_us) {
+        if (first_poll_past_cap == 0 && t >= cap)
+            first_poll_past_cap = t;
+        ev = wire.advance_to(t, master);
+        if (wire.transcript_size() > 0 || ev.kind != MasterEvent::None)
+            break;
+    }
+    REQUIRE(first_poll_past_cap != 0);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).dst == dst);
+    REQUIRE(wire.transcript(0).tx_start_us >= cap);
+    REQUIRE(wire.transcript(0).tx_start_us == first_poll_past_cap);
+    REQUIRE(ev.kind == MasterEvent::None); // nothing concluded from the bus state
+    REQUIRE(master.busy());                // now awaiting the node's answer on its merits
+    REQUIRE(master.attempts() == 1);
+    // FR-011a: counted at its first transmission; no failure booked against the node.
+    REQUIRE(master.stats(dst).transactions == 1);
+    REQUIRE(master.stats(dst).timeouts == 0);
+}
+
+// --- T-1: the scenario the single-instant "gap still denied" bound failed (PR #137 red-team
+// at afed239, HIGH): ONE stray byte just before every superframe poll. Sampled at poll
+// instants that bus looks permanently busy; in truth it is idle 99.5% of the time. ------------
+
+TEST_CASE("one stray byte before every superframe poll cannot hold the request off the wire "
+          "and never concludes the transaction as Failed",
+          "[link][timing:T_gap]") {
+    // The bound must not be an inference about the bus drawn from poll-instant samples: the
+    // engine observes AND transmits only at poll() instants, so any such inference is either
+    // spoofable (this case) or a false positive. The bounded courtesy makes no inference — it
+    // transmits at the first poll past the cap whatever the samples say.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x05;
+    const uint8_t payload[] = {0x33};
+    const Step s[] = {{dst, Kind::Silence}};
+    wire.set_script(dst, s, 1);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    // Some bus activity, so begin() is genuinely gap-deferred.
+    const uint8_t garbage[] = {static_cast<uint8_t>(omgp::TRUNK_flag_byte), 0x11, 0x22,
+                               static_cast<uint8_t>(omgp::TRUNK_flag_byte)};
+    const uint64_t g_start = 100;
+    const uint64_t g_end = g_start + static_cast<uint64_t>(sizeof garbage) * byte_us();
+    wire.inject_bytes(garbage, sizeof garbage, g_start);
+    wire.advance_to(g_end, master);
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 0);
+    const uint64_t deferred_to = g_end + omgp::TRUNK_T_gap_us;
+    const uint64_t cap = courtesy_cap_us(deferred_to);
+
+    // The adversary: a single byte whose start bit lands 5 us before each poll, so at every
+    // poll instant last_activity + T_gap is in the future. The first poll past the cap must
+    // transmit regardless (yes, over that byte: its sender is a trunk §3 violator that started
+    // long after the host's deferred instant, and the host is the only initiator).
+    const uint8_t stray = 0x5A;
+    MasterEvent ev{};
+    uint64_t t = g_end;
+    for (int polls = 0; polls < 8; ++polls) {
+        t += omgp::TRUNK_T_poll_us;
+        wire.inject_bytes(&stray, 1, t - 5);
+        ev = wire.advance_to(t, master);
+        if (wire.transcript_size() > 0 || ev.kind != MasterEvent::None)
+            break;
+    }
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).tx_start_us >= cap);
+    REQUIRE(wire.transcript(0).tx_start_us < cap + omgp::TRUNK_T_poll_us);
+    REQUIRE(ev.kind != MasterEvent::Failed);
+    REQUIRE(master.busy());
+    REQUIRE(master.stats(dst).transactions == 1);
+    REQUIRE(master.stats(dst).timeouts == 0);
+}
+
+// --- T-2: the cap is EXACT — one worst-case frame plus T_gap beyond the first deferred
+// instant, no sooner and no later ---------------------------------------------------------
+
+TEST_CASE("under continuous babble the request goes out exactly at deferred_to + kMaxWire byte "
+          "times + T_gap when polled every microsecond",
+          "[link][timing:T_gap]") {
+    // (a) pins the cap's value from the symbols: deleting the T_gap term transmits 50 us early;
+    // shrinking the frame term transmits early; dropping the cap altogether never transmits.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x07;
+    const uint8_t payload[] = {0x42};
+    const Step s[] = {{dst, Kind::Silence}};
+    wire.set_script(dst, s, 1);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint64_t babble_start = 100;
+    std::vector<uint8_t> babble(500, 0x5A);
+    const uint64_t babble_end = babble_start + static_cast<uint64_t>(babble.size()) * byte_us();
+    wire.inject_bytes(babble.data(), babble.size(), babble_start);
+
+    const uint64_t begin_at = babble_start + 5 * byte_us();
+    wire.advance_to(begin_at, master);
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 0);
+    const uint64_t deferred_to = begin_at + byte_us() + omgp::TRUNK_T_gap_us;
+    const uint64_t cap = courtesy_cap_us(deferred_to);
+    REQUIRE(babble_end > cap + omgp::TRUNK_T_gap_us); // still babbling at and past the cap
+
+    for (uint64_t t = begin_at + 1; t < cap; ++t) {
+        wire.advance_to(t, master);
+        REQUIRE(wire.transcript_size() == 0); // the courtesy is honoured in full
+    }
+    MasterEvent ev = wire.advance_to(cap, master);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).tx_start_us == cap);
+    REQUIRE(wire.transcript(0).tx_start_us ==
+            deferred_to + static_cast<uint64_t>(kMaxWire) * byte_us() + omgp::TRUNK_T_gap_us);
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE(master.busy());
+}
+
+TEST_CASE("a worst-case-length frame starting exactly at the deferred instant is never "
+          "transmitted over, and gets its full T_gap — the cap is not too small",
+          "[link][timing:T_gap]") {
+    // (b) the tie case: a kMaxWire-byte frame whose start bit lands exactly at deferred_to ends
+    // at deferred_to + max_frame, so "its end + T_gap" and the cap coincide. The transmit must
+    // land there — a cap of deferred_to + max_frame alone would drive the line 0 us after that
+    // frame's last byte; any smaller cap would drive it INTO the frame. kMaxWire (142) is the
+    // codec's sizing bound; SC-008's achievable worst case is 140 bytes, so a conforming frame
+    // can never reach the cap — this frame is the bound itself, built as 70 escaped FLAGs so it
+    // is structurally discarded (len byte 0x7E > LIMIT) rather than delivered.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x08;
+    const uint8_t payload[] = {0x77};
+    const Step s[] = {{dst, Kind::Silence}};
+    wire.set_script(dst, s, 1);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t garbage[] = {static_cast<uint8_t>(omgp::TRUNK_flag_byte), 0x11, 0x22,
+                               static_cast<uint8_t>(omgp::TRUNK_flag_byte)};
+    const uint64_t g_start = 100;
+    const uint64_t g_end = g_start + static_cast<uint64_t>(sizeof garbage) * byte_us();
+    wire.inject_bytes(garbage, sizeof garbage, g_start);
+    wire.advance_to(g_end, master);
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 0);
+    const uint64_t due = g_end + omgp::TRUNK_T_gap_us;
+
+    std::vector<uint8_t> other;
+    other.push_back(static_cast<uint8_t>(omgp::TRUNK_flag_byte));
+    while (other.size() + 3 <= kMaxWire) { // room for one escaped pair plus the closing FLAG
+        other.push_back(static_cast<uint8_t>(omgp::TRUNK_escape_byte));
+        other.push_back(static_cast<uint8_t>(omgp::TRUNK_flag_byte ^ omgp::TRUNK_escape_xor));
+    }
+    other.push_back(static_cast<uint8_t>(omgp::TRUNK_flag_byte));
+    REQUIRE(other.size() == kMaxWire);
+    const uint64_t other_end = due + static_cast<uint64_t>(other.size()) * byte_us();
+    wire.inject_bytes(other.data(), other.size(), due);
+    REQUIRE(other_end + omgp::TRUNK_T_gap_us == courtesy_cap_us(due)); // the exact tie
+
+    for (uint64_t t = g_end + 1; t < other_end + omgp::TRUNK_T_gap_us; ++t) {
+        wire.advance_to(t, master);
+        REQUIRE(wire.transcript_size() == 0); // never inside the frame, nor within T_gap of it
+    }
+    wire.advance_to(other_end + omgp::TRUNK_T_gap_us, master);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).tx_start_us == other_end + omgp::TRUNK_T_gap_us);
+}
+
+// --- T-3: a whole transaction under continuous babble concludes, via real outcomes, within a
+// bound computed from the spec symbols — at both the fine and the superframe cadence ---------
+
+TEST_CASE("a transaction under continuous babble runs all three attempts and concludes "
+          "Failed{Timeout} on the node's merits within a symbol-derived bound",
+          "[link][timing:T_gap][timing:retries]") {
+    // Each attempt: the courtesy (max_frame + 2 T_gap + one byte of slack for the byte in
+    // flight at the deferring poll), the request itself, the T_resp window, and up to two poll
+    // periods of detection latency (one to notice the cap, one to notice the timeout). Three
+    // attempts:
+    //   3 * (F + 2G + B) + 3 * (n * B + R) + 6 * P
+    // The outcome is the NODE's: three timeouts, charged to dst, transactions == 1. trunk §7's
+    // failure accounting (all nodes failing -> BUS_FAULT) is how a jammed trunk is detected;
+    // the engine itself never converts a bus condition into a Failed.
+    const uint64_t cadence = GENERATE(uint64_t{1}, uint64_t{omgp::TRUNK_T_poll_us});
+    CAPTURE(cadence);
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x09;
+    const uint8_t payload[] = {0x5A};
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    // Babble is fed in chunks ahead of each poll (MockWire's RX queue is 4 * kMaxWire bytes and
+    // is drained as polled), always covering at least one cadence beyond the poll instant so
+    // the wire is never quiet at any instant the engine can observe.
+    uint64_t babble_next = 100;
+    auto babble_through = [&](uint64_t t) {
+        static const std::vector<uint8_t> chunk(100, 0x5A);
+        while (babble_next <= t + cadence) {
+            wire.inject_bytes(chunk.data(), chunk.size(), babble_next);
+            babble_next += static_cast<uint64_t>(chunk.size()) * byte_us();
+        }
+    };
+
+    const uint64_t begin_at = 150;
+    babble_through(begin_at);
+    wire.advance_to(begin_at, master);
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 0);
+
+    const uint64_t F = static_cast<uint64_t>(kMaxWire) * byte_us();
+    const uint64_t G = omgp::TRUNK_T_gap_us;
+    const uint64_t B = byte_us();
+    const uint64_t R = omgp::TRUNK_T_resp_us;
+    // The retry frame differs in its control byte, hence its CRC, hence possibly its stuffing —
+    // so the two lengths are computed separately rather than assumed equal.
+    const uint64_t n_first = request_bytes(dst, 0, false, payload, sizeof payload).size();
+    const uint64_t n_retry = request_bytes(dst, 0, true, payload, sizeof payload).size();
+    const uint64_t n_max = n_first > n_retry ? n_first : n_retry;
+    const uint64_t bound = 3 * (F + 2 * G + B) + 3 * (n_max * B + R) + 6 * cadence;
+
+    MasterEvent ev{};
+    uint64_t t = begin_at;
+    while (t <= begin_at + bound) {
+        t += cadence;
+        babble_through(t);
         ev = wire.advance_to(t, master);
         if (ev.kind != MasterEvent::None)
             break;
     }
     REQUIRE(ev.kind == MasterEvent::Failed);
     REQUIRE(ev.reason == MasterEvent::Timeout);
-    REQUIRE_FALSE(master.busy());         // concluded, not hung
-    REQUIRE(wire.transcript_size() == 0); // and never drove the line over the traffic
-    // Nothing is charged to the node: the request never reached it, so booking it a timeout
-    // would mark an innocent node for a bus condition it had no part in — three of those feed
-    // trunk §7's "3 consecutive failed transactions -> SUSPECT" (PR #137 review, MEDIUM).
-    // FR-011a counts a transaction at its FIRST TRANSMISSION; this one never reached the wire.
-    REQUIRE(master.stats(dst).timeouts == 0);
-    REQUIRE(master.stats(dst).transactions == 0);
+    REQUIRE(t - begin_at <= bound);
+    REQUIRE_FALSE(master.busy());
+    REQUIRE(wire.transcript_size() == 3);
+    REQUIRE(master.attempts() == 3);
+    REQUIRE(master.stats(dst).transactions == 1);
+    REQUIRE(master.stats(dst).retries == 2);
+    REQUIRE(master.stats(dst).timeouts == 3);
+    // Every retry honoured the courtesy afresh: it cannot start before the previous attempt's
+    // window closed (tx_end + T_resp), plus the gap, plus one worst-case frame, plus the gap.
+    for (size_t k = 1; k < 3; ++k) {
+        const uint64_t prev_n = k == 1 ? n_first : n_retry;
+        const uint64_t prev_tx_end = wire.transcript(k - 1).tx_start_us + prev_n * B;
+        REQUIRE(wire.transcript(k).retry);
+        REQUIRE(wire.transcript(k).tx_start_us >= prev_tx_end + R + G + F + G);
+    }
 }
 
-// --- The babble bound must measure BUS BUSY-NESS, not elapsed time: an idle bus polled at the
-// superframe cadence must still transmit (PR #137 red-team, HIGH) -----------------------
+// --- T-4: the cap follows the CURRENT bit rate (PR #137 review, LOW) --------------------
+
+TEST_CASE("a set_bit_rate() during the deferral re-scales the courtesy cap at once — the "
+          "next poll past the new cap transmits",
+          "[link][timing:T_gap]") {
+    // max_frame is one kMaxWire-byte frame at the current rate: ~12.3 ms at the fallback rate,
+    // 1.42 ms at TRUNK_bit_rate. A cap latched at begin() would hold the fallback figure after
+    // the rate changed; recomputing it at check time does not.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x0A;
+    const uint8_t payload[] = {0x21};
+    const Step s[] = {{dst, Kind::Silence}};
+    wire.set_script(dst, s, 1);
+    Master master(wire, clock, omgp::ADDR_host);
+    master.set_bit_rate(omgp::TRUNK_bit_rate_fallback);
+    const uint64_t slow_byte = byte_time_us(omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(slow_byte > byte_us());
+
+    // Continuous babble at the fallback rate (inject_bytes spaces bytes at the wire's current
+    // rate), then a deferred begin().
+    const uint64_t babble_start = 100;
+    std::vector<uint8_t> slow_babble(120, 0x5A);
+    wire.inject_bytes(slow_babble.data(), slow_babble.size(), babble_start);
+    const uint64_t begin_at = babble_start + 2 * slow_byte;
+    wire.advance_to(begin_at, master);
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 0);
+    const uint64_t deferred_to = begin_at + slow_byte + omgp::TRUNK_T_gap_us;
+    const uint64_t slow_cap = courtesy_cap_us(deferred_to, omgp::TRUNK_bit_rate_fallback);
+    const uint64_t fast_cap = courtesy_cap_us(deferred_to, omgp::TRUNK_bit_rate);
+
+    // Three superframes in: well past the fast cap, well short of the slow one — and the wire
+    // is still babbling at the slow rate, so nothing goes out.
+    uint64_t t = begin_at;
+    for (int polls = 0; polls < 3; ++polls) {
+        t += omgp::TRUNK_T_poll_us;
+        wire.advance_to(t, master);
+        REQUIRE(wire.transcript_size() == 0);
+    }
+    REQUIRE(t > fast_cap);
+    REQUIRE(t + omgp::TRUNK_T_poll_us < slow_cap);
+
+    // The rate changes mid-deferral. Fresh babble at the NEW rate keeps the wire busy at every
+    // instant the engine can observe (the slow-spaced bytes still queued would otherwise leave
+    // T_gap-sized holes once measured in fast byte times and let the transmit out for the
+    // wrong reason).
+    master.set_bit_rate(omgp::TRUNK_bit_rate);
+    std::vector<uint8_t> fast_babble(400, 0x5A);
+    wire.inject_bytes(fast_babble.data(), fast_babble.size(), t + 1);
+
+    t += omgp::TRUNK_T_poll_us;
+    MasterEvent ev = wire.advance_to(t, master);
+    REQUIRE(wire.transcript_size() == 1); // the cap was re-scaled, not latched
+    REQUIRE(wire.transcript(0).tx_start_us == t);
+    REQUIRE(ev.kind != MasterEvent::Failed);
+    REQUIRE(master.busy());
+}
+
+// --- No inference from elapsed time: an idle bus polled at the superframe cadence must still
+// transmit (PR #137 red-team, HIGH) -------------------------------------------------------
 
 TEST_CASE("a gap-deferred transmission on an IDLE bus still goes out when the caller polls at "
           "the superframe cadence",
           "[link][timing:T_gap]") {
-    // The babble bound first fired on elapsed time alone, so it could not tell "a station has
+    // The first babble bound fired on elapsed time alone, so it could not tell "a station has
     // held the wire for a whole frame time" from "nobody called poll() for a while".
     // TRUNK_T_poll_us (2000) EXCEEDS max_frame_us (kMaxWire * 10 = 1420), so at the documented
     // superframe cadence (trunk §6) every gap-deferred transaction and every retry was
     // silently abandoned on a completely idle wire — Failed{Timeout} with nothing ever
     // transmitted, and an innocent node charged for it (three of those feed trunk §7's
-    // SUSPECT rule). The guard now also requires the transmit instant to be STILL in the
-    // future (no T_gap window offered), which an idle bus never satisfies.
+    // SUSPECT rule). Nothing is concluded from the bus state any more: the deferred instant is
+    // simply capped, and an idle bus reaches it on the next poll like any other.
     static_assert(omgp::TRUNK_T_poll_us > omgp::TRUNK_T_gap_us,
                   "this case is only meaningful if the poll cadence outlasts the gap");
     FakeClock clock;
