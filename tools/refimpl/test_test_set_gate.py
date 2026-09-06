@@ -732,6 +732,21 @@ class TestCtestPath:
         assert "tests/unit/sub" in r.stderr and "symlink" in r.stderr, r.stderr
         assert "verified" not in r.stdout
 
+    def test_symlinked_source_dir_itself_is_refused(self, tmp_path):
+        # The top of the walk: os.walk FOLLOWS a symlink handed to it as the root (only nested
+        # links are left alone), so `tests/property -> ../hidden` was walked as if it were the
+        # directory — found while closing @3713ab0 finding 1. The bootstrap path's `find -P`
+        # lists the starting point itself as type l. Refused by name on both.
+        root = make_tree(tmp_path)
+        hidden = root / "hidden"
+        hidden.mkdir()
+        (hidden / "test_c.cpp").write_text("// reached only through the link\n")
+        (root / "tests/property").symlink_to(Path("../hidden"), target_is_directory=True)
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/property" in r.stderr and "symlink" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
     def test_unreadable_directory_under_the_source_dirs_is_refused(self, tmp_path):
         # Red team @3713ab0 [MEDIUM]: os.walk without onerror= swallows the OSError scandir
         # raises for a directory it cannot read, so tests/unit/deep/test_c.cpp was outside the
@@ -938,6 +953,17 @@ class TestBootstrapPath:
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/sub" in r.stderr and "symlink" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_symlinked_source_dir_itself_is_refused_here_too(self, tmp_path):
+        root = make_tree(tmp_path, ctest=False)
+        hidden = root / "hidden"
+        hidden.mkdir()
+        (hidden / "test_c.cpp").write_text("// reached only through the link\n")
+        (root / "tests/property").symlink_to(Path("../hidden"), target_is_directory=True)
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/property" in r.stderr and "symlink" in r.stderr, r.stderr
         assert "verified" not in r.stdout
 
     def test_unreadable_directory_is_refused_here_too(self, tmp_path):

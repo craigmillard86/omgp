@@ -111,8 +111,9 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   object, then each `tests/unit/*.cpp` + `tests/property/*.cpp` with `l3/*.cpp`,
   `l3_helper`, `crc_helper`; disclosure line unchanged. (Amended by #133: the source
   list is `unit_sources()` — every `test_*.cpp` under those two directories at any depth,
-  sorted, symlinks not followed and refused by name (red team @8b0e4f4) — shared with the
-  bootstrap `unit` walk.)
+  sorted, symlinks not followed and refused by name (red team @8b0e4f4), a directory the
+  walk cannot enter refused by name (red team @3713ab0) — shared with the bootstrap `unit`
+  walk.)
 - `unit`: run every test binary; the `EXECUTED: <n>` lines are summed (ctest path via
   `LastTest.log`, bootstrap via stdout); `UNIT_TEST_FLOOR` raised to the new total −
   small slack (documented in the commit that raises it: "raise when tests are added;
@@ -124,7 +125,11 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   at any depth (red team @ceab86f) — reached without following symlinks, and a symlink
   anywhere under those directories, file or directory, is refused by name, since `rglob`
   and `find` do not descend one and a source behind one was silently outside the set (red
-  team @8b0e4f4; with links refused the walked set is the whole tree by construction) —
+  team @8b0e4f4), and so is a directory the walk cannot enter — `os.walk` otherwise swallows
+  the error and omits it, so a mode-000 `tests/unit/deep` hid its source before and after
+  the run alike (red team @3713ab0); with links and walk errors refused the walked set is
+  the whole tree by construction — the `EXECUTED: <n>` line must stand alone (anchored
+  both ends; a line merely containing the marker is not the run's count) —
   was compiled, registered and executed, naming every one
   that was not — compiled means exactly ONE `compile_commands.json` entry (two entries
   under two targets are refused naming both: keeping the last one let a single appended
@@ -176,7 +181,9 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   builds one binary per BASENAME, two sources sharing a basename are refused by name
   before the bootstrap build and before the walk (red team @3dde163 — otherwise one
   binary would vouch for both and count twice), and a symlink under the source
-  directories is refused there too (red team @8b0e4f4). Both paths print a `unit: verified N
+  directories is refused there too (red team @8b0e4f4), as is a directory `find` cannot
+  enter (red team @3713ab0; `find -P` already exited 1 on it, but named by find, not the
+  stage). Both paths print a `unit: verified N
   test binaries` line (N = distinct binaries on the ctest path; sources, which the
   uniqueness check makes one-per-binary, on the bootstrap path), and both fail when
   there are no sources at all. The record, not

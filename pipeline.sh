@@ -13,7 +13,7 @@ WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=
 
 # The unit test SOURCE set, one line per file: every test_*.cpp under tests/unit and
 # tests/property, at any depth, sorted — symlinks not followed (find -P), and refused by name
-# in unit_sources_plain() below. Shared by the bootstrap build and the bootstrap unit
+# in unit_sources_plain() below, as is a directory the walk cannot enter. Shared by the bootstrap build and the bootstrap unit
 # walk (and mirrored by tools/check_test_set.py) so all three agree on what "every source"
 # means; a flat glob would leave tests/unit/<sub>/test_x.cpp silently unchecked (#172 red team
 # @ceab86f, finding 4). find's -name matches the file name only, so sorting is by full path.
@@ -42,11 +42,20 @@ unit_sources_unique() {
 # No symlink under the test source directories, at any depth, directory or file (red team
 # @8b0e4f4 finding 2): `find` without -L does not descend a symlinked directory, so a source
 # behind one was outside the set and never named. The set is plain files and directories
-# only; a link is refused by name (the same rule as tools/check_test_set.py's walk()).
+# only; a link is refused by name, and so is a directory the walk cannot enter (red team
+# @3713ab0 finding 1) — the same rules as tools/check_test_set.py's walk().
 unit_sources_plain() {
   local d dirs=() l rc=0
   for d in tests/unit tests/property; do [ -d "$d" ] && dirs+=("$d"); done
   [ "${#dirs[@]}" -gt 0 ] || return 0
+  # A directory the walk cannot enter hides whatever it holds (red team @3713ab0 finding 1):
+  # find -P exits 1 on it, so this path already failed closed — but named by find, not by
+  # the stage. Named here first, like a symlink.
+  while IFS= read -r l; do
+    [ -n "$l" ] || continue
+    echo "unit: $l: could not be read (not readable and searchable by this uid) under the test source directories: a directory the walk cannot enter hides whatever it holds from the set — fix its permissions" >&2
+    rc=1
+  done < <(find "${dirs[@]}" -type d \( ! -readable -o ! -executable \) 2>/dev/null | LC_ALL=C sort) # find's own 'Permission denied' for the same dir is dropped: this loop names it; unit_sources()' find below still surfaces every other error
   while IFS= read -r l; do
     [ -n "$l" ] || continue
     echo "unit: $l: a symlink (-> $(readlink "$l")) under the test source directories: the source set is plain files and directories only, so whatever the link reaches is outside the set — replace the link with the files themselves" >&2

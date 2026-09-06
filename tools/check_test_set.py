@@ -105,8 +105,12 @@ reached WITHOUT following symlinks (an explicit os.walk; the same set pipeline.s
 unit_sources() walks with `find`), and a symlink anywhere under those directories —
 directory or file — is refused by name: rglob on Python 3.12 and `find` without -L do not
 descend a symlinked directory, so tests/unit/<link>/test_c.cpp was silently outside the set
-(red team @8b0e4f4 finding 2). With links refused, the walked set is the whole tree by
-construction. This supersedes the @2f40596 lead-b statement (a symlinked source verified
+(red team @8b0e4f4 finding 2). A directory the walk cannot enter is refused by name too:
+os.walk's default swallows the error and omits the directory, so a mode-000 tests/unit/deep
+hid its source from the set before and after the run alike (red team @3713ab0 finding 1).
+With links refused and every walk error refused, the walked set is the whole tree by
+construction — os.walk reaches every plain directory it is allowed to enter, and one it is
+not is named. This supersedes the @2f40596 lead-b statement (a symlinked source verified
 by the file it resolves to): a link is not a source. A flat glob would leave
 tests/unit/<sub>/test_x.cpp unchecked and unnamed (@ceab86f finding 4).
 
@@ -125,6 +129,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -138,22 +143,36 @@ TRUNCATED_RE = re.compile(r"test output was removed since it exceeds the thresho
 
 
 def walk(root: Path):
-    """(sorted test sources, sorted symlinks) under SOURCE_DIRS. An explicit os.walk that
-    does NOT follow links — the same set on every interpreter (rglob's symlink handling
-    differs by Python version) and the same set `find` without -L walks in pipeline.sh —
-    and every symlink it meets, directory or file, is returned to be REFUSED by name: what a
-    link reaches is outside the set, so a set that contained one would not be the whole
-    tree (red team @8b0e4f4 finding 2: tests/unit/<link>/test_c.cpp was never named)."""
-    srcs, links = [], []
+    """(sorted test sources, sorted symlinks, walk errors) under SOURCE_DIRS. An explicit
+    os.walk that does NOT follow links — the same set on every interpreter (rglob's symlink
+    handling differs by Python version) and the same set `find` without -L walks in
+    pipeline.sh — and every symlink it meets, directory or file, is returned to be REFUSED by
+    name: what a link reaches is outside the set, so a set that contained one would not be the
+    whole tree (red team @8b0e4f4 finding 2: tests/unit/<link>/test_c.cpp was never named).
+    So is every directory the walk could not enter: os.walk's default swallows scandir's
+    OSError and simply omits the directory (red team @3713ab0 finding 1: a mode-000
+    tests/unit/deep hid test_c.cpp, and `verified 2` was printed over three sources)."""
+    srcs, links, errors = [], [], []
     for d in SOURCE_DIRS:
-        for dirpath, dirnames, filenames in os.walk(root / d):
+        top = root / d
+        try:
+            st = os.lstat(top)
+        except FileNotFoundError:
+            continue        # a source dir that does not exist walks nothing (pipeline.sh: `[ -d "$d" ]`)
+        except OSError as e:
+            errors.append(e)
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            links.append(top)   # os.walk WOULD follow a symlink handed to it as the top
+            continue
+        for dirpath, dirnames, filenames in os.walk(top, onerror=errors.append):
             for name in dirnames + filenames:
                 path = Path(dirpath) / name
                 if path.is_symlink():
                     links.append(path)
                 elif name in filenames and name.startswith("test_") and name.endswith(".cpp") and path.is_file():
                     srcs.append(path)
-    return sorted(srcs), sorted(links)
+    return sorted(srcs), sorted(links), errors
 
 
 def sources(root: Path):
@@ -281,13 +300,18 @@ def snapshot(root: Path, build: Path, log: Path) -> dict:
 
 
 def check_ctest(root: Path, build: Path, log: Path, junit: Path, pre: dict) -> int:
-    srcs, links = walk(root)
+    srcs, links, errors = walk(root)
     # A symlink under the source dirs, at any depth, directory or file (red team @8b0e4f4
-    # finding 2): named first, since what it reaches is by definition not in `srcs`.
+    # finding 2), and a directory the walk could not enter (red team @3713ab0 finding 1):
+    # named first, since what they hold is by definition not in `srcs`.
     link_failures = [f"{p.relative_to(root).as_posix()}: a symlink (-> {os.readlink(p)}) under the test source "
                      f"directories: the source set is plain files and directories only, so whatever the link reaches "
                      f"is outside the set — replace the link with the files themselves"
                      for p in links]
+    link_failures += [f"{os.path.relpath(e.filename, root)}: could not be read ({e.strerror}) under the test source "
+                      f"directories: a directory the walk cannot enter hides whatever it holds from the set — "
+                      f"fix its permissions"
+                      for e in errors]
     if not srcs:
         for f in link_failures:
             print(f"unit: {f}", file=sys.stderr)
