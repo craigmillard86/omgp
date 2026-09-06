@@ -790,6 +790,7 @@ class TestCtestPath:
         build = root / "build/native"
         (build / "CMakeFiles/test_b.dir/objects1.rsp").write_text("CMakeFiles/test_b.dir/tests/unit/test_b.cpp.o\n")
         (build / "CMakeFiles/test_b.dir/link.txt").write_text("/usr/bin/c++ -g @CMakeFiles/test_b.dir/objects1.rsp -o test_b\n")
+        os.utime(build / "test_b")   # the binary is linked AFTER its link line, as in a real build (@17315ed rule)
         r = run_unit(root)
         assert r.returncode == 0, r.stdout + r.stderr
         assert VERIFIED.search(r.stdout).group(1) == "2", r.stdout

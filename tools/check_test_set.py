@@ -17,14 +17,19 @@ the run's own machine-readable record, and names every source that escaped:
               The object must also be on the target's LINK LINE — the Makefiles
               generator's CMakeFiles/<target>.dir/link.txt, read as a build artefact —
               else it was compiled into no binary (the same finding, escape 2 with only
-              the decoy entry: an entry plus a stub object); no link line fails closed.
-              The object must be at least as new as the source: an edited-after-build
-              source is named ("source is newer than its object; rebuild") rather than
-              vouched for by a stale object (red team @ceab86f finding 3), and the binary
-              at least as new as the object: an object recompiled after the last link is
-              named ("object is newer than <binary>; rebuild") rather than credited to a
-              binary that cannot contain it (red team @6fbdebf finding 1). An mtime
-              comparison is a control, not a guarantee (clock skew, touch).
+              the decoy entry: an entry plus a stub object); no link line fails closed,
+              and the line must PRODUCE the target's binary (its `-o`): an object on a
+              line producing another file is named, not credited (red team @17315ed
+              finding 2). The object must be at least as new as the source: an
+              edited-after-build source is named ("source is newer than its object;
+              rebuild") rather than vouched for by a stale object (red team @ceab86f
+              finding 3), and the binary at least as new as the object AND the link line:
+              an object recompiled after the last link is named ("object is newer than
+              <binary>; rebuild") rather than credited to a binary that cannot contain it
+              (red team @6fbdebf finding 1), and so is a link line regenerated after the
+              last link ("link line is newer than <binary>; rebuild") — the membership it
+              states is of a binary not yet linked (red team @17315ed finding 1). An
+              mtime comparison is a control, not a guarantee (clock skew, touch).
   registered  `ctest --show-only=json-v1` in the build dir lists a test whose command is
               EXACTLY [<build>/<target>] — the target's own binary, compared as an absolute
               path WITHOUT resolving symlinks: build/<other> -> build/<target> is not a
@@ -220,9 +225,13 @@ def compiled_targets(build: Path):
 
 
 def linked_objects(link: Path):
-    """abspath of every object named on a target's link line (its cwd is the build dir, two
-    levels up from CMakeFiles/<target>.dir; `@file` response files are read), or None when
-    there is no link line — another generator, or a deleted file — which fails closed."""
+    """(abspath of every object named on a target's link line, abspath of the line's `-o`
+    output or None when it names none) — the line's cwd is the build dir, two levels up from
+    CMakeFiles/<target>.dir; `@file` response files are read. None (not a tuple) when there is
+    no link line — another generator, or a deleted file — which fails closed.
+
+    The output matters as much as the objects (red team @17315ed finding 2): a line that
+    names the object but produces some other file is not evidence about the target's binary."""
     cwd = link.parents[2]
     try:
         tokens = shlex.split(link.read_text())
@@ -231,7 +240,11 @@ def linked_objects(link: Path):
             expanded += shlex.split((cwd / tok[1:]).read_text()) if tok.startswith("@") else [tok]
     except OSError:
         return None
-    return {os.path.abspath(cwd / tok) for tok in expanded if tok.endswith(".o")}
+    output = None
+    for i, tok in enumerate(expanded[:-1]):
+        if tok == "-o":
+            output = os.path.abspath(cwd / expanded[i + 1])
+    return {os.path.abspath(cwd / tok) for tok in expanded if tok.endswith(".o")}, output
 
 
 def registered_tests(build: Path):
@@ -423,17 +436,36 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path, pre: dict) -> i
             failures.append(f"{rel}: link line {link} changed during the ctest run (or did not exist before it); "
                             f"rebuild and rerun via stage_unit")
             continue
-        linked = linked_objects(link)
-        if linked is None:
+        parsed = linked_objects(link)
+        if parsed is None:
             failures.append(f"{rel}: no link line for target {target} at {link} (the Makefiles generator writes it; "
                             f"without it, what {target} was linked from cannot be read, so the compile entry is not "
                             f"evidence of a binary)")
             continue
+        linked, output = parsed
         if os.path.abspath(obj) not in linked:
             failures.append(f"{rel}: object {obj} is not on target {target}'s link line ({link}): compiled, but linked "
                             f"into no binary")
             continue
         binary = os.path.abspath(build / target)
+        # The line must PRODUCE this target's binary (red team @17315ed finding 2): naming the
+        # object on a line whose `-o` is another file says nothing about {binary}. cmake writes
+        # no such line and a mid-run rewrite is caught by the snapshot — a control gap, closed
+        # because the `-o` token is in hand. Identity is the FILE (dev, ino), not the path:
+        # the output is whatever the linker wrote, and the question is whether that is the
+        # file registered here — a tree of links to real binaries over the real compile
+        # database (the real-artefact controls) reads correctly; an output that does not
+        # exist, or is another file, does not. The path-level rules (a link is not a
+        # registration; one file, one registration) are applied to the binary below.
+        if output is None:
+            failures.append(f"{rel}: link line {link} for target {target} names no output (no -o): what it produces "
+                            f"cannot be read, so it is not evidence that {binary} contains {obj}")
+            continue
+        if os.path.exists(binary) and not (os.path.exists(output) and os.path.samefile(output, binary)):
+            # (a binary that does not exist is named by the registration and identity rules below)
+            failures.append(f"{rel}: object {obj} is on a link line ({link}) that produces {output}, not {binary} "
+                            f"(target {target}): not evidence about the binary ctest ran")
+            continue
         if binary not in registered:
             real = os.path.realpath(binary)
             decoys = [d for d in by_basename.get(target, []) if d != binary]
@@ -479,6 +511,16 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path, pre: dict) -> i
             # a guarantee.
             failures.append(f"{rel}: object {obj} is newer than {binary} (target {target}): compiled after the last "
                             f"link, so the binary that ran cannot contain it; rebuild before verifying")
+        elif os.path.getmtime(link) > os.path.getmtime(binary):
+            # The link line, too, must predate the binary (red team @17315ed finding 1): it is
+            # what the object rule above reads its membership from, and one regenerated after
+            # the last link (cmake re-run, the relink never performed) describes a binary that
+            # does not exist yet — the object it names may be older than the binary and still
+            # not in it. CMake rewrites link.txt only when its content changes and make relinks
+            # on that, so a completed build never leaves this state (observed on the real
+            # tree: every link.txt older than its binary); an interrupted one can. A control.
+            failures.append(f"{rel}: link line {link} is newer than {binary} (target {target}): the binary that ran "
+                            f"was not linked from this line; rebuild before verifying")
         elif os.path.getmtime(binary) > record_mtime:
             failures.append(f"{rel}: {binary} is newer than {junit} (the execution record predates this binary; rerun ctest)")
         elif name not in executed and name in truncated:

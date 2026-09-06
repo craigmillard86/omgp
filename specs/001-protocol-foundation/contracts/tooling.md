@@ -141,7 +141,10 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   an mtime comparison is a control, not a guarantee) and is on the target's link line
   (`CMakeFiles/<target>.dir/link.txt`, the Makefiles generator's, read as a build artefact;
   absent, the check fails closed — an entry plus a stub object is not a compilation into
-  the binary, red team @8b0e4f4), registered means an `add_test` whose command is exactly
+  the binary, red team @8b0e4f4), which must itself be no newer than the binary (a line
+  regenerated after the last link describes a binary not yet linked — red team @17315ed)
+  and must produce that binary (its `-o`; a line producing another file is named, not
+  credited — red team @17315ed), registered means an `add_test` whose command is exactly
   the target's own binary — compared as an absolute path without resolving symlinks, so a
   link to another target's binary is not a registration, and the file a registration runs
   must be registered once (a link registered by its own path is refused, both ways; red
