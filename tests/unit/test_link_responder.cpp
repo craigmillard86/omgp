@@ -389,6 +389,81 @@ TEST_CASE("a request claiming src == 0xFF is discarded rather than scheduling an
     REQUIRE(responder.stats().transactions == 1);
 }
 
+// --- red team + review @6c2fe4b finding 2: the whole source-address class, not just 0xFF --
+// f.src is wire-derived and the Deframer validates dst only (link/frame.cpp:142). Trunk §5
+// confines L2 addresses to ADDR_host .. ADDR_backplane_max (kAddrCount of them) and says
+// module node IDs never appear as L2 trunk addresses; and no legitimate frame carries
+// src == dst. Master::begin (link/master.cpp:87, dst >= kAddrCount) and HealthTracker's
+// is_node_addr (link/health.cpp) already bound this class for the addresses THEY take from
+// the wire; the Responder was the third reader of one and had no bound.
+
+TEST_CASE("a request forging src == my_addr is discarded and counted -- the node never "
+          "answers itself, and its replay slot is not evicted by the forgery",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    // A legitimate transaction first, so the forged frame has a replay entry to evict.
+    const uint8_t p[] = {0x55};
+    uint64_t end = inject_request(wire, request_bytes(kMyAddr, kPeer, false, 4, p, sizeof p), 0);
+    wire.advance_to(end + omgp::TRUNK_T_turn_max_us, responder);
+    REQUIRE(handler.calls == 1);
+    REQUIRE(wire.transcript_size() == 1);
+
+    // dst == src == my_addr. Before the fix this was accepted: the node spent a turnaround
+    // window transmitting {dst = my_addr, src = my_addr, response = 1} to itself and
+    // buffer_.peer became my_addr -- the {peer, seq} eviction primitive without
+    // impersonating any real station (red team @6c2fe4b: transcript=1 discards=0).
+    const uint8_t q[] = {0x66};
+    uint64_t t = end + 200 * byte_us();
+    end = inject_request(wire, request_bytes(kMyAddr, kMyAddr, false, 9, q, sizeof q), t);
+    wire.advance_to(end + omgp::TRUNK_T_turn_max_us + 1000, responder);
+
+    REQUIRE(handler.calls == 1);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(responder.stats().transactions == 1);
+    REQUIRE(responder.stats().discards == 1);
+
+    // FR-015 for the real station: its trunk §7 retry of seq 4 is still served from the
+    // buffer, because the forged frame never reached it.
+    t = end + 200 * byte_us();
+    end = inject_request(wire, request_bytes(kMyAddr, kPeer, true, 4, p, sizeof p), t);
+    wire.advance_to(end + omgp::TRUNK_T_turn_max_us, responder);
+
+    REQUIRE(handler.calls == 1);
+    REQUIRE(wire.transcript_size() == 2);
+    REQUIRE(responder.stats().replays_served == 1);
+    REQUIRE(wire.transcript(1).dst == kPeer);
+    REQUIRE(wire.transcript(1).seq == 4);
+}
+
+TEST_CASE("a request whose src is outside trunk §5's L2 address range is discarded and "
+          "counted, at the boundary and beyond",
+          "[link]") {
+    // kAddrCount itself (0x10, the first value that is not an L2 trunk address) pins the
+    // guard's `>=` against `>`; 0xFE is the far end below the 0xFF the case above covers.
+    static_assert(kAddrCount <= 0xFE, "the boundary value must itself lie outside the range");
+    const uint8_t src = GENERATE(static_cast<uint8_t>(kAddrCount), static_cast<uint8_t>(0xFE));
+
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t p[] = {0x77};
+    const uint64_t end =
+        inject_request(wire, request_bytes(kMyAddr, src, false, 2, p, sizeof p), 0);
+    wire.advance_to(end + omgp::TRUNK_T_turn_max_us + 1000, responder);
+
+    INFO("src=" << int(src));
+    REQUIRE(handler.calls == 0);
+    REQUIRE(wire.transcript_size() == 0);
+    REQUIRE(responder.stats().transactions == 0);
+    REQUIRE(responder.stats().discards == 1);
+}
+
 // --- a genuine in-flight conflict: the second request lands strictly before the ------
 // --- first response is due, so transmit_if_due() cannot have flushed it first --------
 
