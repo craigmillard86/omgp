@@ -496,6 +496,14 @@ TEST_CASE("two requests queued before one late poll are both answered, in order,
     const std::vector<uint8_t> resp1 =
         request_bytes(kPeer, kMyAddr, false, 1, a, sizeof a); // same length as response 1
     const uint64_t tx_end1 = late_now + static_cast<uint64_t>(resp1.size()) * byte_us();
+    // ... and not one microsecond before it: a poll() landing inside response 1's
+    // transmission must find the wire occupied and leave request 2 in the queue (trunk §3
+    // half-duplex; deep-verify @70d7660: `transmit_until_us_ = wire_.transmit(...)`
+    // replaced by a constant survived -- Transmitting collapsed to "cleared by the next
+    // poll()" and nothing here polled inside the transmission to notice).
+    wire.advance_to(tx_end1 - 1, responder);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(handler.calls == 1);
     wire.advance_to(tx_end1, responder);
     REQUIRE(handler.calls == 2);
     REQUIRE(wire.transcript_size() == 2);
@@ -614,6 +622,35 @@ TEST_CASE("a frame for another address, and a corrupt frame, are discarded and n
     }
 }
 
+// The response-bit half of the acceptance guard (data-model.md §5 "Request acceptance";
+// FR-014 "only in response to an intact frame addressed to it"): a RESPONSE frame that
+// happens to carry this node's address as dst -- an echo, a misbehaving station, or
+// another Responder's answer on a shared trunk -- is not a request and is never answered.
+// Two Responders answering each other's responses would babble indefinitely. The suite's
+// own request_bytes() hard-codes response=false, so this is the only case that exercises
+// the term (red team @70d7660 finding 1: `f.response ||` deleted survived every case).
+TEST_CASE("a RESPONSE-bit frame addressed to this node is never answered", "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t p[] = {0xA5};
+    const FrameFields f{kMyAddr, kPeer, /*response=*/true, false, 3, static_cast<uint8_t>(sizeof p),
+                        p};
+    uint8_t out[kMaxWire];
+    size_t written = 0;
+    REQUIRE(encode_frame(f, out, sizeof out, written) == Status::Ok);
+    const uint64_t end = inject_request(wire, std::vector<uint8_t>(out, out + written), 0);
+
+    wire.advance_to(end + omgp::TRUNK_T_turn_max_us + 1000, responder);
+
+    REQUIRE(handler.calls == 0);
+    REQUIRE(wire.transcript_size() == 0);
+    REQUIRE(responder.stats().transactions == 0);
+    REQUIRE(responder.stats().discards == 1);
+}
+
 // A second, independent byte-level (deframer) discard must still be counted: a naive
 // running total that only ever goes up by coincidence on the FIRST discard (e.g. summing
 // the wrong way) can look identical to a correct one until a second discard exposes it.
@@ -698,6 +735,37 @@ TEST_CASE("a first poll() reached only after request_end + T_turn_max transmits 
     REQUIRE(wire.transcript_size() == 1);
     REQUIRE(wire.transcript(0).tx_start_us == late_now);
     REQUIRE(responder.stats().late_responses == 1);
+}
+
+// FR-014's late bound is the spec's OUTER T_turn_max, not this engine's own (default:
+// T_turn_min) deadline. A poll() landing strictly between the two is late relative to the
+// engine's configured turnaround yet fully inside the spec window: the response goes out
+// at that instant and is NOT counted late. Every other late_responses assertion either
+// polls exactly at the deadline or constructs the engine with turnaround == T_turn_max
+// (deadline == late bound), so only this case separates the two operands (red team
+// @70d7660 finding 2: `late_bound_us = deadline_us_` survived every case).
+TEST_CASE("a response inside the window but after the engine's own deadline is not late",
+          "[link][timing:T_turn_max]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr); // default turnaround == T_turn_min
+
+    const uint8_t p[] = {0x11};
+    const uint64_t end =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 4, p, sizeof p), 0);
+
+    const uint64_t inside = end + (omgp::TRUNK_T_turn_min_us + omgp::TRUNK_T_turn_max_us) / 2;
+    REQUIRE(inside > end + omgp::TRUNK_T_turn_min_us);
+    REQUIRE(inside < end + omgp::TRUNK_T_turn_max_us);
+    // No intermediate poll(): the first call after the request lands past the engine's own
+    // deadline but inside the spec window.
+    wire.advance_to(inside, responder);
+
+    REQUIRE(handler.calls == 1);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).tx_start_us == inside);
+    REQUIRE(responder.stats().late_responses == 0);
 }
 
 // --- transmitted byte count must match the actual encoded frame, not a fixed size -----
