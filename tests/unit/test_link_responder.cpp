@@ -305,6 +305,32 @@ TEST_CASE("a frame for another address, and a corrupt frame, are discarded and n
     }
 }
 
+// A second, independent byte-level (deframer) discard must still be counted: a naive
+// running total that only ever goes up by coincidence on the FIRST discard (e.g. summing
+// the wrong way) can look identical to a correct one until a second discard exposes it.
+TEST_CASE("a second byte-level discard is counted on top of the first, not lost", "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t payload1[] = {0x01, 0x02};
+    uint64_t end1 =
+        inject_request(wire, crc_bad_request(kMyAddr, kPeer, 0, payload1, sizeof payload1), 0);
+    wire.advance_to(end1 + omgp::TRUNK_T_turn_max_us, responder);
+    REQUIRE(responder.stats().discards == 1);
+
+    const uint8_t payload2[] = {0x03, 0x04, 0x05};
+    const uint64_t start2 = end1 + omgp::TRUNK_T_turn_max_us + 200 * byte_us();
+    uint64_t end2 =
+        inject_request(wire, crc_bad_request(kMyAddr, kPeer, 1, payload2, sizeof payload2), start2);
+    wire.advance_to(end2 + omgp::TRUNK_T_turn_max_us, responder);
+
+    REQUIRE(responder.stats().discards == 2);
+    REQUIRE(handler.calls == 0);
+    REQUIRE(wire.transcript_size() == 0);
+}
+
 // --- idle wire: nothing transmitted -----------------------------------------------------
 
 TEST_CASE("poll() with nothing addressed to the node transmits nothing", "[link]") {
@@ -342,4 +368,66 @@ TEST_CASE("a first poll() reached only after request_end + T_turn_max transmits 
     REQUIRE(wire.transcript_size() == 1);
     REQUIRE(wire.transcript(0).tx_start_us == late_now);
     REQUIRE(responder.stats().late_responses == 1);
+}
+
+// --- transmitted byte count must match the actual encoded frame, not a fixed size -----
+
+TEST_CASE("responses at very different payload lengths are each transmitted intact, in "
+          "sequence",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    // A 1-byte and a maximum-length payload force very different encoded byte counts: a
+    // fixed (wrong) wire length for the response buffer can only coincidentally match one
+    // of the two, and a too-long first response also leaves trailing garbage that the
+    // independent MockWire parser would otherwise fold into the second frame.
+    const uint8_t payload1[] = {0xAB};
+    uint64_t end1 =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 0, payload1, sizeof payload1), 0);
+    wire.advance_to(end1 + omgp::TRUNK_T_turn_min_us, responder);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).len == sizeof payload1);
+    REQUIRE(std::memcmp(wire.transcript(0).payload, payload1, sizeof payload1) == 0);
+
+    uint8_t payload2[omgp::LIMIT_max_l3_payload];
+    for (size_t i = 0; i < sizeof payload2; ++i)
+        payload2[i] = static_cast<uint8_t>(i);
+    const uint64_t start2 = end1 + omgp::TRUNK_T_turn_min_us + 200 * byte_us();
+    uint64_t end2 = inject_request(
+        wire, request_bytes(kMyAddr, kPeer, false, 1, payload2, sizeof payload2), start2);
+    wire.advance_to(end2 + omgp::TRUNK_T_turn_min_us, responder);
+
+    REQUIRE(wire.transcript_size() == 2);
+    REQUIRE(wire.transcript(1).len == sizeof payload2);
+    REQUIRE(std::memcmp(wire.transcript(1).payload, payload2, sizeof payload2) == 0);
+}
+
+// --- state leaves Scheduled once sent: no repeat transmission on later poll()s --------
+
+TEST_CASE("after transmitting, later poll() calls do not retransmit absent a new request",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t payload[] = {0x07};
+    uint64_t request_end =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 0, payload, sizeof payload), 0);
+    const uint64_t deadline = request_end + omgp::TRUNK_T_turn_min_us;
+
+    wire.advance_to(deadline, responder);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(handler.calls == 1);
+
+    // Nothing new arrives; deadline_us_ is unchanged and now_us only grows, so a state_
+    // that failed to leave Scheduled would retransmit the same buffered response again.
+    wire.advance_to(deadline + 500 * byte_us(), responder);
+    wire.advance_to(deadline + 5000 * byte_us(), responder);
+
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(handler.calls == 1);
 }

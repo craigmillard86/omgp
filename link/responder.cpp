@@ -13,8 +13,13 @@ namespace link {
 namespace {
 
 uint32_t clamp_turnaround(uint32_t turnaround_us) {
+    // mutant-ok(equivalent, cxx_lt_to_le): at turnaround_us == T_turn_min_us the
+    // fall-through path (final `return turnaround_us`) already yields T_turn_min_us, so
+    // widening `<` to `<=` returns the identical value via the other branch instead.
     if (turnaround_us < omgp::TRUNK_T_turn_min_us)
         return omgp::TRUNK_T_turn_min_us;
+    // mutant-ok(equivalent, cxx_gt_to_ge): symmetric with T_turn_min_us above — at
+    // turnaround_us == T_turn_max_us the fall-through path already yields T_turn_max_us.
     if (turnaround_us > omgp::TRUNK_T_turn_max_us)
         return omgp::TRUNK_T_turn_max_us;
     return turnaround_us;
@@ -25,6 +30,10 @@ uint32_t clamp_turnaround(uint32_t turnaround_us) {
 // "discards"), so a before/after delta of this total is enough to notice one byte-level
 // discard, whatever caused it — mirrors Master::poll's own bad_crc_before/after delta.
 uint32_t total_discards(const DeframerStats& s) {
+    // mutant-ok(equivalent, cxx_init_const): total is a fresh local re-initialized on
+    // every call; poll() only ever compares two such calls' results against each other
+    // (discards_before/after), so any constant initial offset is added to both sides of
+    // that comparison identically and cancels out of the delta.
     uint32_t total = 0;
     for (uint32_t d : s.discarded)
         total += d;
@@ -67,6 +76,9 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
         const FrameFields resp{f.src,   my_addr_, /*response=*/true,
                                f.retry, f.seq,    static_cast<uint8_t>(resp_len),
                                payload};
+        // mutant-ok(equivalent, cxx_init_const): encode_frame() (link/frame.cpp)
+        // unconditionally overwrites `written` as its very first statement on every
+        // return path, so this initial value is never observed.
         size_t written = 0;
         // encode_frame cannot fail here — by construction, pinned (rule 11): my_addr_ is
         // a real trunk address supplied at construction (never 0xFF), so ReservedAddress
