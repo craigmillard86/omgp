@@ -76,10 +76,10 @@ reaching the code and must be fixed before the PR is opened.
       SC-003 is per target: a run at the CI fuzz budget with zero crashes, and
       "a planted missing bounds check is found within that budget" — only the
       second half is recorded here. `tools/fuzz-smoke.sh <seconds>` splits its
-      argument evenly across all five targets (`fuzz-smoke.sh:53`), so `fuzz_frame`'s
+      argument evenly across all five targets (`fuzz-smoke.sh:54`), so `fuzz_frame`'s
       own share is `<seconds>/5`: 12 s for this record's invocation
       (`./pipeline.sh fuzz` → `tools/fuzz-smoke.sh 60`), versus 120 s under CI
-      deep-verify's `tools/fuzz-smoke.sh 600` (`.github/workflows/ci.yml:150`). The
+      deep-verify's `tools/fuzz-smoke.sh 600` (`.github/workflows/ci.yml:169`). The
       other half of SC-003 — a clean run at that 120 s CI share — is **pending**, not
       established by this PR: it is T0, so the `deep-verify` job runs but gates its heavy
       steps (including the 600 s fuzz) on `steps.tier.outputs.deep` (`ci.yml:128-131`),
@@ -97,7 +97,7 @@ reaching the code and must be fixed before the PR is opened.
       `-fno-sanitize-recover=undefined` in `tests/fuzz/CMakeLists.txt:4`, no
       `UBSAN_OPTIONS` set in `fuzz-smoke.sh`), so a UBSan report alone prints and execution
       continues; the harness's actual failure signal (`findings ≥ 1`, `exit ≠ 0`,
-      `fuzz-smoke.sh:66-68`) comes from ASan's abort once the same unchecked write reaches
+      `fuzz-smoke.sh:95-97`) comes from ASan's abort once the same unchecked write reaches
       a redzone. Finally, restore the guard
       (`git diff -- link/frame.cpp` empty against HEAD), rebuild, rerun a third time —
       expect `findings=0` matching the clean baseline. **Recorded 2026-09-04 (Ubuntu 24.04.4
@@ -151,6 +151,6 @@ reaching the code and must be fixed before the PR is opened.
 
       Note also that the "broken" block above is not literal `./pipeline.sh fuzz` stdout:
       on a finding the script's own stdout is only the `fuzz: fuzz_frame runs=… findings=…`
-      line plus five grep'd lines (`fuzz-smoke.sh:70-71`); the full stack trace and report
+      line plus five grep'd lines (`fuzz-smoke.sh:102-103`); the full stack trace and report
       bodies pasted above are copied from `build/fuzz/fuzz_frame.log`, which the script
       always writes in full regardless of what it echoes to stdout.

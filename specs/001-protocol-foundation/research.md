@@ -123,11 +123,15 @@ remains from the Technical Context.
   name silently yields zero mutants — the harness now fails on "no mutants in a
   non-empty scope" instead of passing; (3) `gitDiffRef` must NOT be in the
   compile-time config (the plugin then embeds nothing) — it belongs to the run-time
-  config only; (4) `includePaths`/`excludePaths` must not be used at all: excluding
-  the TU that holds `main()` (Catch2) removes the run-time mutant dispatch, so every TU
-  is instrumented; (5) Mull's `gitDiffRef` filter drops every mutant in files the diff
+  config only; (4) `includePaths`/`excludePaths` must not be in the **compile-time** config: excluding
+  the TU that holds `main()` (Catch2) there removes the run-time mutant dispatch, so every TU
+  that is built is instrumented. (Amended 2026-09-06, gate-budget PR — pending a ruling, see
+  `docs/OPEN-QUESTIONS.md` 2026-09-06 "Mull path filters are safe at RUN time": the same
+  keys in the run-time config filter what the runner *executes* and were measured to leave
+  every in-scope status unchanged, 14m30s → 43s for `test_link_master`; the build is also
+  limited to the oracle targets); (5) Mull's `gitDiffRef` filter drops every mutant in files the diff
   **adds** (only modified-file hunks survive), so it is not used at all — `mutate.sh`
-  runs every mutant (`--workers`) and scopes the report itself from `git diff -U0`,
+  runs every scope-dir mutant (`--workers`) and scopes the report itself from `git diff -U0`,
   new files included, restricted to `l3/ link/ core/`. Measured kill rate on the
   descriptor commit with the unit binaries as oracle: **76.8 % (265/345)** — the ruling
   (2026-08-29, `docs/OPEN-QUESTIONS.md`) replaced the percentage with a per-survivor
