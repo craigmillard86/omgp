@@ -88,6 +88,7 @@ omgp_add_catch_test(test_link_stuffing tests/property/test_link_stuffing.cpp)
 omgp_add_catch_test(test_link_resync tests/property/test_link_resync.cpp)
 omgp_add_catch_test(test_mock_wire tests/unit/test_mock_wire.cpp)
 omgp_add_catch_test(test_link_health tests/unit/test_link_health.cpp)
+omgp_add_catch_test(test_link_master tests/unit/test_link_master.cpp)
 
 # --- host-only tools ---
 add_executable(crc_helper tools/crc_helper.cpp)

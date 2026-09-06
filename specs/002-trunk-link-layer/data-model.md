@@ -64,7 +64,7 @@ violations" clause is satisfied trivially (ruling Q1).
 Transaction { u8 dst; u8 seq; u8 attempt (0..2); u8 payload[64]; u8 len;
               u64 tx_start_us, tx_end_us; Outcome }
 Outcome ∈ { Pending, Answered, Failed(Timeout | Crc) }     -- Crc: last attempt saw a CRC-failed frame
-Master state ∈ { Idle, Transmitting(until tx_end), AwaitResponse(until tx_end + T_resp), Gap(until last_activity + T_gap) }
+Master state ∈ { Idle, Transmitting(until tx_end), AwaitResponse(until tx_end + T_resp), Gap(until min(last_activity + T_gap, defer_origin + max_frame + T_gap)) }
 ```
 
 - **Receive path**: `poll(now)` first drains `ByteWire::receive()` into the engine's
@@ -74,14 +74,33 @@ Master state ∈ { Idle, Transmitting(until tx_end), AwaitResponse(until tx_end 
 - **Sequence**: per-destination counter `next_seq[16]`; `begin()` uses `next_seq[dst]++ & 0x0F`
   for a new transaction; retries reuse `seq` and set `retry`.
 - **Response acceptance** (all must hold): intact frame; `src == dst_of_request`;
-  `dst == 0x00` (host); `response == 1`; `seq == transaction.seq`; first byte's start
-  instant `< tx_end_us + T_resp`. A CRC-failed frame in the window ends the attempt
+  `dst == host_addr` (the Master's constructor argument, default `0x00` — a Master built
+  with another address accepts only frames to it); `response == 1`; `seq ==
+  transaction.seq`; first byte's start instant in `[tx_end_us, tx_end_us + T_resp)` — the
+  closed lower bound discards a "response" whose FLAG opened inside the host's own
+  transmission, as `contracts/link-cpp.md` already states (both amended in PR #137 review
+  @`1057568`, LOW: this list said `dst == 0x00` and gave only the upper bound; the code,
+  `link/master.cpp` `in_window` and the `host_addr_` compare, is what the tests pin). A
+  CRC-failed frame in the window ends the attempt
   immediately (§7: "CRC-failed response" is a failure, no need to wait for the timeout).
+  A frame that opened inside the window and is still arriving at the window's end (bytes
+  still coming at byte cadence) holds the `Timeout` off until it concludes — bounded at
+  `resp_open + max_frame` (one worst-case frame from the opening FLAG), whatever the poll
+  cadence; no legitimate response can reach that cap. *(Amended in PR #137, red-team
+  @`9547634` HIGH — pending the same ruling as "Gap" below.)*
 - **Retry**: attempts 0, 1, 2 → at most 3 transmissions; after attempt 2 fails → `Failed`.
 - **Gap**: `last_activity` = end of the accepted response's last byte, or the last
   byte of a discarded frame, or the timeout instant; `begin()` before `last_activity +
   T_gap` is accepted but transmission is deferred to that instant (the engine, not the
-  caller, guarantees the gap).
+  caller, guarantees the gap). `last_activity` advances with every byte received during the
+  deferral, so the engine never transmits over an arriving frame — but only up to a bound:
+  `defer_origin + max_frame + T_gap`, where `defer_origin` is the instant first deferred to
+  and `max_frame` is one worst-case frame (`kMaxWire` byte times at the current rate, trunk
+  §4 / SC-008). trunk §3 owes the gap after the host's OWN transactions; deferring for
+  anyone else's bytes is a courtesy, and past the cap the host transmits on schedule and
+  the transaction fails or succeeds on its own merits (spec.md Edge Cases "Babble"). No
+  outcome is ever derived from the bus state. *(Amended in PR #137 — pending a ruling, see
+  `docs/OPEN-QUESTIONS.md` 2026-09-05 "bounded courtesy".)*
 - **Events** returned by `poll(now)`: `None`, `Answered{payload view}`, `Failed{reason}`;
   each transaction yields exactly one terminal event.
 
