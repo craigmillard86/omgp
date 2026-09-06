@@ -2476,15 +2476,43 @@ TEST_CASE("the engine makes no progress without poll(); repolling at an unchange
 
     const uint8_t payload[] = {0x9};
     REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    // begin() transmits at once on an idle bus; the whole observable state after it is the
+    // snapshot. "No state change" (#47 AC) is asserted against ALL of it, not just the event
+    // and busy(): with `ev.kind == None && busy()` alone, a timeout guard mutated to
+    // `now_us <= deadline_` ends the attempt at the still clock — timeouts 1, attempt 1 →
+    // retry pending — and both of those assertions still hold (PR #137 review @050f397).
+    const size_t transcript0 = wire.transcript_size();
+    const uint8_t attempts0 = master.attempts();
+    const AddrStats stats0 = master.stats(dst);
+    const BusStats bus0 = master.bus_stats();
+    REQUIRE(transcript0 == 1);
+    REQUIRE(attempts0 == 1);
+    REQUIRE(stats0.transactions == 1);
+    REQUIRE(stats0.timeouts == 0);
+
+    auto unchanged = [&] {
+        REQUIRE(master.busy());
+        REQUIRE(wire.transcript_size() == transcript0);
+        REQUIRE(master.attempts() == attempts0);
+        const AddrStats& s = master.stats(dst);
+        REQUIRE(s.transactions == stats0.transactions);
+        REQUIRE(s.retries == stats0.retries);
+        REQUIRE(s.timeouts == stats0.timeouts);
+        REQUIRE(s.crc_failures == stats0.crc_failures);
+        REQUIRE(s.discards == stats0.discards);
+        REQUIRE(s.late_responses == stats0.late_responses);
+        REQUIRE(master.bus_stats().rate_changes == bus0.rate_changes);
+        REQUIRE(master.bus_stats().bus_faults == bus0.bus_faults);
+    };
 
     MasterEvent ev1 = master.poll(clock.now_us());
     REQUIRE(ev1.kind == MasterEvent::None);
-    REQUIRE(master.busy());
+    unchanged();
 
     // Same now_us again: the clock never advanced, so nothing further can have happened.
     MasterEvent ev2 = master.poll(clock.now_us());
     REQUIRE(ev2.kind == MasterEvent::None);
-    REQUIRE(master.busy());
+    unchanged();
 }
 
 // --- data-model.md §4 "Gap": a discarded frame's own last byte, not just the timeout ---

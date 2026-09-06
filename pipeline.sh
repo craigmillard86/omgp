@@ -19,12 +19,15 @@ WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=
 # 200580 = 200682 executed (16 binaries) minus ~102 slack — T023-T026 added
 # test_canonical_frame/test_l3_helper_dispatch/test_mock_wire/test_link_health.cpp;
 # raised 2026-09-05 (T027/#45, was 197000). NEVER lowered.
-# 509360 = 509460 executed (17 binaries) minus 100 slack — T029/T031 added
-# test_link_master.cpp (308753 checks: its microsecond-cadence timing loops REQUIRE per poll);
-# raised 2026-09-06 (#137 review, MEDIUM: at 200580 the gate could not notice this binary being
-# dropped — 236588 executed at 40355cf was 36008 above it). Dropping test_link_master now
-# leaves ~200707 < floor, so the gate fires (demonstrated by that arithmetic, assuming the
-# other 16 binaries' counts are unchanged). Was 200580.
+# 509360 = 509460 executed (17 binaries) minus 100 slack AT THE RAISING COMMIT — T029/T031
+# added test_link_master.cpp (then 308753 checks: its microsecond-cadence timing loops REQUIRE
+# per poll); raised 2026-09-06 (#137 review, MEDIUM: at 200580 the gate could not notice this
+# binary being dropped — 236588 executed at 40355cf was 36008 above it). The suite has grown
+# since and the floor is not chased upward: 509681 executed at #137's eleventh round
+# (test_link_master 308974, the other 16 binaries 200707), slack 321 (#137 review @050f397,
+# LOW: this derivation had gone stale). Dropping test_link_master leaves 200707 < floor, so
+# the gate fires (demonstrated by that arithmetic, assuming the other 16 binaries' counts are
+# unchanged). Was 200580.
 UNIT_TEST_FLOOR=509360
 
 stage_codegen() {
