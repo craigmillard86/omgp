@@ -55,7 +55,9 @@ jobs:
           git diff --exit-code docs/ || { echo "::error::protocol docs out of sync with omgp-protocol.yaml"; exit 1; }
 
       - name: Pipeline — all local stages
-        run: ./pipeline.sh codegen build unit refimpl diffcheck scenarios
+        # `quality` (clang-format at the tools/requirements.txt pin + check_embedded) is a
+        # gate here since #135; the pinned formatter comes from the Python-deps step above.
+        run: ./pipeline.sh codegen quality build unit refimpl diffcheck scenarios
 
       - name: Upload test logs on failure
         if: failure()

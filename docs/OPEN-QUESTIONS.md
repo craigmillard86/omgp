@@ -1142,7 +1142,15 @@ busy/not-busy hint back to the tracker) or it violates L2/L3 opacity.
 Alternative with no layering conflict: an explicit sentence declaring
 persistent busy out of node-health scope and owned by L4 — which is already
 where §7 reports OFFLINE.
-**Ruling:** pending — human; blocks nothing until T031/T039.
+**Ruling:** ADOPTED the recommendation's bound — human, 2026-09-06, via #110 F1(b): see the
+2026-09-06 entry "#110 F1: a backplane that never answers, and a node that answers ERR_BUSY
+forever, are both bounded" — a "failed transaction" is a timeout, a CRC failure, or eight
+consecutive `ERR_BUSY` answers to the same request, after which the host backs off
+exponentially for that node and reports to L4 (documents: #155; host: #157). The LAYERING
+CONSEQUENCE above is NOT ruled by F1(b): where the busy-count lives (an L4 hint fed back to
+the tracker, or a sanctioned carve-out in `link/`) is a design ruling owed before #157/T039
+is written (review of PR #163, FOLLOW-UP). Filled 2026-09-06 (was: pending — human; blocks
+nothing until T031/T039).
 **Supersedes:** none (the §7-accounting sentence this entry discusses was
 replaced within the still-unmerged PR #122, not by a landed entry).
 
@@ -2079,3 +2087,332 @@ FR-011 explicitly.
 impact statement stand; its citation of AC6 as the counting criterion and its "beyond that
 criterion" characterisation of the `else` branch are withdrawn in favour of FR-011/FR-011a).
 **Supersedes:** none — amends, not replaces, the entry above (see **Amends:**).
+
+## 2026-09-06 — Host T_resp acceptance window stays [tx_end, tx_end + T_resp); T_turn_min binds the node, not the host (PR #142 red-team @43ec6f5)
+
+**Context:** trunk §3 gives the node a turnaround of `T_turn = 20 µs to 100 µs` after the
+request's final stop bit (`TRUNK_T_turn_min_us` / `TRUNK_T_turn_max_us`, YAML `timing`).
+`link/master.cpp` opens the host's acceptance window at `window_start_us_ = tx_end` and
+closes it at `tx_end + T_resp` (`in_window`, `link/master.cpp:368`): a response whose FLAG
+opens in `[tx_end, tx_end + T_turn_min)` — zero or sub-minimum turnaround, which §3 forbids a
+node to produce — is accepted (delivered, or counted as a CRC failure) rather than
+discarded. The `[link][timing:T_resp]` case "opening EXACTLY at tx_end — zero turnaround"
+(`tests/unit/test_link_master.cpp:3677`) pins this permissive lower bound on purpose. The
+red-team asked whether the host should instead enforce the node's minimum.
+**Options:** (a) keep the window permissive — the host accepts any response after its own
+transmission ends; §3's minimum is a node obligation (driver-enable timing against the host's
+release within 10 µs) that the host cannot observe with its byte-level wire model anyway; a
+too-early answer from a real transceiver is a collision, and §7 accounting (CRC failure /
+timeout → SUSPECT) already covers what the host does see. (b) enforce `window_start_us_ =
+tx_end + T_turn_min_us`: converts a sub-minimum answer into a silent discard plus a full
+T_resp timeout — a faulty station's CRC failure becomes a timeout on a different counter, the
+exact outcome the CRC lower-bound cases were written to prevent.
+**Recommendation:** (a). No code change to `link/`; the test comment at the case above
+WILL cite this entry (deferred to the next f2-link PR touching that file; at the time of
+this entry it cites only the #142 red-team follow-up) so the permissiveness reads as ruled,
+not accidental.
+**Ruling:** ADOPTED (a) — human, 2026-09-06 (maintainer, Claude Code session: "keep
+permissive, document it"). The host window is `[tx_end, tx_end + T_resp)`; `T_turn_min`
+constrains the node under §3 and is not a host-side filter.
+**Amends:** none. **Supersedes:** none.
+
+## 2026-09-06 — #110 red-team of the protocol documents: rulings (index entry)
+
+**Context:** issue #110 (protocol/spec red-team, 12 findings F1–F12 plus a backplane trust
+class) was walked through finding-by-finding with the maintainer on 2026-09-06; the rulings
+are recorded on #110 and, per this file's role as the ruling log, in the entries that
+follow. Every finding is adopted as the red-team's defence proposes, with parameters fixed
+here. Nothing in this entry or the twelve below changes code: the YAML/codec amendments are
+#154 (T3, human-directed), the document amendments #155 (T3), `docs/THREAT-MODEL.md` #156
+(T3); the host-side mitigations are `task` stories #157–#162 (`feature:f3-core`), blocked on
+a `core/` spec that does not yet exist and therefore not to be released until it does.
+**Recommendation:** as recorded per finding below.
+**Ruling:** ADOPTED — human, 2026-09-06 (maintainer, via #110). #110 stays open as the index
+until #154, #155 and #156 merge.
+**Amends:** none. **Supersedes:** none.
+
+## 2026-09-06 — #110 F1: a backplane that never answers, and a node that answers ERR_BUSY forever, are both bounded
+
+**Context:** trunk §8 lets a backplane answer `ERR_BUSY` indefinitely while its module bus
+is wedged (§10.5 names persistent busy as open); §7 counts "failed transactions" toward
+SUSPECT without defining failure, and a valid `ERR_BUSY` response is not a failed
+transaction, so a stuck slot never trips §7. L4 preset recall then waits forever.
+**Recommendation:** (a) trunk §8 / spec §28: slot recovery is mandatory — three consecutive
+module-bus timeouts on one slot ⇒ the backplane isolates or power-cycles that slot, raises a
+backplane event, and the host marks the node `FAULT`; slots are serviced round-robin so one
+wedged slot cannot starve the others. (b) trunk §7: "failed transaction" is defined as a
+timeout, a CRC failure, or exhaustion of the `ERR_BUSY` budget — eight consecutive
+`ERR_BUSY` answers to the same request ⇒ exponential back-off for that node and a report to
+L4. (c) L4: every preset recall has a deadline and a partial-completion report.
+**Ruling:** ADOPTED (a)(b)(c) — human, 2026-09-06 (via #110). Documents: #155. Host budget /
+back-off: #157.
+**Amends:** the 2026-09-03 entry "Persistent ERR_BUSY: no bound anywhere detects a wedged
+bridge" — (b) is the bound that entry asked for; its pending Ruling is filled with a pointer
+here. Its layering consequence (busy-detection is payload inspection, which `link/` must not
+do) is not ruled here and is carried to #155/#157. **Supersedes:** none.
+
+## 2026-09-06 — #110 F2: ERROR.detail is capped; the §6 status-poll budget is derived, not asserted
+
+**Context:** `ERROR.detail` had no maximum, so an ERROR response could be as large as any
+payload; trunk §6 asserted a fixed status-poll cadence "independent of load" for every
+enrolled node, which no frame-time arithmetic supports at the enrolled-node maximum.
+**Recommendation:** (a) YAML `l3_payloads.ERROR.response.detail.max: 4`, enforced by both
+codecs (C++ and Python reference). (b) trunk §6: status polls are
+round-robin with a stated staleness bound; the maximum satisfiable enrolled-node count is
+derived from frame times at the rate in use; "independent of load" is withdrawn as written.
+(c) the scheduler budgets by measured frame time and demotes a node that consistently
+overruns its share.
+**Ruling:** ADOPTED (a)(b)(c) — human, 2026-09-06 (via #110). YAML/codecs: #154. §6: #155.
+Scheduler: #162.
+**Amends:** none. **Supersedes:** none.
+
+## 2026-09-06 — #110 F3: the descriptor cache is a latency optimisation, never a trust boundary
+
+**Context:** protocol §4.1 keys the descriptor cache on `desc_crc` (CRC-16); the red-team
+showed any module can present another module's `desc_crc` and inherit its cached descriptor,
+including anything power-relevant the host had derived from it.
+**Recommendation:** state in §4.1 that `desc_crc` detects corruption and staleness, not
+forgery; nothing power- or safety-relevant is decided from a cache hit — rail approval is
+re-derived from a descriptor read at this insertion and enforced by the per-slot eFuse (spec
+§16). Accepted risk, named: on an open platform any module can impersonate any other at the
+descriptor level. The hash is not strengthened (a stronger hash without a key changes
+nothing about impersonation).
+**Ruling:** ADOPTED — human, 2026-09-06 (via #110): "state the trust boundary, don't
+strengthen the hash". Documents: #155; the accepted risk is listed in `docs/THREAT-MODEL.md`
+(#156).
+**Amends:** none. **Supersedes:** none.
+
+## 2026-09-06 — #110 F4: the bit rate is a property of the trunk; the reference rate wins whenever any enrolled node answers at it (supersedes "the answering rate wins")
+
+**Context:** the 2026-08-29 ruling "after BUS_FAULT, alternate probe rates; the answering
+rate wins" lets a single node that answers only at the fallback rate pin the whole trunk to
+the fallback — a one-node downgrade of every other node's `T_poll` and §6 budget, which the
+red-team demonstrated on paper as a babbling or misconfigured node.
+**Recommendation:** the reference rate is in use whenever any enrolled node answers at it;
+the host falls back only while no enrolled node answers at the reference rate; while at the
+fallback rate the host re-probes the reference rate on a fixed cadence and returns to it as
+soon as a quorum of enrolled nodes answers there. `T_poll` and the §6 budget derive from the
+rate in use. Babble containment is named in trunk §3 as a required node behaviour with a
+test (driver-enable watchdog / transceiver fault detection). Consequences for open work: #61
+(T043, `queued`) says "clear-and-pin on the first valid answer" and #59 (T041) rests on the
+same ruling — both amended by comment on 2026-09-06; `specs/002-trunk-link-layer/
+data-model.md` §7 and `contracts/link-cpp.md` carry the superseded text and are amended in
+#155.
+**Ruling:** ADOPTED — human, 2026-09-06 (via #110): "supersede: reference rate wins,
+fallback re-probes". The superseded text, verbatim from the 2026-08-29 entry: "the first
+valid response at either rate clears the fault exactly once (recovery notification) and that
+rate becomes the rate in use until the layer above changes it."
+**Amends:** none.
+**Supersedes:** the 2026-08-29 entry "Trunk §7: after BUS_FAULT, alternate probe rates; the
+answering rate wins" (spec FR-026) — its alternation of probe rates while BUS_FAULT is
+declared stands; its "answering rate becomes the rate in use" clause is replaced by the rule
+above.
+
+## 2026-09-06 — #110 F5: a response's L3 node_id must belong to the answering L2 src
+
+**Context:** nothing binds the L3 `node_id` inside a response to the L2 `src` that carried
+it; a backplane (or any station) can answer on behalf of a node id it does not own and the
+host attributes the answer to that node.
+**Recommendation:** receiver rule in protocol §2 and trunk §5: a response is acceptable only
+if its L3 `node_id` is the answering L2 `src` itself, or a node id the host assigned to a
+slot of that `src`; anything else is discarded and counted.
+**Ruling:** ADOPTED — human, 2026-09-06 (via #110). Documents: #155. Host check: #158.
+**Amends:** none. **Supersedes:** none.
+
+## 2026-09-06 — #110 F6: GET_EVENT drains are bounded per node per superframe; remaining_count is advisory (closes protocol §6 open question 4)
+
+**Context:** protocol §3.1 (the `GET_EVENT` row: "repeat until empty", `u8 remaining_count`)
+lets a node report `remaining_count` and the host drain until it reaches zero; a node that always reports more pending events holds the host in its drain loop
+and starves the superframe. §6 open question 4 asked how many events a single drain may
+take.
+**Recommendation:** at most K = 1 `GET_EVENT` per node per superframe; a per-node event-rate
+budget (events per second over a window, value fixed with the scheduler) beyond which the
+host stops draining, marks the node `FAULT`, and reports to L4; `remaining_count` is
+advisory and never sizes a buffer or bounds a loop.
+**Ruling:** ADOPTED with K = 1 — human, 2026-09-06 (via #110). Protocol §6 open question 4 is
+ruled with this K. Documents: #155. Host drain: #159.
+**Amends:** none. **Supersedes:** none.
+
+## 2026-09-06 — #110 F7: descriptor field ranges, uniqueness and referential integrity are enforced; power under-declaration is an accepted risk controlled by the eFuse
+
+**Context:** descriptor TLVs carried physical quantities (rail currents, settle times, tube
+supply parameters, audio levels) with no YAML range, no uniqueness rule for `CHANNEL.index`
+/ `PARAM.param_id`, no consistency rule between a declared power class and declared
+currents, and no check that `PARAM_ENUM` / scope references resolve.
+**Recommendation:** (1) YAML ranges enforced by the codecs: `POWER_LV` per-rail maxima from
+spec §15; `SWITCHING.settle_ms ≤ 5000`; `POWER_TUBE` bounds from §18/§19 including the 40 mA
+v1 B+ cap; `AUDIO` bounds from §9. (2) YAML `limits.max_channels` and `limits.max_params`;
+`CHANNEL.index` and `PARAM.param_id` MUST be unique within a descriptor (streaming
+validator, bitmap). (3) §18: declared currents must be consistent with the declared class;
+the class wins on disagreement. (4) a documented host referential-integrity pass before a
+descriptor is admitted (dangling `PARAM_ENUM` / scope references rejected) — a second pass,
+not part of the streaming validator. (5) §16 names the per-slot eFuse as the control for
+power under-declaration (accepted risk).
+**Ruling:** ADOPTED (1)–(5) — human, 2026-09-06 (via #110). YAML/codecs: #154. Documents:
+#155. Integrity pass: #160. Accepted risk (5): `docs/THREAT-MODEL.md` (#156).
+**Amends:** none. **Supersedes:** none.
+
+## 2026-09-06 — #110 F8: a READ_DESC response must echo the requested offset and be non-empty while bytes remain; the host's read budget is fixed
+
+**Context:** protocol §3.1/§4 let a module answer `READ_DESC` with an empty chunk, or a chunk
+at a different offset, indefinitely; the host's read loop then never terminates and a
+`desc_crc` change without re-insertion is silently re-read.
+**Recommendation:** protocol: a `READ_DESC` response MUST carry the requested offset and MUST
+be non-empty while bytes remain — violations are a module fault, not a retry. Host: a fixed
+attempt budget per descriptor read ⇒ `descriptor-unreadable` state, reported, never retried
+forever; one full read per physical attach; a `desc_crc` change without re-insertion is
+itself a fault signal.
+**Ruling:** ADOPTED — human, 2026-09-06 (via #110). Documents: #155. Host budget: #161.
+**Amends:** none. **Supersedes:** none.
+
+## 2026-09-06 — #110 F9: CHANNEL_SETTLED detail is (channel, seq) and the host cross-checks GET_STATUS before un-muting
+
+**Context:** `CHANNEL_SETTLED` carried no detail, so a settle event could not be matched to
+the `SELECT_CHANNEL` that caused it; a stale or forged settle would un-mute the wrong
+channel.
+**Recommendation:** protocol §3.4 + YAML: `CHANNEL_SETTLED` detail is `u8 channel, u8 seq`
+(`seq` echoes the causing `SELECT_CHANNEL`); the host accepts a settle only for the channel
+it asked for and cross-checks `GET_STATUS.active_channel` before un-muting.
+**Ruling:** ADOPTED — human, 2026-09-06 (via #110): "define detail = channel + seq".
+YAML/codecs: #154.
+**Amends:** none. **Supersedes:** none.
+
+## 2026-09-06 — #110 F10: the L3 message limit and the L3 payload limit are two symbols; an unforwardable module message is ERR_INTERNAL plus a module fault
+
+**Context:** one `limits.max_l3_*` value served both as the trunk-frame budget and as the
+payload budget, so `PAYLOAD_INFO`'s `*_max` columns could not be satisfied at the frame
+limit; trunk §8 did not say what a backplane does with a module message it cannot fit into a
+trunk frame.
+**Recommendation:** YAML: `limits.max_l3_message: 64` (the trunk-frame budget) and derived
+`limits.max_l3_payload: 59`; `PAYLOAD_INFO` `*_max` columns corrected to the payload limit.
+Trunk §8: an unforwardable module message ⇒ `ERR_INTERNAL` to the host and a module fault
+raised.
+**Ruling:** ADOPTED — human, 2026-09-06 (via #110): "split the limits; bridge answers
+ERR_INTERNAL". YAML/codecs: #154. §8: #155.
+**Amends:** none. **Supersedes:** none.
+
+## 2026-09-06 — #110 F11: IRQ# is sampled per slot and a slot whose alerts yield no event is masked
+
+**Context:** a module holding IRQ# asserted with nothing to report makes the host poll the
+whole backplane for events on every alert cycle, indefinitely.
+**Recommendation:** spec §28 + trunk §8: IRQ# is sampled per slot; after N alert cycles in
+which a slot's alert yields no event (N fixed with the backplane design; suggest 3) the
+backplane masks that slot's IRQ#, raises a backplane event, and the host marks the node
+`FAULT`.
+**Ruling:** ADOPTED — human, 2026-09-06 (via #110). Documents: #155.
+**Amends:** none. **Supersedes:** none.
+
+## 2026-09-06 — #110 F12: slots per backplane are capped in the YAML and node ids are allocated from a per-backplane quota (constraint on the future BP_SLOT_MAP)
+
+**Context:** `BP_SLOT_MAP` is not yet defined; without a cap a backplane can claim the whole
+node-id space for its slots.
+**Recommendation:** YAML caps slots per backplane (spec §5 reference: 8–16 FX, 4 preamp) as a
+limit symbol now; the host allocates node ids from a fixed per-backplane quota. The
+`BP_SLOT_MAP` format itself is defined later and must respect the cap.
+**Ruling:** ADOPTED — human, 2026-09-06 (via #110). Limit symbol: #154; format: deferred to
+the `BP_SLOT_MAP` definition.
+**Amends:** none. **Supersedes:** none.
+
+## 2026-09-06 — #110 backplane class: the trust boundary is the backplane; docs/THREAT-MODEL.md becomes an authoritative document
+
+**Context:** several #110 attacks (rail control, routing, power readback, slot events) need
+no protocol flaw — the backplane owns the rails and the module bus, and no L3 mechanism can
+constrain it. The accepted risks named in F3, F4 and F7(5) had no single place to live.
+**Recommendation:** new `docs/THREAT-MODEL.md`: the trust boundary is the backplane; modules
+are untrusted; no L3 mechanism constrains a backplane; spec §22 hardware protection is the
+control for power readback; the accepted risks from F3, F4, F7(5) and #110's backplane item
+7 are listed there. Added to CLAUDE.md's authoritative-documents list in the same PR. From
+the "attacks that failed" residue: the receiver rule "preserve reserved L3 flag bits, ignore
+them" (FR-012) gets one sentence in `docs/protocol-l3.md` §3 (#155).
+**Ruling:** ADOPTED — human, 2026-09-06 (via #110): "add docs/THREAT-MODEL.md". #156
+(T3; CLAUDE.md is a ground-truth artefact).
+**Amends:** none. **Supersedes:** none.
+
+---
+
+## 2026-09-06 — Responder replay buffer: keyed on sequence alone, `data-model.md` §5 is silent on the requester
+
+**Context:** red-team on #149 (Responder engine, T033/T035) at `033182a`, escalated to
+BLOCKING (an earlier pass at `907dfbe` had classified the same finding a FOLLOW-UP,
+reasoning that closing it needed a spec change). `data-model.md` §5 states the replay
+condition as `retry == 1 && valid && seq == buffer.seq -> retransmit buffer` — silent on
+whether the retrying frame's `src` must match the station the buffered response was
+actually encoded for. As written, a second station that happens to send `retry=1` with a
+sequence colliding with another station's most-recently-buffered sequence is served that
+other station's response, addressed to that other station (the replying frame's `dst` is
+read back out of the buffer, not recomputed from the current request's `src`) — the
+requester that actually asked gets no answer at all, and an uninvolved third party
+receives an unsolicited frame in what looks like its own response window. Trunk §5
+reserves only `0xFF`; `src` is otherwise wire-derived and unauthenticated, the same
+forgeability class as the two `claimed-src` entries above, and, per the red-team pass, the
+same class of hazard this PR already hardens against for `src == 0xFF` (`link/responder.cpp`
+"Request acceptance") — rejecting one wire-forgeable `src` misuse while accepting another
+in code added by the same PR was judged inconsistent enough to be blocking rather than
+deferred.
+**Impact today:** `sim/`/`core/` do not yet drive `Responder` (F4 wiring is a later
+story), so nothing downstream observes the misdirected frame yet; it becomes load-bearing
+the moment a virtual backplane or scenario puts more than one station on a trunk segment
+sharing a `Responder`.
+**Options:** (a) key the replay strictly on `{peer, seq}` — store the requester's `src`
+alongside the buffered response and require it match before treating a retry as a replay;
+any mismatch falls through to the "otherwise -> new" branch (handler invoked, buffer
+replaced, addressed to whoever actually asked) rather than being discarded outright. (b)
+same, but discard-and-count a colliding-sequence retry from a different station instead of
+answering it as new. (c) leave `data-model.md` §5 exactly as written and accept the
+cross-station replay as spec-literal.
+**Recommendation:** (a) — it never withholds an answer from a station that legitimately
+asked, never sends a stale answer to the wrong address, and degrades to exactly the
+documented behaviour whenever there is only one station retrying (the case §5 was written
+for). Safe default per CLAUDE.md ("implement nothing speculative … proceed only if a safe
+default exists"): stricter than the literal §5 text, never contradicts it (identical
+behaviour whenever `f.src == buffer.peer`, which is every single-master trunk case the
+existing test suite exercises), and needs no `protocol/omgp-protocol.yaml` or golden-vector
+change.
+**Ruling:** adopted as the safe default per CLAUDE.md, pending a human look at whether
+`data-model.md` §5 should be reworded to state the `{peer, seq}` key explicitly (a
+documentation clarification only, no further behaviour change). Implemented in
+`link/responder.hpp` (`ReplayBuffer::peer`) and `link/responder.cpp` (`on_request`'s
+`is_replay` condition), with `tests/unit/test_link_responder.cpp` ("a retry-flagged
+request from a different station is treated as new rather than replaying the previous
+requester's buffered answer") written first and confirmed red before the fix.
+**Supersedes:** none.
+
+## 2026-09-06 — Responder: a request arriving while a response is Scheduled or Transmitting is held, not discarded; `data-model.md` §5 is silent on arrival while busy
+
+**Raised by:** red team @e510b29 on PR #149 (finding 1, BLOCKING), confirmed by the review
+at the same head (finding 1). **Affects:** `link/responder.cpp` (`Responder::poll`,
+`Responder::on_request`), `specs/002-trunk-link-layer/data-model.md` §5, FR-014/FR-015/FR-016.
+**Question:** `data-model.md` §5 gives the Responder three states (Listening, Scheduled,
+Transmitting) and an acceptance rule for an intact request addressed to the node, but says
+nothing about a request whose bytes arrive while a previous response is Scheduled (encoded,
+not yet due) or Transmitting (occupying the half-duplex wire). The implementation at
+`e510b29` discarded and counted such a request. The red team showed two consequences with
+runnable reproducers: (1) two requests queued ahead of one late `poll()` — the second is
+swallowed (at a 2 ms poll period, 2 of 8 well-spaced requests were answered), against
+FR-014's "transmitted at once … counted, not dropped"; (2) a trunk §7 retry queued behind
+its own original in the same batch is discarded rather than replayed, against FR-015's
+unconditional MUST ("retry=1 with the same seq MUST be answered from the replay buffer").
+Neither is a rogue station: both are one master obeying the spec, and one Responder polled
+infrequently — the FR-014 situation by definition.
+**Options:** (a) stop draining the wire while `state_ != Listening`: bytes already arrived
+stay in the wire's receive queue (a UART's RX FIFO does the same) and are decoded, intact,
+by the first `poll()` after the wire is free; the queued request then takes the ordinary
+path — replay, new, late-counted — with the single replay buffer untouched. (b) keep
+draining and keep the discard-and-count (the `e510b29` behaviour). (c) a second replay
+buffer / queue of pending responses.
+**Recommendation:** (a). It needs no new state or storage (rule 5: no allocation after
+init), never overwrites a pending response, never transmits outside a window (FR-017), and
+makes FR-014/015/016 hold uniformly for queued requests. The observable cost: a request
+that arrives while a response is pending is answered after that response, from the wire's
+own queue — its own turnaround window may then be missed, in which case it is counted
+late exactly as FR-014 prescribes for any late poll. (b) violates FR-015 as shown. (c) is
+speculative storage for a case the spec does not describe.
+**Ruling:** (a) adopted as the safe default per CLAUDE.md (stricter than the literal §5
+text, contradicts nothing in it; identical behaviour whenever no request arrives while
+busy, which is every case the pre-`e510b29` suite exercised). Implemented in
+`link/responder.cpp` (`poll()` breaks out of its drain loop while `state_ != Listening`;
+the `on_request` busy-discard branch is removed), with four cases in
+`tests/unit/test_link_responder.cpp` written first and red at `94f6424`. Pending a human
+look at whether `data-model.md` §5 should state the "held in the receive queue" rule
+explicitly (a documentation clarification only).
+**Supersedes:** none.

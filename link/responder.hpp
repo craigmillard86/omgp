@@ -1,9 +1,9 @@
-// OMGP trunk L2 — Responder engine: trunk §3 (media access), §7 (retry rule).
-// Contract: specs/002-trunk-link-layer/contracts/link-cpp.md "Responder engine"; data
-// model: specs/002-trunk-link-layer/data-model.md §5 "Responder". Makes
-// tests/unit/test_link_responder.cpp (T033) and tests/unit/test_link_loop.cpp (T034)
-// pass. Embedded path: C++17, no exceptions, no RTTI, no heap — one buffered response
-// plus fixed statistics.
+// OMGP trunk L2 — Responder transaction engine: trunk §3 (media access — response
+// scheduling inside the turnaround window), §7 (retries, replay). Contract:
+// specs/002-trunk-link-layer/contracts/link-cpp.md "Responder engine"; data model:
+// specs/002-trunk-link-layer/data-model.md §5 "Responder". Makes
+// tests/unit/test_link_responder.cpp (T033) pass. Embedded path: C++17, no exceptions,
+// no RTTI, no heap — one single-frame replay buffer plus fixed statistics.
 #pragma once
 
 #include "link/byte_wire.hpp"
@@ -14,10 +14,9 @@
 namespace omgp {
 namespace link {
 
-// contracts/link-cpp.md "Responder engine": the node-side callback that turns a decoded
-// request payload into a response payload. `handle` is invoked at most once per genuinely
-// new sequence (data-model.md §5) — a retry of the already-answered sequence is served
-// from the Responder's own replay buffer instead.
+// The application-facing side of a node: answers a request and returns how many bytes
+// of `resp` (capacity `cap`) it wrote. Called at most once per NEW sequence (trunk §7:
+// a retried sequence is replayed from the buffer, never re-invoking this).
 struct RequestHandler {
     virtual size_t handle(const uint8_t* req, size_t len, uint8_t* resp, size_t cap) = 0;
 
@@ -25,61 +24,94 @@ struct RequestHandler {
     ~RequestHandler() = default;
 };
 
-// Answers requests addressed to `my_addr` (trunk §3: the node side of one request/response
-// transaction), replaying the last response verbatim on a matching retry rather than
-// invoking `handler` again (trunk §7's retry rule is idempotent at L2: a retried request
-// must never be double-processed). One outstanding response at a time, mirroring the
-// trunk's own strict request/response cadence — a real node never answers two requests at
-// once (data-model.md §5).
+// Drives one node's side of a request/response transaction over a ByteWire (trunk §3):
+// schedules the response inside [T_turn_min, T_turn_max] of the request's end, and
+// replays an already-answered sequence byte-for-byte instead of re-invoking the
+// handler (trunk §7; data-model.md §5).
 class Responder {
   public:
-    // turnaround_us is clamped to [TRUNK_T_turn_min_us, TRUNK_T_turn_max_us] here, at
-    // construction (contracts/link-cpp.md): no later call can put the engine outside the
-    // range the trunk timing model requires.
-    //
-    // Clock& is part of the signature for parity with Master's constructor (contracts/
-    // link-cpp.md) but is not retained: unlike Master::begin(), nothing here runs outside
-    // poll(now_us), so every instant this engine needs already arrives as that parameter.
+    // turnaround_us is clamped into [TRUNK_T_turn_min_us, TRUNK_T_turn_max_us] at
+    // construction (data-model.md §5): trunk §9 already fixes both bounds, so a value
+    // outside that range is pulled to the nearer bound rather than refused.
     Responder(ByteWire& wire, Clock& clock, RequestHandler& handler, uint8_t my_addr,
-              uint32_t turnaround_us = TRUNK_T_turn_min_us);
+              uint32_t turnaround_us = omgp::TRUNK_T_turn_min_us);
 
-    // The only receive path (analysis F1, mirrored from Master): drains ByteWire::receive()
-    // into the engine's own Deframer, handles or replays any accepted request, and
-    // transmits a scheduled response once its instant is reached. No public feed().
-    //
-    // FR-014 "late poll": if the first poll() call at or after the response's own deadline
-    // finds `now_us` already past `request_end + TRUNK_T_turn_max_us`, the response is
-    // transmitted immediately (at `now_us`, not at the missed deadline) and
-    // `stats().late_responses` is incremented — nothing is ever dropped, only delayed.
+    // The only receive path (mirrors Master::poll, analysis F1): drains
+    // ByteWire::receive() into the engine's own Deframer, decides new-vs-replay for any
+    // intact request addressed to my_addr, and transmits a scheduled response once
+    // now_us reaches its deadline. A response still due when now_us is already past
+    // request_end + TRUNK_T_turn_max_us (late poll) is transmitted at once rather than
+    // dropped, and counted in stats().late_responses (spec FR-014).
     void poll(uint64_t now_us);
 
+    // replays_served, discards, transactions (requests handled), late_responses
+    // (contracts/link-cpp.md "Responder engine"); retries/timeouts/crc_failures are
+    // Master-only fields of this shared AddrStats type and stay zero here.
     const AddrStats& stats() const;
 
   private:
-    void handle_request(const FrameFields& f, uint64_t request_end_us);
-    void transmit_response(uint64_t at_us);
+    // data-model.md §5's three states. Transmitting(until tx_end) matters as soon as more
+    // than one request can be queued ahead of a single poll() call: without it, a second
+    // wire_.transmit() could start before the first has left the (half-duplex, trunk §3)
+    // wire — review + red-team @033182a finding 1. poll() drains the wire only while
+    // Listening; in the other two states arrived bytes wait in the wire's receive queue
+    // (red team @e510b29 finding 1).
+    enum class State : uint8_t { Listening, Scheduled, Transmitting };
+
+    // data-model.md §5: single-frame replay buffer, sized to the codec's own worst-case
+    // stuffed-frame bound (kMaxWire).
+    struct ReplayBuffer {
+        bool valid = false;
+        uint8_t seq = 0;
+        // The requester (f.src) this response was encoded for: a retry with a colliding
+        // sequence from a DIFFERENT station must not replay it back to the wrong address
+        // (red-team @033182a finding 3; docs/OPEN-QUESTIONS.md 2026-09-06).
+        uint8_t peer = 0;
+        uint16_t len = 0;
+        uint8_t bytes[kMaxWire] = {};
+    };
+
+    // Decides new-vs-replay for one intact frame addressed to my_addr, or counts a
+    // discard: for a frame not addressed to it, or a request whose src is the reserved
+    // 0xFF marker (never answerable — see the .cpp). Only ever called while Listening
+    // (poll() stops draining otherwise), so a pending response is never overwritten.
+    // Schedules an accepted request's response at request_end_us + turnaround_us_
+    // (data-model.md §5).
+    void on_request(const FrameFields& f, uint64_t request_end_us);
+
+    // Transmits the Scheduled response and moves to Transmitting once `now_us` has
+    // reached its deadline; moves Transmitting back to Listening once `now_us` has
+    // reached the tx_end wire_.transmit() itself returned. Called at the top of every
+    // iteration of poll()'s drain loop — ahead of every byte, and once more after the last
+    // — so a response already due is flushed, and the wire found free again, before the
+    // next queued byte is drained (see poll()'s own comment).
+    void transmit_if_due(uint64_t now_us);
 
     ByteWire& wire_;
+    // Stored for the constructor-signature parity with Master/Health (link-cpp.md
+    // "Responder engine") and for future use (a scheduled deadline check keyed off the
+    // engine's own clock rather than the now_us poll() already takes). poll() and
+    // on_request() take `now_us` explicitly, so clock_ itself is not yet read; the
+    // constructor body performs one discarded read, which silences clang's
+    // -Wunused-private-field (fuzz preset) without [[maybe_unused]] — some gcc versions
+    // reject that attribute on a data member under -Werror=attributes (see health.hpp).
+    Clock& clock_;
     RequestHandler& handler_;
     uint8_t my_addr_;
     uint32_t turnaround_us_;
 
     Deframer deframer_;
+    ReplayBuffer buffer_;
 
-    // ReplayBuffer (data-model.md §5): the last response sent, kept byte-for-byte so a
-    // matching retry retransmits identically rather than re-deriving it from the request.
-    bool buffer_valid_ = false;
-    uint8_t buffer_seq_ = 0;
-    uint8_t buffer_[kMaxWire] = {};
-    size_t buffer_len_ = 0;
-
-    // Scheduled(response at request_end + turnaround_us) while true; Listening otherwise
-    // (data-model.md §5's state enum collapses to this one flag plus deadline_/
-    // request_end_us_, since Transmitting is instantaneous — transmit_response() both
-    // encodes onto the wire and clears the schedule in one call, as Master::do_transmit does).
-    bool scheduled_ = false;
-    uint64_t deadline_ = 0;       // request_end_us_ + turnaround_us_
-    uint64_t request_end_us_ = 0; // instant of the request's own last byte
+    State state_ = State::Listening;
+    // The request the Scheduled response answers: its END instant (the late-poll bound
+    // is request_end_us_ + TRUNK_T_turn_max_us, FR-014) and the transmit deadline
+    // (request_end_us_ + turnaround_us_).
+    uint64_t request_end_us_ = 0;
+    uint64_t deadline_us_ = 0;
+    // Set to wire_.transmit()'s own return value once State::Transmitting is entered: the
+    // instant the wire is free again (data-model.md §5 "until tx_end").
+    uint64_t transmit_until_us_ = 0;
 
     AddrStats stats_ = {};
 };
