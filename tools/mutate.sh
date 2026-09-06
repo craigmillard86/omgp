@@ -22,6 +22,7 @@
 #   ./tools/mutate.sh --diff origin/main --require     # CI: fail if Mull is missing
 #   ./tools/mutate.sh --diff HEAD~1                    # local: disclosed skip if Mull is missing
 #   ./tools/mutate.sh --diff <ref> --dry-run           # print the scope and stop
+#   ./tools/mutate.sh --print-phase2-config           # print the run-time mull.yml and stop
 #   ./tools/mutate.sh --trend-log metrics/mutation-trend.jsonl   # whole tree, append trend
 #
 # Overrides: OMGP_CLANG_MAJOR, MULL_RUNNER (path), MULL_PLUGIN (path) — used to run an
@@ -40,12 +41,31 @@ SCOPE_DIRS=$(cfg scope_dirs)
 TIMEOUT_MS=$(cfg timeout_ms)
 GROUPS_=$(cfg groups)
 
+# Physical path: Mull records the path CMake compiled from, and phase 2's includePaths
+# regexes are anchored on it — a symlinked logical path would match nothing (#141 review).
+ROOT=$(pwd -P)
+
+# Run-time (phase 2) mull.yml, see "configuration is TWO-PHASE" below: what the RUNNER
+# reads. `includePaths` is one regex per scope dir, anchored on the physical root with every
+# regex metacharacter in it escaped — this is the one line that can silently narrow what
+# gets executed, so it is printable (--print-phase2-config) and pinned by
+# tools/refimpl/test_tooling.py without Mull present (#141 review).
+phase2_config() {
+  local root_re
+  root_re=$(printf '%s' "$ROOT" | sed 's/[][\.*^$+?(){}|\\]/\\&/g')
+  echo "mutators:"; for g in $GROUPS_; do echo "  - $g"; done   # as phase 1; every pre-#141 run carried it here and ran, so the runner tolerates it — kept so phase 2 differs from phase 1 by includePaths alone (#141 review)
+  echo "timeout: $TIMEOUT_MS"
+  echo "quiet: true"
+  echo "includePaths:"; for d in $SCOPE_DIRS; do echo "  - ^$root_re/$d/.*"; done
+}
+
 REF=""; REQUIRE=0; DRY=0; TREND_LOG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --diff) REF="$2"; shift 2 ;;
     --require) REQUIRE=1; shift ;;
     --dry-run) DRY=1; shift ;;
+    --print-phase2-config) phase2_config; exit 0 ;;
     --trend-log) TREND_LOG="$2"; shift 2 ;;
     --threshold) echo "mutate: --threshold was removed — the gate is the survivor triage (tools/mutate.cfg [policy])" >&2; exit 2 ;;
     *) echo "mutate: unknown argument $1" >&2; exit 2 ;;
@@ -131,9 +151,6 @@ fi
 # phase 1 instruments every TU; phase 2 narrows what the runner EXECUTES to the scope dirs.
 # The build is always fresh: objects compiled without the config contain no mutants.
 python3 tools/codegen.py --vectors tests/vectors >/dev/null
-# Physical path: Mull records the path CMake compiled from, and phase 2's includePaths
-# regexes are anchored on it — a symlinked logical path would match nothing (#141 review).
-ROOT=$(pwd -P)
 rm -rf "$BUILD" && mkdir -p "$BUILD"
 # Compile-time config: mutators only — every translation unit is instrumented. Measured on
 # 0.34.0: any includePaths/excludePaths HERE leaves the runner with "No mutants found",
@@ -182,13 +199,7 @@ echo "mutation: instrumented build done (mutated functions in library objects:$e
 # modified files but drops every mutant in a file the diff ADDS (new-file hunks) — useless
 # for a feature whose PRs mostly add files. The merge below keeps only mutants on lines
 # `git diff -U0 <ref>` marks as added/changed under scope_dirs.
-ROOT_RE=$(printf '%s' "$ROOT" | sed 's/[][\.*^$+?(){}|\\]/\\&/g')
-{
-  echo "mutators:"; for g in $GROUPS_; do echo "  - $g"; done   # as phase 1; every pre-#141 run carried it here and ran, so the runner tolerates it — kept so phase 2 differs from phase 1 by includePaths alone (#141 review)
-  echo "timeout: $TIMEOUT_MS"
-  echo "quiet: true"
-  echo "includePaths:"; for d in $SCOPE_DIRS; do echo "  - ^$ROOT_RE/$d/.*"; done
-} > "$BUILD/mull.yml"
+phase2_config > "$BUILD/mull.yml"
 # Changed-line ranges per in-scope file (new files are whole-file ranges), as JSON.
 if [ -n "$REF" ]; then
   # shellcheck disable=SC2086

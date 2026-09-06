@@ -65,6 +65,9 @@ LABEL_ANY = re.compile(r"//\s*mutant-ok\b")
 # an empty report is otherwise indistinguishable from "instrumentation didn't reach the
 # code", which is exactly the failure mode this check exists to catch.
 NO_BODY_EXEMPT = re.compile(r"//\s*mutation-exempt\(no-body\)\s*:\s*(\S.*)")
+# The source extensions mutate.sh keeps in SCOPE (its line "SCOPE=... grep -E"); the two
+# must agree, so a changed file the oracle was not chosen for is never demanded mutants.
+SOURCE_RE = re.compile(r"\.(cpp|hpp|h|cc)$")
 
 
 class Label:
@@ -126,7 +129,12 @@ def main(argv=None) -> int:
     root = str(pathlib.Path(args.root).resolve())
     scope_dirs = args.scope_dirs.split()
     categories = args.categories.split()
-    ranges = json.load(open(args.ranges))
+    # mutate.sh builds the ranges from `git diff -U0 -- <scope dirs>` unfiltered, while its
+    # SCOPE (and so the oracle) keeps only source extensions; a README/CMakeLists touch under a
+    # scope dir would otherwise reach the per-dir blind-spot rule as a "changed file" and red
+    # the gate for a dir whose sources did not change (#141 review, MEDIUM). A non-source file
+    # can carry no mutant, so nothing that is counted changes.
+    ranges = {rel: r for rel, r in json.load(open(args.ranges)).items() if SOURCE_RE.search(rel)}
     reports = sorted(pathlib.Path(args.reports).glob("*.json"))
     diff_mode = bool(args.ref)
 

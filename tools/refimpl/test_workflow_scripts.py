@@ -679,3 +679,63 @@ def test_review_checks_out_only_the_trusted_base():
 
 def _action_prompt(steps):
     return next(s for s in steps if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
+
+
+# --- red-team.yml: the verdict-presence guard parses what agent-approve parses ------------------
+
+def _verdict_guard():
+    """The jq filter and the grep regex of red-team.yml's "A verdict for this head exists"
+    step, lifted from the YAML so the test runs the exact text the job runs."""
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "red-team.yml").read_text())
+    step = next(s for s in wf["jobs"]["attack-pr"]["steps"] if s.get("name") == "A verdict for this head exists")
+    run = step["run"]
+    jq = re.search(r"--jq '([^']*)'", run)
+    grep = re.search(r'grep -E "([^"]*)"', run)
+    assert jq and grep, run
+    return jq.group(1), grep.group(1)
+
+
+def _agent_approve_would_accept(comments, head) -> bool:
+    """agent-approve.yml verdictOf, transcribed: claude[bot] only; body trimmed, split on \\n,
+    LAST line, trimmed; full-line regex with the exact head."""
+    rx = re.compile(rf"^VERDICT\(red-team\):\s*(clean|findings)\s*@\s*{head}$")
+    return any(rx.match((c.get("body") or "").strip().split("\n")[-1].strip()) is not None
+               for c in comments if (c.get("user") or {}).get("login") == "claude[bot]")
+
+
+HEAD = "a16d7a6d2a903ec53d129507fa970031012e9d9b"
+_BOT, _HUMAN = {"login": "claude[bot]"}, {"login": "someone"}
+VERDICT_CASES = [
+    ("last line, trailing newlines", [{"user": _BOT, "body": f"prose\n\nVERDICT(red-team): clean @ {HEAD}\n\n"}]),
+    ("last line, CRLF and indent", [{"user": _BOT, "body": f"prose\r\n  VERDICT(red-team): findings @ {HEAD}  \r\n"}]),
+    ("verdict then a trailing signature", [{"user": _BOT, "body": f"VERDICT(red-team): clean @ {HEAD}\n\n-- posted by the attack pass\n"}]),
+    ("verdict quoted mid-comment", [{"user": _BOT, "body": f"the format is:\nVERDICT(red-team): clean @ {HEAD}\nbut I found more.\n"}]),
+    ("verdict at another head", [{"user": _BOT, "body": f"VERDICT(red-team): clean @ {'0' * 40}"}]),
+    ("short sha", [{"user": _BOT, "body": f"VERDICT(red-team): clean @ {HEAD[:7]}"}]),
+    ("right shape, wrong author", [{"user": _HUMAN, "body": f"VERDICT(red-team): clean @ {HEAD}"}]),
+    ("null body", [{"user": _BOT, "body": None}]),
+    ("one of several comments", [{"user": _HUMAN, "body": "x"}, {"user": _BOT, "body": "no verdict"},
+                                 {"user": _BOT, "body": f"VERDICT(red-team): findings @ {HEAD}"}]),
+]
+
+
+@pytest.mark.skipif(shutil.which("jq") is None,
+                    reason="jq not present (blind spot: the verdict guard's jq filter not exercised here; ubuntu-latest has it)")
+@pytest.mark.parametrize("name,comments", VERDICT_CASES, ids=[c[0] for c in VERDICT_CASES])
+def test_red_team_verdict_guard_agrees_with_agent_approve(name, comments):
+    """#141 review @a16d7a6 (MEDIUM): the guard's comment says it parses agent-approve's shape
+    (last non-empty line, full sha) but its grep matched EVERY line of every claude[bot]
+    comment — a verdict followed by a signature was "present" here and absent for
+    agent-approve, the exact stall the step exists to expose; a quoted verdict mid-comment
+    counted, the #103 laxness back. Run the step's own jq + grep on each shape and require
+    the same answer agent-approve's transcribed parser gives."""
+    jq_filter, grep_re = _verdict_guard()
+    lines = subprocess.run(["jq", "-r", jq_filter], input=json.dumps(comments), capture_output=True, text=True, check=True).stdout
+    hit = subprocess.run(["grep", "-E", grep_re.replace("$HEAD", HEAD)], input=lines, capture_output=True, text=True).returncode == 0
+    assert hit == _agent_approve_would_accept(comments, HEAD), (name, lines)
+
+
+def test_red_team_verdict_guard_cases_cover_both_answers():
+    """The parametrised agreement above would be vacuous if every case had the same answer."""
+    answers = {_agent_approve_would_accept(c, HEAD) for _, c in VERDICT_CASES}
+    assert answers == {True, False}

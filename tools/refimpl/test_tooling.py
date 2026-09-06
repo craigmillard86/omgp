@@ -342,10 +342,74 @@ def test_report_diff_mode_fails_when_a_changed_dir_has_no_executed_mutants(tmp_p
     rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
     assert rc == 1, out
     assert "link/" in out and "blind spot" in out and "no mutants under" in out
-    # An exempt(no-body) file is the one legitimate way for a changed dir to carry none.
+    # An exempt(no-body) file is the one legitimate way for a changed dir to carry none. rc is
+    # 1 either way here (l3/x.cpp:2 is an unlabelled survivor), so the distinguishing
+    # assertion is the blind-spot message's absence (#141 review @a16d7a6: the earlier
+    # `"link/" not in out.split("survivor")[0]` held with the exemption branch deleted).
     (root / "link" / "y.cpp").write_text("// mutation-exempt(no-body): declarations only\nint g();\n")
     rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
-    assert rc == 1 and "x.cpp:2" in out and "link/" not in out.split("survivor")[0], out
+    assert rc == 1 and "UNLABELLED survivor: l3/x.cpp:2" in out, out
+    assert "no mutants under" not in out and "blind spot" not in out, out
+
+
+def test_report_diff_mode_per_dir_rule_ignores_non_source_changes(tmp_path):
+    """mutate.sh filters SCOPE to source extensions but builds scope_ranges.json from a plain
+    `git diff -U0 -- <scope dirs>`, so a docs/CMake touch under a scope dir reaches the
+    report as a changed file. The per-dir rule must not demand mutants for a dir whose only
+    change is such a file — else `link/frame.cpp` + `l3/README.md` reds deep-verify with
+    "no mutants under l3/" although no l3/ source changed (#141 review @a16d7a6, MEDIUM)."""
+    src = list(SRC)
+    src[1] = "    if (a >= 4) // mutant-ok(equivalent): 4 is never reached, callers pass < 4"
+    root, reports = _setup(tmp_path, src, MUTANTS,
+                           {"l3/x.cpp": [[1, 8]], "link/README.md": [[1, 3]], "link/CMakeLists.txt": [[1, 1]]})
+    (root / "link").mkdir()
+    (root / "link" / "README.md").write_text("# link\n\ndocs only\n")
+    (root / "link" / "CMakeLists.txt").write_text("add_library(omgp_link INTERFACE)\n")
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 0, out
+    assert "no mutants under" not in out and "blind spot" not in out, out
+    # A source change in that dir still trips the rule: the filter narrows, never disables it.
+    (root / "link" / "y.cpp").write_text("int g() {\n    return 1;\n}\n")
+    (tmp_path / "ranges.json").write_text(json.dumps(
+        {"l3/x.cpp": [[1, 8]], "link/README.md": [[1, 3]], "link/y.cpp": [[1, 3]]}))
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1 and "no mutants under link/" in out, out
+
+
+def test_mutate_phase2_config_is_one_anchored_regex_per_scope_dir(tmp_path):
+    """The run-time includePaths filter is the one thing in mutate.sh that can silently narrow
+    what the runner executes (#141 review @a16d7a6, LOW): pin the generated phase-2 mull.yml
+    text — exactly one regex per configured scope dir, anchored on the physical root with
+    every regex metacharacter in that root escaped — without needing Mull. The clone lives
+    under a directory name built from metacharacters, so an unescaped ROOT would either fail
+    to match its own path or match far too much."""
+    weird = tmp_path / "r(o)[o]t+x.y$z"
+    weird.mkdir()
+    clone = weird / "clone"
+    subprocess.run(["git", "clone", "-q", "--shared", "--no-checkout", str(ROOT), str(clone)], check=True)
+    subprocess.run(["git", "checkout", "-q", "HEAD"], cwd=clone, check=True)
+    for rel in ("tools/mutate.sh", "tools/mutate.cfg"):
+        (clone / rel).write_text((ROOT / rel).read_text())
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--print-phase2-config")
+    assert rc == 0, out
+    physical = str(clone.resolve())
+    cp = configparser.ConfigParser()
+    cp.read(CFG)
+    scope_dirs = cp["policy"]["scope_dirs"].split()
+    lines = out.splitlines()
+    assert "includePaths:" in lines, out
+    paths = [line[4:] for line in lines[lines.index("includePaths:") + 1:] if line.startswith("  - ")]
+    assert len(paths) == len(scope_dirs) == len(set(paths)), out
+    for d, pattern in zip(scope_dirs, paths):
+        assert pattern.startswith("^") and pattern.endswith(f"/{d}/.*"), pattern
+        assert re.fullmatch(pattern, f"{physical}/{d}/a/b.cpp"), (pattern, physical)
+        assert not re.fullmatch(pattern, f"{physical}x/{d}/a.cpp"), pattern       # anchored on the root
+        assert not re.fullmatch(pattern, f"{physical}/tests/{d}/a.cpp"), pattern  # not a substring match
+        assert not re.fullmatch(pattern, f"{physical}/{d}x/a.cpp"), pattern       # the dir, not a prefix
+    # The other keys the runner reads: every mutator group, the pinned timeout, quiet.
+    assert f"timeout: {cp['policy']['timeout_ms']}" in lines and "quiet: true" in lines, out
+    for g in cp["mutators"]["groups"].split():
+        assert f"  - {g}" in lines[:lines.index("includePaths:")], out
 
 
 # --- tools/mutate_diff_reports.py: the evidence tool for mutate.sh changes -----------------------

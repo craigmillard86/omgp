@@ -169,7 +169,12 @@ jobs:
         # agent-approve then stalls a T2 PR on a green check with no visible cause (#141
         # review, MEDIUM; #140). Fail closed: the job is green only when a claude[bot]
         # comment ends with a red-team verdict for exactly this head — the same shape
-        # agent-approve parses (last non-empty line, full sha). Not a required check, so a
+        # agent-approve parses (agent-approve.yml verdictOf: body trimmed, LAST line only,
+        # trimmed, full sha; #103: a token mid-comment must never count). The jq below keeps
+        # exactly that line per comment — the last line carrying a non-blank character,
+        # whitespace-trimmed — so a comment whose verdict is followed by any trailing text is
+        # no verdict here either, and a quoted verdict mid-comment is not one (#141 review
+        # @a16d7a6, MEDIUM: the earlier grep matched every line). Not a required check, so a
         # workflow-changing PR (T3, human-merged) shows red here rather than a false green.
         if: steps.tier.outputs.deep == 'true'
         env:
@@ -177,8 +182,8 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           if gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" --paginate \
-               --jq '.[] | select(.user.login == "claude[bot]") | .body' \
-             | grep -E "^VERDICT\(red-team\): *(clean|findings) *@ *$HEAD *$" | grep -q .; then
+               --jq '.[] | select(.user.login == "claude[bot]") | (.body // "") | split("\n") | map(select(test("\\S"))) | (last // "") | sub("^\\s+"; "") | sub("\\s+$"; "")' \
+             | grep -E "^VERDICT\(red-team\):[[:space:]]*(clean|findings)[[:space:]]*@[[:space:]]*$HEAD$" | grep -q .; then
             echo "red-team: verdict present for $HEAD"
           else
             if ! git diff --quiet origin/main -- .github/workflows/red-team.yml; then
