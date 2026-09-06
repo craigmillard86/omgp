@@ -471,6 +471,64 @@ class TestCtestPath:
         assert "no -o" in r.stderr or "no output" in r.stderr, r.stderr
         assert "verified" not in r.stdout, r.stdout
 
+    def test_compile_entry_crediting_another_sources_object_is_refused(self, tmp_path):
+        # Red team @4012926 finding 1 [MEDIUM] (review @4012926 finding 1): every rule after
+        # `hits[0]` is about the entry's OBJECT — exists, on the link line, in the binary that
+        # ran — and none asks whether it is THIS source's object. So an entry crediting test_b.cpp
+        # to test_a's real, linked object walks through the whole chain honestly, and test_b.cpp
+        # (no target, no object, no binary, no add_test — #133's escape 2 exactly) is "verified".
+        # The stub-object fix at 8b0e4f4 refused a stub; this names a real one. cmake derives the
+        # object's path from the source's (CMakeFiles/<target>.dir/<source rel path>.o), so the
+        # entry must name that path and no other.
+        root = make_tree(tmp_path, compiled={"test_a": "test_a"}, registered=("test_a",), binaries=("test_a",))
+        b = root / "build/native"
+        obj = "CMakeFiles/test_a.dir/tests/unit/test_a.cpp.o"                      # test_a's REAL object
+        src = root / "tests/unit/test_b.cpp"
+        cc = b / "compile_commands.json"
+        entries = json.loads(cc.read_text())
+        entries.append({"directory": str(b), "command": f"/usr/bin/c++ -std=gnu++17 -o {obj} -c {src}", "file": str(src)})
+        cc.write_text(json.dumps(entries, indent=2))
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "not this source's object" in r.stderr, r.stderr
+        assert "tests/unit/test_b.cpp.o" in r.stderr, r.stderr                    # names what cmake would have written
+        assert "verified" not in r.stdout, r.stdout
+
+    def test_object_that_is_a_symlink_to_another_object_is_refused(self, tmp_path):
+        # Red team @4012926 finding 2 [LOW]: exists(), identity() and the link-line membership
+        # all reason about the object's PATH; a symlink at test_b's object path reaching test_a's
+        # object passes all three, though the bytes linked into test_b are test_a's compilation.
+        # The binary and the source already have this rule; the object is the last link in the
+        # chain without one.
+        root = make_tree(tmp_path)
+        b = root / "build/native"
+        a = b / "CMakeFiles/test_a.dir/tests/unit/test_a.cpp.o"
+        o = b / "CMakeFiles/test_b.dir/tests/unit/test_b.cpp.o"
+        o.unlink()
+        o.symlink_to(a)
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "symlink" in r.stderr, r.stderr
+        assert "test_b.cpp.o" in r.stderr, r.stderr
+        assert "verified" not in r.stdout, r.stdout
+
+    def test_object_hard_linked_to_another_object_is_refused(self, tmp_path):
+        # Same finding, hard link: nothing to resolve, so the object must be the one plain file
+        # the compiler wrote — a second name for it (st_nlink > 1) means the bytes are shared
+        # with something this tool cannot name. No ccache/hard-link mode is used anywhere in
+        # this repo's builds (grep of the workflows, presets and scripts), so a real tree's
+        # objects have one name each; a control on that fact.
+        root = make_tree(tmp_path)
+        b = root / "build/native"
+        a = b / "CMakeFiles/test_a.dir/tests/unit/test_a.cpp.o"
+        o = b / "CMakeFiles/test_b.dir/tests/unit/test_b.cpp.o"
+        o.unlink()
+        os.link(a, o)
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "hard link" in r.stderr, r.stderr
+        assert "verified" not in r.stdout, r.stdout
+
     def test_source_in_a_subdirectory_is_checked(self, tmp_path):
         # Finding 4: a non-recursive glob made tests/unit/link/test_lost.cpp invisible — the
         # forgotten-CMakeLists-line escape, one directory down. The walk is recursive now.
