@@ -3571,6 +3571,71 @@ TEST_CASE("a CRC-failed frame whose FLAG opens INSIDE the host's own transmissio
     REQUIRE(master.stats(dst).crc_failures == 0);
 }
 
+TEST_CASE("a second CRC-failed frame in the T_gap after an in-window CRC failure is not charged "
+          "again: the guard's `awaiting` half, not `in_window`, is what rejects it",
+          "[link][timing:T_gap]") {
+    // The case above pins `in_window`'s lower bound on the CRC path; its `awaiting` half was
+    // still killed by nothing (PR #142 red-team @9632347, LOW). It is reachable and not
+    // equivalent: end_attempt() re-purposes deadline_ as the RETRY instant and never touches
+    // window_start_us_, so the T_gap after an in-window CRC failure carries a STALE window —
+    // `in_window` is still true, `awaiting` is false. The T_gap case that puts a frame in
+    // exactly that gap uses a well-formed foreign one (never enters the CRC branch), and the
+    // out-of-window CRC case opens past the deadline (both conjuncts false). With `awaiting`
+    // gone, a station garbling the bus during the gap is charged a SECOND crc_failures
+    // against a node that transmitted nothing — the misattribution the else branch exists
+    // to prevent.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x08;
+    const uint8_t payload[] = {0x11};
+    const Step script[] = {{dst, Kind::CrcError}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, script, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
+    const uint64_t crc_end = response_full_end(tx_end, dst, 0, payload, sizeof payload);
+
+    MasterEvent ev = wire.advance_to(crc_end, master);
+    REQUIRE(ev.kind == MasterEvent::None); // attempt 0 ended CrcFailed, retries remain
+    REQUIRE(master.stats(dst).crc_failures == 1);
+    REQUIRE(master.busy());
+
+    // A second corrupted frame (same construction as the case above: exactly one
+    // Discard::BadCrc through the engine's own Deframer), opened one byte time after the
+    // failure — squarely inside the stale window [window_start_us_ = tx_end, deadline_ =
+    // crc_end + T_gap), so `in_window` holds and only `awaiting` rejects it.
+    std::vector<uint8_t> bad = response_bytes(dst, 0, payload, sizeof payload);
+    REQUIRE(bad.size() > 6);
+    bad[5] = static_cast<uint8_t>(bad[5] ^ 0x02);
+    REQUIRE(bad[5] != omgp::TRUNK_flag_byte);
+    REQUIRE(bad[5] != omgp::TRUNK_escape_byte);
+    {
+        Deframer probe;
+        FrameView v{};
+        for (uint8_t b : bad)
+            REQUIRE_FALSE(probe.feed(b, v));
+        REQUIRE(probe.stats().discarded[static_cast<size_t>(Discard::BadCrc)] == 1);
+    }
+    const uint64_t open2 = crc_end + byte_us();
+    const uint64_t end2 = open2 + static_cast<uint64_t>(bad.size()) * byte_us();
+    REQUIRE(open2 >= tx_end);                        // in_window's lower half holds ...
+    REQUIRE(open2 < crc_end + omgp::TRUNK_T_gap_us); // ... and its upper half (the retry instant)
+    // The frame's own END may fall past that instant: `in_window` reads only the opening
+    // instant, and the retry is gap-deferred behind this frame's last byte in any case.
+    wire.inject_bytes(bad.data(), bad.size(), open2);
+
+    for (uint64_t t = crc_end + 1; t <= end2 + byte_us(); ++t)
+        ev = wire.advance_to(t, master);
+    REQUIRE(wire.transcript_size() == 1); // the retry has not gone out yet
+
+    // Pristine: the concluded attempt is not re-concluded. Without `awaiting`: 2.
+    REQUIRE(master.stats(dst).crc_failures == 1);
+    REQUIRE(master.attempts() == 1); // no extra retry consumed
+}
+
 TEST_CASE("set_bit_rate() refuses a rate whose byte time truncates to zero: not forwarded, not "
           "counted, and both timing protections keep their byte-time basis",
           "[link]") {
