@@ -278,7 +278,11 @@ class TestCtestPath:
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert not record.exists(), "the previous run's record survived a run in which ctest wrote none"
-        r = run_tool("--ctest", cwd=root)
+        # The broken registration also fails --snapshot; the missing record is checked before
+        # any comparison, so an empty (well-formed) snapshot is enough to reach that line.
+        stub = tmp_path / "pre-stub.json"
+        stub.write_text(json.dumps({"compile_commands": "", "objects": {}, "registered": [], "binaries": {}}))
+        r = run_tool("--ctest", "--pre", str(stub), cwd=root)
         assert r.returncode != 0 and "no execution record" in r.stderr, r.stderr
 
     def test_non_utf8_test_output_is_tolerated(self, tmp_path):
@@ -300,7 +304,7 @@ class TestCtestPath:
         assert record.exists(), "stage_unit must leave ctest's JUnit record in the build tree"
         later = record.stat().st_mtime + 60
         os.utime(root / "build/native/test_b", (later, later))
-        r = run_tool("--ctest", cwd=root)
+        r = run_tool("--ctest", "--pre", str(snapshot(root)), cwd=root)
         assert r.returncode != 0, r.stdout
         assert "tests/unit/test_b.cpp" in r.stderr and "predates" in r.stderr, r.stderr
         assert r.stderr.count("unit: tests/") == 1, r.stderr
@@ -353,7 +357,7 @@ class TestCtestPath:
         build = root / "build/native"
         subprocess.run(["ctest", "--output-junit", "Testing/junit.xml"], cwd=build,
                        capture_output=True, text=True, timeout=300, check=True)
-        r = run_tool("--ctest", cwd=root)
+        r = run_tool("--ctest", "--pre", str(snapshot(root)), cwd=root)
         assert r.returncode != 0, r.stdout
         assert "tests/unit/test_b.cpp" in r.stderr and "truncated" in r.stderr, r.stderr
         assert "DISABLED" not in r.stderr, r.stderr
@@ -504,12 +508,31 @@ class TestCtestPath:
         # Third leg of the same class: the record-mtime rule catches a binary rebuilt AFTER
         # the run, not one overwritten by an earlier test DURING it (older than the record,
         # so the rule holds — and the file that ran is not the file the build produced).
-        # ctest runs the registrations serially, in order: test_a rewrites test_b, then
-        # test_b runs as the rewrite.
-        root = make_tree(tmp_path, scripts={"test_b": 'echo "EXECUTED: 0"'})
+        # ctest runs the registrations serially, in order: test_a rewrites test_b in place —
+        # same inode, same size (the original is padded to the rewrite's length), mtime put
+        # back with `touch -r` — then test_b runs as the rewrite. Only ctime tells, which
+        # utime cannot set: that is the leg of the fingerprint this scenario relies on.
+        root = make_tree(tmp_path, scripts={"test_b": 'echo "EXECUTED: 0"     '})
         build = root / "build/native"
         _executable(build / "test_a", "#!/usr/bin/env bash\n"
+                    f'cp -p "{build}/test_b" "{build}/test_b.ref"\n'
                     f"printf '#!/usr/bin/env bash\\necho \"EXECUTED: 600000\"\\n' > \"{build}/test_b\"\n"
+                    f'touch -r "{build}/test_b.ref" "{build}/test_b"\n'
+                    'echo "EXECUTED: 600000"\n')
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "changed during the ctest run" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_object_rewritten_during_the_run_is_refused(self, tmp_path):
+        # The object leg of the same fingerprint (added to kill mutant M31, which no other
+        # scenario reached): an object that exists before the run but is rewritten during it
+        # is not the object the binary was linked from, and is refused as changed.
+        root = make_tree(tmp_path)
+        build = root / "build/native"
+        obj = build / "CMakeFiles/test_b.dir/tests/unit/test_b.cpp.o"
+        _executable(build / "test_a", "#!/usr/bin/env bash\n"
+                    f'printf "\\x7fELF-rewritten" > "{obj}"\n'
                     'echo "EXECUTED: 600000"\n')
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
@@ -525,7 +548,7 @@ class TestCtestPath:
         build = root / "build/native"
         pre = snapshot(root)
         case = '<testcase name="test_a" status="run"><system-out>EXECUTED: 600000\n</system-out></testcase>'
-        (build / "Testing").mkdir()
+        (build / "Testing").mkdir(exist_ok=True)   # `ctest --show-only` (the snapshot) may have made it
         (build / "Testing/junit.xml").write_text(f"<testsuite>{case}{case}</testsuite>\n")
         r = run_tool("--ctest", "--pre", str(pre), cwd=root)
         assert r.returncode != 0, r.stdout
@@ -534,19 +557,20 @@ class TestCtestPath:
 
     def test_registration_that_is_a_superset_of_the_record_is_named_as_such(self, tmp_path):
         # Same finding: with strict equality relaxed to "record ⊆ registration", test_b would
-        # still fail — but as "did not run", the wrong diagnosis. A registration ctest never
-        # saw is a registration-set/record mismatch and is named as one, not as a skip.
+        # still fail — but only as "did not run", the wrong diagnosis. A registration ctest
+        # never saw is a registration-set/record mismatch and is named as one (the per-source
+        # line follows; the mismatch line is what the relaxed clause loses).
         root = make_tree(tmp_path)
         build = root / "build/native"
         pre = snapshot(root)
-        (build / "Testing").mkdir()
+        (build / "Testing").mkdir(exist_ok=True)   # `ctest --show-only` (the snapshot) may have made it
         (build / "Testing/junit.xml").write_text(
             '<testsuite><testcase name="test_a" status="run"><system-out>EXECUTED: 600000\n'
             '</system-out></testcase></testsuite>\n')
         r = run_tool("--ctest", "--pre", str(pre), cwd=root)
         assert r.returncode != 0, r.stdout
-        assert "registration set differs from the run's record" in r.stderr and "test_b" in r.stderr, r.stderr
-        assert "did not run" not in r.stderr, r.stderr
+        assert "registration set differs from the run's record" in r.stderr, r.stderr
+        assert "registered but not in" in r.stderr and "['test_b']" in r.stderr, r.stderr
 
     def test_missing_record_is_a_named_failure(self, tmp_path):
         # stage_unit deletes the record before ctest; if ctest then writes none, the tool must

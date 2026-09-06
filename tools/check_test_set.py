@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Prove that every test_*.cpp under tests/{unit,property} was compiled, registered and executed.
 
-`pipeline.sh` `stage_unit` (ctest path) calls this after `ctest --preset native
---output-junit Testing/junit.xml` and after summing the floor. The floor
+`pipeline.sh` `stage_unit` (ctest path) calls `--snapshot` BEFORE `ctest --preset native
+--output-junit Testing/junit.xml` and `--ctest --pre -` after it and after summing the floor. The floor
 (`UNIT_TEST_FLOOR`) catches a mass loss of assertions; it cannot see ONE source dropping
 out while the rest keep the sum above it (#133). This check reads the build artefacts and
 the run's own machine-readable record, and names every source that escaped:
@@ -66,6 +66,22 @@ missing record means ctest did not write one this run — also refused. Both are
 current pipeline, not guarantees: an out-of-band `ctest` after a rebuild is refused only
 by the mtime comparison.
 
+Unchanged during the run (red team @f8bce32): every artefact above is read AFTER the tests,
+and the tests are programs that can write under build/ — a test that appended a
+compile_commands.json entry and a stub object for a source no target built was verified on
+the target that ran (escape 2, green). So stage_unit takes `--snapshot` first: sha256 of
+compile_commands.json, the identity (dev, ino, size, mtime_ns, ctime_ns) of every source's
+object and of every registered binary, and the registration list (name, argv). `--ctest --pre`
+refuses what differs: "compile_commands.json changed during the ctest run", "object … did
+not exist before the ctest run" / "changed during the ctest run", "registration set changed
+during the ctest run" (this also closes the rewrite-that-keeps-the-name-set residual the
+record comparison left), "<binary> changed during the ctest run". The snapshot is held in
+the stage's shell variable and handed over on stdin, so a running test cannot rewrite it
+too. Identity by stat, not content: a rewrite in place changes ctime, which utime cannot
+put back — a control (root, or a clock moved), not a guarantee. What the snapshot cannot
+see: a test that reaches the shell's memory, or rewrites this tool or pipeline.sh while
+running — stated, not covered; those files are reviewed code.
+
 No sources at all is a failure, not a vacuous pass (review @7dbf9d8).
 
 Matching is by BINARY (basename of the target / command[0]), not by test name:
@@ -85,6 +101,7 @@ ctest path)` — N counts distinct binaries, so a multi-source target counts onc
 `unit: <source>: <reason>` line per failing source on stderr, exit 1.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -152,7 +169,55 @@ def executed_counts(junit: Path):
     return out, truncated, recorded
 
 
-def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
+def identity(path) -> list:
+    """What a file is, for the unchanged-during-the-run comparison: (dev, ino, size, mtime_ns,
+    ctime_ns), or None if absent. A rewrite in place changes size/mtime/ctime; a replacement
+    changes ino; `touch`/utime cannot put ctime back — a control (root, or a clock moved), not
+    a guarantee. Contents are not hashed: 17 sanitizer objects per run is a cost for nothing
+    the stat does not already show."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+
+
+def read_artefacts(build: Path, log: Path):
+    """compiled_targets + registered_tests, with LastTest.log handed back as ctest left it."""
+    log_bytes = log.read_bytes() if log.exists() else None   # BEFORE show-only, which rewrites it
+    compiled = compiled_targets(build)
+    try:
+        registered = registered_tests(build)
+    finally:
+        if log_bytes is not None:
+            log.write_bytes(log_bytes)
+    return compiled, registered
+
+
+def registration_list(registered) -> list:
+    return sorted([name, argv] for regs in registered.values() for name, argv in regs)
+
+
+def snapshot(root: Path, build: Path, log: Path) -> dict:
+    """The pre-run fingerprint stage_unit takes BEFORE ctest and hands to --ctest --pre: the
+    compilation database (hashed), every source's object, the registration set (name, argv)
+    and every registered binary. Anything that differs after the run was written while the
+    tests ran (or after them) and is not evidence about the run (red team @f8bce32)."""
+    compiled, registered = read_artefacts(build, log)
+    objects = {}
+    for src in sources(root):
+        hit = compiled.get(os.path.realpath(src))
+        if hit is not None:
+            objects[str(hit[1])] = identity(hit[1])
+    return {
+        "compile_commands": hashlib.sha256((build / "compile_commands.json").read_bytes()).hexdigest(),
+        "objects": objects,
+        "registered": registration_list(registered),
+        "binaries": {path: identity(path) for path in registered},
+    }
+
+
+def check_ctest(root: Path, build: Path, log: Path, junit: Path, pre: dict) -> int:
     srcs = sources(root)
     if not srcs:
         print(f"unit: no test sources under {', '.join(SOURCE_DIRS)} in {root} (nothing to verify is a failure, not a pass)",
@@ -161,16 +226,21 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
     if not junit.exists():
         print(f"unit: no execution record at {junit} (ctest --output-junit did not write one this run)", file=sys.stderr)
         return 1
-    log_bytes = log.read_bytes() if log.exists() else None   # BEFORE show-only, which rewrites it
-    compiled = compiled_targets(build)
-    try:
-        registered = registered_tests(build)
-    finally:
-        if log_bytes is not None:
-            log.write_bytes(log_bytes)   # hand the run's log back exactly as ctest left it
+    compiled, registered = read_artefacts(build, log)
     executed, truncated, recorded = executed_counts(junit)
     record_mtime = junit.stat().st_mtime
     failures = []
+    # Unchanged since the pre-run snapshot (red team @f8bce32): the registration set is
+    # compared here, the objects and binaries per source below.
+    if hashlib.sha256((build / "compile_commands.json").read_bytes()).hexdigest() != pre["compile_commands"]:
+        failures.append("compile_commands.json changed during the ctest run (differs from the pre-run snapshot) — "
+                        "a test wrote it? rebuild and rerun via stage_unit")
+    now = registration_list(registered)
+    if now != pre["registered"]:
+        before = [f"{n} -> {' '.join(a)}" for n, a in pre["registered"] if [n, a] not in now]
+        after = [f"{n} -> {' '.join(a)}" for n, a in now if [n, a] not in pre["registered"]]
+        failures.append(f"registration set changed during the ctest run (before the run and not after: {before}; "
+                        f"after and not before: {after}) — a test rewrote CTestTestfile.cmake? rerun via stage_unit")
     by_name = {}   # ctest test name -> registered paths carrying it (one name, one registration)
     for path, regs in registered.items():
         for name, _ in regs:
@@ -182,13 +252,13 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
         failures.append("registration set differs from the run's record "
                         f"(registered but not in {junit}: {missing}; in the record but not registered: {extra}; "
                         f"recorded more than once: {dups}) — CTestTestfile.cmake changed after ctest ran?")
-    identity = {}   # registered path -> (st_dev, st_ino) of the file it runs, for the one-file-one-registration rule
+    inode = {}   # registered path -> (st_dev, st_ino) of the file it runs, for the one-file-one-registration rule
     for path in registered:
         try:
             st = os.stat(path)
         except OSError:
             continue
-        identity[path] = (st.st_dev, st.st_ino)
+        inode[path] = (st.st_dev, st.st_ino)
     by_basename = {}   # for the "same name, wrong path" message only
     for path in registered:
         by_basename.setdefault(os.path.basename(path), []).append(path)
@@ -205,6 +275,13 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
         if src.stat().st_mtime > obj.stat().st_mtime:
             failures.append(f"{rel}: source is newer than its object {obj} (target {target}); rebuild before verifying")
             continue
+        if pre["objects"].get(str(obj)) is None:
+            failures.append(f"{rel}: object {obj} did not exist before the ctest run (written during or after the tests — "
+                            f"not evidence that the binary that ran contains it); rebuild and rerun via stage_unit")
+            continue
+        if pre["objects"][str(obj)] != identity(obj):
+            failures.append(f"{rel}: object {obj} changed during the ctest run; rebuild and rerun via stage_unit")
+            continue
         binary = os.path.abspath(build / target)
         if binary not in registered:
             real = os.path.realpath(binary)
@@ -220,7 +297,7 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
                 failures.append(f"{rel}: built as {target} but not registered with ctest (no add_test)")
             continue
         name, argv = registered[binary][0]
-        twins = [d for d, i in identity.items() if d != binary and i == identity.get(binary)]
+        twins = [d for d, i in inode.items() if d != binary and i == inode.get(binary)]
         namesakes = [d for d in by_name.get(name, []) if d != binary]
         if namesakes:
             failures.append(f"{rel}: registered as '{name}', but one name cannot identify two binaries' runs: "
@@ -229,6 +306,9 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
             failures.append(f"{rel}: registered as '{name}', but the file {binary} runs is also registered as "
                             f"'{registered[twins[0]][0][0]}' ({twins[0]}): one file cannot be two targets' binaries, "
                             f"so neither registration is a run of its own target")
+        elif pre["binaries"].get(binary) != identity(binary):
+            failures.append(f"{rel}: {binary} changed during the ctest run (the file that ran is not the file the build "
+                            f"produced — overwritten by a test?); rebuild and rerun via stage_unit")
         elif len(argv) > 1:
             failures.append(f"{rel}: registered as '{name}' with argument(s) {argv[1:]} — a filtered run is not "
                             f"execution of the source; register the whole binary (add_test(NAME {target} COMMAND {target}))")
@@ -252,8 +332,13 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--ctest", action="store_true", required=True,
-                    help="check the cmake/ctest build at --build against this run's record")
+    mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--ctest", action="store_true",
+                      help="check the cmake/ctest build at --build against this run's record and the --pre snapshot")
+    mode.add_argument("--snapshot", action="store_true",
+                      help="print the pre-run snapshot (JSON) of the build artefacts for a later --ctest --pre")
+    ap.add_argument("--pre", type=Path,
+                    help="the --snapshot taken before ctest ran ('-' for stdin); required with --ctest")
     ap.add_argument("--root", type=Path, default=Path.cwd(), help="repo root (tests/ lives here)")
     ap.add_argument("--build", type=Path, help="cmake build dir (default: ROOT/build/native)")
     ap.add_argument("--log", type=Path, help="ctest log to preserve (default: BUILD/Testing/Temporary/LastTest.log)")
@@ -263,7 +348,19 @@ def main(argv=None) -> int:
     build = (a.build or root / "build" / "native").resolve()
     log = (a.log or build / "Testing" / "Temporary" / "LastTest.log").resolve()
     junit = (a.junit or build / "Testing" / "junit.xml").resolve()
-    return check_ctest(root, build, log, junit)
+    if a.snapshot:
+        json.dump(snapshot(root, build, log), sys.stdout)
+        return 0
+    if a.pre is None:
+        ap.error("--ctest needs --pre <snapshot taken before ctest ran> (stage_unit takes it with --snapshot)")
+    try:
+        pre = json.load(sys.stdin if str(a.pre) == "-" else a.pre.open())
+        for key in ("compile_commands", "objects", "registered", "binaries"):
+            pre[key]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        print(f"unit: no usable pre-run snapshot at {a.pre} ({e}); rerun via stage_unit", file=sys.stderr)
+        return 1
+    return check_ctest(root, build, log, junit, pre)
 
 
 if __name__ == "__main__":

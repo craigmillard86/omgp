@@ -133,7 +133,16 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   (`ctest --show-only` runs after the tests; a test that rewrote `CTestTestfile.cmake`
   is refused as "registration set differs from the run's record" — a control, not a
   guarantee) — with no arguments (a filtered Catch2 run, or a same-named binary
-  elsewhere, is refused), executed means an `EXECUTED: <n>` line with n > 0 (red team
+  elsewhere, is refused); and all of that evidence must be UNCHANGED by the run: the
+  stage takes `check_test_set.py --snapshot` before ctest (sha256 of
+  `compile_commands.json`; dev/ino/size/mtime/ctime of every source's object and every
+  registered binary; the registration list) and hands it to `--ctest --pre` on stdin —
+  never via a file under `build/` — so a test that writes a compile entry, an object, a
+  registration or a binary while running is refused as "changed during the ctest run"
+  (red team @f8bce32; the identity is a control, not a guarantee — ctime is what a
+  size-and-mtime-preserving rewrite cannot restore without root or a moved clock; a test
+  that reaches the shell's memory or rewrites the tool or `pipeline.sh` is outside what
+  reading artefacts can establish, stated). Executed means an `EXECUTED: <n>` line with n > 0 (red team
   @94f2462) for the BINARY that contains the source's object — per-binary evidence, not
   proof that any one source's cases ran; one source per target in `CMakeLists.txt` makes
   the two coincide, a control on the build files, not a guarantee — ctest is run with

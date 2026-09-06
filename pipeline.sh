@@ -134,7 +134,18 @@ stage_unit() {
     # LAST line the listener prints, so a chatty green binary would lose its evidence
     # (red team @3880d35). Raised to 10 MB per test; the tool names a truncated record as
     # such. (`--test-output-truncation head` is accepted and ignored by CMake 3.22 — measured.)
-    rm -f build/native/Testing/junit.xml
+    # Pre-run snapshot (red team @f8bce32): compile_commands.json, every source's object, the
+    # registration set and every registered binary are fingerprinted BEFORE ctest and must be
+    # found unchanged after it — a test that writes any of them while running (a forged
+    # compile entry + object for a source no target built made escape 2 green) is refused.
+    # Held in this shell's memory and handed over on stdin, not written under build/, so a
+    # running test cannot rewrite the snapshot as well. (A test that reaches this shell's
+    # memory, or rewrites tools/check_test_set.py or this script while running, is outside
+    # what artefact reading can establish — stated, not covered.)
+    rm -f build/native/Testing/junit.xml   # first: a failed snapshot must not leave a stale record either
+    local pre
+    pre=$(python3 tools/check_test_set.py --snapshot) \
+      || { echo "unit: pre-run snapshot of the build artefacts failed (nothing to compare the run against)" >&2; return 1; }
     ctest --preset native --output-on-failure --output-junit Testing/junit.xml \
       --test-output-size-passed 10000000
     # ctest only prints test-binary stdout inline on failure, so on a green
@@ -154,7 +165,7 @@ stage_unit() {
     # its own failure, neither masks the other. It runs AFTER the sum because
     # `ctest --show-only` rewrites LastTest.log (the tool restores it, belt and braces).
     local rc=0
-    python3 tools/check_test_set.py --ctest || rc=1
+    python3 tools/check_test_set.py --ctest --pre - <<<"$pre" || rc=1
     if [ "$n" -lt "$UNIT_TEST_FLOOR" ]; then
       echo "unit: executed check count ($n) below floor ($UNIT_TEST_FLOOR) - test filter may be broken" >&2
       rc=1
