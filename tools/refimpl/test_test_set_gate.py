@@ -393,6 +393,25 @@ class TestCtestPath:
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_b.cpp" in r.stderr and "newer than its object" in r.stderr, r.stderr
 
+    def test_object_newer_than_its_binary_is_refused(self, tmp_path):
+        # Red team @6fbdebf finding 1 [MEDIUM]: the chain source -> object -> binary was
+        # ordered in time at its first hop only. A source edited after the last link, its
+        # object recompiled but the link never rerun (interrupted or failed), passed: the
+        # binary ctest ran cannot contain the edited source, and the bootstrap path already
+        # refuses the same tree (`-nt`). Named like the two neighbouring freshness rules: an
+        # mtime comparison is a control, not a guarantee.
+        root = make_tree(tmp_path)
+        b = root / "build/native"
+        t0 = time.time() - 1000
+        os.utime(b / "test_a", (t0, t0))                                              # linked long ago
+        os.utime(root / "tests/unit/test_a.cpp", (t0 + 100, t0 + 100))                # edited after the link
+        os.utime(b / "CMakeFiles/test_a.dir/tests/unit/test_a.cpp.o", (t0 + 200, t0 + 200))  # recompiled, not relinked
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_a.cpp" in r.stderr and "newer than" in r.stderr, r.stderr
+        assert "test_a.cpp.o" in r.stderr and "build/native/test_a" in r.stderr, r.stderr
+        assert "verified" not in r.stdout, r.stdout
+
     def test_source_in_a_subdirectory_is_checked(self, tmp_path):
         # Finding 4: a non-recursive glob made tests/unit/link/test_lost.cpp invisible — the
         # forgotten-CMakeLists-line escape, one directory down. The walk is recursive now.
@@ -902,6 +921,29 @@ class TestBootstrapPath:
         assert "tests/unit/link/test_a.cpp" in r.stderr and "tests/unit/test_a.cpp" in r.stderr, r.stderr
         assert "same basename" in r.stderr, r.stderr
         assert "verified" not in r.stdout and "executed 1800000" not in r.stdout, r.stdout
+
+    def test_same_basename_twice_is_refused_despite_a_quoted_sibling(self, tmp_path):
+        # Red team @6fbdebf finding 2 [LOW]: unit_sources_unique() fed the sorted source list
+        # through `xargs -rn1 basename`; xargs treats an unmatched quote as syntax, printed an
+        # error and STOPPED, dropping every later line — and its exit status vanished inside
+        # `$(...)`. A source named test_a'q.cpp, sorting before a colliding pair, voided the
+        # check for that pair: the clobbering binary was run twice, counted twice, exit 0. The
+        # same tree without the quoted sibling is test_same_basename_twice_is_refused.
+        root = make_tree(tmp_path, ctest=False)
+        twin = root / "tests/unit/sub/test_z.cpp"
+        twin.parent.mkdir(parents=True)
+        twin.write_text("// same basename as tests/unit/test_z.cpp\n")
+        (root / "tests/unit/test_z.cpp").write_text("// stub\n")
+        _executable(root / "build/native/test_z", '#!/usr/bin/env bash\necho "EXECUTED: 600000"\n')
+        quoted = "test_a'q"
+        (root / "tests/unit" / f"{quoted}.cpp").write_text("// an unmatched quote in the name\n")
+        _executable(root / "build/native" / quoted, '#!/usr/bin/env bash\necho "EXECUTED: 600000"\n')
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/sub/test_z.cpp" in r.stderr and "tests/unit/test_z.cpp" in r.stderr, r.stderr
+        assert "same basename" in r.stderr, r.stderr
+        assert "xargs" not in r.stderr, r.stderr
+        assert "verified" not in r.stdout, r.stdout
 
     def test_source_newer_than_its_binary_is_refused_here_too(self, tmp_path):
         # Finding 2 [LOW]: the freshness comparison landed on the ctest path only; a binary
