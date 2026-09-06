@@ -116,9 +116,12 @@ violator, and the transaction proceeds "on its own merits", spec.md Edge Cases "
 `Failed` reasons remain exactly `Timeout | Crc`: the engine never concludes a transaction
 from the bus state. The bound is per attempt and scales with byte time: a whole transaction
 under a station that keeps the wire busy concludes within
-`3·(max_frame + 2·T_gap + byte) + 3·(request bytes·byte + T_resp) + 6·poll period` (≈5.5 ms
-at 1 Mb/s, ≈40 ms at the 115200 fallback), plus at most one `max_frame` per attempt when the
-traffic also opens a frame inside each `T_resp` window. That last term is the **cap on the
+`3·(max_frame + 2·T_gap + byte) + 3·(request bytes·byte + T_resp) + 6·poll period` — at the
+superframe cadence (`T_poll`, the caller's) ≈17.5 ms at 1 Mb/s and ≈52.6 ms at the 115200
+fallback; the ≈5.5 ms / ≈40.6 ms once quoted here are the same formula at a ~1 µs cadence
+(PR #137 red-team @`0263d0f`, LOW) — plus at most one `max_frame` per attempt when the
+traffic also opens a frame inside each `T_resp` window (≈21.7 ms / ≈89 ms at `T_poll`;
+`docs/OPEN-QUESTIONS.md` 2026-09-06). That last term is the **cap on the
 in-flight hold**: the `T_resp` timeout gates the start bit (trunk §3), so a response whose
 opening FLAG lands inside `[tx_end, tx_end + T_resp)` holds the timeout off while it is still
 arriving — bytes keep coming at byte cadence — but never past `resp_open + max_frame`. Cadence

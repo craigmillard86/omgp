@@ -172,10 +172,14 @@ class Master {
     //
     // The cap is PER ATTEMPT and scales with byte time, so a whole transaction under a
     // station that keeps the wire busy runs three courtesies plus three windows: within
-    // 3·(max_frame + 2·T_gap + byte) + 3·(request bytes·byte + T_resp) + 6·poll period —
-    // about 5.5 ms at 1 Mb/s, about 40 ms at the 115200 fallback (the rate trunk §7's
-    // BUS_FAULT re-probe runs at) — plus at most one worst-case frame per attempt when the
-    // babble also opens a frame inside the T_resp window, since frame_arriving()'s hold is
+    // 3·(max_frame + 2·T_gap + byte) + 3·(request bytes·byte + T_resp) + 6·poll period.
+    // The poll-period term is not small at the cadence the superframe scheduler (T_poll)
+    // actually polls at: ≈17.5 ms at 1 Mb/s and ≈52.6 ms at the 115200 fallback (the rate
+    // trunk §7's BUS_FAULT re-probe runs at); only at a ~1 µs cadence does the formula give
+    // ≈5.5 ms / ≈40.6 ms (PR #137 red-team @0263d0f, LOW: those two were once quoted here as
+    // THE figures). Plus at most one worst-case frame per attempt when the
+    // babble also opens a frame inside the T_resp window (≈21.7 ms / ≈89 ms at T_poll — the
+    // figures docs/OPEN-QUESTIONS.md 2026-09-06 records), since frame_arriving()'s hold is
     // capped at resp_open + max_frame whatever the byte cadence (PR #137 red-team @9547634,
     // HIGH: before the cap, one byte per poll instant stretched that term to ~kMaxWire poll
     // periods per attempt). Demonstrated by "a transaction under continuous FLAG-free babble…"
