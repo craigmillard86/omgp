@@ -20,9 +20,9 @@ uint32_t clamp_turnaround(uint32_t turnaround_us) {
 }
 } // namespace
 
-Responder::Responder(ByteWire& wire, Clock& clock, RequestHandler& handler, uint8_t my_addr,
+Responder::Responder(ByteWire& wire, Clock& /*clock*/, RequestHandler& handler, uint8_t my_addr,
                      uint32_t turnaround_us)
-    : wire_(wire), clock_(clock), handler_(handler), my_addr_(my_addr),
+    : wire_(wire), handler_(handler), my_addr_(my_addr),
       turnaround_us_(clamp_turnaround(turnaround_us)) {}
 
 const AddrStats& Responder::stats() const {

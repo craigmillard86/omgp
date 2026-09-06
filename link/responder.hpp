@@ -36,6 +36,10 @@ class Responder {
     // turnaround_us is clamped to [TRUNK_T_turn_min_us, TRUNK_T_turn_max_us] here, at
     // construction (contracts/link-cpp.md): no later call can put the engine outside the
     // range the trunk timing model requires.
+    //
+    // Clock& is part of the signature for parity with Master's constructor (contracts/
+    // link-cpp.md) but is not retained: unlike Master::begin(), nothing here runs outside
+    // poll(now_us), so every instant this engine needs already arrives as that parameter.
     Responder(ByteWire& wire, Clock& clock, RequestHandler& handler, uint8_t my_addr,
               uint32_t turnaround_us = TRUNK_T_turn_min_us);
 
@@ -56,7 +60,6 @@ class Responder {
     void transmit_response(uint64_t at_us);
 
     ByteWire& wire_;
-    Clock& clock_;
     RequestHandler& handler_;
     uint8_t my_addr_;
     uint32_t turnaround_us_;
