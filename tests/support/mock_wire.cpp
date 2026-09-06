@@ -19,6 +19,7 @@ namespace {
 constexpr bool needs_stuffing(uint8_t b) {
     return b == omgp::TRUNK_flag_byte || b == omgp::TRUNK_escape_byte;
 }
+} // namespace
 
 // The corrupted CRC high byte for Kind::CrcError: definitely wrong, and on the same side
 // of the FLAG/ESCAPE stuffing boundary as `real_hi` (PR #137 review, MEDIUM). A bare XOR
@@ -26,6 +27,11 @@ constexpr bool needs_stuffing(uint8_t b) {
 // silently change the corrupted frame's wire length relative to the real response's and
 // break every timing assertion built on that length (tests/unit/test_link_master.cpp
 // computes expected instants from the UNCORRUPTED response's own encode_frame length).
+// Declared in mock_wire.hpp (not anonymous): T034 (tests/unit/test_link_loop.cpp) reuses
+// this and encode_crc_corrupted() below to corrupt a REAL Responder's response the same
+// way MockWire's own Kind::CrcError does, rather than re-deriving this stuffing-boundary
+// logic a second time while it is itself pending a ruling (docs/OPEN-QUESTIONS.md
+// 2026-09-05 "Kind::CrcError's corrupted CRC byte").
 uint8_t corrupt_crc_hi(uint8_t real_hi) {
     const uint8_t naive = static_cast<uint8_t>(real_hi ^ 0xFF);
     if (needs_stuffing(naive) == needs_stuffing(real_hi))
@@ -86,6 +92,7 @@ size_t encode_crc_corrupted(const omgp::link::FrameFields& f, uint8_t* out, size
     return w;
 }
 
+namespace {
 // The response FrameFields a conforming node (or MockWire's Respond/CrcError/Duplicate
 // echo) sends back to `request` — dst/src swapped, response bit set, seq echoed. Shared
 // by all three Kinds: they differ only in what bytes reach the wire and when, not in
