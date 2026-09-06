@@ -759,13 +759,21 @@ def _action_prompt(steps):
     return next(s for s in steps if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
 
 
-# --- red-team.yml: the verdict-presence guard parses what agent-approve parses ------------------
+# --- the verdict-presence guards (red-team.yml, claude-review.yml) parse what agent-approve parses
 
-def _verdict_guard():
-    """The jq filter and the grep regex of red-team.yml's "A verdict for this head exists"
-    step, lifted from the YAML so the test runs the exact text the job runs."""
-    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "red-team.yml").read_text())
-    step = next(s for s in wf["jobs"]["attack-pr"]["steps"] if s.get("name") == "A verdict for this head exists")
+# (workflow, job, verdict kind) for each job whose final claude-code-action step can finish
+# "success" having posted nothing, and whose absent verdict then stalls agent-approve on a green
+# check: attack-pr since #141; review since the maintainer's 2026-09-06 direction (run
+# 34036822817 was green with no VERDICT(review) — the same stall, on the side every tier needs).
+VERDICT_GUARDS = [("red-team.yml", "attack-pr", "red-team"), ("claude-review.yml", "review", "review")]
+GUARD_STEP = "A verdict for this head exists"
+
+
+def _verdict_guard(workflow: str, job: str):
+    """The jq filter and the grep regex of a workflow's "A verdict for this head exists" step,
+    lifted from the YAML so the test runs the exact text the job runs."""
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8"))
+    step = next(s for s in wf["jobs"][job]["steps"] if s.get("name") == GUARD_STEP)
     run = step["run"]
     jq = re.search(r"--jq '([^']*)'", run)
     grep = re.search(r'grep -E "([^"]*)"', run)
@@ -773,50 +781,90 @@ def _verdict_guard():
     return jq.group(1), grep.group(1)
 
 
-def _agent_approve_would_accept(comments, head) -> bool:
+def _agent_approve_would_accept(comments, head, kind) -> bool:
     """agent-approve.yml verdictOf, transcribed: claude[bot] only; body trimmed, split on \\n,
     LAST line, trimmed; full-line regex with the exact head."""
-    rx = re.compile(rf"^VERDICT\(red-team\):\s*(clean|findings)\s*@\s*{head}$")
+    rx = re.compile(rf"^VERDICT\({kind}\):\s*(clean|findings)\s*@\s*{head}$")
     return any(rx.match((c.get("body") or "").strip().split("\n")[-1].strip()) is not None
                for c in comments if (c.get("user") or {}).get("login") == "claude[bot]")
 
 
 HEAD = "a16d7a6d2a903ec53d129507fa970031012e9d9b"
 _BOT, _HUMAN = {"login": "claude[bot]"}, {"login": "someone"}
-VERDICT_CASES = [
-    ("last line, trailing newlines", [{"user": _BOT, "body": f"prose\n\nVERDICT(red-team): clean @ {HEAD}\n\n"}]),
-    ("last line, CRLF and indent", [{"user": _BOT, "body": f"prose\r\n  VERDICT(red-team): findings @ {HEAD}  \r\n"}]),
-    ("verdict then a trailing signature", [{"user": _BOT, "body": f"VERDICT(red-team): clean @ {HEAD}\n\n-- posted by the attack pass\n"}]),
-    ("verdict quoted mid-comment", [{"user": _BOT, "body": f"the format is:\nVERDICT(red-team): clean @ {HEAD}\nbut I found more.\n"}]),
-    ("verdict at another head", [{"user": _BOT, "body": f"VERDICT(red-team): clean @ {'0' * 40}"}]),
-    ("short sha", [{"user": _BOT, "body": f"VERDICT(red-team): clean @ {HEAD[:7]}"}]),
-    ("right shape, wrong author", [{"user": _HUMAN, "body": f"VERDICT(red-team): clean @ {HEAD}"}]),
-    ("null body", [{"user": _BOT, "body": None}]),
-    ("one of several comments", [{"user": _HUMAN, "body": "x"}, {"user": _BOT, "body": "no verdict"},
-                                 {"user": _BOT, "body": f"VERDICT(red-team): findings @ {HEAD}"}]),
-]
+
+
+def _verdict_cases(kind):
+    v = f"VERDICT({kind})"
+    return [
+        ("last line, trailing newlines", [{"user": _BOT, "body": f"prose\n\n{v}: clean @ {HEAD}\n\n"}]),
+        ("last line, CRLF and indent", [{"user": _BOT, "body": f"prose\r\n  {v}: findings @ {HEAD}  \r\n"}]),
+        ("verdict then a trailing signature", [{"user": _BOT, "body": f"{v}: clean @ {HEAD}\n\n-- posted by the pass\n"}]),
+        ("verdict quoted mid-comment", [{"user": _BOT, "body": f"the format is:\n{v}: clean @ {HEAD}\nbut I found more.\n"}]),
+        ("verdict at another head", [{"user": _BOT, "body": f"{v}: clean @ {'0' * 40}"}]),
+        ("short sha", [{"user": _BOT, "body": f"{v}: clean @ {HEAD[:7]}"}]),
+        ("right shape, wrong author", [{"user": _HUMAN, "body": f"{v}: clean @ {HEAD}"}]),
+        ("the OTHER kind's verdict at this head", [{"user": _BOT, "body": f"VERDICT({'review' if kind == 'red-team' else 'red-team'}): clean @ {HEAD}"}]),
+        ("null body", [{"user": _BOT, "body": None}]),
+        ("one of several comments", [{"user": _HUMAN, "body": "x"}, {"user": _BOT, "body": "no verdict"},
+                                     {"user": _BOT, "body": f"{v}: findings @ {HEAD}"}]),
+    ]
+
+
+VERDICT_CASES = [(wf, job, kind, name, comments)
+                 for wf, job, kind in VERDICT_GUARDS for name, comments in _verdict_cases(kind)]
 
 
 @pytest.mark.skipif(shutil.which("jq") is None,
-                    reason="jq not present (blind spot: the verdict guard's jq filter not exercised here; ubuntu-latest has it)")
-@pytest.mark.parametrize("name,comments", VERDICT_CASES, ids=[c[0] for c in VERDICT_CASES])
-def test_red_team_verdict_guard_agrees_with_agent_approve(name, comments):
+                    reason="jq not present (blind spot: the verdict guards' jq filter not exercised here; ubuntu-latest has it)")
+@pytest.mark.parametrize("workflow,job,kind,name,comments", VERDICT_CASES,
+                         ids=[f"{c[2]}: {c[3]}" for c in VERDICT_CASES])
+def test_verdict_guard_agrees_with_agent_approve(workflow, job, kind, name, comments):
     """#141 review @a16d7a6 (MEDIUM): the guard's comment says it parses agent-approve's shape
     (last non-empty line, full sha) but its grep matched EVERY line of every claude[bot]
     comment — a verdict followed by a signature was "present" here and absent for
     agent-approve, the exact stall the step exists to expose; a quoted verdict mid-comment
     counted, the #103 laxness back. Run the step's own jq + grep on each shape and require
-    the same answer agent-approve's transcribed parser gives."""
-    jq_filter, grep_re = _verdict_guard()
+    the same answer agent-approve's transcribed parser gives — for BOTH guards, so the review
+    side cannot drift from the red-team side (a review verdict must not satisfy the red-team
+    guard, nor the reverse: the "OTHER kind" case)."""
+    jq_filter, grep_re = _verdict_guard(workflow, job)
     lines = subprocess.run(["jq", "-r", jq_filter], input=json.dumps(comments), capture_output=True, text=True, check=True).stdout
     hit = subprocess.run(["grep", "-E", grep_re.replace("$HEAD", HEAD)], input=lines, capture_output=True, text=True).returncode == 0
-    assert hit == _agent_approve_would_accept(comments, HEAD), (name, lines)
+    assert hit == _agent_approve_would_accept(comments, HEAD, kind), (name, lines)
 
 
-def test_red_team_verdict_guard_cases_cover_both_answers():
+@pytest.mark.parametrize("kind", [g[2] for g in VERDICT_GUARDS])
+def test_verdict_guard_cases_cover_both_answers(kind):
     """The parametrised agreement above would be vacuous if every case had the same answer."""
-    answers = {_agent_approve_would_accept(c, HEAD) for _, c in VERDICT_CASES}
+    answers = {_agent_approve_would_accept(c, HEAD, kind) for _, c in _verdict_cases(kind)}
     assert answers == {True, False}
+
+
+def test_review_verdict_guard_wiring():
+    """claude-review.yml's guard (maintainer direction 2026-09-06; the review-side twin of
+    #141's attack-pr step): it runs AFTER the action, on EVERY tier (no `if` — T0/T1
+    approvals hang off this verdict, unlike attack-pr's `deep` gate), is not advisory, greps
+    for the review kind at the vetted head (`steps.head.outputs.sha`, the sha the prompt
+    stamps — never a mutable ref), and reads comments with the job's own GITHUB_TOKEN via
+    `gh api` in a plain run step: nothing is added to the reviewer's --allowedTools, so the
+    read-only surface pinned above is unchanged (that test still runs against this file)."""
+    wf, steps, action = _review_action()
+    idx = lambda pred: next(i for i, s in enumerate(steps) if pred(s))
+    agent = idx(lambda s: "claude-code-action" in s.get("uses", ""))
+    guard = idx(lambda s: s.get("name") == GUARD_STEP)
+    assert guard > agent, "the guard must run after the action has had its chance to post"
+    g = steps[guard]
+    assert "if" not in g, "every tier is reviewed, so every tier must show a verdict"
+    assert g.get("continue-on-error") is not True, "the guard must fail the job, not warn"
+    env = g.get("env") or {}
+    assert env.get("HEAD") == "${{ steps.head.outputs.sha }}", env
+    assert "${{ github.token }}" in str(env.get("GH_TOKEN")), env
+    _jq, grep_re = _verdict_guard("claude-review.yml", "review")
+    assert grep_re.startswith("^VERDICT\\(review\\):"), grep_re
+    assert "$HEAD$" in grep_re, "the head must be anchored at end of line"
+    assert "exit 1" in g["run"]
+    # Same PR-number expression as the rest of the job (the dispatch arm has no event PR).
+    assert "${{ github.event.pull_request.number || inputs.pr }}" in g["run"]
 
 
 # --- red-team.yml: a restored build tree is another commit's binaries ---------------------------
