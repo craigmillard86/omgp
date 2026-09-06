@@ -59,7 +59,15 @@ protected: ~ByteWire() = default;
 ## What the engines guarantee to the wire
 
 - Never call `transmit()` before the previous transmission's returned instant, nor within
-  `TRUNK_T_gap_us` after the last received byte's final stop bit (Master).
+  `TRUNK_T_gap_us` after the last received byte's final stop bit (Master) — *except* once
+  the bounded courtesy has expired: deferral for activity that is not the host's own ends
+  at `defer_origin + max_frame + TRUNK_T_gap_us`, and past that instant the Master
+  transmits on schedule even while bytes are still arriving (trunk §3: the host is the
+  only initiator; a station still occupying the wire is a §3 violator — `contracts/
+  link-cpp.md` "That push-out is bounded", `data-model.md` §4 "Gap"). *(Amended in PR
+  #137 — pending a ruling, see `docs/OPEN-QUESTIONS.md` 2026-09-05 "bounded courtesy"
+  and 2026-09-06 "third statement of the T_gap rule"; the first wording was
+  unconditional and an engine→wire guarantee the engine no longer holds.)*
 - The Responder calls `transmit()` only inside `[request_end + T_turn_min, request_end +
   T_turn_max]` and only once per accepted request (or replay).
 - `receive()` is the only receive path: each engine drains it at the start of every

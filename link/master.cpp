@@ -140,7 +140,18 @@ void Master::do_transmit(uint64_t at_us) {
     // before any return path — so this initial value can never be read.
     // mutant-ok(equivalent, cxx_init_const): any constant here is behaviourally identical.
     size_t written = 0;
-    // Validated at begin() (length/address); cannot fail here.
+    // encode_frame cannot fail here — by construction, pinned (rule 11): its three refusals
+    // (link/frame.cpp) are PayloadTooLong, refused identically at begin(); ReservedAddress
+    // (0xFF), subsumed by begin()'s dst >= kAddrCount (static_assert above); and
+    // BufferTooSmall, which needs `cap < 2 + 2*(kHeaderLen + len + kCrcLen)` — impossible
+    // for len <= LIMIT_max_l3_payload while buf is kMaxWire bytes:
+    static_assert(
+        kMaxWire >= 2 + 2 * (kHeaderLen + omgp::LIMIT_max_l3_payload + kCrcLen),
+        "buf must hold encode_frame's worst case for the largest payload begin() accepts");
+    // Were any of those to lapse, encode_frame would leave written == 0 and the wire would
+    // see nothing while the transaction was counted and a T_resp window opened (PR #137
+    // review @0263d0f, LOW) — hence the pins rather than a return-value branch that no test
+    // could reach.
     encode_frame(f, buf, sizeof buf, written);
     const uint64_t tx_end = wire_.transmit(buf, written, at_us);
 

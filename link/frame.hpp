@@ -34,7 +34,9 @@ class Deframer {
     // that closed the previous frame, since trunk §4 makes that same byte the next frame's
     // opening delimiter. This is a STATE predicate only: it says an accumulation is open, NOT
     // that bytes are still arriving, and on its own it never goes false again on a quiet wire
-    // (only TooLong/BadEscape return the Deframer to Hunting).
+    // (only two transitions return the Deframer to Hunting, both driven by a received byte:
+    // append()'s TooLong and on_escaped_byte()'s BadEscape; on_flag()'s BadEscape — an ESC
+    // directly followed by a FLAG — counts the discard and opens the next frame, InFrame).
     //
     // Deliberately NOT narrowed to `len_ > 0 || Escaped`: that reads as "a frame is genuinely
     // in flight", but it is also false for the whole first byte time of EVERY frame (on_flag()

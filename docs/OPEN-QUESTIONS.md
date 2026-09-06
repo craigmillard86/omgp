@@ -1823,3 +1823,35 @@ this caller only.
 **Ruling:** pending — human (contract text; folds into the set_bit_rate ruling above).
 **Amends:** the "stated once" sentence in the two 2026-09-06 set_bit_rate entries.
 **Supersedes:** none — amends, not replaces, the two 2026-09-06 set_bit_rate entries above (its reading stays live; see **Amends:**).
+
+---
+
+## 2026-09-06 — the third statement of the T_gap rule (`byte-wire-and-clock.md` "What the engines guarantee to the wire") was left unconditional by the bounded courtesy
+
+**Context:** review at `0263d0f` (#137, MEDIUM). The bounded courtesy (2026-09-05 entry above)
+lets the Master transmit past `defer_origin + max_frame + TRUNK_T_gap_us` while bytes are
+still arriving — zero idle since the last received byte's stop bit — and
+`tests/unit/test_link_master.cpp` "under continuous babble the request goes out exactly at
+deferred_to + kMaxWire byte times + T_gap when polled every microsecond" demonstrates it
+(green in the `native` job at `928877c`, run 34021853034). #137 amended the two places that
+state the T_gap rule as a state-machine description (`contracts/link-cpp.md` "That push-out
+is bounded", `data-model.md` §4 "Gap") but not the third, `contracts/byte-wire-and-clock.md`
+§"What the engines guarantee to the wire": *"Never call `transmit()` … nor within
+`TRUNK_T_gap_us` after the last received byte's final stop bit (Master)."* That is the
+strongest of the three wordings — an engine→wire guarantee — and an F3/F4 implementer
+reading it would rely on an invariant the engine no longer holds.
+**Fix in #137:** the bullet is amended in place (marked *pending a ruling*) to state the
+exception in the same terms as `link-cpp.md`: the unconditional rule holds until the
+courtesy cap; past it the Master transmits on schedule (trunk §3: sole initiator, no CSMA).
+No behaviour changes; no test changes. What the engine actually guarantees the wire is
+therefore: never before the previous transmission's returned instant (unconditional), and
+never within `T_gap` of received activity *unless* that activity has already deferred the
+transmission by one worst-case frame plus `T_gap`.
+**Recommended:** rule as one question with the 2026-09-05 "bounded courtesy" entry — if
+the courtesy is accepted, all three statements read alike; if it is rejected (FR-010
+"never transmit into activity" kept absolute), `byte-wire-and-clock.md` reverts to its
+first wording with the other two, and the babble outcome question reopens.
+**Ruling:** pending — folded into the "bounded courtesy" ruling above.
+**Amends:** the 2026-09-05 "bounded courtesy" entry's list of amended contract text (it
+named two of the three statements of the rule).
+**Supersedes:** none — amends, not replaces, the 2026-09-05 "bounded courtesy" entry (its reading stays live; see **Amends:**).
