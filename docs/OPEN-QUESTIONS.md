@@ -1562,6 +1562,7 @@ accept the figure; note it against §6 in the trunk §10 item the entry above as
 **Ruling:** pending — folded into the "bounded courtesy" ruling above.
 **Amends:** the 2026-09-05 "bounded courtesy" entry's ≈17 ms / ~10× figures (that entry's
 reading and contract text are unchanged).
+**Supersedes:** none — amends, not replaces, the 2026-09-05 "bounded courtesy" entry (its reading stays live; see **Amends:**).
 
 ## 2026-09-06 — a bit-rate change while another station's frame is still arriving: what does the wire model mean?
 
@@ -1590,6 +1591,7 @@ physics and keeps the engine's inference honest without new state. Until ruled, 
 is the same shape of gap (a protection guarantee that holds only under an unstated operating
 assumption).
 **Ruling:** pending — human (ByteWire contract; F3/F4 interface).
+**Supersedes:** none.
 
 ## 2026-09-06 — Master::set_bit_rate(0) is refused; the contract has no refusal clause
 
@@ -1610,6 +1612,7 @@ change for F3; (c) clamp to `TRUNK_bit_rate_fallback` — rejected: no rate is a
 stand-in for "no rate". **Recommended:** (a), with the contract text amended to say so (done in
 #137, marked pending); revisit if F3 ever computes a rate rather than selecting one of §9's.
 **Ruling:** pending — human (contract text).
+**Supersedes:** none.
 
 ## 2026-09-06 — Deframer::in_frame() is a public member the contract's Deframer listing did not have
 
@@ -1629,6 +1632,7 @@ duplicate of parser state the Deframer already holds, and a second place for the
 disagree; (c) expose a richer query (e.g. the accumulator length) — more surface than any
 caller needs today. **Recommended:** (a).
 **Ruling:** pending — human (US1 contract text).
+**Supersedes:** none.
 
 ## 2026-09-06 — Master::set_bit_rate refuses any rate whose byte time truncates to 0 µs (amends the set_bit_rate(0) entry above)
 
@@ -1648,6 +1652,9 @@ zero".
 **Recommended:** (a) with the byte-time condition, not (d): §9's rate table is the protocol's,
 and a generic "≥ 1 µs per byte" precondition does not need re-stating if it ever grows.
 **Ruling:** pending — human (contract text; folds into the ruling on the entry above).
+**Amends:** the 2026-09-06 "set_bit_rate(0)" entry's refusal condition (`bps == 0` becomes
+`bps == 0 || byte_time_us(bps) == 0`); its options and recommendation stand.
+**Supersedes:** none — amends, not replaces, the 2026-09-06 "set_bit_rate(0)" entry above (its reading stays live; see **Amends:**).
 
 ## 2026-09-06 — the protection claimed for the bounded courtesy was FALSE at 3a15d29: poll()'s drain loop stopped early
 
@@ -1678,6 +1685,7 @@ to frames "arriving during an open response window". Now charged to the frame's 
 SUSPECT accounting). Contract text amended in #137, marked pending.
 **Ruling:** none needed for the fix (a bug against the PR's own stated property); the
 attribution change folds into the pending ruling on the amended contract text.
+**Supersedes:** none.
 
 ---
 
@@ -1780,6 +1788,7 @@ pending, folded into the "bounded courtesy" ruling.
 **Ruling:** pending — folded into the "bounded courtesy" ruling above.
 **Amends:** the 2026-09-06 "FLAG-delimited babble" entry's "by construction … exactly F"
 sentence (true of a contiguous stream; the cap makes it true at any cadence).
+**Supersedes:** none — amends, not replaces, the 2026-09-06 "FLAG-delimited babble" entry (its reading stays live; see **Amends:**).
 
 ## 2026-09-06 — the set_bit_rate byte-time guard screens one caller; `wire_.bit_rate()` is the value the engine computes from (amends the two set_bit_rate entries above)
 
@@ -1813,3 +1822,4 @@ the maintainer's ruling. The `master.cpp` `set_bit_rate` comment now says the gu
 this caller only.
 **Ruling:** pending — human (contract text; folds into the set_bit_rate ruling above).
 **Amends:** the "stated once" sentence in the two 2026-09-06 set_bit_rate entries.
+**Supersedes:** none — amends, not replaces, the two 2026-09-06 set_bit_rate entries above (its reading stays live; see **Amends:**).
