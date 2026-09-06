@@ -30,6 +30,8 @@ WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=
 # 16 together stay BELOW the floor, so dropping test_link_master fires the gate —
 # demonstrated by that arithmetic, assuming those 16 have not grown by 304731 (slack over
 # the floor is 6013; over the 16-binary sum it is 304731). Was 200580.
+# The floor is the COUNT gate. The SET gate — every tests/{unit,property}/test_*.cpp compiled,
+# registered and executed, by name — is tools/check_test_set.py in stage_unit (#133).
 UNIT_TEST_FLOOR=509360
 
 stage_codegen() {
@@ -107,16 +109,32 @@ stage_unit() {
     fi
     n=${n:-0}
     echo "unit: executed $n check(s) (ctest path)"
+    # The floor sees a mass loss of checks; it cannot see ONE tests/{unit,property}/test_*.cpp
+    # that is built but never add_test-ed, compiled by no target, or DISABLED, while the rest
+    # keep the sum above it (#133). check_test_set.py reads compile_commands.json, the objects,
+    # `ctest --show-only` and this run's log, and names the escaped source. The two checks are
+    # independent: each reports its own failure, neither masks the other. It runs AFTER the sum
+    # because `ctest --show-only` rewrites LastTest.log (the tool restores it, belt and braces).
+    local rc=0
+    python3 tools/check_test_set.py --ctest || rc=1
     if [ "$n" -lt "$UNIT_TEST_FLOOR" ]; then
       echo "unit: executed check count ($n) below floor ($UNIT_TEST_FLOOR) - test filter may be broken" >&2
-      return 1
+      rc=1
     fi
+    return "$rc"
   else
-    # Every test binary runs; its output is always printed (even on failure) and the
-    # EXECUTED: lines are summed across binaries for the floor.
-    local total=0 bin out rc n
-    for bin in "$BIN"/test_*; do
-      [ -x "$bin" ] || continue
+    # One binary per SOURCE (the same list stage_build compiles): a source whose binary is
+    # missing fails by name (#133) instead of dropping out of a walk over build/native/test_*.
+    # Every binary runs; its output is always printed (even on failure) and the EXECUTED:
+    # lines are summed across binaries for the floor.
+    local total=0 count=0 t bin out rc n
+    for t in tests/unit/test_*.cpp tests/property/test_*.cpp; do
+      [ -f "$t" ] || continue
+      bin="$BIN/$(basename "$t" .cpp)"
+      if [ ! -x "$bin" ]; then
+        echo "unit: $t: no binary at $bin (not built, or built under another name)" >&2
+        return 1
+      fi
       set +e
       out=$("$bin")
       rc=$?
@@ -128,7 +146,9 @@ stage_unit() {
       fi
       n=$(printf '%s\n' "$out" | grep -o 'EXECUTED: [0-9]\+' | grep -o '[0-9]\+' | tail -1) || true
       total=$((total + ${n:-0}))
+      count=$((count + 1))
     done
+    echo "unit: verified $count test binaries (built and executed; bootstrap path)"
     echo "unit: executed $total check(s) (bootstrap path)"
     if [ "$total" -lt "$UNIT_TEST_FLOOR" ]; then
       echo "unit: executed check count ($total) below floor ($UNIT_TEST_FLOOR) - test filter may be broken" >&2

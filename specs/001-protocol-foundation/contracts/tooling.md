@@ -113,7 +113,12 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
 - `unit`: run every test binary; the `EXECUTED: <n>` lines are summed (ctest path via
   `LastTest.log`, bootstrap via stdout); `UNIT_TEST_FLOOR` raised to the new total −
   small slack (documented in the commit that raises it: "raise when tests are added;
-  NEVER lower").
+  NEVER lower"). (Amended by #133: the floor is the COUNT gate only. The ctest path also
+  runs `tools/check_test_set.py`, which proves from `compile_commands.json`, the object
+  files, `ctest --show-only` and the run's `LastTest.log` that every
+  `tests/{unit,property}/test_*.cpp` was compiled, registered and executed, naming the
+  first that was not; the bootstrap path walks the SOURCES, so a source with no binary
+  fails by name. Both paths print a `unit: verified N test binaries` line.)
 - `refimpl`: `python3 -m pytest -q tools/refimpl`.
 - `codegen`: `python3 tools/codegen.py --vectors tests/vectors && python3 tools/codegen.py --check-docs`.
 - `esp32`: calls `stage_codegen` first so `build/gen/` exists on the host before the
