@@ -1782,6 +1782,168 @@ TEST_CASE("frame_arriving()'s cadence boundary is exactly one byte time past the
         REQUIRE(master.stats(dst).timeouts == 1);
 }
 
+// --- The T_resp in-flight hold is bounded in TIME, not only in bytes (red-team @9547634, HIGH)
+
+TEST_CASE("one byte per superframe poll cannot hold the T_resp timeout off for longer than one "
+          "worst-case frame: the attempt ends at the first poll past resp_open + kMaxWire byte "
+          "times, whatever the poll cadence",
+          "[link][timing:T_resp]") {
+    // frame_arriving()'s cadence test is evaluated only at poll() instants and only against the
+    // most recent byte. A station that starts one byte at (or just before) every poll instant
+    // is therefore "still arriving" at every observation the engine makes, and the byte-count
+    // bound alone (Discard::TooLong after kMaxUnstuffed appends) releases the hold only after
+    // ~142 wire bytes — 142 POLL PERIODS at this cadence (~284 ms at T_poll, ~0.5% duty cycle),
+    // not the one worst-case frame (1.42 ms) documented. So the hold is ALSO capped in time at
+    // resp_open_us_ + max_frame_us(): no conforming frame outlasts kMaxWire byte times from
+    // its opening FLAG, so a frame still "arriving" past that is a violator's, and the timeout
+    // fires at the first poll past the cap. Pinned at both rates (the cap scales with byte
+    // time; the poll period does not). The whole-transaction version follows below.
+    const uint32_t rate = GENERATE(omgp::TRUNK_bit_rate, omgp::TRUNK_bit_rate_fallback);
+    CAPTURE(rate);
+    const uint64_t B = byte_time_us(rate);
+    const uint64_t P = omgp::TRUNK_T_poll_us;
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x07;
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+    if (rate != omgp::TRUNK_bit_rate)
+        master.set_bit_rate(rate);
+    REQUIRE(master.begin(dst, nullptr, 0) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, nullptr, 0).size()) * B;
+    const uint64_t deadline = tx_end + omgp::TRUNK_T_resp_us;
+    const uint64_t F = static_cast<uint64_t>(kMaxWire) * B;
+
+    // One opening FLAG inside the window, then exactly one FLAG-free byte at every poll
+    // instant from the next superframe on (escaped-FLAG pairs: the longest accumulation the
+    // Deframer holds — the byte-count bound is deliberately kept out of reach).
+    const uint64_t resp_open = tx_end + 50;
+    const uint8_t flag = static_cast<uint8_t>(omgp::TRUNK_flag_byte);
+    wire.inject_bytes(&flag, 1, resp_open);
+    REQUIRE(wire.advance_to(resp_open, master).kind == MasterEvent::None);
+    const auto pair = stuffed_body(1);
+    uint64_t t = resp_open, released_at = 0;
+    for (size_t k = 0; k < 2 * static_cast<size_t>(kMaxWire) && released_at == 0; ++k) {
+        t += P;
+        wire.inject_bytes(&pair[k % 2], 1, t);
+        wire.advance_to(t, master);
+        if (master.stats(dst).timeouts == 1)
+            released_at = t;
+        else
+            REQUIRE(t <= resp_open + F); // still held: only ever inside the cap
+    }
+    REQUIRE(released_at != 0);
+    // The first poll instant strictly past the cap, and not a byte count: fewer than kMaxWire
+    // attacker bytes were needed (at T_poll one to two, depending on the rate).
+    REQUIRE(released_at > resp_open + F);
+    REQUIRE(released_at - P <= resp_open + F);
+    REQUIRE(released_at - deadline <= F + P);
+    REQUIRE(master.busy()); // the attempt ended in a retry, not in a conclusion from the bus
+    REQUIRE(master.stats(dst).transactions == 1);
+}
+
+TEST_CASE("the time cap on the T_resp hold is exactly resp_open + kMaxWire byte times: a byte "
+          "arriving at that instant still holds the timeout off, one arriving a microsecond "
+          "later does not",
+          "[link][timing:T_resp]") {
+    // Isolates the cap from the cadence bound (which the contiguous-stream test above cannot
+    // do: for a maximal contiguous frame the two release at the same microsecond). Two sparse
+    // bytes, each drained by a poll at its own start instant so the cadence test is satisfied
+    // by construction; only the cap decides. Pins `<=` against `<` and the exact constant.
+    const uint64_t extra = GENERATE(uint64_t{0}, uint64_t{1});
+    CAPTURE(extra);
+    const uint64_t B = byte_us();
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x07;
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+    REQUIRE(master.begin(dst, nullptr, 0) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, nullptr, 0).size()) * B;
+    const uint64_t resp_open = tx_end + 50;
+    const uint64_t cap = resp_open + static_cast<uint64_t>(kMaxWire) * B;
+    const uint8_t flag = static_cast<uint8_t>(omgp::TRUNK_flag_byte);
+    wire.inject_bytes(&flag, 1, resp_open);
+    REQUIRE(wire.advance_to(resp_open, master).kind == MasterEvent::None);
+    const uint8_t esc = static_cast<uint8_t>(omgp::TRUNK_escape_byte);
+    wire.inject_bytes(&esc, 1, cap + extra);
+    wire.advance_to(cap + extra, master);
+    if (extra == 0)
+        REQUIRE(master.stats(dst).timeouts == 0); // at the cap: still held
+    else
+        REQUIRE(master.stats(dst).timeouts == 1); // one microsecond past it: released
+}
+
+TEST_CASE("a transaction under one byte per superframe poll, with a hostile FLAG opened inside "
+          "every T_resp window, still concludes Failed{Timeout} within the FLAG-delimited bound",
+          "[link][timing:T_gap][timing:T_resp][timing:retries]") {
+    // The whole-transaction consequence of the previous two tests: the adversary that rode the
+    // uncapped hold for ~284 ms per attempt (~852 ms per transaction at T_poll) is inside the
+    // same 3 * (F + 2G + B) + 3 * (n * B + R + F) + 6 * P bound the FLAG-delimited babble test
+    // asserts — the "+F per attempt" term is now true BY CONSTRUCTION of the cap at any poll
+    // cadence, not only for the contiguous stream that test measures. Both rates.
+    const uint32_t rate = GENERATE(omgp::TRUNK_bit_rate, omgp::TRUNK_bit_rate_fallback);
+    CAPTURE(rate);
+    const uint64_t B = byte_time_us(rate);
+    const uint64_t P = omgp::TRUNK_T_poll_us;
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x07;
+    const uint8_t payload[] = {0x5A};
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+    if (rate != omgp::TRUNK_bit_rate)
+        master.set_bit_rate(rate);
+
+    const uint64_t F = static_cast<uint64_t>(kMaxWire) * B;
+    const uint64_t G = omgp::TRUNK_T_gap_us;
+    const uint64_t R = omgp::TRUNK_T_resp_us;
+    const uint64_t n_first = request_bytes(dst, 0, false, payload, sizeof payload).size();
+    const uint64_t n_retry = request_bytes(dst, 0, true, payload, sizeof payload).size();
+    const uint64_t n_max = n_first > n_retry ? n_first : n_retry;
+    const uint64_t bound = 3 * (F + 2 * G + B) + 3 * (n_max * B + R + F) + 6 * P;
+
+    const uint64_t begin_at = P;
+    wire.advance_to(begin_at, master);
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+
+    const uint8_t flag = static_cast<uint8_t>(omgp::TRUNK_flag_byte);
+    const auto pair = stuffed_body(1);
+    size_t armed = 0, k = 0;
+    MasterEvent ev{};
+    uint64_t t = begin_at;
+    while (t <= begin_at + bound) {
+        t += P;
+        // One FLAG-free byte at every poll instant; plus, for every request the host has put
+        // on the wire, one FLAG inside that attempt's own window (tx_end + 50) to open the hold.
+        wire.inject_bytes(&pair[k++ % 2], 1, t);
+        while (armed < wire.transcript_size()) {
+            const auto& rec = wire.transcript(armed);
+            const uint64_t n = rec.retry ? n_retry : n_first;
+            wire.inject_bytes(&flag, 1, rec.tx_start_us + n * B + 50);
+            ++armed;
+        }
+        ev = wire.advance_to(t, master);
+        if (ev.kind != MasterEvent::None)
+            break;
+    }
+    REQUIRE(ev.kind == MasterEvent::Failed);
+    REQUIRE(ev.reason == MasterEvent::Timeout);
+    REQUIRE(t - begin_at <= bound);
+    REQUIRE_FALSE(master.busy());
+    REQUIRE(wire.transcript_size() == 3);
+    REQUIRE(master.attempts() == 3);
+    REQUIRE(master.stats(dst).transactions == 1);
+    REQUIRE(master.stats(dst).retries == 2);
+    REQUIRE(master.stats(dst).timeouts == 3);
+    REQUIRE(master.stats(dst).crc_failures == 0);
+}
+
 // --- T-4: the cap follows the CURRENT bit rate (PR #137 review, LOW) --------------------
 
 TEST_CASE("a set_bit_rate() during the deferral re-scales the courtesy cap at once — the "
@@ -2831,6 +2993,49 @@ TEST_CASE("a rate rise between two polls does not rewind last_activity: a later-
     wire.advance_to(correct, master);
     REQUIRE(wire.transcript_size() == 1);
     REQUIRE(wire.transcript(0).tx_start_us == correct);
+}
+
+TEST_CASE("frame_arriving() follows the last byte actually received, not last_activity: after a "
+          "rate rise a stalled in-window frame stops holding the T_resp timeout off at the "
+          "later-drained byte's (earlier) end",
+          "[link][timing:T_resp]") {
+    // master.hpp on last_rx_us_: "Distinct from last_activity_ ... frame_arriving() needs
+    // strictly the last byte actually seen". That distinction was justified by comment alone —
+    // reading last_activity_ in frame_arriving() survived the whole suite (PR #137 red-team
+    // @9547634, LOW). The two diverge exactly where the previous test's guard bites: a byte
+    // drained after a rate rise ends BEFORE one drained at the slower rate; last_rx_us_ is a
+    // plain store and follows it down, last_activity_ is a max and does not. (The behaviour
+    // itself sits inside the "rate change mid-stream" gap recorded in docs/OPEN-QUESTIONS.md
+    // 2026-09-06 / #138; what this pins is the member the predicate reads.)
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+    master.set_bit_rate(omgp::TRUNK_bit_rate_fallback);
+    const uint64_t slow_bt = byte_time_us(omgp::TRUNK_bit_rate_fallback);
+
+    const uint8_t dst = 0x01;
+    const Step silence[] = {{dst, Kind::Silence}};
+    wire.set_script(dst, silence, 1);
+    REQUIRE(master.begin(dst, nullptr, 0) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, nullptr, 0).size()) * slow_bt;
+
+    const uint8_t flag = static_cast<uint8_t>(omgp::TRUNK_flag_byte);
+    wire.inject_bytes(&flag, 1, tx_end + 150); // opens inside the window; ends at +150+slow_bt
+    REQUIRE(wire.advance_to(tx_end + 150, master).kind == MasterEvent::None);
+
+    master.set_bit_rate(omgp::TRUNK_bit_rate);
+    const uint8_t filler = 0x00;
+    wire.inject_bytes(&filler, 1, tx_end + 160); // ends at +160 + byte_us() at the NEW rate
+    REQUIRE(tx_end + 160 + byte_us() < tx_end + 150 + slow_bt);
+    // Quiet since +160 + byte_us() for several byte times at the rate in force: nothing is in
+    // flight, and last_activity_ (still at the FLAG's slow-rate end) must not say otherwise.
+    const uint64_t at = tx_end + omgp::TRUNK_T_resp_us + 40;
+    REQUIRE(at > tx_end + 160 + 2 * byte_us());
+    // ... yet still inside last_activity_ + one byte time, where reading last_activity_ holds.
+    REQUIRE(at <= tx_end + 150 + slow_bt + byte_us());
+    wire.advance_to(at, master);
+    REQUIRE(master.stats(dst).timeouts == 1);
 }
 
 // --- discards attribution: dst only while dst's response window is open (spec US2 AC6) ----
