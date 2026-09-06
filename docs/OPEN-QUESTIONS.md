@@ -1909,3 +1909,35 @@ files — the 2026-08-28 entry above). Each is listed so it is not mistaken for 
 **Ruling:** pending — human (tooling contract amendment; `tools/mutate.sh` is gate machinery).
 **Supersedes:** none — amends the "corrected measurement" entry of 2026-08-28 (its
 `gitDiffRef` finding stands; this entry narrows the *path-filter* finding to compile time).
+
+---
+
+## 2026-09-06 — an idle-time discard is charged to the frame's CLAIMED in-range src; nothing authenticates it (amends the out-of-range entry above)
+
+**Context:** review at `1a55116` (#137, LOW). The out-of-range entry above records that a
+discarded frame claiming `src >= kAddrCount` is counted nowhere. Its in-range half was not
+recorded: with no transaction open (or one gap-deferred), `poll()` charges the discard to
+`stats_[f.src]` — spec US2 AC6 and issue #47 AC6 scope the per-destination counter to frames
+"arriving during an open response window" (the `awaiting` branch, correct and tested); the
+`else` branch is a design choice made in #137 beyond that criterion. `src` is wire-derived and
+unauthenticated (trunk §5 reserves only `0xFF`), so any station injecting intact frames with
+`src = 0x03` while the host is idle inflates `stats(0x03).discards` and node 3 never
+transmitted; nothing downstream can tell the two apart. **Impact today:** diagnostics only —
+no health or scheduling decision reads `AddrStats::discards` (a control: the current contents
+of `core/` and `link/`); it becomes load-bearing the moment `discards` feeds trunk §7
+SUSPECT/OFFLINE accounting, which is the same forgeability the "not attributable to a
+specific `dst_`" CRC branch was written to avoid.
+**Options:** (a) as the entry above — a bus-level `discards` counter in `BusStats` for every
+discard with no open window, in-range or not, so an unattributable discard is never charged
+to an address (per-address discards then mean "during that address's own window" and nothing
+else); (b) keep the claimed-src attribution and document it as unauthenticated, forbidding
+health logic from reading it; (c) drop the `else` branch and count idle-time discards nowhere
+(worsens the FR-011 gap the entry above records).
+**Recommendation:** (a), the same field and the same data-model amendment as the out-of-range
+entry — one counter closes both halves. Folded into #138 item 3 (bus-level outcome/counter),
+where the forgeability of the in-range half is now noted alongside the out-of-range half. Not
+changed in #137: the same data-model ruling is pending.
+**Ruling:** pending — human (data-model amendment; folds into the out-of-range entry's ruling).
+**Amends:** the out-of-range entry above (its "otherwise to the frame's own claimed `src`"
+description of the code is complete; this entry records that the in-range half is forgeable).
+**Supersedes:** none — amends, not replaces, the 2026-09-06 out-of-range entry (its reading stays live; see **Amends:**).

@@ -3502,6 +3502,75 @@ TEST_CASE("a matching answer whose FLAG opens INSIDE the host's own transmission
     REQUIRE(master.busy()); // the attempt's own window is still open
 }
 
+TEST_CASE("a CRC-failed frame whose FLAG opens INSIDE the host's own transmission does not end "
+          "the attempt: the window's lower bound gates the CRC path as well as the delivered one",
+          "[link][timing:T_resp]") {
+    // The case above pins the lower bound on the DELIVERED path; the out-of-window CRC case
+    // ("...arriving outside any open attempt's own window is discarded silently") opens its
+    // corrupted frame AFTER the deadline. Nothing crossed the two, so `awaiting && in_window`
+    // on the CRC path could lose its `frame_open_us >= window_start_us_` half with the suite
+    // green (PR #137 red-team @1a55116, LOW, surviving mutant M62). With that half gone,
+    // another station garbling the line during the host's own request is charged to the
+    // polled node as crc_failures and ends the attempt — three such bursts fail a healthy
+    // node, the very attribution trunk §7's accounting must not make.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x06;
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint64_t t0 = 1000;
+    wire.advance_to(t0, master); // the F3 loop's poll-then-begin
+    const uint8_t payload[] = {0x5A};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript(0).tx_start_us == t0);
+    const size_t req_n = request_bytes(dst, 0, false, payload, sizeof payload).size();
+    const uint64_t tx_end = t0 + static_cast<uint64_t>(req_n) * byte_us();
+    const uint64_t deadline = tx_end + omgp::TRUNK_T_resp_us;
+
+    // A response-shaped frame for THIS transaction with one interior byte flipped; checked
+    // here, through the engine's own Deframer, to land as exactly one Discard::BadCrc (so
+    // the corruption neither stuffs nor unstuffs a byte and the frame is not merely malformed).
+    std::vector<uint8_t> bad = response_bytes(dst, 0, payload, sizeof payload);
+    REQUIRE(bad.size() > 6);
+    bad[5] = static_cast<uint8_t>(bad[5] ^ 0x02);
+    REQUIRE(bad[5] != omgp::TRUNK_flag_byte);
+    REQUIRE(bad[5] != omgp::TRUNK_escape_byte);
+    {
+        Deframer probe;
+        FrameView v{};
+        for (uint8_t b : bad)
+            REQUIRE_FALSE(probe.feed(b, v));
+        REQUIRE(probe.stats().discarded[static_cast<size_t>(Discard::BadCrc)] == 1);
+    }
+
+    // Its opening FLAG lands halfway through the request: inside [tx_start, tx_end), i.e.
+    // before window_start_us_, and it ends well before the deadline.
+    const uint64_t open_at = t0 + (req_n / 2) * byte_us();
+    REQUIRE(open_at > t0);
+    REQUIRE(open_at < tx_end);
+    wire.inject_bytes(bad.data(), bad.size(), open_at);
+    const uint64_t bad_end = open_at + static_cast<uint64_t>(bad.size()) * byte_us();
+    REQUIRE(bad_end < deadline);
+
+    MasterEvent ev{};
+    for (uint64_t t = t0 + 1; t <= bad_end + byte_us(); ++t) {
+        ev = wire.advance_to(t, master);
+        REQUIRE(ev.kind == MasterEvent::None);
+    }
+    REQUIRE(master.stats(dst).crc_failures == 0); // M62: 1 — charged to the polled node
+    REQUIRE(master.attempts() == 1);              // and no retry was scheduled
+    REQUIRE(master.busy());                       // attempt 1's own window is still open
+
+    // The attempt then concludes by the ordinary T_resp timeout, with retries remaining.
+    for (uint64_t t = bad_end + byte_us(); ev.kind == MasterEvent::None && t <= deadline + 4; ++t)
+        ev = wire.advance_to(t, master);
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE(master.stats(dst).timeouts == 1);
+    REQUIRE(master.stats(dst).crc_failures == 0);
+}
+
 TEST_CASE("set_bit_rate() refuses a rate whose byte time truncates to zero: not forwarded, not "
           "counted, and both timing protections keep their byte-time basis",
           "[link]") {
