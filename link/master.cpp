@@ -87,10 +87,18 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     seq_ = next_seq_[dst];
     next_seq_[dst] = static_cast<uint8_t>((next_seq_[dst] + 1) & 0x0F);
     len_ = static_cast<uint8_t>(len);
-    // memcpy(payload_, payload, 0) has no observable effect either way — do_transmit only
-    // ever reads back the first len_ bytes of payload_ (via FrameFields fed into
-    // encode_frame's `for (i < f.len)` loop).
-    // mutant-ok(equivalent, cxx_gt_to_ge): a copy of zero bytes is unobservable either way.
+    // The guard exists for begin(dst, nullptr, 0): memcpy's pointer arguments are declared
+    // non-null even for a zero count, so the unguarded call is UB. On the wire the two are
+    // indistinguishable — do_transmit only reads the first len_ bytes of payload_ (FrameFields
+    // into encode_frame's `for (i < f.len)`) — but NOT equivalent: UBSan's nonnull-attribute
+    // check reports the unguarded call ("null pointer passed as argument 2, which is declared
+    // to never be null"), demonstrated on "…fallback bit rate…" (test_link_master.cpp:494,
+    // one of five begin(dst, nullptr, 0) callers) with the mutant emulated as `if (true)` — the
+    // source-level `len_ >= 0` does not compile under -Werror=type-limits. The native preset
+    // has no -fno-sanitize-recover (CMakeLists.txt:17), so that report is printed and the
+    // suite still exits 0 — the mutant survives by exit code, hence `accepted`, not
+    // `equivalent` (PR #137 review @41983fe, LOW).
+    // mutant-ok(accepted, cxx_gt_to_ge): differs only by memcpy(_, nullptr, 0) — UB, UBSan-only.
     if (len_ > 0)
         std::memcpy(payload_, payload, len_);
     attempt_count_ = 0;
