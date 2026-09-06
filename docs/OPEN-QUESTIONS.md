@@ -1142,7 +1142,15 @@ busy/not-busy hint back to the tracker) or it violates L2/L3 opacity.
 Alternative with no layering conflict: an explicit sentence declaring
 persistent busy out of node-health scope and owned by L4 — which is already
 where §7 reports OFFLINE.
-**Ruling:** pending — human; blocks nothing until T031/T039.
+**Ruling:** ADOPTED the recommendation's bound — human, 2026-09-06, via #110 F1(b): see the
+2026-09-06 entry "#110 F1: a backplane that never answers, and a node that answers ERR_BUSY
+forever, are both bounded" — a "failed transaction" is a timeout, a CRC failure, or eight
+consecutive `ERR_BUSY` answers to the same request, after which the host backs off
+exponentially for that node and reports to L4 (documents: #155; host: #157). The LAYERING
+CONSEQUENCE above is NOT ruled by F1(b): where the busy-count lives (an L4 hint fed back to
+the tracker, or a sanctioned carve-out in `link/`) is a design ruling owed before #157/T039
+is written (review of PR #163, FOLLOW-UP). Filled 2026-09-06 (was: pending — human; blocks
+nothing until T031/T039).
 **Supersedes:** none (the §7-accounting sentence this entry discusses was
 replaced within the still-unmerged PR #122, not by a landed entry).
 
@@ -2071,7 +2079,10 @@ timeout, a CRC failure, or exhaustion of the `ERR_BUSY` budget — eight consecu
 L4. (c) L4: every preset recall has a deadline and a partial-completion report.
 **Ruling:** ADOPTED (a)(b)(c) — human, 2026-09-06 (via #110). Documents: #155. Host budget /
 back-off: #157.
-**Amends:** none. **Supersedes:** none.
+**Amends:** the 2026-09-03 entry "Persistent ERR_BUSY: no bound anywhere detects a wedged
+bridge" — (b) is the bound that entry asked for; its pending Ruling is filled with a pointer
+here. Its layering consequence (busy-detection is payload inspection, which `link/` must not
+do) is not ruled here and is carried to #155/#157. **Supersedes:** none.
 
 ## 2026-09-06 — #110 F2: ERROR.detail is capped; the §6 status-poll budget is derived, not asserted
 
@@ -2079,7 +2090,7 @@ back-off: #157.
 payload; trunk §6 asserted a fixed status-poll cadence "independent of load" for every
 enrolled node, which no frame-time arithmetic supports at the enrolled-node maximum.
 **Recommendation:** (a) YAML `l3_payloads.ERROR.response.detail.max: 4`, enforced by both
-codecs (C++ and Python reference) and exercised by vectors. (b) trunk §6: status polls are
+codecs (C++ and Python reference). (b) trunk §6: status polls are
 round-robin with a stated staleness bound; the maximum satisfiable enrolled-node count is
 derived from frame times at the rate in use; "independent of load" is withdrawn as written.
 (c) the scheduler budgets by measured frame time and demotes a node that consistently
