@@ -383,6 +383,22 @@ class TestCtestPath:
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_b.cpp" in r.stderr and "not registered" in r.stderr, r.stderr
 
+    def test_two_registrations_reaching_one_file_are_refused(self, tmp_path):
+        # Red team @3dde163 finding 3 [LOW]: the exact-path rule held only when the add_test
+        # named the OTHER path. Register build/test_b by its own path while it is a symlink to
+        # test_a's binary: both registrations pass the path comparison and test_a's single run
+        # vouches for test_b's object, which is in no binary that ran. One file cannot be two
+        # targets' binaries: both sources are named.
+        root = make_tree(tmp_path)
+        build = root / "build/native"
+        (build / "test_b").unlink()
+        (build / "test_b").symlink_to(build / "test_a")
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "tests/unit/test_a.cpp" in r.stderr, r.stderr
+        assert "also registered" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
     def test_missing_record_is_a_named_failure(self, tmp_path):
         # stage_unit deletes the record before ctest; if ctest then writes none, the tool must
         # say so by name rather than fall over in the XML parser.
@@ -452,6 +468,36 @@ class TestBootstrapPath:
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/link/test_lost.cpp" in r.stderr and "no binary" in r.stderr, r.stderr
+
+    def test_same_basename_twice_is_refused(self, tmp_path):
+        # Red team @3dde163 finding 1 [MEDIUM]: the walk maps a source to $BIN/<basename>, so
+        # tests/unit/link/test_a.cpp and tests/unit/test_a.cpp share ONE binary — the build
+        # clobbers one with the other, the walk runs the survivor twice, reports "verified 2"
+        # and adds its count to the floor twice. The bootstrap path has one binary per
+        # basename by construction, so two sources with one basename must be named, not merged.
+        root = make_tree(tmp_path, ctest=False)
+        twin = root / "tests/unit/link/test_a.cpp"
+        twin.parent.mkdir(parents=True)
+        twin.write_text("// same basename as tests/unit/test_a.cpp\n")
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/link/test_a.cpp" in r.stderr and "tests/unit/test_a.cpp" in r.stderr, r.stderr
+        assert "same basename" in r.stderr, r.stderr
+        assert "verified" not in r.stdout and "executed 1800000" not in r.stdout, r.stdout
+
+    def test_source_newer_than_its_binary_is_refused_here_too(self, tmp_path):
+        # Finding 2 [LOW]: the freshness comparison landed on the ctest path only; a binary
+        # from an earlier build vouched for a source edited since. Same kind of message here,
+        # same label: an mtime comparison is a control, not a guarantee.
+        root = make_tree(tmp_path, ctest=False)
+        assert run_unit(root).returncode == 0
+        src = root / "tests/unit/test_b.cpp"
+        src.write_text("// every TEST_CASE deleted after the build\n")
+        t = time.time() + 60
+        os.utime(src, (t, t))
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "newer than its binary" in r.stderr, r.stderr
 
     def test_no_sources_is_a_failure_here_too(self, tmp_path):
         # Finding 5's bootstrap half: the source walk over nothing must not print
