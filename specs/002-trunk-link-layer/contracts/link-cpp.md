@@ -70,7 +70,15 @@ class Master {
 public:
     Master(ByteWire&, Clock&, uint8_t host_addr = 0x00);
     Status begin(uint8_t dst, const uint8_t* payload, size_t len);   // Busy if a transaction is open;
-                                                                     // PayloadTooLong / ReservedAddress as encode_frame
+                                                                     // PayloadTooLong as encode_frame;
+                                                                     // ReservedAddress for ANY dst >= kAddrCount
+                                                                     // (0x10..0xFF), wider than encode_frame's
+                                                                     // 0xFF-only: next_seq_/stats_ are kAddrCount-entry
+                                                                     // tables indexed by dst. A refused begin() leaves
+                                                                     // next_seq_ untouched and transmits nothing.
+                                                                     // (Amended in PR #137 — pending a ruling, see
+                                                                     // docs/OPEN-QUESTIONS.md 2026-09-05 "begin()
+                                                                     // refuses dst >= kAddrCount".)
     MasterEvent poll(uint64_t now_us);            // drains ByteWire::receive() into the deframer, then drives the
                                                   // state machine; at most one terminal event per transaction.
                                                   // The ONLY receive path — there is no public feed() (analysis F1).
