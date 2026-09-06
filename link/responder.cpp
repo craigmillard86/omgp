@@ -70,28 +70,43 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
         return;
     }
 
-    if (state_ == State::Scheduled) {
-        // A previous request's response is still pending transmission — not yet due
-        // either, since poll() (transmit_if_due) already flushes anything overdue ahead
-        // of this frame. Trunk §3 is half-duplex with one transaction at a time (spec.md
-        // Edge Cases: the host never has two transactions to one node in flight), so a
-        // second accepted request landing here can only be a rogue/babbling station or a
-        // second host. Discard it and count it rather than silently overwriting the
-        // pending response and its replay buffer.
+    if (state_ != State::Listening) {
+        // A previous request's response is still Scheduled (encoded, not yet handed to
+        // wire_.transmit()) or still Transmitting (handed to wire_.transmit(), still
+        // physically occupying the half-duplex wire until transmit_until_us_ — review +
+        // red-team @033182a finding 1). Trunk §3 is half-duplex with one transaction at a
+        // time (spec.md Edge Cases: the host never has two transactions to one node in
+        // flight), so a second accepted request landing in either state can only be a
+        // rogue/babbling station or a second host. Discard it and count it rather than
+        // silently overwriting the pending response's buffer or colliding with it on the
+        // wire (FR-017: never transmit outside a response window).
         stats_.discards++;
         return;
     }
 
-    const bool is_replay = f.retry && buffer_.valid && f.seq == buffer_.seq;
+    // f.src == buffer_.peer: a retry with a colliding sequence from a DIFFERENT station
+    // must not be served the previous requester's buffered answer (red-team @033182a
+    // finding 3; docs/OPEN-QUESTIONS.md 2026-09-06) — treated as new instead, below.
+    const bool is_replay =
+        f.retry && buffer_.valid && f.seq == buffer_.seq && f.src == buffer_.peer;
     if (is_replay) {
         // data-model.md §5: "retry == 1 && valid && seq == buffer.seq -> retransmit
         // buffer (no handler call)" — the exact bytes already sent, never re-encoded.
         stats_.replays_served++;
     } else {
         // Any other intact request is new (data-model.md §5): a differing sequence, no
-        // retry bit, or a retry bit with nothing yet buffered to replay (spec US3 AS5).
+        // retry bit, a retry bit with nothing yet buffered to replay (spec US3 AS5), or a
+        // retry whose sequence collides with a DIFFERENT station's buffered response.
         uint8_t payload[omgp::LIMIT_max_l3_payload];
         const size_t resp_len = handler_.handle(f.payload, f.len, payload, sizeof payload);
+        // A RequestHandler must never return more than its own `cap` (== sizeof payload
+        // here); checked before the uint8_t cast below, which would otherwise wrap a
+        // value like 256 back into a legal-looking length and silently encode a corrupt
+        // response (red-team @033182a finding 2).
+        if (resp_len > sizeof payload) {
+            stats_.discards++;
+            return;
+        }
         // data-model.md §5: "src = my_addr, dst = request.src" — the response goes back
         // to whoever sent the request, not to my_addr_ itself.
         const FrameFields resp{f.src,   my_addr_, /*response=*/true,
@@ -109,10 +124,9 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
                       "buffer_.bytes must hold encode_frame's worst case for the largest "
                       "response a RequestHandler can write");
         // `f.src == 0xFF` is already excluded above, so ReservedAddress cannot fire on
-        // this call's `resp.dst` — but a RequestHandler is application code (F4-facing)
-        // and could still misbehave (e.g. return more than its own `cap`), so the
-        // returned Status is checked rather than assumed: on any refusal, nothing is
-        // scheduled and the existing replay buffer is left untouched, rather than
+        // this call's `resp.dst`, and resp_len is already bounded above — but the
+        // returned Status is still checked rather than assumed: on any refusal, nothing
+        // is scheduled and the existing replay buffer is left untouched, rather than
         // committing a transaction and a buffer entry for a response that was never
         // encoded.
         if (encode_frame(resp, buffer_.bytes, sizeof buffer_.bytes, written) != Status::Ok) {
@@ -121,6 +135,7 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
         }
         buffer_.len = static_cast<uint16_t>(written);
         buffer_.seq = f.seq;
+        buffer_.peer = f.src;
         buffer_.valid = true;
         stats_.transactions++;
     }
@@ -131,6 +146,11 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
 }
 
 void Responder::transmit_if_due(uint64_t now_us) {
+    if (state_ == State::Transmitting) {
+        if (now_us < transmit_until_us_)
+            return;
+        state_ = State::Listening;
+    }
     if (state_ != State::Scheduled || now_us < deadline_us_)
         return;
     // FR-014 "late poll": the response is due, but if this is the first poll() call to
@@ -139,14 +159,10 @@ void Responder::transmit_if_due(uint64_t now_us) {
     // rather than backdated, and counted rather than silently dropped.
     const uint64_t late_bound_us = request_end_us_ + omgp::TRUNK_T_turn_max_us;
     const bool late = now_us > late_bound_us;
-    wire_.transmit(buffer_.bytes, buffer_.len, now_us);
+    transmit_until_us_ = wire_.transmit(buffer_.bytes, buffer_.len, now_us);
     if (late)
         stats_.late_responses++;
-    // State::Listening is the enum's own zero value, and cxx_assign_const substitutes
-    // exactly that zero value for an assignment's RHS (see `written = 0`'s label above),
-    // so the mutated statement is byte-for-byte identical to this one.
-    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
-    state_ = State::Listening;
+    state_ = State::Transmitting;
 }
 
 void Responder::poll(uint64_t now_us) {

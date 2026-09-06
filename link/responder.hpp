@@ -50,13 +50,21 @@ class Responder {
     const AddrStats& stats() const;
 
   private:
-    enum class State : uint8_t { Listening, Scheduled };
+    // data-model.md §5's three states. Transmitting(until tx_end) matters as soon as more
+    // than one response can be due in a single poll() call: without it, a second
+    // wire_.transmit() could start before the first has left the (half-duplex, trunk §3)
+    // wire — review + red-team @033182a finding 1.
+    enum class State : uint8_t { Listening, Scheduled, Transmitting };
 
     // data-model.md §5: single-frame replay buffer, sized to the codec's own worst-case
     // stuffed-frame bound (kMaxWire).
     struct ReplayBuffer {
         bool valid = false;
         uint8_t seq = 0;
+        // The requester (f.src) this response was encoded for: a retry with a colliding
+        // sequence from a DIFFERENT station must not replay it back to the wrong address
+        // (red-team @033182a finding 3; docs/OPEN-QUESTIONS.md 2026-09-06).
+        uint8_t peer = 0;
         uint16_t len = 0;
         uint8_t bytes[kMaxWire] = {};
     };
@@ -64,15 +72,17 @@ class Responder {
     // Decides new-vs-replay for one intact frame addressed to my_addr, or counts a
     // discard: for a frame not addressed to it, a request whose src is the reserved
     // 0xFF marker (never answerable — see the .cpp), or one arriving while a previous
-    // response is still Scheduled. Schedules an accepted request's response at
-    // request_end_us + turnaround_us_ (data-model.md §5).
+    // response is still Scheduled or still Transmitting (occupying the half-duplex
+    // wire). Schedules an accepted request's response at request_end_us + turnaround_us_
+    // (data-model.md §5).
     void on_request(const FrameFields& f, uint64_t request_end_us);
 
-    // Transmits the Scheduled response and returns to Listening if `now_us` has reached
-    // its deadline (data-model.md §5's Transmitting instant); no-op otherwise. Called
-    // both ahead of every drained byte and once more after the drain loop in poll(), so
-    // a response already due is flushed before on_request() can decide new-vs-replay for
-    // whatever frame comes next (see poll()'s own comment).
+    // Transmits the Scheduled response and moves to Transmitting once `now_us` has
+    // reached its deadline; moves Transmitting back to Listening once `now_us` has
+    // reached the tx_end wire_.transmit() itself returned. Called both ahead of every
+    // drained byte and once more after the drain loop in poll(), so a response already
+    // due is flushed before on_request() can decide new-vs-replay for whatever frame
+    // comes next (see poll()'s own comment).
     void transmit_if_due(uint64_t now_us);
 
     ByteWire& wire_;
@@ -97,6 +107,9 @@ class Responder {
     // (request_end_us_ + turnaround_us_).
     uint64_t request_end_us_ = 0;
     uint64_t deadline_us_ = 0;
+    // Set to wire_.transmit()'s own return value once State::Transmitting is entered: the
+    // instant the wire is free again (data-model.md §5 "until tx_end").
+    uint64_t transmit_until_us_ = 0;
 
     AddrStats stats_ = {};
 };

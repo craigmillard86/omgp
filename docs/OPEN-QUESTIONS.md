@@ -2014,3 +2014,52 @@ FR-011 explicitly.
 impact statement stand; its citation of AC6 as the counting criterion and its "beyond that
 criterion" characterisation of the `else` branch are withdrawn in favour of FR-011/FR-011a).
 **Supersedes:** none — amends, not replaces, the entry above (see **Amends:**).
+
+---
+
+## 2026-09-06 — Responder replay buffer: keyed on sequence alone, `data-model.md` §5 is silent on the requester
+
+**Context:** red-team on #149 (Responder engine, T033/T035) at `033182a`, escalated to
+BLOCKING (an earlier pass at `907dfbe` had classified the same finding a FOLLOW-UP,
+reasoning that closing it needed a spec change). `data-model.md` §5 states the replay
+condition as `retry == 1 && valid && seq == buffer.seq -> retransmit buffer` — silent on
+whether the retrying frame's `src` must match the station the buffered response was
+actually encoded for. As written, a second station that happens to send `retry=1` with a
+sequence colliding with another station's most-recently-buffered sequence is served that
+other station's response, addressed to that other station (the replying frame's `dst` is
+read back out of the buffer, not recomputed from the current request's `src`) — the
+requester that actually asked gets no answer at all, and an uninvolved third party
+receives an unsolicited frame in what looks like its own response window. Trunk §5
+reserves only `0xFF`; `src` is otherwise wire-derived and unauthenticated, the same
+forgeability class as the two `claimed-src` entries above, and, per the red-team pass, the
+same class of hazard this PR already hardens against for `src == 0xFF` (`link/responder.cpp`
+"Request acceptance") — rejecting one wire-forgeable `src` misuse while accepting another
+in code added by the same PR was judged inconsistent enough to be blocking rather than
+deferred.
+**Impact today:** `sim/`/`core/` do not yet drive `Responder` (F4 wiring is a later
+story), so nothing downstream observes the misdirected frame yet; it becomes load-bearing
+the moment a virtual backplane or scenario puts more than one station on a trunk segment
+sharing a `Responder`.
+**Options:** (a) key the replay strictly on `{peer, seq}` — store the requester's `src`
+alongside the buffered response and require it match before treating a retry as a replay;
+any mismatch falls through to the "otherwise -> new" branch (handler invoked, buffer
+replaced, addressed to whoever actually asked) rather than being discarded outright. (b)
+same, but discard-and-count a colliding-sequence retry from a different station instead of
+answering it as new. (c) leave `data-model.md` §5 exactly as written and accept the
+cross-station replay as spec-literal.
+**Recommendation:** (a) — it never withholds an answer from a station that legitimately
+asked, never sends a stale answer to the wrong address, and degrades to exactly the
+documented behaviour whenever there is only one station retrying (the case §5 was written
+for). Safe default per CLAUDE.md ("implement nothing speculative … proceed only if a safe
+default exists"): stricter than the literal §5 text, never contradicts it (identical
+behaviour whenever `f.src == buffer.peer`, which is every single-master trunk case the
+existing test suite exercises), and needs no `protocol/omgp-protocol.yaml` or golden-vector
+change.
+**Ruling:** adopted as the safe default per CLAUDE.md, pending a human look at whether
+`data-model.md` §5 should be reworded to state the `{peer, seq}` key explicitly (a
+documentation clarification only, no further behaviour change). Implemented in
+`link/responder.hpp` (`ReplayBuffer::peer`) and `link/responder.cpp` (`on_request`'s
+`is_replay` condition), with `tests/unit/test_link_responder.cpp` ("a retry-flagged
+request from a different station is treated as new rather than replaying the previous
+requester's buffered answer") written first and confirmed red before the fix.
+**Supersedes:** none.
