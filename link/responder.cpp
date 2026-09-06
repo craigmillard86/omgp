@@ -70,19 +70,10 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
         return;
     }
 
-    if (state_ != State::Listening) {
-        // A previous request's response is still Scheduled (encoded, not yet handed to
-        // wire_.transmit()) or still Transmitting (handed to wire_.transmit(), still
-        // physically occupying the half-duplex wire until transmit_until_us_ — review +
-        // red-team @033182a finding 1). Trunk §3 is half-duplex with one transaction at a
-        // time (spec.md Edge Cases: the host never has two transactions to one node in
-        // flight), so a second accepted request landing in either state can only be a
-        // rogue/babbling station or a second host. Discard it and count it rather than
-        // silently overwriting the pending response's buffer or colliding with it on the
-        // wire (FR-017: never transmit outside a response window).
-        stats_.discards++;
-        return;
-    }
+    // state_ == Listening here, by construction of poll(): bytes are only drained from the
+    // wire while nothing is Scheduled or Transmitting, so a request can never reach this
+    // point while a previous response is pending (red team @e510b29 finding 1 — the
+    // earlier "discard while busy" rule here dropped a queued retry against FR-015).
 
     // f.src == buffer_.peer: a retry with a colliding sequence from a DIFFERENT station
     // must not be served the previous requester's buffered answer (red-team @033182a
@@ -130,6 +121,11 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
         // committing a transaction and a buffer entry for a response that was never
         // encoded.
         if (encode_frame(resp, buffer_.bytes, sizeof buffer_.bytes, written) != Status::Ok) {
+            // Unreachable: both of encode_frame's refusal conditions are excluded above
+            // (ReservedAddress: f.src != 0xFF; BufferTooSmall: resp_len bounded, kMaxWire
+            // static_asserted). Kept as defence in depth; no test can reach the counter to
+            // observe which way it moves.
+            // mutant-ok(accepted, cxx_post_inc_to_post_dec): unreachable by construction.
             stats_.discards++;
             return;
         }
@@ -147,6 +143,10 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
 
 void Responder::transmit_if_due(uint64_t now_us) {
     if (state_ == State::Transmitting) {
+        // Strict `<`: transmit_until_us_ is "the instant of the final stop bit" (ByteWire),
+        // so a poll() at exactly that instant already finds the wire free and drains the
+        // next queued request at once, not one poll later (killing test: "two requests
+        // queued before one late poll…", the poll at exactly tx_end).
         if (now_us < transmit_until_us_)
             return;
         state_ = State::Listening;
@@ -168,13 +168,23 @@ void Responder::transmit_if_due(uint64_t now_us) {
 void Responder::poll(uint64_t now_us) {
     uint8_t byte;
     uint64_t start_us;
-    // Drained unconditionally, exactly like Master::poll (FR-011/FR-017). A response
-    // already due is flushed ahead of every byte (not just once at the end): several
-    // requests queued ahead of an infrequent poll() call must each still be answered in
-    // turn, rather than a later one's on_request() silently overwriting a not-yet-
-    // transmitted response that was, by this call's own now_us, already due.
-    while (wire_.receive(byte, start_us)) {
+    // The wire is drained only while Listening. Trunk §3 is half-duplex, one transaction
+    // at a time: while a response is Scheduled (encoded, not yet due) or Transmitting
+    // (physically occupying the wire until transmit_until_us_) any bytes that have already
+    // arrived stay where they are — in the wire's receive queue, exactly as they would in
+    // a UART's RX FIFO — and are picked up, intact, by the first poll() after the wire is
+    // free. So several requests queued ahead of an infrequent poll() call are each
+    // answered in turn (FR-014: late ones counted, none dropped), a queued trunk §7 retry
+    // is replayed (FR-015), and a later request can never overwrite a response still
+    // pending in buffer_ (red team @e510b29 finding 1; docs/OPEN-QUESTIONS.md
+    // 2026-09-06). A response already due is flushed ahead of every byte, not just once
+    // at the end, so a queued request is decoded the instant the wire is free.
+    for (;;) {
         transmit_if_due(now_us);
+        if (state_ != State::Listening)
+            break;
+        if (!wire_.receive(byte, start_us))
+            break;
 
         const uint32_t discards_before = total_discards(deframer_.stats());
         FrameView view{};
@@ -187,8 +197,8 @@ void Responder::poll(uint64_t now_us) {
         if (total_discards(deframer_.stats()) > discards_before)
             stats_.discards++;
     }
-
-    transmit_if_due(now_us);
+    // No trailing transmit_if_due(): every exit from the loop above is preceded by one,
+    // and a request accepted by on_request() (state_ -> Scheduled) loops back to the top.
 }
 
 } // namespace link

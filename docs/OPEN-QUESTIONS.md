@@ -2311,3 +2311,43 @@ documentation clarification only, no further behaviour change). Implemented in
 request from a different station is treated as new rather than replaying the previous
 requester's buffered answer") written first and confirmed red before the fix.
 **Supersedes:** none.
+
+## 2026-09-06 — Responder: a request arriving while a response is Scheduled or Transmitting is held, not discarded; `data-model.md` §5 is silent on arrival while busy
+
+**Raised by:** red team @e510b29 on PR #149 (finding 1, BLOCKING), confirmed by the review
+at the same head (finding 1). **Affects:** `link/responder.cpp` (`Responder::poll`,
+`Responder::on_request`), `specs/002-trunk-link-layer/data-model.md` §5, FR-014/FR-015/FR-016.
+**Question:** `data-model.md` §5 gives the Responder three states (Listening, Scheduled,
+Transmitting) and an acceptance rule for an intact request addressed to the node, but says
+nothing about a request whose bytes arrive while a previous response is Scheduled (encoded,
+not yet due) or Transmitting (occupying the half-duplex wire). The implementation at
+`e510b29` discarded and counted such a request. The red team showed two consequences with
+runnable reproducers: (1) two requests queued ahead of one late `poll()` — the second is
+swallowed (at a 2 ms poll period, 2 of 8 well-spaced requests were answered), against
+FR-014's "transmitted at once … counted, not dropped"; (2) a trunk §7 retry queued behind
+its own original in the same batch is discarded rather than replayed, against FR-015's
+unconditional MUST ("retry=1 with the same seq MUST be answered from the replay buffer").
+Neither is a rogue station: both are one master obeying the spec, and one Responder polled
+infrequently — the FR-014 situation by definition.
+**Options:** (a) stop draining the wire while `state_ != Listening`: bytes already arrived
+stay in the wire's receive queue (a UART's RX FIFO does the same) and are decoded, intact,
+by the first `poll()` after the wire is free; the queued request then takes the ordinary
+path — replay, new, late-counted — with the single replay buffer untouched. (b) keep
+draining and keep the discard-and-count (the `e510b29` behaviour). (c) a second replay
+buffer / queue of pending responses.
+**Recommendation:** (a). It needs no new state or storage (rule 5: no allocation after
+init), never overwrites a pending response, never transmits outside a window (FR-017), and
+makes FR-014/015/016 hold uniformly for queued requests. The observable cost: a request
+that arrives while a response is pending is answered after that response, from the wire's
+own queue — its own turnaround window may then be missed, in which case it is counted
+late exactly as FR-014 prescribes for any late poll. (b) violates FR-015 as shown. (c) is
+speculative storage for a case the spec does not describe.
+**Ruling:** (a) adopted as the safe default per CLAUDE.md (stricter than the literal §5
+text, contradicts nothing in it; identical behaviour whenever no request arrives while
+busy, which is every case the pre-`e510b29` suite exercised). Implemented in
+`link/responder.cpp` (`poll()` breaks out of its drain loop while `state_ != Listening`;
+the `on_request` busy-discard branch is removed), with four cases in
+`tests/unit/test_link_responder.cpp` written first and red at `94f6424`. Pending a human
+look at whether `data-model.md` §5 should state the "held in the receive queue" rule
+explicitly (a documentation clarification only).
+**Supersedes:** none.

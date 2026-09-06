@@ -52,9 +52,9 @@ struct RecordingHandler : RequestHandler {
 
 // RequestHandler test double that misbehaves (contracts/link-cpp.md: a RequestHandler is
 // application code, not a trusted part of the engine): claims to have written more bytes
-// than its own `cap` -- and, unavoidably here, more than LIMIT_max_l3_payload, so
-// encode_frame() (link/frame.cpp) always refuses it with Status::PayloadTooLong. Never
-// writes past `cap` itself; only the returned count lies.
+// than its own `cap` -- which the Responder's own `resp_len > sizeof payload` check
+// (link/responder.cpp, before the uint8_t cast) refuses, so encode_frame() is never even
+// reached. Never writes past `cap` itself; only the returned count lies.
 struct OversizedHandler : RequestHandler {
     int calls = 0;
 
@@ -536,11 +536,17 @@ TEST_CASE("a retry queued in the same late-poll batch as its original is replaye
     REQUIRE(responder.stats().replays_served == 1);
     REQUIRE(responder.stats().transactions == 1);
     REQUIRE(responder.stats().discards == 0);
-    // The replay carries the retry bit and is otherwise the identical response.
-    REQUIRE(wire.transcript(1).retry);
-    REQUIRE(wire.transcript(1).seq == 5);
-    REQUIRE(wire.transcript(1).len == 1);
-    REQUIRE(wire.transcript(1).payload[0] == 0xC3);
+    // data-model.md Section 5 "retransmit buffer": the exact bytes already sent, so the
+    // replay is field-for-field the first response (its retry bit included: the original
+    // was answered to a retry=0 request, and the buffer is not re-encoded).
+    const MockWire::TxRecord& first = wire.transcript(0);
+    const MockWire::TxRecord& replay = wire.transcript(1);
+    REQUIRE(replay.dst == first.dst);
+    REQUIRE(replay.response);
+    REQUIRE(replay.retry == first.retry);
+    REQUIRE(replay.seq == 5);
+    REQUIRE(replay.len == 1);
+    REQUIRE(replay.payload[0] == 0xC3);
 }
 
 TEST_CASE("eight well-spaced requests are all answered whatever the poll cadence, none "
@@ -650,7 +656,7 @@ TEST_CASE("a RequestHandler that claims more bytes than its own cap is discarded
     wire.advance_to(end + omgp::TRUNK_T_turn_min_us, responder);
 
     REQUIRE(handler.calls == 1);
-    REQUIRE(wire.transcript_size() == 0); // encode_frame refused it: nothing to transmit
+    REQUIRE(wire.transcript_size() == 0); // refused before encoding: nothing to transmit
     REQUIRE(responder.stats().transactions == 0);
     REQUIRE(responder.stats().discards == 1);
 }
