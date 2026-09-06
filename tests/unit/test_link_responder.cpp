@@ -392,9 +392,16 @@ TEST_CASE("a request claiming src == 0xFF is discarded rather than scheduling an
 // --- a genuine in-flight conflict: the second request lands strictly before the ------
 // --- first response is due, so transmit_if_due() cannot have flushed it first --------
 
-TEST_CASE("a second accepted request arriving while the first response is still "
-          "Scheduled (not yet due) is discarded, and the first response still lands",
+TEST_CASE("a second request arriving inside the first response's turnaround window is "
+          "held in the wire's receive queue, and answered after the first response",
           "[link]") {
+    // Red team @e510b29 finding 1 (BLOCKING) / review @e510b29 finding 1: on_request()
+    // used to DISCARD any accepted request that landed while a response was Scheduled or
+    // Transmitting. data-model.md Section 5 is silent on arrival while busy, and FR-015 /
+    // FR-016 make "replay" / "treat as new" unconditional MUSTs -- so the engine now
+    // stops draining the wire while a response is pending and picks the bytes up, intact,
+    // once the wire is free (a UART's RX FIFO does exactly this). Nothing is discarded;
+    // docs/OPEN-QUESTIONS.md 2026-09-06 records the reading.
     FakeClock clock;
     MockWire wire(clock);
     RecordingHandler handler;
@@ -415,35 +422,45 @@ TEST_CASE("a second accepted request arriving while the first response is still 
     // Request B: zero-length payload keeps its own wire time short, so it fully arrives
     // well before deadline_a even at the maximum turnaround.
     const uint64_t t2 = end_a + byte_us();
-    uint64_t end_b = inject_request(wire, request_bytes(kMyAddr, 0x07, false, 2, nullptr, 0), t2);
+    const std::vector<uint8_t> b_bytes = request_bytes(kMyAddr, 0x07, false, 2, nullptr, 0);
+    uint64_t end_b = inject_request(wire, b_bytes, t2);
     REQUIRE(end_b < deadline_a); // otherwise this test would not exercise the conflict
 
-    // Drains B strictly before A's deadline: transmit_if_due(end_b) is a no-op (not due
-    // yet), so B's on_request() sees state_ == Scheduled -- the true in-flight conflict,
-    // not the "already due, flushed first" case covered above.
+    // Drains nothing: A's response is Scheduled and not yet due, so B's bytes stay queued
+    // -- B's handler is not invoked, nothing is transmitted, nothing is discarded.
     wire.advance_to(end_b, responder);
-    // B's handler is never invoked, neither response is transmitted yet, only A ever
-    // became a transaction, and B (only B) is discarded.
     REQUIRE(handler.calls == 1);
     REQUIRE(wire.transcript_size() == 0);
     REQUIRE(responder.stats().transactions == 1);
-    REQUIRE(responder.stats().discards == 1);
+    REQUIRE(responder.stats().discards == 0);
 
-    // A's response still lands once its own deadline is reached; B leaves no trace.
+    // A's response lands exactly at its own deadline, B still untouched behind it.
     wire.advance_to(deadline_a, responder);
-    REQUIRE(handler.calls == 1);
     REQUIRE(wire.transcript_size() == 1);
     REQUIRE(wire.transcript(0).seq == 1);
-    REQUIRE(responder.stats().discards == 1);
+    REQUIRE(wire.transcript(0).tx_start_us == deadline_a);
+    REQUIRE(handler.calls == 1);
+    // A's response occupies the wire until tx_end_a; B is decoded the instant it is free,
+    // and its own response is scheduled from B's request_end -- inside its own window here,
+    // so it is NOT counted late (FR-014 counts a violation, not a queue).
+    const uint64_t deadline_b = end_b + omgp::TRUNK_T_turn_max_us;
+    wire.advance_to(deadline_b, responder);
+    REQUIRE(handler.calls == 2);
+    REQUIRE(wire.transcript_size() == 2);
+    REQUIRE(wire.transcript(1).seq == 2);
+    REQUIRE(wire.transcript(1).dst == 0x07);
+    REQUIRE(wire.transcript(1).tx_start_us == deadline_b);
+    REQUIRE(responder.stats().transactions == 2);
+    REQUIRE(responder.stats().late_responses == 0);
+    REQUIRE(responder.stats().discards == 0);
 }
 
-// --- red-team @907dfbe finding #3 / review + red-team @033182a finding #1: a second ---
-// --- accepted request must neither silently steal the first response NOR collide -----
-// --- with it on the wire --------------------------------------------------------------
+// --- red-team @e510b29 finding 1 (BLOCKING): requests queued ahead of one late poll ----
+// --- are each answered in turn -- none discarded, each counted late (FR-014/015/016) ---
 
-TEST_CASE("a second request whose frame completes while the first response is still "
-          "occupying the wire is discarded and counted, never colliding with it",
-          "[link]") {
+TEST_CASE("two requests queued before one late poll are both answered, in order, each "
+          "counted late, the second the instant the wire is free",
+          "[link][timing:T_turn_max]") {
     FakeClock clock;
     MockWire wire(clock);
     RecordingHandler handler;
@@ -452,32 +469,110 @@ TEST_CASE("a second request whose frame completes while the first response is st
     const uint8_t a[] = {0xA1};
     const uint8_t b[] = {0xB2};
     uint64_t end1 = inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, a, sizeof a), 0);
-    // The second request's bytes start one byte time after the first ends, well inside
-    // what would be the first response's turnaround window -- but neither request is
-    // drained until the single advance_to() below, well after both requests' own
-    // deadlines: a late poll() (FR-014), doubled.
-    const uint64_t t2 = end1 + byte_us();
-    uint64_t end2 = inject_request(wire, request_bytes(kMyAddr, 0x07, false, 2, b, sizeof b), t2);
+    // Request 2 from the same master, a full T_resp + T_gap after request 1 ended (the
+    // tightest spacing the Master itself permits, red team @e510b29). Neither request is
+    // drained until the single advance_to() below, well after both windows have closed:
+    // a late poll() (FR-014), doubled.
+    const uint64_t t2 = end1 + omgp::TRUNK_T_resp_us + omgp::TRUNK_T_gap_us;
+    uint64_t end2 = inject_request(wire, request_bytes(kMyAddr, kPeer, false, 2, b, sizeof b), t2);
+    const uint64_t late_now = end2 + omgp::TRUNK_T_turn_max_us + 1000;
 
-    wire.advance_to(end2 + omgp::TRUNK_T_turn_min_us, responder);
+    wire.advance_to(late_now, responder);
 
-    // The first response is transmitted in full -- never silently stolen -- and counted
-    // late, since request 1's own T_turn_max window had already closed by the time this
-    // (deliberately late) poll() ran.
+    // Response 1 goes out at once and is counted late. Request 2's bytes are NOT drained
+    // past it: the wire is occupied until response 1's final stop bit, so they wait in the
+    // receive queue -- not discarded, not yet handled.
     REQUIRE(handler.calls == 1);
     REQUIRE(wire.transcript_size() == 1);
     REQUIRE(wire.transcript(0).seq == 1);
-    REQUIRE(responder.stats().transactions == 1);
+    REQUIRE(wire.transcript(0).tx_start_us == late_now);
     REQUIRE(responder.stats().late_responses == 1);
+    REQUIRE(responder.stats().discards == 0);
 
-    // Request 2's frame only finishes decoding once the drain loop reaches its last byte,
-    // by which point transmit_if_due() has already flushed response 1: the wire is still
-    // physically occupied transmitting it (data-model.md Section 5
-    // Transmitting(until tx_end); trunk Section 3 is half-duplex). Colliding with it (the
-    // bug this test used to assert as correct, red-team @033182a finding 1) is worse than
-    // discarding it, and unlike the pre-attempt-2 code (907dfbe finding #3) the discard is
-    // counted, not invisible.
-    REQUIRE(responder.stats().discards == 1);
+    // The exact instant transmit() said the wire is free again (ByteWire: "the instant of
+    // the final stop bit"): request 2 is decoded, handled, and -- its own window long
+    // closed -- answered immediately, counted late. Exactly at tx_end, not a poll later
+    // (deep-verify @e510b29: `now_us < transmit_until_us_` survived as `<=`).
+    const std::vector<uint8_t> resp1 =
+        request_bytes(kPeer, kMyAddr, false, 1, a, sizeof a); // same length as response 1
+    const uint64_t tx_end1 = late_now + static_cast<uint64_t>(resp1.size()) * byte_us();
+    wire.advance_to(tx_end1, responder);
+    REQUIRE(handler.calls == 2);
+    REQUIRE(wire.transcript_size() == 2);
+    REQUIRE(wire.transcript(1).seq == 2);
+    REQUIRE(wire.transcript(1).tx_start_us == tx_end1);
+    REQUIRE(responder.stats().transactions == 2);
+    REQUIRE(responder.stats().late_responses == 2);
+    REQUIRE(responder.stats().discards == 0);
+}
+
+TEST_CASE("a retry queued in the same late-poll batch as its original is replayed, not "
+          "dropped",
+          "[link]") {
+    // Red team @e510b29 finding 1, the FR-015 half: a trunk Section 7 retry that lands
+    // behind its own original ahead of one late poll() must still be served from the
+    // replay buffer -- byte for byte, handler not invoked again.
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t p[] = {0xC3};
+    uint64_t end1 = inject_request(wire, request_bytes(kMyAddr, kPeer, false, 5, p, sizeof p), 0);
+    uint64_t end2 = inject_request(wire, request_bytes(kMyAddr, kPeer, true, 5, p, sizeof p),
+                                   end1 + omgp::TRUNK_T_resp_us);
+    const uint64_t late_now = end2 + omgp::TRUNK_T_turn_max_us + 1000;
+
+    wire.advance_to(late_now, responder);
+    REQUIRE(handler.calls == 1);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(responder.stats().replays_served == 0);
+    REQUIRE(responder.stats().discards == 0);
+
+    // Well after response 1 has left the wire: the retry is drained and replayed.
+    wire.advance_to(late_now + 1000, responder);
+    REQUIRE(handler.calls == 1);
+    REQUIRE(wire.transcript_size() == 2);
+    REQUIRE(responder.stats().replays_served == 1);
+    REQUIRE(responder.stats().transactions == 1);
+    REQUIRE(responder.stats().discards == 0);
+    // The replay carries the retry bit and is otherwise the identical response.
+    REQUIRE(wire.transcript(1).retry);
+    REQUIRE(wire.transcript(1).seq == 5);
+    REQUIRE(wire.transcript(1).len == 1);
+    REQUIRE(wire.transcript(1).payload[0] == 0xC3);
+}
+
+TEST_CASE("eight well-spaced requests are all answered whatever the poll cadence, none "
+          "discarded",
+          "[link]") {
+    // The red team's own sweep (@e510b29 finding 1): at 400 us and coarser, requests
+    // were silently swallowed -- 2 of 8 answered at a 2 ms poll period. Expected by
+    // FR-014: all eight, late ones counted, nothing dropped.
+    const uint8_t p[] = {0x5A};
+    for (uint64_t period : {50u, 400u, 1000u, 2000u}) {
+        DYNAMIC_SECTION("poll period " << period << " us") {
+            FakeClock clock;
+            MockWire wire(clock);
+            RecordingHandler handler;
+            Responder responder(wire, clock, handler, kMyAddr);
+            uint64_t t = 1000, last_end = 0;
+            for (int i = 0; i < 8; ++i) {
+                last_end = inject_request(
+                    wire,
+                    request_bytes(kMyAddr, kPeer, false, static_cast<uint8_t>(i), p, sizeof p), t);
+                t = last_end + omgp::TRUNK_T_resp_us + omgp::TRUNK_T_gap_us;
+            }
+            for (uint64_t now = period; now <= last_end + 20000; now += period)
+                wire.advance_to(now, responder);
+            REQUIRE(handler.calls == 8);
+            REQUIRE(wire.transcript_size() == 8);
+            for (size_t i = 0; i < 8; ++i)
+                REQUIRE(wire.transcript(i).seq == i);
+            REQUIRE(responder.stats().transactions == 8);
+            REQUIRE(responder.stats().discards == 0);
+        }
+    }
 }
 
 // --- US3 AS4/FR-017: wrong address / corrupt frame -> discard, no transmission --------
