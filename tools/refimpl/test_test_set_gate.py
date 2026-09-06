@@ -399,6 +399,18 @@ class TestCtestPath:
         assert "also registered" in r.stderr, r.stderr
         assert "verified" not in r.stdout
 
+    def test_hard_linked_binary_under_two_registrations_is_refused(self, tmp_path):
+        # Same rule, hard link: no symlink to resolve, so the file identity (st_dev, st_ino)
+        # is what the comparison must use — a realpath comparison passes this tree (mutant
+        # M22 at round 5 survived until this test).
+        root = make_tree(tmp_path)
+        build = root / "build/native"
+        (build / "test_b").unlink()
+        os.link(build / "test_a", build / "test_b")
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "also registered" in r.stderr, r.stderr
+
     def test_missing_record_is_a_named_failure(self, tmp_path):
         # stage_unit deletes the record before ctest; if ctest then writes none, the tool must
         # say so by name rather than fall over in the XML parser.

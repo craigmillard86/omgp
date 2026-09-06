@@ -19,6 +19,19 @@ WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=
 unit_sources() {
   find tests/unit tests/property -name 'test_*.cpp' 2>/dev/null | LC_ALL=C sort
 }
+# The bootstrap path has ONE binary per basename by construction ($BIN/$(basename $t .cpp)),
+# so two sources sharing a basename would clobber each other's build and let the survivor
+# vouch for both — twice into the floor sum (#172 red team @3dde163, finding 1). Refused by
+# name before the bootstrap build and before the bootstrap unit walk. The cmake path is
+# unaffected: targets are named in CMakeLists, and the tool matches by object, not basename.
+unit_sources_unique() {
+  local dup rc=0
+  for dup in $(unit_sources | xargs -rn1 basename | LC_ALL=C sort | uniq -d); do
+    echo "unit: $(unit_sources | grep "/$dup\$" | tr '\n' ' ')— same basename $dup: the bootstrap path builds one binary per basename, so these would share (and clobber) one" >&2
+    rc=1
+  done
+  return "$rc"
+}
 
 # raise when tests are added; NEVER lower to get green (that change is itself T3)
 # 133865 = 133870 executed (9 binaries; the seeded property tests dominate) minus 5 slack —
@@ -88,8 +101,9 @@ stage_build() {
     support="$(ls tests/support/*.cpp) tools/canonical.cpp tools/l3_helper_dispatch.cpp"
     l3srcs=$(ls l3/*.cpp 2>/dev/null || true)
     linksrcs=$(ls link/*.cpp 2>/dev/null || true)
-    # One binary per unit_sources() entry, named by basename. test_smoke keeps its own main
-    # (linking it with Catch2's main would be a duplicate symbol).
+    # One binary per unit_sources() entry, named by basename — so basenames must be unique.
+    # test_smoke keeps its own main (linking it with Catch2's main would be a duplicate symbol).
+    unit_sources_unique || return 1
     while IFS= read -r t; do
       name=$(basename "$t" .cpp)
       if [ "$name" = test_smoke ]; then
@@ -152,12 +166,19 @@ stage_unit() {
     # build/native/test_*. Every binary runs; its output is always printed (even on failure)
     # and the EXECUTED: lines are summed across binaries for the floor. The same predicate as
     # the ctest path (red team @ceab86f, finding 1): exit 0 alone is not execution — the
-    # binary must print `EXECUTED: n` with n > 0, else it is named and the stage fails.
+    # binary must print `EXECUTED: n` with n > 0, else it is named and the stage fails. A
+    # source newer than its binary is named too (@3dde163 finding 2; the ctest path's
+    # source-vs-object rule in kind) — an mtime comparison is a control, not a guarantee.
     local total=0 count=0 t bin out rc n
+    unit_sources_unique || return 1
     while IFS= read -r t; do
       bin="$BIN/$(basename "$t" .cpp)"
       if [ ! -x "$bin" ]; then
         echo "unit: $t: no binary at $bin (not built, or built under another name)" >&2
+        return 1
+      fi
+      if [ "$t" -nt "$bin" ]; then
+        echo "unit: $t: source is newer than its binary $bin; rebuild before verifying" >&2
         return 1
       fi
       set +e
@@ -185,7 +206,7 @@ stage_unit() {
       echo "unit: no test sources under tests/unit, tests/property (nothing to verify is a failure, not a pass)" >&2
       return 1
     fi
-    echo "unit: verified $count test binaries (built and executed; bootstrap path)"
+    echo "unit: verified $count test binaries (built and executed; bootstrap path)"   # one per source: basenames are unique (checked above)
     echo "unit: executed $total check(s) (bootstrap path)"
     if [ "$total" -lt "$UNIT_TEST_FLOOR" ]; then
       echo "unit: executed check count ($total) below floor ($UNIT_TEST_FLOOR) - test filter may be broken" >&2

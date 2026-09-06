@@ -18,7 +18,10 @@ the run's own machine-readable record, and names every source that escaped:
   registered  `ctest --show-only=json-v1` in the build dir lists a test whose command is
               EXACTLY [<build>/<target>] — the target's own binary, compared as an absolute
               path WITHOUT resolving symlinks: build/<other> -> build/<target> is not a
-              registration of <other> (@ceab86f finding 5). A same-named binary elsewhere
+              registration of <other> (@ceab86f finding 5) — and the FILE the registration
+              runs must be registered once: two registrations whose command[0] are one file
+              (a link registered by its own path; @3dde163 finding 3) are both refused,
+              since one file cannot be two targets' binaries. A same-named binary elsewhere
               is a decoy (red team @94f2462 finding 2). No arguments
               (an argument is a Catch2 filter; a spec matching nothing plus
               --allow-running-no-tests exits 0 with `EXECUTED: 0` — @94f2462 finding 1).
@@ -27,6 +30,11 @@ the run's own machine-readable record, and names every source that escaped:
               here, for every source, rather than silently.
   executed    this run's Testing/junit.xml has a <testcase> for that registered name with
               status="run" whose <system-out> carries an `EXECUTED: <n>` line with n > 0.
+              That evidence is PER BINARY: it shows the binary containing the source's
+              object ran and executed something, not that any particular source's cases
+              did (a source whose TEST_CASEs are all hidden or deleted contributes zero to
+              a binary that still reports n > 0). One source per target in CMakeLists today
+              makes the two coincide — a control on the build files, not a guarantee.
               A DISABLED test is status="disabled" with system-out "Disabled"; a
               SKIP_RETURN_CODE skip is status="notrun" (measured, CMake 3.22). ctest keeps
               only --test-output-size-passed bytes (default 1024) of a passing test's stdout
@@ -152,6 +160,13 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
             log.write_bytes(log_bytes)   # hand the run's log back exactly as ctest left it
     executed, truncated = executed_counts(junit)
     record_mtime = junit.stat().st_mtime
+    identity = {}   # registered path -> (st_dev, st_ino) of the file it runs, for the one-file-one-registration rule
+    for path in registered:
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        identity[path] = (st.st_dev, st.st_ino)
     by_basename = {}   # for the "same name, wrong path" message only
     for path in registered:
         by_basename.setdefault(os.path.basename(path), []).append(path)
@@ -184,7 +199,12 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
                 failures.append(f"{rel}: built as {target} but not registered with ctest (no add_test)")
             continue
         name, argv = registered[binary][0]
-        if len(argv) > 1:
+        twins = [d for d, i in identity.items() if d != binary and i == identity.get(binary)]
+        if twins:
+            failures.append(f"{rel}: registered as '{name}', but the file {binary} runs is also registered as "
+                            f"'{registered[twins[0]][0][0]}' ({twins[0]}): one file cannot be two targets' binaries, "
+                            f"so neither registration is a run of its own target")
+        elif len(argv) > 1:
             failures.append(f"{rel}: registered as '{name}' with argument(s) {argv[1:]} — a filtered run is not "
                             f"execution of the source; register the whole binary (add_test(NAME {target} COMMAND {target}))")
         elif os.path.getmtime(binary) > record_mtime:

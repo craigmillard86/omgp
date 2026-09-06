@@ -125,17 +125,26 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   no older than the source (an edited-after-build source is named; an mtime comparison is
   a control, not a guarantee), registered means an `add_test` whose command is exactly
   the target's own binary — compared as an absolute path without resolving symlinks, so a
-  link to another target's binary is not a registration — with no arguments (a filtered
-  Catch2 run, or a same-named binary elsewhere, is refused), executed means an
-  `EXECUTED: <n>` line with n > 0 (red team @94f2462) — ctest is run with
+  link to another target's binary is not a registration, and the file a registration runs
+  must be registered once (a link registered by its own path is refused, both ways; red
+  team @3dde163) — with no arguments (a filtered Catch2 run, or a same-named binary
+  elsewhere, is refused), executed means an `EXECUTED: <n>` line with n > 0 (red team
+  @94f2462) for the BINARY that contains the source's object — per-binary evidence, not
+  proof that any one source's cases ran; one source per target in `CMakeLists.txt` makes
+  the two coincide, a control on the build files, not a guarantee — ctest is run with
   `--test-output-size-passed 10000000` because its default keeps only the first 1024 bytes
   of a passing test's stdout, dropping the trailing `EXECUTED:` line, and the tool names a
   record truncated that way (red team @3880d35); the bootstrap path walks the same
   `unit_sources()` list, so a source with no binary fails by name, and applies the same
   execution predicate: a binary that exits 0 with no `EXECUTED:` line, or `EXECUTED: 0`,
-  is named and fails the stage (red team @ceab86f). Both paths print a `unit: verified N
-  test binaries` line (N = distinct binaries), and both fail when there are no sources
-  at all. The record, not
+  is named and fails the stage (red team @ceab86f); a source newer than its binary is
+  named (`rebuild before verifying`; a control, not a guarantee); and because that path
+  builds one binary per BASENAME, two sources sharing a basename are refused by name
+  before the bootstrap build and before the walk (red team @3dde163 — otherwise one
+  binary would vouch for both and count twice). Both paths print a `unit: verified N
+  test binaries` line (N = distinct binaries on the ctest path; sources, which the
+  uniqueness check makes one-per-binary, on the bootstrap path), and both fail when
+  there are no sources at all. The record, not
   `LastTest.log`, is the execution evidence: the log interleaves the tests' own stdout
   with ctest's framing (PR #172 red team). The two paths have different predicates by
   design — ctest runs what cmake registered and the tool proves the sources are all in
