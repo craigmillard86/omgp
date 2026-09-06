@@ -2381,3 +2381,86 @@ against an implementation rather than assumed. Material to the human ruling the
 **Ruling:** pending human. No code change; the Responder's behaviour and its tests are as
 in the 2026-09-06 entry.
 **Supersedes:** none (adds a dependency note to the 2026-09-06 entry; does not change it).
+## 2026-09-06 — Responder `{peer, seq}` replay key (adopted above) lets one forged frame evict a pending station's replay entry and defeat FR-015 for that station's own retry
+
+**Raised by:** red team on PR #145 @ `d0cc3bf` (finding 1, BLOCKING). **Affects:**
+`link/responder.cpp` (`on_request`'s `is_replay` condition and its `buffer_` overwrite on
+the "new" path), `link/responder.hpp` (`ReplayBuffer::peer`), the entry immediately above
+this one ("Responder replay buffer: keyed on sequence alone..."), and
+`tests/unit/test_link_responder.cpp:793` ("a retry-flagged request from a different
+station is treated as new...").
+**Question:** the entry above closed one hazard (a colliding-sequence retry from a
+different station stealing another station's buffered answer) by keying replay on
+`{peer, seq}` and, when the incoming frame's `src` does not match `buffer_.peer`, falling
+through to "treated as new" — re-invoking the handler and overwriting `buffer_` with the
+new frame's own `peer`. Trunk §3 states "the host is the only initiator", but `on_request`
+does not check `f.src` against `ADDR_host` for either path (replay or new); nothing stops
+an impostor frame with an arbitrary `src` from taking the "new" branch. Demonstrated
+(`d0cc3bf`, finding 1): after the host's request seq 5 is answered (`buffer_.peer ==
+ADDR_host`), a single retry-flagged frame `{src: 0x02, seq: 5}` is accepted as new
+(`buffer_.peer` becomes `0x02`), so the host's own subsequent genuine retry of seq 5 no
+longer matches `buffer_.peer` either — it is *also* treated as new, re-invoking the
+handler a second time and violating FR-015's unconditional "retry MUST NOT invoke the
+application" for the station that actually asked. One forged frame, from any address,
+timed between a request and its own retry, defeats replay for that request.
+**Options:** (a) validate `f.src == ADDR_host` for every accepted request (replay or new)
+and discard-and-count anything else, per trunk §3's "the host is the only initiator" —
+closes the hole outright, since an impostor's frame can then never reach either branch.
+(b) leave `{peer, seq}` keying as the sole guard (today's code) and accept that any
+station able to place one well-timed frame on the trunk can evict another station's
+in-flight replay entry.
+**Why not implemented directly as a safe default:** (a) is the FR-conformant fix, but it
+requires reversing `tests/unit/test_link_responder.cpp:793-820`'s assertions (that test
+currently REQUIREs a frame from a non-host `src` (`0x07`) to be treated as new, answered,
+and counted — exactly the acceptance (a) would remove); that test itself resulted from an
+explicit prior ruling (the entry above). CLAUDE.md and `docs/OPERATING-POLICY.md` both
+prohibit an agent weakening, skipping or reversing an existing test's assertions without
+an explicit human instruction naming it, so no code or test change is made here despite
+(a) being the recommendation.
+**Recommendation:** (a): add the `f.src == ADDR_host` check (mirroring the existing
+`f.src == 0xFF` reserved-address discard already in `on_request`) and update
+`tests/unit/test_link_responder.cpp:793` to assert the frame from `0x07` is discarded
+(`stats().discards` increments, no transmission, no handler call) rather than answered as
+a new station — a human decision, since it reverses that test's current, deliberately-set
+expectation.
+**Ruling:** pending — human (reverses an existing test's assertions; not a decision an
+agent makes unilaterally per CLAUDE.md/OPERATING-POLICY §2).
+**Amends:** none. **Supersedes:** none — narrows the entry above pending the ruling.
+
+## 2026-09-06 — `RequestHandler`'s "called at most once per NEW sequence" doc claim overclaims: a request duplicated with the retry bit CLEAR re-invokes it
+
+**Raised by:** red team on PR #145 @ `d0cc3bf` (finding 2, BLOCKING as a CLAUDE.md rule 11
+unlabelled-claim violation); the same underlying gap was raised as a non-blocking spec
+question ("FU-3") by an earlier red-team pass on this branch but was never recorded here.
+**Affects:** `link/responder.hpp` (`RequestHandler`'s doc comment), `link/responder.cpp`
+(`on_request`'s `is_replay` condition, `f.retry && ...`), spec 002 SC-004 ("the
+application runs exactly once per new sequence"), trunk §7 line 70 ("a retry of a
+sequence it already answered" — silent on a duplicate with the retry bit clear).
+**Question:** `data-model.md` §5 and trunk §7 gate replay on the retry bit; `link/
+responder.hpp`'s `RequestHandler` comment claims unconditionally "Called at most once per
+NEW sequence ... a retried sequence is replayed from the buffer, never re-invoking this"
+— true only for `f.retry == true`. A request-shaped frame duplicated on the wire with
+`retry == 0` and a colliding `seq` (a reflection, a repeater, or `Kind::Duplicate` applied
+to the request direction rather than the response) satisfies data-model.md §5's literal
+replay condition being false, so `on_request` takes the "new" branch: the handler runs
+again and a second response is transmitted. This is the same code path SC-004 pins for
+the *response* direction (drop/duplicate/delay/corrupt); no cell in
+`tests/unit/test_link_loop.cpp`'s matrix duplicates a *request*.
+**Options:** (a) treat any frame matching `{seq == buffer_.seq, valid}` as a replay
+regardless of the retry bit — closes the SC-004 gap but contradicts data-model.md §5's
+literal condition and trunk §7's wording, and would also suppress a legitimately new
+request that coincidentally reuses a sequence value 16 transactions later (the wrap case
+already on file above). (b) leave the code as-is (matches the ratified design) and correct
+only the doc comment's claim to state its actual, narrower scope. (c) both a comment fix
+and a new pinning test recording today's behaviour, without changing it.
+**Recommendation:** (c) as the immediate, safe-default step (no behaviour change, so
+nothing this repo currently depends on can regress): reworded the `RequestHandler` comment
+in `link/responder.hpp` to state the guarantee only holds when the repeat carries the
+retry bit, and added a case to `tests/unit/test_link_responder.cpp` pinning the current
+(gap) behaviour for a retry-bit-clear duplicate. Whether (a) should also be adopted — i.e.
+whether SC-004's "exactly once per new sequence" or data-model.md §5's retry-bit-gated
+replay condition governs — is a spec conflict for a human to resolve, same class as the
+entry immediately above.
+**Ruling:** pending — human (spec conflict between SC-004 and data-model.md §5 / trunk
+§7). Comment relabelled and pinning test added as the non-behaviour-changing part.
+**Amends:** none. **Supersedes:** none.
