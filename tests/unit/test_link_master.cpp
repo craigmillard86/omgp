@@ -2614,3 +2614,332 @@ TEST_CASE("a frame arriving while no transaction is open at all is discarded and
     REQUIRE(master.stats(forged_dst_node).discards == discards_before + 1);
     REQUIRE_FALSE(master.busy());
 }
+
+// --- poll()'s drain loop reads EVERY byte due at now_us — including those behind the byte --
+// that concluded an attempt ---------------------------------------------------------------
+//
+// PR #137 red-team @3a15d29, HIGH: the drain loop used to `break` on the byte that ended an
+// attempt (Answered, or an in-window CRC failure). Bytes already DUE behind it in the RX queue
+// stayed unread, so fire_pending() at the bottom of the same poll() — or a begin() the caller
+// issued on the terminal event, the intended F3 loop — judged the bus idle from a
+// last_activity_ that predated them and transmitted over a frame another station had put on
+// the wire in the meantime. Reachable in ordinary operation: any poll landing >= T_gap after
+// the concluding frame ended while another frame that started in between is still arriving
+// (at the T_poll cadence with 1.4 ms worst-case frames, routinely). Each case below polls ONCE,
+// mid-foreign-frame, exactly as a superframe scheduler would, and pins the next transmission
+// to other_end + T_gap: not one microsecond earlier (over the frame), and not later (the
+// courtesy cap does not bind here — asserted, so the case cannot pass vacuously).
+
+namespace {
+
+// A full-length frame of some other conversation on the trunk (neither addressed to nor from
+// the host), long enough that a single T_poll-cadence poll lands inside it.
+std::vector<uint8_t> foreign_frame() {
+    uint8_t p[omgp::LIMIT_max_l3_payload];
+    for (size_t i = 0; i < sizeof p; ++i)
+        p[i] = static_cast<uint8_t>(0x11 + (i % 0x40));
+    return encode_expected(0x03, 0x04, false, false, 0x05, p, sizeof p);
+}
+
+// Polls once at `mid` (inside the foreign frame occupying [other_start, other_end)), then
+// pins the transmission at transcript index `idx` to exactly other_end + T_gap.
+void require_deferred_past(MockWire& wire, Master& master, size_t idx, uint64_t other_end) {
+    REQUIRE(wire.transcript_size() == idx); // nothing went out over the frame
+    wire.advance_to(other_end + omgp::TRUNK_T_gap_us - 1, master);
+    REQUIRE(wire.transcript_size() == idx); // not one microsecond early
+    wire.advance_to(other_end + omgp::TRUNK_T_gap_us, master);
+    REQUIRE(wire.transcript_size() == idx + 1);
+    REQUIRE(wire.transcript(idx).tx_start_us == other_end + omgp::TRUNK_T_gap_us);
+}
+
+} // namespace
+
+TEST_CASE("the retry scheduled by an in-window CRC failure defers for a foreign frame that was "
+          "already arriving when the same poll() drained the failing byte",
+          "[link][timing:T_gap]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t dst = 0x01;
+    const uint8_t payload[] = {0xAA, 0xBB};
+    // The retries stay unanswered: only the retry's INSTANT is under test here.
+    const Step script[] = {{dst, Kind::CrcError}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, script, 3);
+
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 1);
+    const uint64_t tx_end =
+        wire.transcript(0).tx_start_us +
+        request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us();
+    const uint64_t crc_end = response_full_end(tx_end, dst, 0, payload, sizeof payload);
+
+    // What end_attempt() will latch as the retry's origin, and the courtesy cap it implies.
+    const uint64_t defer_origin = crc_end + omgp::TRUNK_T_gap_us;
+    const uint64_t cap = courtesy_cap_us(defer_origin);
+
+    const std::vector<uint8_t> other = foreign_frame();
+    const uint64_t other_start = crc_end + byte_us(); // one byte time after the CRC frame ends
+    const uint64_t other_end = other_start + other.size() * byte_us();
+    wire.inject_bytes(other.data(), other.size(), other_start);
+    // Both halves of fire_pending()'s stated protection antecedent hold for this frame, and the
+    // cap is not what keeps the retry off it.
+    REQUIRE(other_start <= defer_origin + omgp::TRUNK_T_gap_us);
+    REQUIRE(other_end <= cap);
+    REQUIRE(other_end + omgp::TRUNK_T_gap_us < cap);
+
+    const uint64_t mid = other_start + (other.size() / 2) * byte_us();
+    REQUIRE(mid < other_end);
+    MasterEvent ev = wire.advance_to(mid, master);
+    REQUIRE(ev.kind == MasterEvent::None); // attempt 0 ended CrcFailed; retries remain
+    REQUIRE(master.stats(dst).crc_failures == 1);
+    REQUIRE(master.busy());
+
+    require_deferred_past(wire, master, 1, other_end);
+    REQUIRE(wire.transcript(1).retry);
+}
+
+TEST_CASE("a begin() issued on Answered defers for the polled node's own duplicate that was "
+          "still arriving when that poll() drained the accepted response",
+          "[link][timing:T_gap]") {
+    // No third station at all: Kind::Duplicate's second copy of the response is on the wire
+    // when the caller, seeing Answered, starts the next transaction on the same tick.
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t dst = 0x01;
+    uint8_t payload[omgp::LIMIT_max_l3_payload];
+    for (size_t i = 0; i < sizeof payload; ++i)
+        payload[i] = static_cast<uint8_t>(0x21 + (i % 0x40));
+    // delay_us on a Duplicate step is the GAP before the repeated copy (contracts/mock-wire.md).
+    const Step script[] = {{dst, Kind::Duplicate, omgp::TRUNK_T_gap_us}};
+    wire.set_script(dst, script, 1);
+
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end =
+        wire.transcript(0).tx_start_us +
+        request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us();
+    const uint64_t first_end = response_full_end(tx_end, dst, 0, payload, sizeof payload);
+    const size_t resp_n = response_bytes(dst, 0, payload, sizeof payload).size();
+    const uint64_t dup_start = first_end + omgp::TRUNK_T_gap_us;
+    const uint64_t dup_end = dup_start + resp_n * byte_us();
+
+    const uint64_t mid = dup_start + (resp_n / 2) * byte_us();
+    MasterEvent ev = wire.advance_to(mid, master);
+    REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(ev.response.len == sizeof payload);
+
+    const uint8_t next[] = {0x01};
+    REQUIRE(master.begin(0x02, next, sizeof next) == Status::Ok);
+    REQUIRE(master.busy());
+    REQUIRE(master.attempts() == 0); // gap-deferred, nothing on the wire yet
+    require_deferred_past(wire, master, 1, dup_end);
+    REQUIRE(wire.transcript(1).dst == 0x02);
+}
+
+TEST_CASE("the F3 loop — begin() on the poll() that returned Answered — defers for a foreign "
+          "frame that was already arriving when that poll() drained the response",
+          "[link][timing:T_gap]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t dst = 0x01;
+    const uint8_t payload[] = {0xAA, 0xBB};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok); // default Respond
+    const uint64_t tx_end =
+        wire.transcript(0).tx_start_us +
+        request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us();
+    const uint64_t resp_end = response_full_end(tx_end, dst, 0, payload, sizeof payload);
+
+    const std::vector<uint8_t> other = foreign_frame();
+    const uint64_t other_start = resp_end + byte_us();
+    const uint64_t other_end = other_start + other.size() * byte_us();
+    wire.inject_bytes(other.data(), other.size(), other_start);
+
+    const uint64_t mid = other_start + (other.size() / 2) * byte_us();
+    MasterEvent ev = wire.advance_to(mid, master);
+    REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE_FALSE(master.busy());
+
+    const uint8_t next[] = {0x02};
+    REQUIRE(master.begin(0x02, next, sizeof next) == Status::Ok);
+    require_deferred_past(wire, master, 1, other_end);
+}
+
+TEST_CASE("a rate rise between two polls does not rewind last_activity: a later-drained byte "
+          "that ends earlier than an earlier one leaves the gap measured from the later end",
+          "[link][timing:T_gap]") {
+    // PR #137 red-team @3a15d29, LOW: the drain loop's `if (byte_end_us > last_activity_)`
+    // guard was pinned by nothing. It is not equivalent to an unconditional assignment: each
+    // byte's end is computed at DRAIN time from the rate then in force, so a byte drained
+    // AFTER set_bit_rate() upwards can end before one drained at the slower rate.
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    master.set_bit_rate(omgp::TRUNK_bit_rate_fallback);
+    const uint64_t slow_bt = byte_time_us(omgp::TRUNK_bit_rate_fallback);
+    const uint8_t noise = 0x41; // not a FLAG: neither delivered nor counted, but bus activity
+    wire.inject_bytes(&noise, 1, 1000);
+    wire.advance_to(1000, master); // ends at 1000 + slow_bt
+
+    master.set_bit_rate(omgp::TRUNK_bit_rate);
+    wire.inject_bytes(&noise, 1, 1010);
+    wire.advance_to(1010, master); // ends at 1010 + byte_us(), i.e. EARLIER than the byte above
+    REQUIRE(1010 + byte_us() < 1000 + slow_bt);
+
+    const uint8_t p[] = {0x01};
+    REQUIRE(master.begin(0x01, p, sizeof p) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 0); // gap-deferred
+
+    const uint64_t rewound = 1010 + byte_us() + omgp::TRUNK_T_gap_us;
+    const uint64_t correct = 1000 + slow_bt + omgp::TRUNK_T_gap_us;
+    wire.advance_to(rewound, master);
+    REQUIRE(wire.transcript_size() == 0); // still deferred: the gap runs from the LATER end
+    wire.advance_to(correct - 1, master);
+    REQUIRE(wire.transcript_size() == 0);
+    wire.advance_to(correct, master);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).tx_start_us == correct);
+}
+
+// --- discards attribution: dst only while dst's response window is open (spec US2 AC6) ----
+
+TEST_CASE("a third station's frame delivered while a transaction is gap-deferred, not awaiting "
+          "a response, is charged to its own claimed source, not to the deferred transaction's dst",
+          "[link]") {
+    // PR #137 review @3a15d29, LOW: `if (open_) stats_[dst_].discards++` charged every
+    // delivered-but-unaccepted frame to dst_ for the whole PendingTransmit phase too, when dst_
+    // had no response window running. spec US2 AC6 scopes the per-destination counter to
+    // frames "arriving during an open response window".
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t other_src = 0x05, dst = 0x02;
+    const uint8_t body[] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+    const std::vector<uint8_t> other =
+        encode_expected(omgp::ADDR_host, other_src, true, false, 0x09, body, sizeof body);
+    const uint64_t other_start = 1000;
+    const uint64_t other_end = other_start + other.size() * byte_us();
+    wire.inject_bytes(other.data(), other.size(), other_start);
+
+    // Drain just the opening FLAG, then begin(): the new transaction is gap-deferred behind it.
+    wire.advance_to(other_start, master);
+    const uint8_t p[] = {0x7A};
+    REQUIRE(master.begin(dst, p, sizeof p) == Status::Ok);
+    REQUIRE(master.busy());
+    REQUIRE(wire.transcript_size() == 0);
+
+    // The frame completes while the transaction is still PendingTransmit.
+    wire.advance_to(other_end, master);
+    REQUIRE(wire.transcript_size() == 0);
+    REQUIRE(master.stats(other_src).discards == 1);
+    REQUIRE(master.stats(dst).discards == 0);
+    // ...and the deferred transmission then follows the frame by exactly T_gap.
+    wire.advance_to(other_end + omgp::TRUNK_T_gap_us, master);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).tx_start_us == other_end + omgp::TRUNK_T_gap_us);
+}
+
+TEST_CASE("an unsolicited frame while idle whose claimed source is exactly kAddrCount is "
+          "discarded without touching any in-range record or the bus statistics",
+          "[link]") {
+    // Idle-path attribution indexes stats_ by the frame's own wire-derived src, guarded by
+    // `f.src < kAddrCount`. kAddrCount itself is the first out-of-range index: with the guard
+    // off by one this write would land past the table (ASan in the native preset). Every
+    // in-range record and the bus record are asserted untouched.
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+    REQUIRE_FALSE(master.busy());
+
+    const uint8_t body[] = {0x01};
+    const std::vector<uint8_t> stray =
+        encode_expected(omgp::ADDR_host, kAddrCount, true, false, 0, body, sizeof body);
+    const uint64_t start = 500;
+    wire.inject_bytes(stray.data(), stray.size(), start);
+    MasterEvent ev = wire.advance_to(start + stray.size() * byte_us(), master);
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE_FALSE(master.busy());
+    REQUIRE(master.stats(kAddrCount).discards == 0); // the benign out-of-range record
+    for (uint8_t a = 0; a < kAddrCount; ++a) {
+        CAPTURE(a);
+        REQUIRE(master.stats(a).discards == 0);
+    }
+    REQUIRE(master.bus_stats().rate_changes == 0);
+    REQUIRE(master.bus_stats().bus_faults == 0);
+}
+
+// --- trunk §3: a response whose start bit lands EXACTLY at tx_end is inside the window and --
+// is allowed to finish past tx_end + T_resp ---------------------------------------------------
+
+TEST_CASE("a response opening exactly at tx_end — the window's closed lower bound — that is "
+          "still arriving at tx_end + T_resp holds the timeout off and is Answered",
+          "[link][timing:T_resp]") {
+    // The in-flight hold is gated on resp_open_us_ >= window_start_us_: the lower bound is
+    // CLOSED (contracts/link-cpp.md "[tx_end, tx_end + T_resp)"), so a frame opening at tx_end
+    // itself is the window's — not a stale one from before this attempt.
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t dst = 0x06;
+    const Step silence[] = {{dst, Kind::Silence}};
+    wire.set_script(dst, silence, 1);
+
+    const uint8_t payload[] = {0x33};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end =
+        wire.transcript(0).tx_start_us +
+        request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us();
+    const uint64_t deadline = tx_end + omgp::TRUNK_T_resp_us;
+
+    uint8_t long_body[omgp::LIMIT_max_l3_payload];
+    for (size_t i = 0; i < sizeof long_body; ++i)
+        long_body[i] = static_cast<uint8_t>(i);
+    const std::vector<uint8_t> resp = response_bytes(dst, 0, long_body, sizeof long_body);
+    const uint64_t resp_end = tx_end + resp.size() * byte_us();
+    REQUIRE(resp_end > deadline); // still arriving when the nominal window ends
+    wire.inject_bytes(resp.data(), resp.size(), tx_end);
+
+    MasterEvent ev = wire.advance_to(deadline, master);
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE(master.stats(dst).timeouts == 0); // held off: the frame opened IN the window
+    ev = wire.advance_to(resp_end, master);
+    REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(ev.response.len == sizeof long_body);
+    REQUIRE(master.stats(dst).timeouts == 0);
+}
+
+TEST_CASE("set_bit_rate() refuses a rate whose byte time truncates to zero: not forwarded, not "
+          "counted, and both timing protections keep their byte-time basis",
+          "[link]") {
+    // PR #137 red-team @3a15d29, LOW: bps == 0 was refused for byte_time_us()'s nonzero
+    // precondition, but any bps > 10 Mb/s passed and made byte_time_us() == 0 — collapsing
+    // frame_arriving()'s cadence slack and max_frame_us() (hence the courtesy cap) to nothing,
+    // silently. The refusal is the property the engine needs, stated once: a byte must take at
+    // least one microsecond at the rate in force (docs/OPEN-QUESTIONS.md 2026-09-06).
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint32_t too_fast = 10000000u + 1u; // the first rate at which 10 bits take < 1 us
+    REQUIRE(byte_time_us(too_fast) == 0);
+    REQUIRE(byte_time_us(10000000u) == 1);
+
+    master.set_bit_rate(too_fast);
+    REQUIRE(wire.bit_rate() == omgp::TRUNK_bit_rate);
+    REQUIRE(master.bus_stats().rate_changes == 0);
+    master.set_bit_rate(20000000u);
+    REQUIRE(wire.bit_rate() == omgp::TRUNK_bit_rate);
+    REQUIRE(master.bus_stats().rate_changes == 0);
+
+    // The boundary itself is accepted: 10 Mb/s has a 1 us byte time.
+    master.set_bit_rate(10000000u);
+    REQUIRE(wire.bit_rate() == 10000000u);
+    REQUIRE(master.bus_stats().rate_changes == 1);
+    REQUIRE(byte_time_us(wire.bit_rate()) != 0);
+}
