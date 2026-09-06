@@ -15,10 +15,14 @@ interleaves ctest's own framing with each test's verbatim stdout, so a test coul
 print `N/M Testing:` / `Command:` lines and mint execution evidence for a binary
 that never ran (PR #172 red team, finding 1). In the JUnit file a test's stdout is
 XML-escaped text inside its own `<testcase>`, the status is ctest's, and the test
-is matched by NAME to `ctest --show-only`'s command — so arguments on the
-registered command (finding 2) and raw bytes in the output (finding 3) are
-handled by ctest, not parsed here. The record must postdate every registered
-binary (finding 4) and the source set must be non-empty (finding 5, review).
+is matched by NAME to `ctest --show-only`'s command, whose command[0] must BE the
+target's binary (`build/native/<target>`; red team @94f2462 finding 2) and must
+carry no arguments (a filtered run is not execution of the source — @94f2462
+finding 1; @7dbf9d8 finding 2 had asked for tolerance because the LOG's argv
+quoting broke the match, which the record does not need). Raw bytes in the output
+(@7dbf9d8 finding 3) are ctest's to replace. The record must postdate every
+registered binary (finding 4), is deleted before ctest runs so a stale one cannot
+vouch (@94f2462 finding 3), and the source set must be non-empty (finding 5).
 
 Every scenario below runs the real `stage_unit` (`bash pipeline.sh unit`) in a
 FAKE tree — the pipeline script, the presets, two stub sources, a hand-written
@@ -213,13 +217,55 @@ class TestCtestPath:
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_b.cpp" in r.stderr and "did not run" in r.stderr, r.stderr
 
-    def test_registered_with_an_argument_is_verified(self, tmp_path):
-        # Finding 2: `add_test(NAME x COMMAND test_x "[tag]")` is ordinary CMake; the record's
-        # per-argv quoting must not turn the binary's name into `test_b" "[tag]`.
+    def test_registered_with_an_argument_is_refused(self, tmp_path):
+        # Red team @7dbf9d8 finding 2 asked for arguments to be TOLERATED (the log's argv
+        # quoting broke the match); red team @94f2462 finding 1 [HIGH] showed why they must
+        # not be: `add_test(… test_x "[tag]")` runs a filtered subset, and a spec matching
+        # nothing plus --allow-running-no-tests exits 0, status="run", `EXECUTED: 0` — twelve
+        # of the real seventeen binaries fit inside the floor's slack at once. CMakeLists
+        # registers `COMMAND ${name}` bare; anything else is not execution of the source.
         root = make_tree(tmp_path, args={"test_b": "[sometag]"})
         r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "argument" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_executed_zero_is_not_execution(self, tmp_path):
+        # The count-bearing half of the same finding: a run that reports `EXECUTED: 0` ran no
+        # test case (the listener prints on testRunEnded regardless). Not execution.
+        root = make_tree(tmp_path, scripts={"test_b": 'echo "EXECUTED: 0"'})
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "EXECUTED: 0" in r.stderr, r.stderr
+
+    def test_registration_of_a_same_named_binary_elsewhere_is_refused(self, tmp_path):
+        # Red team @94f2462 finding 2 [MEDIUM]: registration was matched on the BASENAME of
+        # command[0], so an add_test pointing at /somewhere/else/test_b vouched for the source
+        # while the real build/native/test_b had no add_test at all — escape #1 of #133.
+        root = make_tree(tmp_path, registered=("test_a",))
+        decoy = tmp_path / "decoy" / "test_b"
+        _executable(decoy, '#!/usr/bin/env bash\necho "EXECUTED: 600000"\n')
+        with (root / "build/native/CTestTestfile.cmake").open("a") as f:
+            f.write(f'add_test([=[decoy]=] "{decoy}")\n')
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "not this target's binary" in r.stderr, r.stderr
+
+    def test_stale_record_does_not_survive_a_failed_ctest(self, tmp_path):
+        # Red team @94f2462 finding 3 [LOW]: `rm -f` of the record was an unkilled mutant. A
+        # CTestTestfile with a syntax error makes ctest exit 8 WITHOUT writing a record
+        # (measured, CMake 3.22); the previous run's record must not still be there to vouch.
+        root = make_tree(tmp_path)
+        r = run_unit(root)
         assert r.returncode == 0, r.stdout + r.stderr
-        assert VERIFIED.search(r.stdout).group(1) == "2", r.stdout
+        record = root / "build/native/Testing/junit.xml"
+        assert record.exists()
+        (root / "build/native/CTestTestfile.cmake").write_text('add_test([=[x]=] "/bin/true"\n')  # unclosed
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert not record.exists(), "the previous run's record survived a run in which ctest wrote none"
+        r = run_tool("--ctest", cwd=root)
+        assert r.returncode != 0 and "no execution record" in r.stderr, r.stderr
 
     def test_non_utf8_test_output_is_tolerated(self, tmp_path):
         # Finding 3: the property tests push arbitrary bytes through the codecs; a CAPTURE of a
