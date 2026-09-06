@@ -474,8 +474,15 @@ MasterEvent Master::poll(uint64_t now_us) {
     // PR opened with.
     const bool frame_pending_in_window =
         frame_arriving(now_us) && resp_open_us_ >= window_start_us_ && resp_open_us_ < deadline_;
-    if (open_ && sub_phase_ == SubPhase::AwaitResponse && event.kind == MasterEvent::None &&
-        now_us >= deadline_ && !frame_pending_in_window) {
+    // No `event.kind == None` conjunct: `open_ && AwaitResponse` already implies it. Every
+    // write of a non-None event above first leaves that state — Answered clears open_,
+    // end_attempt's terminal branch clears open_, its retry branch moves to PendingTransmit
+    // and resets the event — and nothing between the drain loop and here re-enters
+    // AwaitResponse (only do_transmit does, from fire_pending() below). Dead by construction;
+    // an unkillable conjunct, removed rather than labelled, as at @40355cf (PR #137 red-team
+    // @1057568, LOW: deleting it left the whole suite green).
+    if (open_ && sub_phase_ == SubPhase::AwaitResponse && now_us >= deadline_ &&
+        !frame_pending_in_window) {
         end_attempt(deadline_, MasterEvent::Timeout, event);
     }
 
