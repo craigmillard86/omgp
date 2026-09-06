@@ -26,9 +26,10 @@ WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=
 # the floor is not chased upward, so the CURRENT total is the `unit: executed N check(s)`
 # line of the latest run, not this comment (it went stale twice: #137 reviews @050f397 and
 # @c0bf71c). What the floor protects is the invariant, restated with the figures measured
-# at 1a55116 (515373 = test_link_master 310744 + the other 16 binaries 204629): the other 16 together stay BELOW the floor, so dropping test_link_master
-# fires the gate — demonstrated by that arithmetic, assuming those 16 have not grown by
-# 304731 (slack over the floor is 6013; over the 16-binary sum it is 304731). Was 200580.
+# at 1a55116 (515373 = test_link_master 310744 + the other 16 binaries 204629): the other
+# 16 together stay BELOW the floor, so dropping test_link_master fires the gate —
+# demonstrated by that arithmetic, assuming those 16 have not grown by 304731 (slack over
+# the floor is 6013; over the 16-binary sum it is 304731). Was 200580.
 UNIT_TEST_FLOOR=509360
 
 stage_codegen() {

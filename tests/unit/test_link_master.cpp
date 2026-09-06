@@ -3511,8 +3511,9 @@ TEST_CASE("a CRC-failed frame whose FLAG opens INSIDE the host's own transmissio
     // on the CRC path could lose its `frame_open_us >= window_start_us_` half with the suite
     // green (PR #137 red-team @1a55116, LOW, surviving mutant M62). With that half gone,
     // another station garbling the line during the host's own request is charged to the
-    // polled node as crc_failures and ends the attempt — three such bursts fail a healthy
-    // node, the very attribution trunk §7's accounting must not make.
+    // polled node as crc_failures and ends the attempt — three such bursts fail a
+    // transaction, nine (three consecutive failed transactions, trunk §7) mark a healthy
+    // node SUSPECT: the very attribution §7's accounting must not make.
     FakeClock clock;
     MockWire wire(clock);
     const uint8_t dst = 0x06;
@@ -3634,6 +3635,18 @@ TEST_CASE("a second CRC-failed frame in the T_gap after an in-window CRC failure
     // Pristine: the concluded attempt is not re-concluded. Without `awaiting`: 2.
     REQUIRE(master.stats(dst).crc_failures == 1);
     REQUIRE(master.attempts() == 1); // no extra retry consumed
+
+    // Positive control (PR #142 review @9632347, LOW: the case above is all-negative — every
+    // assertion there also holds if inject_bytes() delivered nothing). Here the injected
+    // frame's last byte lands past the retry instant, so the retry is gap-deferred behind it
+    // (data-model.md §4 "Gap") — an instant only a RECEIVED frame can produce. The same
+    // construction and the same helper as the case above, so it stands as that case's RX
+    // canary too; the M62 witness itself cannot carry it (a frame long enough to outlast
+    // the deadline closes after the timeout, with `awaiting` already false).
+    REQUIRE(end2 > crc_end + omgp::TRUNK_T_gap_us);
+    require_deferred_past(wire, master, 1, end2);
+    REQUIRE(wire.transcript(1).retry);
+    REQUIRE(master.stats(dst).crc_failures == 1);
 }
 
 TEST_CASE("set_bit_rate() refuses a rate whose byte time truncates to zero: not forwarded, not "
