@@ -43,6 +43,11 @@ public:
     bool feed(uint8_t byte, FrameView& out);      // true exactly when a frame is delivered by this byte
     void reset();                                 // back to Hunting; counters kept
     const DeframerStats& stats() const;
+    bool in_frame() const;                        // state != Hunting (InFrame or Escaped: a FLAG has been seen
+                                                  // and no discard has reset the parser). A state predicate
+                                                  // only — never false on a quiet wire. Added for Master's
+                                                  // T_resp in-flight test (PR #137, pending a ruling —
+                                                  // docs/OPEN-QUESTIONS.md 2026-09-06 "Deframer::in_frame()")
 };
 ```
 Guarantees: `feed` never reads memory other than `byte` and its own accumulator; delivered
@@ -65,13 +70,24 @@ class Master {
 public:
     Master(ByteWire&, Clock&, uint8_t host_addr = 0x00);
     Status begin(uint8_t dst, const uint8_t* payload, size_t len);   // Busy if a transaction is open;
-                                                                     // PayloadTooLong / ReservedAddress as encode_frame
+                                                                     // PayloadTooLong as encode_frame;
+                                                                     // ReservedAddress for ANY dst >= kAddrCount
+                                                                     // (0x10..0xFF), wider than encode_frame's
+                                                                     // 0xFF-only: next_seq_/stats_ are kAddrCount-entry
+                                                                     // tables indexed by dst. A refused begin() leaves
+                                                                     // next_seq_ untouched and transmits nothing.
+                                                                     // (Amended in PR #137 — pending a ruling, see
+                                                                     // docs/OPEN-QUESTIONS.md 2026-09-05 "begin()
+                                                                     // refuses dst >= kAddrCount".)
     MasterEvent poll(uint64_t now_us);            // drains ByteWire::receive() into the deframer, then drives the
                                                   // state machine; at most one terminal event per transaction.
                                                   // The ONLY receive path — there is no public feed() (analysis F1).
     bool busy() const;
     uint8_t attempts() const;                     // 0..3 for the open/last transaction
-    void set_bit_rate(uint32_t bps);              // pass-through to the wire + BusStats.rate_changes
+    void set_bit_rate(uint32_t bps);              // pass-through to the wire + BusStats.rate_changes;
+                                                  // refused (not forwarded, not counted) when byte_time_us(bps)
+                                                  // would be 0: bps == 0 and bps > 10 Mb/s (PR #137, pending a
+                                                  // ruling — docs/OPEN-QUESTIONS.md 2026-09-06, two entries)
     const AddrStats& stats(uint8_t addr) const;   // per destination (kAddrCount entries)
     const BusStats& bus_stats() const;
     void reset_stats();
@@ -80,8 +96,40 @@ public:
 Behaviour (tests assert each): a new transaction uses the destination's next 4-bit
 sequence; retries reuse it and set `retry`; at most `TRUNK_retries` retries; response
 window `[tx_end, tx_end + TRUNK_T_resp_us)`; a CRC-failed frame in the window ends the
-attempt at once; frames failing any acceptance check are discarded and counted; the next
-transmission starts no earlier than `last_activity + TRUNK_T_gap_us`.
+attempt at once; frames failing any acceptance check are discarded and counted — against
+`dst` while `dst`'s response window is open (spec US2 AC6), otherwise against the frame's own
+claimed `src` when that is in range (a claimed `src` of `0x10..0xFE` is discarded and counted
+nowhere — an FR-011 tension recorded in `docs/OPEN-QUESTIONS.md` 2026-09-06, bus-level counter
+tracked in #138) — and a byte-for-byte drain: `poll()` reads every byte due at
+`now_us`, including those behind the byte that concluded an attempt; the next transmission
+starts no earlier than `last_activity + TRUNK_T_gap_us`, where `last_activity` is re-read on
+every `poll()` so a byte arriving during the deferral pushes the instant out. `begin()` does
+not drain the wire itself: its own collision guarantee assumes `poll(now_us)` immediately
+precedes it at the same `now_us` (the intended F3 loop `ev = poll(now); if (ev.kind != None)
+begin(...)`) — stated, not enforced (PR #137; enforcement tracked in #138).
+That push-out is bounded: deferral for activity that is not the host's own ends at
+`defer_origin + max_frame + TRUNK_T_gap_us` (`defer_origin` = the instant the transmission
+was first deferred to; `max_frame` = `kMaxWire` byte times at the current rate — one
+worst-case frame, trunk §4 / SC-008), and past that the host transmits on schedule (trunk §3:
+the host is the only initiator, no CSMA; a station still occupying the wire is a §3
+violator, and the transaction proceeds "on its own merits", spec.md Edge Cases "Babble").
+`Failed` reasons remain exactly `Timeout | Crc`: the engine never concludes a transaction
+from the bus state. The bound is per attempt and scales with byte time: a whole transaction
+under a station that keeps the wire busy concludes within
+`3·(max_frame + 2·T_gap + byte) + 3·(request bytes·byte + T_resp) + 6·poll period` — at the
+superframe cadence (`T_poll`, the caller's) ≈17.5 ms at 1 Mb/s and ≈52.6 ms at the 115200
+fallback; the ≈5.5 ms / ≈40.6 ms once quoted here are the same formula at a ~1 µs cadence
+(PR #137 red-team @`0263d0f`, LOW) — plus at most one `max_frame` per attempt when the
+traffic also opens a frame inside each `T_resp` window (≈21.7 ms / ≈89 ms at `T_poll`;
+`docs/OPEN-QUESTIONS.md` 2026-09-06). That last term is the **cap on the
+in-flight hold**: the `T_resp` timeout gates the start bit (trunk §3), so a response whose
+opening FLAG lands inside `[tx_end, tx_end + T_resp)` holds the timeout off while it is still
+arriving — bytes keep coming at byte cadence — but never past `resp_open + max_frame`. Cadence
+alone is sampled at `poll()` instants and so bounds the hold in bytes only (one byte per poll
+instant held it for `~kMaxWire` poll periods — 284 ms at `T_poll` — PR #137 red-team
+@`9547634`, HIGH); the cap makes the bound a time, and no legitimate response can reach it (at
+most `kMaxWire` contiguous bytes). *(Amended in PR #137 — pending a ruling, see
+`docs/OPEN-QUESTIONS.md` 2026-09-05 "bounded courtesy".)*
 
 ## Responder engine (`responder.hpp`) — trunk §3, §7
 

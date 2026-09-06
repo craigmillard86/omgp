@@ -272,3 +272,166 @@ TEST_CASE("MockWire's RX queue capacity overflow is a hard test failure, never a
     REQUIRE(fault != nullptr);
     REQUIRE(std::strcmp(fault, "MockWire: RX queue capacity exceeded (4 * kMaxWire)") == 0);
 }
+
+// --- contracts/mock-wire.md Step table: Kind::CrcError / Kind::Duplicate, at the harness -
+// level directly (PR #137 review, MEDIUM: implemented and used throughout
+// tests/unit/test_link_master.cpp, T029's own slice of T030, but never asserted here) -----
+
+TEST_CASE("Kind::CrcError answers with a CRC-invalid frame of the same wire length as the "
+          "real response would have been, at request_end + delay_us",
+          "[link][mock_wire]") {
+    FakeClock clock;
+    const Step crc_step[] = {{0x01, Kind::CrcError, 30}};
+    MockWire wire(clock);
+    wire.set_script(0x01, crc_step, 1);
+
+    const std::vector<uint8_t> req = encode_request(0x01, 0);
+    uint64_t tx_end = 0;
+    HEAP_FREE_SCOPE({ tx_end = wire.transmit(req.data(), req.size(), 0); });
+
+    const std::vector<uint8_t> real_answer = expected_respond_answer(req);
+    const uint64_t answer_end =
+        tx_end + 30 +
+        static_cast<uint64_t>(real_answer.size()) * byte_time_us(omgp::TRUNK_bit_rate);
+    wire.advance_to(answer_end);
+
+    Deframer d;
+    FrameView view{};
+    bool delivered = false;
+    size_t drained = 0;
+    uint8_t byte;
+    uint64_t start_us;
+    uint64_t first_start = 0;
+    uint64_t last_start = 0;
+    while (wire.receive(byte, start_us)) {
+        if (drained == 0)
+            first_start = start_us;
+        last_start = start_us;
+        if (d.feed(byte, view))
+            delivered = true;
+        ++drained;
+    }
+    // contracts/mock-wire.md: "the real response with its last CRC byte XOR 0xFF" — never
+    // an intact frame, but (docs/OPEN-QUESTIONS.md 2026-09-05: the byte itself is not a
+    // literal XOR 0xFF at four values) always the same wire length as the real one.
+    REQUIRE_FALSE(delivered);
+    REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::BadCrc)] == 1);
+    REQUIRE(drained == real_answer.size());
+    // "at request_end + delay_us": the instant itself, pinned like the Duplicate case's.
+    // The drain count alone passes for every delay SMALLER than the scripted one (receive()
+    // releases a byte once start_us <= now), and test_link_master's CRC-timing cases derive
+    // their expected instants from this delay (PR #137 review @2627be9, MEDIUM).
+    REQUIRE(first_start == tx_end + 30);
+    REQUIRE(last_start ==
+            tx_end + 30 +
+                static_cast<uint64_t>(real_answer.size() - 1) * byte_time_us(omgp::TRUNK_bit_rate));
+}
+
+// The CRC high byte of an encoded frame, read back off its wire tail: `... lo hi FLAG`, or
+// `... lo ESC hi^xor FLAG` when hi is FLAG/ESCAPE itself (lo's own stuffing cannot put an
+// ESCAPE at [n-3]: a stuffed lo reads `ESC lo^xor` there, and lo^xor is never ESCAPE).
+uint8_t crc_hi_on_wire(const std::vector<uint8_t>& wire) {
+    const size_t n = wire.size();
+    REQUIRE(n >= 4);
+    REQUIRE(wire[n - 1] == omgp::TRUNK_flag_byte);
+    return wire[n - 3] == omgp::TRUNK_escape_byte
+               ? static_cast<uint8_t>(wire[n - 2] ^ omgp::TRUNK_escape_xor)
+               : wire[n - 2];
+}
+
+TEST_CASE("Kind::CrcError at each stuffing-boundary CRC high byte (FLAG, ESCAPE, and the two "
+          "whose XOR 0xFF would land on them) still answers CRC-invalid at the real "
+          "response's wire length",
+          "[link][mock_wire]") {
+    // contracts/mock-wire.md's amended CrcError row (docs/OPEN-QUESTIONS.md 2026-09-05):
+    // XOR 0xFF except where that crosses the FLAG/ESCAPE stuffing boundary, where a
+    // different wrong byte of the same stuffed length is chosen. The generic case above
+    // never produces those four values, so the boundary branches went unexercised (PR #137
+    // red-team @1057568, LOW: neutering the FLAG/ESCAPE branch left the suite green). Each
+    // of the four is driven here through a request whose mirrored answer carries it —
+    // found by search, and REQUIREd to exist so the case cannot pass vacuously. A literal
+    // `crc_hi ^ 0xFF` fails the length assertion at all four (T028's note); a branch that
+    // returns the real byte unchanged fails REQUIRE_FALSE(delivered).
+    const uint8_t boundary[4] = {omgp::TRUNK_flag_byte, omgp::TRUNK_escape_byte,
+                                 static_cast<uint8_t>(omgp::TRUNK_flag_byte ^ 0xFF),
+                                 static_cast<uint8_t>(omgp::TRUNK_escape_byte ^ 0xFF)};
+    for (uint8_t want : boundary) {
+        CAPTURE(int(want));
+        bool found = false;
+        std::vector<uint8_t> req;
+        for (unsigned seq = 0; seq < 16 && !found; ++seq)
+            for (unsigned pb = 0; pb < 256 && !found; ++pb) {
+                req = encode_request(0x01, static_cast<uint8_t>(seq), static_cast<uint8_t>(pb));
+                found = crc_hi_on_wire(expected_respond_answer(req)) == want;
+            }
+        REQUIRE(found);
+        const std::vector<uint8_t> real_answer = expected_respond_answer(req);
+        REQUIRE(crc_hi_on_wire(real_answer) == want);
+
+        FakeClock clock;
+        const Step crc_step[] = {{0x01, Kind::CrcError, 30}};
+        MockWire wire(clock);
+        wire.set_script(0x01, crc_step, 1);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        wire.advance_to(tx_end + 30 +
+                        static_cast<uint64_t>(real_answer.size()) *
+                            byte_time_us(omgp::TRUNK_bit_rate));
+
+        Deframer d;
+        FrameView view{};
+        bool delivered = false;
+        size_t drained = 0;
+        uint8_t byte;
+        uint64_t start_us;
+        while (wire.receive(byte, start_us)) {
+            if (d.feed(byte, view))
+                delivered = true;
+            ++drained;
+        }
+        REQUIRE_FALSE(delivered);
+        REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::BadCrc)] == 1);
+        REQUIRE(drained == real_answer.size());
+        REQUIRE(wire.take_fault() == nullptr);
+    }
+}
+
+TEST_CASE("Kind::Duplicate answers with the real response, then the identical bytes again "
+          "delay_us after the first copy's own end",
+          "[link][mock_wire]") {
+    FakeClock clock;
+    const Step dup_step[] = {{0x01, Kind::Duplicate, 40}};
+    MockWire wire(clock);
+    wire.set_script(0x01, dup_step, 1);
+
+    const std::vector<uint8_t> req = encode_request(0x01, 0);
+    uint64_t tx_end = 0;
+    HEAP_FREE_SCOPE({ tx_end = wire.transmit(req.data(), req.size(), 0); });
+
+    const std::vector<uint8_t> answer = expected_respond_answer(req);
+    const uint64_t bt = byte_time_us(omgp::TRUNK_bit_rate);
+    // "the real response" (contracts/mock-wire.md's Respond row): first byte at
+    // request_end + TRUNK_T_turn_min_us, the default delay — Duplicate's own delay_us
+    // governs only the SECOND copy, below.
+    const uint64_t first_end =
+        tx_end + omgp::TRUNK_T_turn_min_us + static_cast<uint64_t>(answer.size()) * bt;
+    const uint64_t second_end = first_end + 40 + static_cast<uint64_t>(answer.size()) * bt;
+    wire.advance_to(second_end);
+
+    std::vector<uint8_t> drained;
+    uint64_t second_copy_start = 0;
+    uint8_t byte;
+    uint64_t start_us;
+    while (wire.receive(byte, start_us)) {
+        if (drained.size() == answer.size())
+            second_copy_start = start_us;
+        drained.push_back(byte);
+    }
+    REQUIRE(drained.size() == 2 * answer.size());
+    REQUIRE(std::equal(drained.begin(), drained.begin() + static_cast<long>(answer.size()),
+                       answer.begin()));
+    REQUIRE(std::equal(drained.begin() + static_cast<long>(answer.size()), drained.end(),
+                       answer.begin()));
+    // contracts/mock-wire.md: the second copy starts delay_us after the FIRST copy's OWN
+    // end, not after the request's own end.
+    REQUIRE(second_copy_start == first_end + 40);
+}

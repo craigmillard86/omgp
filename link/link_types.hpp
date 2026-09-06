@@ -20,7 +20,7 @@ namespace link {
 enum class Status : uint8_t {
     Ok = 0,
     PayloadTooLong,  // encode_frame: len > LIMIT_max_l3_payload
-    ReservedAddress, // encode_frame: dst == 0xFF (trunk §5)
+    ReservedAddress, // encode_frame: dst == 0xFF (trunk §5); Master::begin: dst >= kAddrCount
     BufferTooSmall,  // caller output buffer insufficient (nothing written)
     Busy,            // Master::begin: a transaction is already open
     NotIdle,         // engine operation attempted outside the state it requires

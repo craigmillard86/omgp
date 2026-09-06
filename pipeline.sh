@@ -19,7 +19,16 @@ WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=
 # 200580 = 200682 executed (16 binaries) minus ~102 slack — T023-T026 added
 # test_canonical_frame/test_l3_helper_dispatch/test_mock_wire/test_link_health.cpp;
 # raised 2026-09-05 (T027/#45, was 197000). NEVER lowered.
-UNIT_TEST_FLOOR=200580
+# 509360 = 509460 executed (17 binaries) minus 100 slack AT THE RAISING COMMIT — T029/T031
+# added test_link_master.cpp (then 308753 checks: its microsecond-cadence timing loops REQUIRE
+# per poll); raised 2026-09-06 (#137 review, MEDIUM: at 200580 the gate could not notice this
+# binary being dropped — 236588 executed at 40355cf was 36008 above it). The suite has grown
+# since and the floor is not chased upward: 511453 executed at #137's nineteenth round
+# (test_link_master 310744, the other 16 binaries 200709), slack 2093 (#137 review @050f397,
+# LOW: this derivation had gone stale). Dropping test_link_master leaves 200709 < floor, so
+# the gate fires (demonstrated by that arithmetic, assuming the other 16 binaries' counts are
+# unchanged). Was 200580.
+UNIT_TEST_FLOOR=509360
 
 stage_codegen() {
   # Constants + vectors header from the YAML, then prove the human-authored docs tables
@@ -129,7 +138,7 @@ stage_unit() {
 stage_refimpl() {
   python3 tools/refimpl/omgp_crc.py
   python3 tools/refimpl/genvectors.py --check   # committed vectors byte-identical to the generator (rule 9; red-team finding 3 on PR #107)
-  python3 -m pytest -q tools/refimpl   # reference implementation + tool tests (jinja2/pytest: tools/requirements.txt)
+  python3 -m pytest -q -rs tools/refimpl   # reference implementation + tool tests (jinja2/pytest: tools/requirements.txt); -rs names every skip, so a CI log says WHICH blind spot a skip is (#141 review: "3 skipped" was unreadable)
 }
 stage_diffcheck() { python3 tools/diffcheck.py; }
 stage_scenarios() {
