@@ -95,6 +95,24 @@ uint64_t response_full_end(uint64_t tx_end, uint8_t node, uint8_t seq, const uin
     return t0 + static_cast<uint64_t>(n) * byte_us();
 }
 
+// A response-shaped frame for `node`'s transaction with one interior byte flipped; checked
+// here, through the engine's own Deframer, to land as exactly one Discard::BadCrc (so the
+// corruption neither stuffs nor unstuffs a byte and the frame is not merely malformed).
+std::vector<uint8_t> crc_bad_response(uint8_t node, uint8_t seq, const uint8_t* payload,
+                                      size_t len) {
+    std::vector<uint8_t> bad = response_bytes(node, seq, payload, len);
+    REQUIRE(bad.size() > 6);
+    bad[5] = static_cast<uint8_t>(bad[5] ^ 0x02);
+    REQUIRE(bad[5] != omgp::TRUNK_flag_byte);
+    REQUIRE(bad[5] != omgp::TRUNK_escape_byte);
+    Deframer probe;
+    FrameView v{};
+    for (uint8_t b : bad)
+        REQUIRE_FALSE(probe.feed(b, v));
+    REQUIRE(probe.stats().discarded[static_cast<size_t>(Discard::BadCrc)] == 1);
+    return bad;
+}
+
 } // namespace
 
 // --- US2 AC1: happy path -------------------------------------------------------------
@@ -3500,6 +3518,245 @@ TEST_CASE("a matching answer whose FLAG opens INSIDE the host's own transmission
     REQUIRE(ev.kind != MasterEvent::Answered);
     REQUIRE(master.stats(dst).discards >= 1);
     REQUIRE(master.busy()); // the attempt's own window is still open
+}
+
+TEST_CASE("a CRC-failed frame whose FLAG opens INSIDE the host's own transmission does not end "
+          "the attempt: the window's lower bound gates the CRC path as well as the delivered one",
+          "[link][timing:T_resp]") {
+    // The case above pins the lower bound on the DELIVERED path; the out-of-window CRC case
+    // ("...arriving outside any open attempt's own window is discarded silently") opens its
+    // corrupted frame AFTER the deadline. Nothing crossed the two, so `awaiting && in_window`
+    // on the CRC path could lose its `frame_open_us >= window_start_us_` half with the suite
+    // green (PR #137 red-team @1a55116, LOW, surviving mutant M62). With that half gone,
+    // another station garbling the line during the host's own request is charged to the
+    // polled node as crc_failures and ends the attempt — three such bursts fail a
+    // transaction, nine (three consecutive failed transactions, trunk §7) mark a healthy
+    // node SUSPECT: the very attribution §7's accounting must not make.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x06;
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint64_t t0 = 1000;
+    wire.advance_to(t0, master); // the F3 loop's poll-then-begin
+    const uint8_t payload[] = {0x5A};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript(0).tx_start_us == t0);
+    const size_t req_n = request_bytes(dst, 0, false, payload, sizeof payload).size();
+    const uint64_t tx_end = t0 + static_cast<uint64_t>(req_n) * byte_us();
+    const uint64_t deadline = tx_end + omgp::TRUNK_T_resp_us;
+
+    // A response-shaped frame for THIS transaction, corrupted to exactly one Discard::BadCrc.
+    // Its opening FLAG lands halfway through the request: inside [tx_start, tx_end), i.e.
+    // before window_start_us_, and it ends well before the deadline.
+    const std::vector<uint8_t> bad = crc_bad_response(dst, 0, payload, sizeof payload);
+    const uint64_t open_at = t0 + (req_n / 2) * byte_us();
+    REQUIRE(open_at > t0);
+    REQUIRE(open_at < tx_end);
+    wire.inject_bytes(bad.data(), bad.size(), open_at);
+    const uint64_t bad_end = open_at + static_cast<uint64_t>(bad.size()) * byte_us();
+    REQUIRE(bad_end < deadline);
+
+    // Drained through the closing FLAG (its start instant, bad_end - byte_us, is when
+    // MockWire releases it) and no further: the control below appends bytes AT bad_end.
+    MasterEvent ev{};
+    for (uint64_t t = t0 + 1; t <= bad_end; ++t) {
+        ev = wire.advance_to(t, master);
+        REQUIRE(ev.kind == MasterEvent::None);
+    }
+    REQUIRE(master.stats(dst).crc_failures == 0); // M62: 1 — charged to the polled node
+    REQUIRE(master.attempts() == 1);              // and no retry was scheduled
+    REQUIRE(master.busy());                       // attempt 1's own window is still open
+
+    SECTION("the attempt then concludes by the ordinary T_resp timeout, retries remaining") {
+        for (uint64_t t = bad_end + 1; ev.kind == MasterEvent::None && t <= deadline + 4; ++t)
+            ev = wire.advance_to(t, master);
+        REQUIRE(ev.kind == MasterEvent::None);
+        REQUIRE(master.stats(dst).timeouts == 1);
+        REQUIRE(master.stats(dst).crc_failures == 0);
+    }
+
+    SECTION("positive RX control: the attempt is still live, and is Answered by a frame that "
+            "opens ON the burst's closing FLAG") {
+        // Everything above holds just as well if inject_bytes() had put nothing on the wire,
+        // and the sibling case's canary exercises RX in the T_gap, not RX during the host's
+        // own transmission (PR #142 red-team @6bbd7aa, LOW). This section's outcome exists
+        // only if the burst reached the engine: trunk §4 makes a closing FLAG the next
+        // frame's opening delimiter, so the node's answer, sent back-to-back with the burst
+        // and carrying no FLAG of its own, OPENS at the burst's closing FLAG — inside
+        // [tx_end, deadline) — and is Answered. Had the burst never arrived, the Deframer
+        // would still be Hunting, the flagless answer ignored up to its closing FLAG (which
+        // opens an empty accumulation), and the attempt would time out instead.
+        const std::vector<uint8_t> answer = response_bytes(dst, 0, payload, sizeof payload);
+        REQUIRE(answer.front() == omgp::TRUNK_flag_byte);
+        const uint64_t shared_flag = bad_end - byte_us();
+        REQUIRE(shared_flag >= tx_end); // the shared FLAG opens IN the window ...
+        wire.inject_bytes(answer.data() + 1, answer.size() - 1, bad_end);
+        const uint64_t answer_end = bad_end + static_cast<uint64_t>(answer.size() - 1) * byte_us();
+        REQUIRE(answer_end < deadline); // ... and the answer closes inside it
+
+        for (uint64_t t = bad_end + 1; ev.kind == MasterEvent::None && t <= answer_end + byte_us();
+             ++t)
+            ev = wire.advance_to(t, master);
+        REQUIRE(ev.kind == MasterEvent::Answered); // injection dropped: None (then Timeout)
+        REQUIRE(ev.response.len == sizeof payload);
+        REQUIRE(ev.response.payload[0] == payload[0]);
+        REQUIRE(master.stats(dst).crc_failures == 0); // M62: 1, and never Answered
+        REQUIRE(master.stats(dst).timeouts == 0);
+        REQUIRE(master.attempts() == 1);
+        REQUIRE_FALSE(master.busy());
+    }
+}
+
+TEST_CASE("a second CRC-failed frame in the T_gap after an in-window CRC failure is not charged "
+          "again: the guard's `awaiting` half, not `in_window`, is what rejects it",
+          "[link][timing:T_gap]") {
+    // The case above pins `in_window`'s lower bound on the CRC path; its `awaiting` half was
+    // still killed by nothing (PR #142 red-team @9632347, LOW). It is reachable and not
+    // equivalent: end_attempt() re-purposes deadline_ as the RETRY instant and never touches
+    // window_start_us_, so the T_gap after an in-window CRC failure carries a STALE window —
+    // `in_window` is still true, `awaiting` is false. The T_gap case that puts a frame in
+    // exactly that gap uses a well-formed foreign one (never enters the CRC branch), and the
+    // out-of-window CRC case opens past the deadline (both conjuncts false). With `awaiting`
+    // gone, a station garbling the bus during the gap is charged a SECOND crc_failures
+    // against a node that transmitted nothing — the misattribution the else branch exists
+    // to prevent.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x08;
+    const uint8_t payload[] = {0x11};
+    const Step script[] = {{dst, Kind::CrcError}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, script, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
+    const uint64_t crc_end = response_full_end(tx_end, dst, 0, payload, sizeof payload);
+
+    MasterEvent ev = wire.advance_to(crc_end, master);
+    REQUIRE(ev.kind == MasterEvent::None); // attempt 0 ended CrcFailed, retries remain
+    REQUIRE(master.stats(dst).crc_failures == 1);
+    REQUIRE(master.busy());
+
+    // A second corrupted frame (crc_bad_response: exactly one Discard::BadCrc through the
+    // engine's own Deframer), opened one byte time after the failure — squarely inside the
+    // stale window [window_start_us_ = tx_end, deadline_ = crc_end + T_gap), so `in_window`
+    // holds and only `awaiting` rejects it.
+    const std::vector<uint8_t> bad = crc_bad_response(dst, 0, payload, sizeof payload);
+    const uint64_t open2 = crc_end + byte_us();
+    const uint64_t end2 = open2 + static_cast<uint64_t>(bad.size()) * byte_us();
+    REQUIRE(open2 >= tx_end);                        // in_window's lower half holds ...
+    REQUIRE(open2 < crc_end + omgp::TRUNK_T_gap_us); // ... and its upper half (the retry instant)
+    // The frame's own END may fall past that instant: `in_window` reads only the opening
+    // instant, and the retry is gap-deferred behind this frame's last byte in any case.
+    wire.inject_bytes(bad.data(), bad.size(), open2);
+
+    for (uint64_t t = crc_end + 1; t <= end2 + byte_us(); ++t)
+        ev = wire.advance_to(t, master);
+    REQUIRE(wire.transcript_size() == 1); // the retry has not gone out yet
+
+    // Pristine: the concluded attempt is not re-concluded. Without `awaiting`: 2.
+    REQUIRE(master.stats(dst).crc_failures == 1);
+    REQUIRE(master.attempts() == 1); // no extra retry consumed
+
+    // Positive control (PR #142 review @9632347, LOW): the injected frame's last byte lands
+    // past the retry instant, so the retry is gap-deferred behind it (data-model.md §4
+    // "Gap") — an instant only a RECEIVED frame can produce. It covers RX in the T_gap only;
+    // RX during the host's own transmission is the M62 case's own control above (PR #142
+    // red-team @6bbd7aa, LOW).
+    REQUIRE(end2 > crc_end + omgp::TRUNK_T_gap_us);
+    require_deferred_past(wire, master, 1, end2);
+    REQUIRE(wire.transcript(1).retry);
+    REQUIRE(master.stats(dst).crc_failures == 1);
+}
+
+TEST_CASE("a CRC-failed response opening EXACTLY at tx_end — zero turnaround — is the window's "
+          "own and fails the attempt at once: the CRC path's lower bound is closed",
+          "[link][timing:T_resp]") {
+    // The delivered path pins its closed lower bound at exactly tx_end ("a response opening
+    // exactly at tx_end ..."); the two CRC cases above open strictly inside the transmission
+    // and strictly inside the window, so `frame_open_us >= window_start_us_` on the CRC path
+    // could become `>` with the suite green (PR #142 red-team @6bbd7aa, follow-up 2, surviving
+    // mutant). A station that ignores T_turn_min and answers on the very stop bit of the
+    // request — precisely the faulty station trunk §7's accounting exists for — would then
+    // have its garbled answer discarded silently and the host would wait out the whole
+    // T_resp: a CRC failure converted into a timeout, on a different counter and with a
+    // later attempt end.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x06;
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t payload[] = {0x5A};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end =
+        wire.transcript(0).tx_start_us +
+        request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us();
+
+    const std::vector<uint8_t> bad = crc_bad_response(dst, 0, payload, sizeof payload);
+    wire.inject_bytes(bad.data(), bad.size(), tx_end); // opening FLAG AT window_start_us_
+    const uint64_t bad_end = tx_end + static_cast<uint64_t>(bad.size()) * byte_us();
+    REQUIRE(bad_end < tx_end + omgp::TRUNK_T_resp_us);
+
+    MasterEvent ev{};
+    for (uint64_t t = wire.transcript(0).tx_start_us + 1; t <= bad_end + byte_us(); ++t)
+        ev = wire.advance_to(t, master);
+    REQUIRE(ev.kind == MasterEvent::None);        // attempt 0 ended CrcFailed, retries remain
+    REQUIRE(master.stats(dst).crc_failures == 1); // `>`: 0 — discarded as pre-window
+    REQUIRE(master.stats(dst).timeouts == 0);
+    REQUIRE(master.busy());
+    // And it ended AT the failure, not at the deadline: the retry is gap-deferred from the
+    // corrupted frame's last byte, not from tx_end + T_resp.
+    require_deferred_past(wire, master, 1, bad_end);
+    REQUIRE(wire.transcript(1).retry);
+}
+
+TEST_CASE("a CRC-failed frame opening EXACTLY at the deadline, drained by one coarse poll, is "
+          "not the window's: the CRC path's upper bound is open",
+          "[link][timing:T_resp]") {
+    // The out-of-window CRC case opens its frame PAST the deadline, and every in-window one
+    // is polled per microsecond — so nothing sits on deadline_ itself, and `frame_open_us <
+    // deadline_` on the CRC path could become `<=` with the suite green (PR #142 red-team
+    // @6bbd7aa, follow-up 3, surviving mutant). It is observable under the coarse cadence the
+    // F3 superframe loop actually has: one poll() drains the whole frame to exhaustion BEFORE
+    // its own timeout branch runs, so `awaiting` is still true when the bad closing FLAG
+    // lands, and `<=` charges crc_failures to the polled node for a frame that opened at
+    // tx_end + T_resp — outside [tx_end, tx_end + T_resp), so not this window's.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x07;
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t payload[] = {0x5A};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end =
+        wire.transcript(0).tx_start_us +
+        request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us();
+    const uint64_t deadline = tx_end + omgp::TRUNK_T_resp_us;
+
+    const std::vector<uint8_t> bad = crc_bad_response(dst, 0, payload, sizeof payload);
+    wire.inject_bytes(bad.data(), bad.size(), deadline); // opening FLAG AT deadline_
+    const uint64_t bad_end = deadline + static_cast<uint64_t>(bad.size()) * byte_us();
+
+    // ONE poll, past the frame's end: the whole frame is drained, then the timeout fires.
+    MasterEvent ev = wire.advance_to(bad_end + byte_us(), master);
+    REQUIRE(ev.kind == MasterEvent::None);        // attempt 0 timed out, retries remain
+    REQUIRE(master.stats(dst).crc_failures == 0); // `<=`: 1 — charged to the polled node
+    REQUIRE(master.stats(dst).timeouts == 1);
+    REQUIRE(master.attempts() == 1);
+    REQUIRE(master.busy());
+    // The frame's bytes are bus activity all the same: the retry is gap-deferred behind its
+    // last byte (data-model.md §4 "Gap"), not behind the deadline it overran.
+    require_deferred_past(wire, master, 1, bad_end);
+    REQUIRE(wire.transcript(1).retry);
 }
 
 TEST_CASE("set_bit_rate() refuses a rate whose byte time truncates to zero: not forwarded, not "
