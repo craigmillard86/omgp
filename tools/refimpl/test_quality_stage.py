@@ -25,7 +25,7 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 REQUIREMENTS = ROOT / "tools" / "requirements.txt"
-PIN_RE = re.compile(r"^clang-format==(\d+\.\d+\.\d+)$", re.M)
+PIN_RE = re.compile(r"^clang-format==(\d+\.\d+\.\d+)\s*(#.*)?$", re.M)
 
 
 def pinned_version() -> str:

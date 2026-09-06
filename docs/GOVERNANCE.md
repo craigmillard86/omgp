@@ -34,7 +34,7 @@ issues, comments) — never as direct changes to main.
 | Differential check | independent verification of codecs | CI (C++ vs Python reference) |
 | Immutable golden vectors | tests can't be quietly bent | CLAUDE.md rule 9 + T3 scoring on `tests/vectors/` |
 | Sanitizers + cross-compile | memory safety + portability | CI jobs |
-| Format + static analysis (quality stage) | code quality on every merge | pipeline stage in CI |
+| Format + embedded-path rules (quality stage) | clang-format at the pinned version (tools/requirements.txt) + check_embedded on every PR | `quality` in the `native` job's stage list (ci.yml; wired by #135 — before that no job ran it) |
 | CodeQL (C++/Python/Actions) + dependency review | security on every PR + weekly | security workflow; the `CodeQL` results check, `codeql` and `dependency-review` are required status checks on `main` (ruled 2026-08-28) |
 | Deep-verify: focused fuzz + diff-scoped mutation | pre-merge deep testing on T2/T3; fails on any fuzz finding or on any surviving mutant on a changed line that is neither killed by a test nor labelled `// mutant-ok(equivalent\|accepted): <why>` on its source line (triage gate, ruled 2026-08-29; the whole-tree kill rate is a nightly trend, never a gate). `tools/mutate.cfg [policy]` constants are T3 — never relaxed to get green | conditional CI job in ci-gate |
 | Claude review on every agent PR | spec-conformance + security review pass, per pushed head | claude-review workflow (advisory findings; machine-readable verdict) |
