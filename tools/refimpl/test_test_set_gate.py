@@ -146,6 +146,19 @@ def run_tool(*args, cwd=ROOT):
                           capture_output=True, text=True, timeout=300)
 
 
+def snapshot(root: Path, build: Path = None) -> Path:
+    """The stage's pre-run snapshot of the build artefacts, taken NOW and written to a file
+    outside the tree — for scenarios that drive the tool directly rather than through
+    `bash pipeline.sh unit` (which holds its snapshot in the shell's memory). Taken now, the
+    "unchanged during the run" comparison is vacuous; such scenarios test the other rules."""
+    build = build or root / "build" / "native"
+    r = run_tool("--snapshot", "--root", str(root), "--build", str(build))
+    assert r.returncode == 0, r.stdout + r.stderr
+    pre = root.parent / f"pre-{root.name}.json"
+    pre.write_text(r.stdout)
+    return pre
+
+
 VERIFIED = re.compile(r"^unit: verified (\d+) test binar(?:y|ies) \(compiled, registered, executed; ctest path\)$", re.M)
 
 
@@ -443,6 +456,98 @@ class TestCtestPath:
         assert "registration set" in r.stderr and "record" in r.stderr, r.stderr
         assert "verified" not in r.stdout
 
+    def test_compile_evidence_written_during_the_run_is_refused(self, tmp_path):
+        # Red team @f8bce32 [MEDIUM]: the registration set and the record were pinned to the
+        # run, but compile_commands.json and the objects were read AFTER the tests with no
+        # snapshot — so a test that wrote an entry and an object for an uncompiled, unbuilt,
+        # unregistered source while it ran made #133 escape 2 green (the forged object is
+        # older than the record and newer than the source, so both freshness rules held).
+        # The artefacts are fingerprinted before ctest and must be found unchanged after it.
+        root = make_tree(tmp_path, compiled={"test_a": "test_a"}, registered=("test_a",), binaries=("test_a",))
+        build = root / "build/native"
+        cc, obj = build / "compile_commands.json", "CMakeFiles/test_a.dir/tests/unit/test_b.cpp.o"
+        src_b = root / "tests/unit/test_b.cpp"
+        forged = json.loads(cc.read_text()) + [{
+            "directory": str(build),
+            "command": f"/usr/bin/c++ -std=gnu++17 -o {obj} -c {src_b}",
+            "file": str(src_b)}]
+        (build / "forged_cc.json").write_text(json.dumps(forged, indent=2))
+        _executable(build / "test_a", "#!/usr/bin/env bash\n"
+                    f'mkdir -p "{build}/CMakeFiles/test_a.dir/tests/unit"\n'
+                    f'printf "\\x7fELF" > "{build}/{obj}"\n'
+                    f'cp "{build}/forged_cc.json" "{cc}"\n'
+                    'echo "EXECUTED: 600000"\n')
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "compile_commands.json changed during the ctest run" in r.stderr, r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "before the ctest run" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_registration_rewritten_keeping_the_name_set_is_refused(self, tmp_path):
+        # The residual the f8bce32 body stated rather than closed: a rewrite that keeps the
+        # record's name set was not detected (it could re-attribute runs, not mint them). The
+        # registration set — names, binaries, arguments — is now snapshotted before ctest and
+        # must be identical afterwards, so swapping two binaries between two names (both ran,
+        # both counted) is refused as a change during the run.
+        root = make_tree(tmp_path)
+        build = root / "build/native"
+        swap = (f'cat > "{build}/CTestTestfile.cmake" <<EOF\n'
+                f'add_test([=[test_a]=] "{build}/test_b")\nadd_test([=[test_b]=] "{build}/test_a")\nEOF\n'
+                'echo "EXECUTED: 600000"')
+        _executable(build / "test_a", f"#!/usr/bin/env bash\n{swap}\n")
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "registration set changed during the ctest run" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_binary_rewritten_during_the_run_is_refused(self, tmp_path):
+        # Third leg of the same class: the record-mtime rule catches a binary rebuilt AFTER
+        # the run, not one overwritten by an earlier test DURING it (older than the record,
+        # so the rule holds — and the file that ran is not the file the build produced).
+        # ctest runs the registrations serially, in order: test_a rewrites test_b, then
+        # test_b runs as the rewrite.
+        root = make_tree(tmp_path, scripts={"test_b": 'echo "EXECUTED: 0"'})
+        build = root / "build/native"
+        _executable(build / "test_a", "#!/usr/bin/env bash\n"
+                    f"printf '#!/usr/bin/env bash\\necho \"EXECUTED: 600000\"\\n' > \"{build}/test_b\"\n"
+                    'echo "EXECUTED: 600000"\n')
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "changed during the ctest run" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_record_carrying_a_name_twice_is_refused(self, tmp_path):
+        # Red team @f8bce32 [LOW]: the "recorded more than once" clause had no killing test.
+        # One registration cannot yield two <testcase>s of one name (the tests cannot write
+        # XML structure), so such a record is not this registration set's run. Driven
+        # directly: the stage's own ctest would never write it.
+        root = make_tree(tmp_path, sources=("test_a",))
+        build = root / "build/native"
+        pre = snapshot(root)
+        case = '<testcase name="test_a" status="run"><system-out>EXECUTED: 600000\n</system-out></testcase>'
+        (build / "Testing").mkdir()
+        (build / "Testing/junit.xml").write_text(f"<testsuite>{case}{case}</testsuite>\n")
+        r = run_tool("--ctest", "--pre", str(pre), cwd=root)
+        assert r.returncode != 0, r.stdout
+        assert "recorded more than once" in r.stderr and "test_a" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_registration_that_is_a_superset_of_the_record_is_named_as_such(self, tmp_path):
+        # Same finding: with strict equality relaxed to "record ⊆ registration", test_b would
+        # still fail — but as "did not run", the wrong diagnosis. A registration ctest never
+        # saw is a registration-set/record mismatch and is named as one, not as a skip.
+        root = make_tree(tmp_path)
+        build = root / "build/native"
+        pre = snapshot(root)
+        (build / "Testing").mkdir()
+        (build / "Testing/junit.xml").write_text(
+            '<testsuite><testcase name="test_a" status="run"><system-out>EXECUTED: 600000\n'
+            '</system-out></testcase></testsuite>\n')
+        r = run_tool("--ctest", "--pre", str(pre), cwd=root)
+        assert r.returncode != 0, r.stdout
+        assert "registration set differs from the run's record" in r.stderr and "test_b" in r.stderr, r.stderr
+        assert "did not run" not in r.stderr, r.stderr
+
     def test_missing_record_is_a_named_failure(self, tmp_path):
         # stage_unit deletes the record before ctest; if ctest then writes none, the tool must
         # say so by name rather than fall over in the XML parser.
@@ -450,7 +555,7 @@ class TestCtestPath:
         r = run_unit(root)
         assert r.returncode == 0, r.stdout + r.stderr
         (root / "build/native/Testing/junit.xml").unlink()
-        r = run_tool("--ctest", cwd=root)
+        r = run_tool("--ctest", "--pre", str(snapshot(root)), cwd=root)
         assert r.returncode != 0, r.stdout
         assert "no execution record" in r.stderr and "Traceback" not in r.stderr, r.stderr
 
@@ -460,7 +565,8 @@ class TestCtestPath:
         root = make_tree(tmp_path)
         empty = tmp_path / "empty"
         (empty / "tests" / "unit").mkdir(parents=True)
-        r = run_tool("--ctest", "--root", str(empty), "--build", str(root / "build/native"))
+        pre = snapshot(empty, root / "build/native")
+        r = run_tool("--ctest", "--pre", str(pre), "--root", str(empty), "--build", str(root / "build/native"))
         assert r.returncode != 0, r.stdout
         assert "no test sources" in r.stderr, r.stderr
         assert "verified" not in r.stdout
@@ -555,7 +661,7 @@ class TestBootstrapPath:
 
 # --- controls on the real tree ------------------------------------------------------------
 
-def test_real_build_tree_verifies_every_source():
+def test_real_build_tree_verifies_every_source(tmp_path):
     # Positive control: the tool, over the real build artefacts and the latest ctest record,
     # verifies exactly the sources in the tree. Needs a cmake build + a `unit` run (CI runs
     # build -> unit -> refimpl in that order); the tool itself refuses a record older than
@@ -563,7 +669,9 @@ def test_real_build_tree_verifies_every_source():
     _need(TOOL.exists(), f"{TOOL.name} missing")
     _need((ROOT / "build/native/CTestTestfile.cmake").exists(), "no cmake build tree at build/native")
     _need((ROOT / "build/native/Testing/junit.xml").exists(), "no ctest record: run `./pipeline.sh unit` first")
-    r = run_tool("--ctest")
+    pre = tmp_path / "pre.json"   # taken now, after the run: the unchanged-during-run rule is vacuous here
+    pre.write_text(run_tool("--snapshot").stdout)
+    r = run_tool("--ctest", "--pre", str(pre))
     assert r.returncode == 0, r.stdout + r.stderr
     assert len(SOURCES) > 0
     assert int(VERIFIED.search(r.stdout).group(1)) == len(SOURCES), (r.stdout, SOURCES)
@@ -596,7 +704,7 @@ def test_real_artefacts_minus_one_registration_name_that_source(tmp_path):
             if "test_link_master" not in ln and not ln.startswith("subdirs(")]
     assert any(str(build) in ln for ln in kept), kept   # the rewrite found the real paths
     (build / "CTestTestfile.cmake").write_text("\n".join(kept) + "\n")
-    r = run_tool("--ctest", "--root", str(root), "--build", str(build))
+    r = run_tool("--ctest", "--pre", str(snapshot(root, build)), "--root", str(root), "--build", str(build))
     assert r.returncode != 0, r.stdout
     assert "tests/unit/test_link_master.cpp" in r.stderr and "not registered" in r.stderr, r.stderr
     # Only that one: every other source is still consistent with the same artefacts.
