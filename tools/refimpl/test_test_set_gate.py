@@ -395,21 +395,80 @@ class TestCtestPath:
 
     def test_object_newer_than_its_binary_is_refused(self, tmp_path):
         # Red team @6fbdebf finding 1 [MEDIUM]: the chain source -> object -> binary was
-        # ordered in time at its first hop only. A source edited after the last link, its
-        # object recompiled but the link never rerun (interrupted or failed), passed: the
-        # binary ctest ran cannot contain the edited source, and the bootstrap path already
-        # refuses the same tree (`-nt`). Named like the two neighbouring freshness rules: an
-        # mtime comparison is a control, not a guarantee.
+        # ordered in time at its first hop only. An object recompiled after the last link,
+        # the link never rerun (interrupted or failed), passed: the binary ctest ran cannot
+        # contain that object, and the bootstrap path already refuses the same tree (`-nt`).
+        # Named like the two neighbouring freshness rules: an mtime comparison is a control,
+        # not a guarantee.
+        #
+        # The tree is the header-rebuild shape (red team @17315ed finding 3): the SOURCE is
+        # older than the binary — untouched — and only the object is newer (a header it
+        # includes changed, so it was recompiled). A rule reading the source's mtime instead
+        # of the object's (M-X) passes this tree; the previous shape (source edited too) let
+        # both operands satisfy the predicate and could not tell them apart.
         root = make_tree(tmp_path)
         b = root / "build/native"
         t0 = time.time() - 1000
-        os.utime(b / "test_a", (t0, t0))                                              # linked long ago
-        os.utime(root / "tests/unit/test_a.cpp", (t0 + 100, t0 + 100))                # edited after the link
+        os.utime(root / "tests/unit/test_a.cpp", (t0 - 300, t0 - 300))                # never edited
+        os.utime(b / "test_a", (t0, t0))                                              # last link
         os.utime(b / "CMakeFiles/test_a.dir/tests/unit/test_a.cpp.o", (t0 + 200, t0 + 200))  # recompiled, not relinked
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_a.cpp" in r.stderr and "newer than" in r.stderr, r.stderr
         assert "test_a.cpp.o" in r.stderr and "build/native/test_a" in r.stderr, r.stderr
+        assert "verified" not in r.stdout, r.stdout
+
+    def test_link_line_newer_than_its_binary_is_refused(self, tmp_path):
+        # Red team @17315ed finding 1 [MEDIUM]: the link line is what makes the object ->
+        # binary hop mean anything (3713ab0), and it was compared only against the pre-run
+        # snapshot — never placed in time against the binary. A link line regenerated AFTER
+        # the last link (cmake re-run with a changed source list, the relink never performed)
+        # names an object the binary cannot contain, and that object, being older than the
+        # binary, does not trip the object rule. Same reachability as the object case: an
+        # interrupted build, then `./pipeline.sh unit` alone. Named in the shape of its three
+        # neighbours; a control, not a guarantee.
+        root = make_tree(tmp_path)
+        b = root / "build/native"
+        t0 = time.time() - 1000
+        os.utime(root / "tests/unit/test_a.cpp", (t0 - 200, t0 - 200))
+        os.utime(b / "CMakeFiles/test_a.dir/tests/unit/test_a.cpp.o", (t0 - 100, t0 - 100))
+        os.utime(b / "test_a", (t0, t0))                                              # last link
+        os.utime(b / "CMakeFiles/test_a.dir/link.txt", (t0 + 100, t0 + 100))          # regenerated after it
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_a.cpp" in r.stderr and "newer than" in r.stderr, r.stderr
+        assert "link.txt" in r.stderr and "build/native/test_a" in r.stderr, r.stderr
+        assert "verified" not in r.stdout, r.stdout
+
+    def test_link_line_that_produces_another_binary_is_refused(self, tmp_path):
+        # Red team @17315ed finding 2 [LOW]: "the object is on target test_a's link line" said
+        # nothing about what that line PRODUCES. A line whose `-o` is some other file is not
+        # evidence about build/native/test_a, whatever objects it names. cmake never writes
+        # such a line and a mid-run rewrite is caught by the snapshot — a control gap in a rule
+        # this PR introduced, closed because the `-o` token is already parsed.
+        root = make_tree(tmp_path)
+        b = root / "build/native"
+        obj = "CMakeFiles/test_a.dir/tests/unit/test_a.cpp.o"
+        (b / "CMakeFiles/test_a.dir/link.txt").write_text(f"/usr/bin/c++ -g {obj} -o some_other_binary \n")
+        os.utime(b / "test_a")                                                        # the binary is the newest file
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_a.cpp" in r.stderr and "some_other_binary" in r.stderr, r.stderr
+        assert "build/native/test_a" in r.stderr, r.stderr
+        assert "verified" not in r.stdout, r.stdout
+
+    def test_link_line_naming_no_output_fails_closed(self, tmp_path):
+        # The `-o` rule's other branch: a link line with no `-o` at all produces nothing this
+        # tool can name, so it is refused by name rather than assumed to produce the target.
+        root = make_tree(tmp_path)
+        b = root / "build/native"
+        obj = "CMakeFiles/test_a.dir/tests/unit/test_a.cpp.o"
+        (b / "CMakeFiles/test_a.dir/link.txt").write_text(f"/usr/bin/c++ -g {obj} \n")
+        os.utime(b / "test_a")
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_a.cpp" in r.stderr and "link.txt" in r.stderr, r.stderr
+        assert "no -o" in r.stderr or "no output" in r.stderr, r.stderr
         assert "verified" not in r.stdout, r.stdout
 
     def test_source_in_a_subdirectory_is_checked(self, tmp_path):
