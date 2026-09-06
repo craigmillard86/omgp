@@ -57,15 +57,23 @@ const AddrStats& Responder::stats() const {
 }
 
 void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
-    if (f.dst != my_addr_ || f.response ||
-        f.src == 0xFF) { // literal-ok: trunk §5 reserved address, not an L3 event code
-        // Not a request addressed to this node (data-model.md §5 "Request
-        // acceptance"), or its claimed source is the reserved marker 0xFF: a response's
-        // `dst` IS `f.src` (below), and encode_frame refuses to originate `dst == 0xFF`
-        // (link/frame.cpp:17-18) — such a request could never be answered. The Deframer
-        // validates only `dst == 0xFF` (link/frame.cpp:142), never `src`, so this must be
-        // rejected here rather than left to poison the replay buffer. Either way:
-        // silently discarded, counted (trunk §4).
+    // `f.src` is wire-derived: the Deframer validates only `dst == 0xFF` (link/frame.cpp:142),
+    // never `src`, so this is the one place the claimed source is bounded before it becomes
+    // a response's `dst` (below) and the replay key's `peer`. Trunk §5 confines L2 addresses
+    // to ADDR_host..ADDR_backplane_max — kAddrCount of them, module node IDs never among
+    // them — and a station is never its own peer. Master::begin (link/master.cpp:87) and
+    // HealthTracker (link/health.cpp) bound the same wire-derived class the same way; the
+    // Responder was the third reader of one without a bound (red team + review @6c2fe4b
+    // finding 2). The static_assert keeps the reserved marker 0xFF — the earlier, narrower
+    // screen: a response to it could never be encoded (link/frame.cpp:17-18) — inside the
+    // refused range if kAddrCount is ever edited, rather than letting that lapse silently.
+    static_assert(kAddrCount <= 0xFF, // literal-ok: trunk §5 reserved address, not an event code
+                  "kAddrCount must leave trunk §5's reserved address refused by src >= kAddrCount");
+    if (f.dst != my_addr_ || f.response || f.src == my_addr_ || f.src >= kAddrCount) {
+        // Not a request addressed to this node (data-model.md §5 "Request acceptance"), or
+        // one whose claimed source this node could never legitimately answer: silently
+        // discarded, counted (trunk §4), and — load-bearing for FR-015 — never allowed to
+        // reach buffer_, where its `src` would evict a real station's replay entry.
         stats_.discards++;
         return;
     }
