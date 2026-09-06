@@ -32,7 +32,11 @@ void Master::set_bit_rate(uint32_t bps) {
     // byte must take at least one microsecond at the rate in force. Refused rather than
     // clamped: no rate is a defensible stand-in for an unusable one, and trunk §9's rates both
     // satisfy this. rate_changes counts changes actually applied, so a refused call does not
-    // bump it (docs/OPEN-QUESTIONS.md 2026-09-06, two "set_bit_rate" entries).
+    // bump it (docs/OPEN-QUESTIONS.md 2026-09-06, two "set_bit_rate" entries). This guard
+    // screens THIS caller only: max_frame_us()/frame_arriving() compute from wire_.bit_rate(),
+    // and ByteWire::set_bit_rate is a second, unguarded door — the precondition belongs on
+    // ByteWire (a contract change, pending: OPEN-QUESTIONS 2026-09-06 "screens one caller";
+    // PR #137 red-team @2627be9, LOW). Assumed, not enforced here.
     if (bps == 0 || byte_time_us(bps) == 0)
         return;
     wire_.set_bit_rate(bps);

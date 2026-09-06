@@ -1780,3 +1780,36 @@ pending, folded into the "bounded courtesy" ruling.
 **Ruling:** pending — folded into the "bounded courtesy" ruling above.
 **Amends:** the 2026-09-06 "FLAG-delimited babble" entry's "by construction … exactly F"
 sentence (true of a contiguous stream; the cap makes it true at any cadence).
+
+## 2026-09-06 — the set_bit_rate byte-time guard screens one caller; `wire_.bit_rate()` is the value the engine computes from (amends the two set_bit_rate entries above)
+
+**Context:** red-team at `2627be9` (#137, LOW). The two entries above frame the refusal in
+`Master::set_bit_rate` as "the property the engine's timing arithmetic actually needs, stated
+once". It is stated on one door. `ByteWire::set_bit_rate` is public and unguarded, and
+`max_frame_us()` / `frame_arriving()` divide by `wire_.bit_rate()` unconditionally — so the
+rate the engine's two protections (the T_resp in-flight time cap, the courtesy cap) are
+computed from is whatever the wire reports, not what the Master guard screened. Their
+reproducer sets 20 Mb/s through `MockWire::set_bit_rate` directly while still delivering bytes
+at a 10 µs cadence: `max_frame_us()` is 0, the courtesy cap collapses to `defer_origin + T_gap`,
+and the engine transmits into a frame another station opened 50 µs earlier — the HIGH class
+this PR fixed, re-reachable through the other door. That door is the one `MockWire`'s
+`Kind::Rate` step (T030) and F4's virtual wire will use, since they drive the rate from
+scenario data. **Honest scope (rule 11):** the reproducer's wire is internally inconsistent
+(reports 20 Mb/s, delivers at 1 Mb/s); what it establishes is that the guard is a control on
+one caller, not a guarantee about `bit_rate()`. **Not reachable today** — no in-repo `ByteWire`
+reports a rate outside trunk §9 (a control: the current contents of the repo).
+**Options:** (a) state the precondition where it belongs — on `ByteWire` itself, in
+`contracts/byte-wire-and-clock.md`: "`bit_rate()` reports a rate at which a byte takes at least
+1 µs (`byte_time_us(bit_rate()) >= 1`); the engine's timing is undefined otherwise" — and keep
+the Master guard as the engine-side check of its own input; (b) re-check `byte_time_us(
+wire_.bit_rate()) >= 1` on every poll and treat a violation as … something (there is no good
+"something": refusing to poll is a hang, transmitting is the reproducer); (c) nothing beyond
+the Master guard, documented as one-door.
+**Recommended:** (a). A wire that reports a rate its own byte model cannot express is a
+broken wire, and a precondition on the interface is the honest place to say so; the F4
+virtual wire and the `Kind::Rate` step then carry the obligation explicitly, and (b) buys no
+safe behaviour. Not implemented in #137: a `ByteWire` precondition is a contract change and
+the maintainer's ruling. The `master.cpp` `set_bit_rate` comment now says the guard screens
+this caller only.
+**Ruling:** pending — human (contract text; folds into the set_bit_rate ruling above).
+**Amends:** the "stated once" sentence in the two 2026-09-06 set_bit_rate entries.

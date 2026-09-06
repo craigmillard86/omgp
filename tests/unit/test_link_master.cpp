@@ -194,6 +194,43 @@ TEST_CASE("silence for the full response window triggers exactly two retries (sa
     REQUIRE_FALSE(master.busy());
 }
 
+// US2 AC2's "identical payload": until this case, TxRecord::payload was read for the FIRST
+// transmission only (:126) and every retry assertion checked retry/seq/tx_start_us — so a
+// retry going out with the right length and the wrong bytes (the double-/wrong-apply hazard
+// L3 idempotency rests on, trunk §7) moved no assertion (PR #137 red-team @2627be9, MEDIUM).
+// The payload contains FLAG and ESCAPE so the bytes are also read through the stuffer.
+TEST_CASE("every retry carries the identical payload bytes, not merely the same length",
+          "[link][timing:retries]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x03;
+    const uint8_t payload[] = {static_cast<uint8_t>(omgp::TRUNK_flag_byte), 0xA5,
+                               static_cast<uint8_t>(omgp::TRUNK_escape_byte), 0x5A};
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(std::memcmp(wire.transcript(0).payload, payload, sizeof payload) == 0);
+
+    uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
+    for (uint32_t attempt = 0; attempt < omgp::TRUNK_retries; ++attempt) {
+        const uint64_t retry_tx_start = tx_end + omgp::TRUNK_T_resp_us + omgp::TRUNK_T_gap_us;
+        REQUIRE(wire.advance_to(retry_tx_start, master).kind == MasterEvent::None);
+        const auto& rec = wire.transcript(static_cast<size_t>(attempt) + 1);
+        REQUIRE(rec.retry);
+        REQUIRE(rec.seq == 0);
+        REQUIRE(rec.len == sizeof payload); // US2 AC2
+        REQUIRE(std::memcmp(rec.payload, payload, sizeof payload) == 0);
+        tx_end = retry_tx_start + static_cast<uint64_t>(
+                                      request_bytes(dst, 0, true, payload, sizeof payload).size()) *
+                                      byte_us();
+    }
+    REQUIRE(wire.advance_to(tx_end + omgp::TRUNK_T_resp_us, master).kind == MasterEvent::Failed);
+}
+
 // --- A terminal Failed{Timeout} still counts as a concluded transaction, clears busy(),
 // and still gap-defers the very next begin() from its own instant --------------------
 
@@ -482,6 +519,37 @@ TEST_CASE("a conforming node's answer is accepted at every legal payload length,
         if (len > 0)
             REQUIRE(std::memcmp(ev.response.payload, payload, len) == 0);
     }
+}
+
+// master.hpp: "payload points into Master's own buffer and is valid only until the next
+// poll() call". poll() drains to exhaustion, so bytes arriving behind the accepted answer are
+// fed to the same Deframer inside the same call — the one moment the distinction between
+// response_buf_ and the Deframer's accumulator is observable. No earlier case put anything on
+// the wire behind an accepted answer and then re-read ev.response.payload, so an event
+// pointing at the accumulator (`f.payload` in place of `response_buf_`) left the suite green
+// (PR #137 red-team @2627be9, MEDIUM).
+TEST_CASE("the Answered payload survives bytes drained behind it in the same poll()", "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x04;
+    const uint8_t payload[] = {0xA1, 0xB2, 0xC3, 0xD4};
+    Master master(wire, clock, omgp::ADDR_host);
+
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
+    const uint64_t resp_end = response_full_end(tx_end, dst, 0, payload, sizeof payload);
+
+    // Another station starts talking the instant the answer ends: plain bytes, appended
+    // straight into the accumulator the answer's own closing FLAG just opened.
+    const uint8_t trailing[] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+    wire.inject_bytes(trailing, sizeof trailing, resp_end);
+
+    const MasterEvent ev = wire.advance_to(resp_end + sizeof trailing * byte_us(), master);
+    REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(ev.response.len == sizeof payload);
+    REQUIRE(std::memcmp(ev.response.payload, payload, sizeof payload) == 0);
 }
 
 TEST_CASE("a conforming node's answer is accepted at the fallback bit rate, whose own "
@@ -2665,6 +2733,47 @@ TEST_CASE("begin() accepts a payload exactly at LIMIT_max_l3_payload bytes", "[l
     uint8_t payload[omgp::LIMIT_max_l3_payload] = {};
     REQUIRE(master.begin(0x01, payload, sizeof payload) == Status::Ok);
     REQUIRE(master.busy());
+}
+
+// begin()'s contract: "a refused begin() must leave next_seq_ untouched and transmit nothing"
+// (US2 AC7). The dst >= kAddrCount refusal is pinned below via the table-overrun ASan trip,
+// but no case observed the SEQUENCE state after a PayloadTooLong or Busy refusal — a burnt
+// number is a gap in the per-destination sequence the Responder's replay buffer keys on
+// (trunk §7), and both such mutants survived the suite (PR #137 red-team @2627be9, LOW).
+TEST_CASE("a begin() refused with PayloadTooLong does not burn the destination's sequence",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x05;
+    Master master(wire, clock, omgp::ADDR_host);
+    uint8_t too_long[omgp::LIMIT_max_l3_payload + 1] = {};
+    REQUIRE(master.begin(dst, too_long, sizeof too_long) == Status::PayloadTooLong);
+    REQUIRE(wire.transcript_size() == 0);
+    const uint8_t ok_payload[] = {0x7F};
+    REQUIRE(master.begin(dst, ok_payload, sizeof ok_payload) == Status::Ok);
+    REQUIRE(wire.transcript(0).seq == 0); // the refusal must not have consumed seq 0
+}
+
+TEST_CASE("a begin() refused with Busy does not burn the destination's sequence", "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x06;
+    Master master(wire, clock, omgp::ADDR_host);
+    const uint8_t payload[] = {0x11};
+
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript(0).seq == 0);
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Busy);
+
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
+    const uint64_t resp_end = response_full_end(tx_end, dst, 0, payload, sizeof payload);
+    REQUIRE(wire.advance_to(resp_end, master).kind == MasterEvent::Answered);
+
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok); // gap-deferred
+    REQUIRE(wire.advance_to(resp_end + omgp::TRUNK_T_gap_us, master).kind == MasterEvent::None);
+    REQUIRE(wire.transcript(1).seq == 1); // the NEXT sequence, not the one after next
 }
 
 // --- contracts/link-cpp.md: set_bit_rate() forwards to the wire and is counted ---------
