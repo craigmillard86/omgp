@@ -818,3 +818,36 @@ TEST_CASE("a retry-flagged request from a different station is treated as new ra
     REQUIRE(handler.calls == 2);             // treated as new, not replayed
     REQUIRE(responder.stats().replays_served == 0);
 }
+
+// --- red-team @d0cc3bf finding #2: a request duplicated with the retry bit CLEAR is ----
+// --- NOT covered by the replay buffer -- it re-invokes the handler a second time. ------
+// Pins today's (open-question) behaviour; does not assert it is the desired outcome --
+// see docs/OPEN-QUESTIONS.md 2026-09-06 ("RequestHandler's 'called at most once per NEW
+// sequence' doc claim overclaims..."). `RequestHandler::handle()`'s own doc comment in
+// responder.hpp is scoped to retry-bit-SET repeats precisely because of this case.
+
+TEST_CASE("a request duplicated on the wire with the retry bit clear re-invokes the "
+          "handler a second time (open question, not asserted as desired)",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t p[] = {0x5A};
+    const auto req = request_bytes(kMyAddr, kPeer, /*retry=*/false, 9, p, sizeof p);
+    uint64_t end1 = inject_request(wire, req, 0);
+    wire.advance_to(end1 + omgp::TRUNK_T_turn_min_us, responder);
+    REQUIRE(handler.calls == 1);
+    REQUIRE(wire.transcript_size() == 1);
+
+    // The exact same bytes appear again -- a wire-level duplicate, retry bit still clear --
+    // shortly after, well inside the window the buffered response could have replayed from.
+    const uint64_t start2 = end1 + omgp::TRUNK_T_turn_min_us + 200 * byte_us();
+    uint64_t end2 = inject_request(wire, req, start2);
+    wire.advance_to(end2 + omgp::TRUNK_T_turn_min_us, responder);
+
+    CHECK(handler.calls == 2);          // NOT once: the retry-bit gate misses this
+    CHECK(wire.transcript_size() == 2); // a second response goes out unsolicited
+    CHECK(responder.stats().replays_served == 0);
+}

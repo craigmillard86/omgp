@@ -15,8 +15,12 @@ namespace omgp {
 namespace link {
 
 // The application-facing side of a node: answers a request and returns how many bytes
-// of `resp` (capacity `cap`) it wrote. Called at most once per NEW sequence (trunk §7:
-// a retried sequence is replayed from the buffer, never re-invoking this).
+// of `resp` (capacity `cap`) it wrote. Called at most once per sequence carrying the
+// retry bit SET that collides with an already-buffered response (trunk §7: such a retry
+// is replayed from the buffer, never re-invoking this) -- NOT a guarantee against a
+// request duplicated on the wire with the retry bit CLEAR (e.g. a reflection or repeat):
+// that repeats the "new" path and re-invokes this a second time. Open spec question
+// (docs/OPEN-QUESTIONS.md 2026-09-06, SC-004 vs this retry-bit-gated condition).
 struct RequestHandler {
     virtual size_t handle(const uint8_t* req, size_t len, uint8_t* resp, size_t cap) = 0;
 
