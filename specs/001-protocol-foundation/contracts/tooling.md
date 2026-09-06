@@ -115,10 +115,18 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   small slack (documented in the commit that raises it: "raise when tests are added;
   NEVER lower"). (Amended by #133: the floor is the COUNT gate only. The ctest path also
   runs `tools/check_test_set.py`, which proves from `compile_commands.json`, the object
-  files, `ctest --show-only` and the run's `LastTest.log` that every
-  `tests/{unit,property}/test_*.cpp` was compiled, registered and executed, naming the
-  first that was not; the bootstrap path walks the SOURCES, so a source with no binary
-  fails by name. Both paths print a `unit: verified N test binaries` line.)
+  files, `ctest --show-only` and the run's `ctest --output-junit` record
+  (`build/native/Testing/junit.xml`, deleted before ctest runs and refused if older than
+  any registered binary) that every `tests/{unit,property}/test_*.cpp` was compiled,
+  registered and executed, naming every one that was not; the bootstrap path walks the
+  SOURCES, so a source with no binary fails by name. Both paths print a `unit: verified N
+  test binaries` line, and both fail when there are no sources at all. The record, not
+  `LastTest.log`, is the execution evidence: the log interleaves the tests' own stdout
+  with ctest's framing (PR #172 red team). The two paths have different predicates by
+  design — ctest runs what cmake registered and the tool proves the sources are all in
+  that set; bootstrap runs one binary per source that its own `stage_build` made — and
+  a pipeline run never mixes them: a cmake tree without `CTestTestfile.cmake` takes the
+  bootstrap path and fails at the first source with no bootstrap binary.)
 - `refimpl`: `python3 -m pytest -q tools/refimpl`.
 - `codegen`: `python3 tools/codegen.py --vectors tests/vectors && python3 tools/codegen.py --check-docs`.
 - `esp32`: calls `stage_codegen` first so `build/gen/` exists on the host before the

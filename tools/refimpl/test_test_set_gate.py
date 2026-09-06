@@ -77,6 +77,7 @@ def make_tree(
     ctest=True,           # False: no CTestTestfile.cmake -> stage_unit takes the bootstrap path
     args=None,            # {target: "argument"} — add_test registers the command WITH that argument
     scripts=None,         # {target: bash body} — what the fake binary runs instead of the EXECUTED echo
+    props=None,           # {target: "PROP value"} — an extra set_tests_properties line
 ) -> Path:
     """A minimal tree in which `bash pipeline.sh unit` runs for real."""
     compiled = dict.fromkeys(sources, None) if compiled is None else compiled
@@ -85,6 +86,7 @@ def make_tree(
     binaries = tuple(sources) if binaries is None else tuple(binaries)
     args = args or {}
     scripts = scripts or {}
+    props = props or {}
     root = tmp_path / "tree"
     build = root / "build" / "native"
     build.mkdir(parents=True)
@@ -123,6 +125,8 @@ def make_tree(
             reg.append(f'add_test([=[{t}]=] "{build / t}"{arg})')
             if t in disabled:
                 reg.append(f"set_tests_properties([=[{t}]=] PROPERTIES DISABLED TRUE)")
+            if t in props:
+                reg.append(f"set_tests_properties([=[{t}]=] PROPERTIES {props[t]})")
         (build / "CTestTestfile.cmake").write_text("\n".join(reg) + "\n")
     return root
 
@@ -249,6 +253,35 @@ class TestCtestPath:
         r = run_unit(root)
         assert r.returncode != 0
         assert "tests/unit/test_b.cpp" in r.stderr and "missing" in r.stderr, r.stderr
+
+    def test_skipped_test_that_printed_its_count_did_not_run(self, tmp_path):
+        # A SKIP_RETURN_CODE test prints EXECUTED: and then exits with the skip code: ctest is
+        # green, the floor is cleared, the record says status="notrun" (measured, CMake 3.22).
+        # The status is load-bearing on its own — a mutant ignoring it survived the other cases.
+        root = make_tree(tmp_path, props={"test_b": "SKIP_RETURN_CODE 77"},
+                         scripts={"test_b": 'echo "EXECUTED: 600000"\nexit 77'})
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "did not run" in r.stderr, r.stderr
+
+    def test_ran_without_an_executed_line_did_not_count(self, tmp_path):
+        # The converse: status="run", exit 0, but no EXECUTED: line — a binary that is not the
+        # Catch2 harness at all (or whose reporter was replaced). The line is load-bearing too.
+        root = make_tree(tmp_path, scripts={"test_b": 'echo "hello"'})
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "did not run" in r.stderr, r.stderr
+
+    def test_missing_record_is_a_named_failure(self, tmp_path):
+        # stage_unit deletes the record before ctest; if ctest then writes none, the tool must
+        # say so by name rather than fall over in the XML parser.
+        root = make_tree(tmp_path)
+        r = run_unit(root)
+        assert r.returncode == 0, r.stdout + r.stderr
+        (root / "build/native/Testing/junit.xml").unlink()
+        r = run_tool("--ctest", cwd=root)
+        assert r.returncode != 0, r.stdout
+        assert "no execution record" in r.stderr and "Traceback" not in r.stderr, r.stderr
 
     def test_no_sources_is_a_failure_not_a_vacuous_pass(self, tmp_path):
         # Finding 5 / review MEDIUM: `verified 0 test binaries`, exit 0 is a dead gate with a

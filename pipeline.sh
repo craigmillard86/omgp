@@ -99,7 +99,17 @@ stage_build() {
 
 stage_unit() {
   if command -v ctest >/dev/null 2>&1 && [ -f build/native/CTestTestfile.cmake ]; then
-    ctest --preset native --output-on-failure
+    # Two paths, one predicate each. This one runs whatever cmake registered (ctest sees
+    # add_test lines only, so check_test_set.py has to prove every source is in that set);
+    # the bootstrap path below runs one binary per SOURCE, which its own stage_build made
+    # one-for-one by construction. A cmake build tree with no CTestTestfile takes the
+    # bootstrap path and fails by name at the first source with no $BIN binary.
+    # The JUnit record is this run's execution evidence (#172 red team: LastTest.log
+    # interleaves the tests' stdout with ctest's framing, so a test could forge it; the
+    # record's framing is XML the tests cannot write). Deleted first so a stale record can
+    # never stand in for this run's.
+    rm -f build/native/Testing/junit.xml
+    ctest --preset native --output-on-failure --output-junit Testing/junit.xml
     # ctest only prints test-binary stdout inline on failure, so on a green
     # run the "EXECUTED: <n>" line lives in ctest's per-test log instead.
     local log="build/native/Testing/Temporary/LastTest.log"
@@ -112,9 +122,10 @@ stage_unit() {
     # The floor sees a mass loss of checks; it cannot see ONE tests/{unit,property}/test_*.cpp
     # that is built but never add_test-ed, compiled by no target, or DISABLED, while the rest
     # keep the sum above it (#133). check_test_set.py reads compile_commands.json, the objects,
-    # `ctest --show-only` and this run's log, and names the escaped source. The two checks are
-    # independent: each reports its own failure, neither masks the other. It runs AFTER the sum
-    # because `ctest --show-only` rewrites LastTest.log (the tool restores it, belt and braces).
+    # `ctest --show-only` and this run's JUnit record, and names every escaped source (or
+    # fails when there are no sources at all). The two checks are independent: each reports
+    # its own failure, neither masks the other. It runs AFTER the sum because
+    # `ctest --show-only` rewrites LastTest.log (the tool restores it, belt and braces).
     local rc=0
     python3 tools/check_test_set.py --ctest || rc=1
     if [ "$n" -lt "$UNIT_TEST_FLOOR" ]; then
@@ -148,6 +159,10 @@ stage_unit() {
       total=$((total + ${n:-0}))
       count=$((count + 1))
     done
+    if [ "$count" -eq 0 ]; then
+      echo "unit: no test sources under tests/unit, tests/property (nothing to verify is a failure, not a pass)" >&2
+      return 1
+    fi
     echo "unit: verified $count test binaries (built and executed; bootstrap path)"
     echo "unit: executed $total check(s) (bootstrap path)"
     if [ "$total" -lt "$UNIT_TEST_FLOOR" ]; then
