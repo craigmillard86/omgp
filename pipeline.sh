@@ -22,12 +22,13 @@ WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=
 # 509360 = 509460 executed (17 binaries) minus 100 slack AT THE RAISING COMMIT — T029/T031
 # added test_link_master.cpp (then 308753 checks: its microsecond-cadence timing loops REQUIRE
 # per poll); raised 2026-09-06 (#137 review, MEDIUM: at 200580 the gate could not notice this
-# binary being dropped — 236588 executed at 40355cf was 36008 above it). The suite has grown
-# since and the floor is not chased upward: 511453 executed at #137's nineteenth round
-# (test_link_master 310744, the other 16 binaries 200709), slack 2093 (#137 review @050f397,
-# LOW: this derivation had gone stale). Dropping test_link_master leaves 200709 < floor, so
-# the gate fires (demonstrated by that arithmetic, assuming the other 16 binaries' counts are
-# unchanged). Was 200580.
+# binary being dropped — 236588 executed at 40355cf was 36008 above it). The suite grows and
+# the floor is not chased upward, so the CURRENT total is the `unit: executed N check(s)`
+# line of the latest run, not this comment (it went stale twice: #137 reviews @050f397 and
+# @c0bf71c). What the floor protects is the invariant, restated with the figures measured
+# at 1a55116 (515373 = test_link_master 310744 + the other 16 binaries 204629): the other 16 together stay BELOW the floor, so dropping test_link_master
+# fires the gate — demonstrated by that arithmetic, assuming those 16 have not grown by
+# 304731 (slack over the floor is 6013; over the 16-binary sum it is 304731). Was 200580.
 UNIT_TEST_FLOOR=509360
 
 stage_codegen() {
