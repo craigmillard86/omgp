@@ -58,14 +58,13 @@ struct Step {
 // produce distinguishable streams.
 uint32_t xorshift32_next(uint32_t& state);
 
-// Kind::CrcError's corruption, exposed so a test driving a REAL Responder's response
-// through the same corruption (rather than MockWire's own echo) does not re-derive this
-// stuffing-boundary logic — see mock_wire.cpp for the rationale and the pending ruling
-// (docs/OPEN-QUESTIONS.md 2026-09-05 "Kind::CrcError's corrupted CRC byte").
-uint8_t corrupt_crc_hi(uint8_t real_hi);
-// Encodes `f` with its CRC high byte corrupted via corrupt_crc_hi() (same stuffed wire
-// length as an uncorrupted encode_frame(f, ...)). Returns 0 (nothing written) if `cap` is
-// too small, mirroring encode_frame's BufferTooSmall convention without a Status return.
+// Kind::CrcError's corruption (mock_wire.cpp's corrupt_crc_hi(), file-local), exposed here
+// so a test driving a REAL Responder's response through the same corruption (rather than
+// MockWire's own echo) does not re-derive this stuffing-boundary logic — see mock_wire.cpp
+// for the rationale and the pending ruling (docs/OPEN-QUESTIONS.md 2026-09-05 "Kind::
+// CrcError's corrupted CRC byte"). Same stuffed wire length as an uncorrupted
+// encode_frame(f, ...). Returns 0 (nothing written) if `cap` is too small, mirroring
+// encode_frame's BufferTooSmall convention without a Status return.
 size_t encode_crc_corrupted(const omgp::link::FrameFields& f, uint8_t* out, size_t cap);
 
 // Scripted ByteWire (contracts/mock-wire.md). `clock` is shared with the engine(s) under

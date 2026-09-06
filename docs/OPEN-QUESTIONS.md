@@ -1950,3 +1950,68 @@ files — the 2026-08-28 entry above). Each is listed so it is not mistaken for 
 **Ruling:** pending — human (tooling contract amendment; `tools/mutate.sh` is gate machinery).
 **Supersedes:** none — amends the "corrected measurement" entry of 2026-08-28 (its
 `gitDiffRef` finding stands; this entry narrows the *path-filter* finding to compile time).
+
+---
+
+## 2026-09-06 — T034's SC-004 loop bridges MockWire by hand instead of driving it through Kind::Duplicate/CrcError/Silence
+
+**Context:** PR #145 review @ `9e28db5` (MEDIUM) flagged that
+`tests/unit/test_link_loop.cpp` (T034, spec 002 issue #52) does not exercise SC-004's
+fault matrix through `MockWire`'s own `Kind::Duplicate`, `Kind::CrcError` or a `Respond`
+with `delay_us >= TRUNK_T_resp_us` — the mechanisms #52's own task text names ("the
+mock's handler for node *n* is `Responder` *n*"). It instead builds a hand-rolled
+bidirectional bridge (`host_wire`/`node_wire`, `run_transaction()`) from `MockWire`'s
+public surface (`inject_bytes`/`transcript`/`advance_to`) and shapes each attempt's fault
+by hand. The reason is real, not an oversight: `MockWire::schedule_respond()`
+(`tests/support/mock_wire.cpp`) always fabricates the answer itself — it echoes the
+request's own payload rather than invoking a node's `RequestHandler` — so it cannot
+exercise a real `Responder`'s replay buffer, which is exactly the property SC-004 exists
+to prove (`stats().replays_served`, "handler invocations == 1 per new sequence"). Wiring
+`MockWire` itself to call through to a real `RequestHandler` is out of scope for #52
+(named as such in the file's own header comment and in tasks.md), and is the same gap
+`specs/002-trunk-link-layer/contracts/mock-wire.md:16` already documents as unmet.
+**Recommended:** read #52's "each node's `MockWire` handler being that node's `Responder`"
+as satisfied by the hand-built bridge (it still runs a real `Master` and a real
+`Responder`, over `MockWire`'s existing byte-level RX/TX/transcript surface, with no new
+`Kind` and no change to `MockWire`'s step semantics — the bridge supplies only what
+`Kind::Respond` cannot yet do), rather than blocking #52 on a `MockWire` rewrite. File the
+follow-up named in the PR #145 review/red-team ("make `MockWire::Kind::Respond` answer
+via the node's `RequestHandler`, per `contracts/mock-wire.md:16`") as its own issue so
+T039 (#57) and T042 (#60) can extend one shared loop instead of each hand-building their
+own bridge.
+**Ruling:** pending — human (accept the bridge as meeting #52's criterion, or amend the
+criterion/file a blocking prerequisite issue instead).
+**Supersedes:** none.
+
+---
+
+## 2026-09-06 — SC-004's "retry 1"/"retry 2" columns collapse to one case for Drop/CrcError at TRUNK_retries == 2
+
+**Context:** PR #145 review @ `9e28db5` (MEDIUM) found that
+`tests/unit/test_link_loop.cpp`'s "drop through retry 2" and "CRC-corrupted response
+through retry 2" cases scripted the identical fault sequence as their "through retry 1"
+siblings ({Drop,Drop,Clean} and {Corrupt,Corrupt,Clean} respectively) and asserted
+nothing their sibling did not. This is not a copy-paste slip: with `TRUNK_retries == 2`
+there are only 3 transmissions per transaction (attempts 0, 1, 2), so for a fault that
+must clear before Master can succeed (Drop, CrcError — as opposed to Duplicate/
+DelayPastTResp, where the *stale* copy is what "retry 2" delivers, genuinely
+distinguishing it from "retry 1"), there are only three distinguishable outcomes:
+recovers at attempt 1 ("at attempt 0"), recovers only at attempt 2 (the full retry
+budget — labelled "through retry 1" in the file, since the fault persists through that
+retry), or never recovers ("after give-up"). A fourth, distinct "through retry 2"
+still-recovers case cannot exist for these two fault kinds: recovering after attempt 2
+would require a 4th transmission, which `TRUNK_retries == 2` does not allow. #52's task
+text (`specs/002-trunk-link-layer/tasks.md` T034) nonetheless states the matrix as
+{drop, duplicate, delay-past-T_resp, corrupt} × {attempt 0, retry 1, retry 2, after
+give-up} — 16 cells — naming 4 positions per fault uniformly.
+**Recommended:** the safe default applied in PR #145: drop the two non-distinguishable
+cells (14 SC-004 cases, not 16, for this reason alone — Duplicate and DelayPastTResp keep
+all 4 positions, since their "retry 2" case is genuinely distinct) rather than keep
+verbatim-duplicate tests solely to match a literal cell count, and record why here rather
+than in a code comment. If a maintainer instead wants 16 always-distinct cells, that
+requires either raising `TRUNK_retries` for this suite alone (not proposed — it is a
+protocol constant, golden rule 1) or redefining what "retry 2" asserts for a
+non-terminal-recovery fault when only 3 attempts exist.
+**Ruling:** pending — human (accept 14 SC-004 cases for the Drop/CrcError rows, or amend
+tasks.md's T034 matrix description).
+**Supersedes:** none.

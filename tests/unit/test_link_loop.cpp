@@ -52,7 +52,6 @@
 //   wrong-rate probe       -> reserved: T042 (#60), same script as BUS_FAULT above
 #include "catch_amalgamated.hpp"
 #include "fake_clock.hpp"
-#include "heap_guard.hpp"
 #include "link/crc16.hpp"
 #include "link/frame.hpp"
 #include "link/link_types.hpp"
@@ -66,7 +65,6 @@
 #include <vector>
 
 using namespace omgp::link;
-using omgp_test::corrupt_crc_hi;
 using omgp_test::encode_crc_corrupted;
 using omgp_test::FakeClock;
 using omgp_test::Kind;
@@ -102,9 +100,18 @@ uint64_t byte_us() {
 // so the response content is trivially predictable.
 struct CountingHandler : RequestHandler {
     unsigned invocations = 0;
+    // Recorded, not REQUIRE'd, here: this call runs on Responder::poll()'s stack, and
+    // link/CMakeLists.txt builds omgp_link with -fno-exceptions — a REQUIRE thrown from
+    // this frame would unwind through it, which is not defined behaviour (same hazard
+    // mock_wire.hpp's fault_ deferral exists to avoid). Checked from the caller's own
+    // stack instead (run_transaction, after the advance_to() that reaches this handler).
+    bool overflowed = false;
     size_t handle(const uint8_t* req, size_t len, uint8_t* resp, size_t cap) override {
         ++invocations;
-        REQUIRE(len <= cap);
+        if (len > cap) {
+            overflowed = true;
+            len = cap;
+        }
         if (len > 0)
             std::memcpy(resp, req, len);
         return len;
@@ -199,6 +206,7 @@ MasterEvent run_transaction(Loop& loop, uint8_t dst, const uint8_t* payload, siz
         // node_wire.transmit(), so MockWire itself never tries to auto-answer it.
         loop.node_wire.inject_bytes(req_bytes.data(), req_bytes.size(), req.tx_start_us);
         loop.node_wire.advance_to(req_tx_end, loop.responder); // drains the request
+        REQUIRE_FALSE(loop.handler.overflowed);
         const uint64_t response_start_us = req_tx_end + omgp::TRUNK_T_turn_min_us; // default
         loop.node_wire.advance_to(response_start_us, loop.responder); // transmits the reply
 
@@ -210,15 +218,25 @@ MasterEvent run_transaction(Loop& loop, uint8_t dst, const uint8_t* payload, siz
             loop.host_wire.inject_bytes(resp_bytes.data(), resp_bytes.size(), response_start_us);
             const uint64_t full_end =
                 response_start_us + static_cast<uint64_t>(resp_bytes.size()) * byte_us();
-            if (fault == Fault::Duplicate) {
-                // contracts/mock-wire.md Kind::Duplicate: the real response, then the same
-                // bytes again after it (here, after the whole transaction has had time to
-                // conclude on the first copy, so it cannot be mistaken for a second genuine
-                // answer arriving inside the SAME window).
-                loop.host_wire.inject_bytes(resp_bytes.data(), resp_bytes.size(),
-                                            full_end + omgp::TRUNK_T_gap_us);
-            }
-            return loop.host_wire.advance_to(full_end, loop.master);
+            if (fault != Fault::Duplicate)
+                return loop.host_wire.advance_to(full_end, loop.master);
+
+            // contracts/mock-wire.md Kind::Duplicate: the real response, then the same
+            // bytes again after it (here, after the whole transaction has had time to
+            // conclude on the first copy, so it cannot be mistaken for a second genuine
+            // answer arriving inside the SAME window). Deliver the duplicate and advance
+            // past it here, on the caller's behalf, so every Duplicate cell actually drains
+            // it and proves it had no effect, rather than leaving it sitting undelivered in
+            // host_wire's RX queue until the test ends.
+            const uint64_t dup_start = full_end + omgp::TRUNK_T_gap_us;
+            loop.host_wire.inject_bytes(resp_bytes.data(), resp_bytes.size(), dup_start);
+            const MasterEvent ev = loop.host_wire.advance_to(full_end, loop.master);
+            const uint64_t dup_end =
+                dup_start + static_cast<uint64_t>(resp_bytes.size()) * byte_us();
+            const MasterEvent late = loop.host_wire.advance_to(dup_end, loop.master);
+            REQUIRE(late.kind == MasterEvent::None);
+            REQUIRE_FALSE(loop.master.busy());
+            return ev;
         }
 
         uint64_t next_attempt_ready_at; // when THIS attempt concludes (retry or Failed follows)
@@ -295,18 +313,6 @@ TEST_CASE("SC-004 drop through retry 1: recovers on the second retry, handler in
     REQUIRE(loop.master.attempts() == 3);
     REQUIRE(loop.handler.invocations == 1);
     REQUIRE(loop.responder.stats().replays_served == 2);
-}
-
-TEST_CASE("SC-004 drop through retry 2: uses the full retry budget and still recovers", "[link]") {
-    Loop loop;
-    const uint8_t payload[] = {0x13};
-    // TRUNK_retries == 2: attempts 0 and 1 both drop, attempt 2 (the last) is answered.
-    const Fault plan[3] = {Fault::Drop, Fault::Drop, Fault::Clean};
-    const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
-    REQUIRE(ev.kind == MasterEvent::Answered);
-    REQUIRE(ev.response.seq == 0);
-    REQUIRE(loop.master.attempts() == static_cast<uint8_t>(omgp::TRUNK_retries) + 1);
-    REQUIRE(loop.handler.invocations == 1);
 }
 
 TEST_CASE("SC-004 drop after give-up: Failed{Timeout} after exactly 3 transmissions, handler "
@@ -432,18 +438,6 @@ TEST_CASE("SC-004 CRC-corrupted response through retry 1: recovers on the second
     REQUIRE(loop.master.attempts() == 3);
     REQUIRE(loop.handler.invocations == 1);
     REQUIRE(loop.master.stats(kNode).crc_failures == 2);
-}
-
-TEST_CASE("SC-004 CRC-corrupted response through retry 2: uses the full retry budget and "
-          "still recovers",
-          "[link]") {
-    Loop loop;
-    const uint8_t payload[] = {0x33};
-    const Fault plan[3] = {Fault::Corrupt, Fault::Corrupt, Fault::Clean};
-    const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
-    REQUIRE(ev.kind == MasterEvent::Answered);
-    REQUIRE(loop.master.attempts() == static_cast<uint8_t>(omgp::TRUNK_retries) + 1);
-    REQUIRE(loop.handler.invocations == 1);
 }
 
 TEST_CASE("SC-004 CRC-corrupted response after give-up: Failed{CrcFailed} after exactly 3 "
