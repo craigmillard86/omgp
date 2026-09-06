@@ -1610,3 +1610,71 @@ change for F3; (c) clamp to `TRUNK_bit_rate_fallback` — rejected: no rate is a
 stand-in for "no rate". **Recommended:** (a), with the contract text amended to say so (done in
 #137, marked pending); revisit if F3 ever computes a rate rather than selecting one of §9's.
 **Ruling:** pending — human (contract text).
+
+## 2026-09-06 — Deframer::in_frame() is a public member the contract's Deframer listing did not have
+
+**Context:** review at `3a15d29` (#137, MEDIUM). `contracts/link-cpp.md` "Frame codec" listed
+`Deframer`'s public surface as exactly `Deframer()`, `feed`, `reset`, `stats`. #137 added
+`bool in_frame() const` (`state_ != Hunting`) so `Master::frame_arriving()` can pair the
+parser's state with byte cadence for the trunk §3 T_resp in-flight test (a response whose
+START BIT arrived inside the window must be allowed to finish). `frame.hpp` is US1's closed
+deliverable (T027/#45), so this is drift in a settled artefact; every other contract divergence
+in #137 was logged here and this one was not — recorded now, and the listing is amended in
+#137 (marked pending).
+**Options:** (a) accept the member as part of the codec's contract, documented as a STATE
+predicate only (it never goes false on a quiet wire — the T_resp hold needs cadence on top of
+it, which is why `Master` owns that pairing rather than the Deframer); (b) keep it out of the
+contract and have `Master` track "a FLAG has been seen since the last discard" itself — a
+duplicate of parser state the Deframer already holds, and a second place for the two to
+disagree; (c) expose a richer query (e.g. the accumulator length) — more surface than any
+caller needs today. **Recommended:** (a).
+**Ruling:** pending — human (US1 contract text).
+
+## 2026-09-06 — Master::set_bit_rate refuses any rate whose byte time truncates to 0 µs (amends the set_bit_rate(0) entry above)
+
+**Context:** red-team at `3a15d29` (#137, LOW). The entry above records the refusal of
+`bps == 0` on the grounds that `byte_time_us()` has a nonzero precondition. The same hazard sits
+one step out: any `bps > 10 000 000` passes that guard and makes `byte_time_us(bps) ==
+10000000u / bps == 0`, at which point `frame_arriving()` degenerates to `now_us <= last_rx_us_`
+(the T_resp in-flight hold disappears) and `max_frame_us()` becomes 0 (the courtesy cap
+collapses to `defer_origin + T_gap`) — both protections this PR adds become silent no-ops.
+Not reachable from trunk §9's own rates (1 Mb/s, 115 200), hence LOW. Implemented in #137: the
+refusal is `bps == 0 || byte_time_us(bps) == 0`, i.e. "a byte must take at least 1 µs at this
+rate" — the property the engine's timing arithmetic actually needs, stated once. Pinned by
+`tests/unit/test_link_master.cpp` "set_bit_rate() refuses a rate whose byte time truncates to
+zero".
+**Options:** as the entry above — (a) refuse silently (implemented); (b) return a `Status`;
+(c) clamp. A further option (d): restrict `set_bit_rate` contractually to trunk §9's two rates.
+**Recommended:** (a) with the byte-time condition, not (d): §9's rate table is the protocol's,
+and a generic "≥ 1 µs per byte" precondition does not need re-stating if it ever grows.
+**Ruling:** pending — human (contract text; folds into the ruling on the entry above).
+
+## 2026-09-06 — the protection claimed for the bounded courtesy was FALSE at 3a15d29: poll()'s drain loop stopped early
+
+**Context:** red-team at `3a15d29` (#137, HIGH). The 2026-09-05 "bounded courtesy" entry and
+`fire_pending()` claimed, by construction, that "a frame whose start bit lands at or before
+`defer_origin + T_gap` is never transmitted over", resting on the drain loop recording EVERY
+received byte's end in `last_activity_`. The recording was not unconditional across a `poll()`:
+the loop `break`-ed on the byte that concluded an attempt (Answered, or an in-window CRC
+failure), leaving bytes already due behind it unread, and `fire_pending()` at the bottom of the
+same `poll()` — or a `begin()` the caller issued on the terminal event, the intended F3 loop —
+judged the bus idle from a `last_activity_` that predated them. Three reproducers (the engine's
+own retry after a CRC failure; the polled node's `Kind::Duplicate` second copy still arriving
+when the host starts the next transaction; the F3 loop with a third station's frame) each
+transmitted mid-frame at the `T_poll` cadence. Fixed in #137: the drain loop no longer breaks —
+every byte due at `now_us` is read, and the attempt-ending byte's outcome is preserved because
+the acceptance checks are gated on `awaiting` (re-evaluated per byte and false once the attempt
+has ended). Pinned by three cases under "the drain loop reads every due byte". With that fix the
+by-construction argument holds as stated (at a constant bit rate, see the "rate change" entry):
+the last byte drained at `now` has start <= now < end, so `last_activity_ > now` whenever a
+frame is arriving. The `begin()`-without-`poll()` gap tracked in #138 is unchanged by this: its
+guarantee assumes `poll(now)` immediately precedes `begin()`, which — after this fix, and not
+before it — is sufficient.
+**Also changed:** `discards` attribution (review at `3a15d29`, LOW). A frame delivered while a
+transaction is open but NOT awaiting a response (gap-deferred before its first or a retried
+transmission) used to be charged to `dst_`; spec US2 AC6 scopes the per-destination `discards`
+to frames "arriving during an open response window". Now charged to the frame's own claimed
+`src` (when in range), as when fully idle. Diagnostic-only (`discards` does not feed trunk §7's
+SUSPECT accounting). Contract text amended in #137, marked pending.
+**Ruling:** none needed for the fix (a bug against the PR's own stated property); the
+attribution change folds into the pending ruling on the amended contract text.

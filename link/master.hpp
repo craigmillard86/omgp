@@ -34,6 +34,14 @@ class Master {
     // encode_frame (contracts/link-cpp.md). An accepted transaction may still defer its
     // transmission to satisfy T_gap (data-model.md §4 "Gap") — busy() is already true
     // when this returns Ok either way.
+    //
+    // PRECONDITION (stated, not enforced — #138): poll(now_us) has run immediately before, at
+    // the clock's current instant. begin() does not drain the wire itself, so its "never
+    // transmits into an arriving frame" guarantee is only as fresh as the caller's last
+    // poll(): a begin() issued after clock time has passed with no poll() in between is blind
+    // to every byte that arrived meanwhile and can transmit into a frame already on the wire.
+    // The intended F3 loop — `ev = poll(now); if (ev.kind != None) begin(next, ...)` —
+    // satisfies it (PR #137 review @3a15d29, MEDIUM; contracts/link-cpp.md "Master engine").
     Status begin(uint8_t dst, const uint8_t* payload, size_t len);
 
     // The only receive path (analysis F1): drains ByteWire::receive() into the engine's

@@ -25,10 +25,15 @@ void Master::set_bit_rate(uint32_t bps) {
     // byte_time_us() has a nonzero precondition and the engine calls it on every poll (cadence
     // and frame-time bounds), so a zero rate accepted here would make the engine violate that
     // precondition from the inside — an assert in a debug build, a divide-by-zero otherwise
-    // (PR #137 red-team, LOW). Refused rather than clamped: no rate is a defensible stand-in
-    // for "no rate", and trunk §9's rates are all nonzero. rate_changes counts changes actually
-    // applied, so a refused call does not bump it.
-    if (bps == 0)
+    // (PR #137 red-team, LOW). The same hazard sits one step out: above 10 Mb/s the integer
+    // byte time truncates to 0 µs, frame_arriving()'s cadence slack and max_frame_us() (hence
+    // the courtesy cap) collapse to nothing, and both protections become silent no-ops (PR #137
+    // red-team @3a15d29, LOW). So the precondition the engine actually needs is stated once: a
+    // byte must take at least one microsecond at the rate in force. Refused rather than
+    // clamped: no rate is a defensible stand-in for an unusable one, and trunk §9's rates both
+    // satisfy this. rate_changes counts changes actually applied, so a refused call does not
+    // bump it (docs/OPEN-QUESTIONS.md 2026-09-06, two "set_bit_rate" entries).
+    if (bps == 0 || byte_time_us(bps) == 0)
         return;
     wire_.set_bit_rate(bps);
     bus_stats_.rate_changes++;
@@ -178,14 +183,19 @@ void Master::fire_pending(uint64_t now_us) {
     // strictly greater than `now`. Hence last_activity_ > now, and the deferred instant
     // (last_activity_ + T_gap) stays ahead of `now` for as long as bytes keep coming, at any
     // CONSTANT bit rate. Proved by construction from the drain loop's unconditional recording
-    // plus that contiguity — not merely by the tests that exercise it. The constancy matters:
-    // each byte's end is computed at DRAIN time from the rate then in force, so a set_bit_rate()
-    // upwards while a frame put on the wire at the old rate is still arriving makes those bytes
-    // appear to end early, and the perceived holes can let this transmit out inside that frame
-    // (PR #137 red-team @40355cf, LOW — a byte's own duration is not something ByteWire
+    // of EVERY byte due at `now` (the loop never exits early — it did once, on the attempt-
+    // ending byte, and the argument was false for exactly the bytes left behind it: PR #137
+    // red-team @3a15d29, HIGH) plus that contiguity — not merely by the tests that exercise
+    // it. Two things it does NOT cover: a begin() with no poll(now) immediately before it sees
+    // no bytes at all (master.hpp begin(); #138), and a rate change mid-frame. The constancy
+    // matters: each byte's end is computed at DRAIN time from the rate then in force, so a
+    // set_bit_rate() upwards while a frame put on the wire at the old rate is still arriving makes
+    // those bytes appear to end early, and the perceived holes can let this transmit out inside
+    // that frame (PR #137 red-team @40355cf, LOW — a byte's own duration is not something ByteWire
     // reports; open in #138 / docs/OPEN-QUESTIONS.md 2026-09-06 "rate change mid-stream").
     // Every protection claim below is therefore stated for a constant rate.
     uint64_t want_us = deadline_;
+    // mutant-ok(equivalent, cxx_gt_to_ge): at equality the branch re-stores want_us's own value.
     if (has_last_activity_ && last_activity_ + omgp::TRUNK_T_gap_us > want_us)
         want_us = last_activity_ + omgp::TRUNK_T_gap_us;
 
@@ -226,9 +236,10 @@ void Master::fire_pending(uint64_t now_us) {
     // above SC-008's 140-byte achievable worst case — recomputed here so a set_bit_rate()
     // during the deferral is honoured at once (PR #137 review, LOW).
     const uint64_t cap_us = defer_origin_us_ + max_frame_us() + omgp::TRUNK_T_gap_us;
-    // mutant-ok(equivalent, cxx_gt_to_ge): `a > b ? b : a` and `a >= b ? b : a` both compute
-    // min(a, b) for ALL inputs — they pick different branches only when a == b, where both
-    // branches yield the same value.
+    // `a > b ? b : a` and `a >= b ? b : a` both compute min(a, b) for ALL inputs — they pick
+    // different branches only when a == b, where both branches yield the same value. (A label
+    // governs only the line directly beneath it — tools/mutate_report.py — so it comes last.)
+    // mutant-ok(equivalent, cxx_gt_to_ge): min(a, b) either way; at a == b both branches agree.
     if (want_us > cap_us)
         want_us = cap_us;
     deadline_ = want_us;
@@ -250,6 +261,7 @@ void Master::end_attempt(uint64_t last_activity_us, MasterEvent::Reason reason,
     // review/red-team, MEDIUM). An unconditional overwrite here made that clause dead code:
     // a frame discarded just past deadline_ recorded its own (later) end, only for this
     // unconditional assignment to immediately rewind it back to the (earlier) deadline_.
+    // mutant-ok(equivalent, cxx_gt_to_ge): at equality the branch re-stores the same value.
     if (last_activity_us > last_activity_)
         last_activity_ = last_activity_us;
     has_last_activity_ = true;
@@ -284,6 +296,18 @@ MasterEvent Master::poll(uint64_t now_us) {
     // while no transaction is open, or while one is gap-deferred between attempts, is
     // still discarded and counted rather than left to overrun a real UART FIFO or bleed
     // into whichever window opens next (PR #137 review, MEDIUM).
+    //
+    // And drained to EXHAUSTION: this loop never `break`s, not even on the byte that ends an
+    // attempt (an in-window CRC failure, or the Answered delivery). It used to, and bytes
+    // already due behind that byte stayed unread — so fire_pending() at the bottom of this
+    // very poll(), or a begin() the caller issued on the terminal event (the intended F3
+    // loop), judged the bus idle from a last_activity_ that predated them and transmitted
+    // INTO a frame another station had started in the meantime (PR #137 red-team @3a15d29,
+    // HIGH). fire_pending()'s protection argument rests on this loop recording every received
+    // byte's end; an early exit made that recording conditional and the argument false. The
+    // attempt-ending byte's outcome survives the rest of the drain because every acceptance
+    // check below is gated on `awaiting`, re-evaluated per byte and false once the attempt
+    // has ended: later bytes can only be recorded as activity and discarded/counted.
     while (wire_.receive(byte, start_us)) {
         const bool is_flag = (byte == omgp::TRUNK_flag_byte);
         // The instant that opened the accumulation now forming, captured BEFORE this
@@ -313,6 +337,10 @@ MasterEvent Master::poll(uint64_t now_us) {
         // idle after a partial or ignored burst. last_rx_us_ additionally feeds
         // frame_arriving()'s cadence test, so it tracks received bytes ONLY.
         last_rx_us_ = byte_end_us;
+        // Not equivalent to an unconditional store: a byte drained AFTER a rate rise can end
+        // before one drained at the slower rate (test "a rate rise between two polls does not
+        // rewind last_activity"). Only the equality case is behaviourally identical:
+        // mutant-ok(equivalent, cxx_gt_to_ge): at equality the branch re-stores the same value.
         if (byte_end_us > last_activity_)
             last_activity_ = byte_end_us;
         has_last_activity_ = true;
@@ -320,9 +348,10 @@ MasterEvent Master::poll(uint64_t now_us) {
         if (bad_crc_after > bad_crc_before) {
             if (awaiting && in_window) {
                 // trunk §7: a CRC-failed response IN the window is a failure — ends this
-                // attempt at once, no need to wait out the remaining T_resp window.
+                // attempt at once, no need to wait out the remaining T_resp window. The
+                // drain goes on (see the loop comment): `awaiting` is false from here.
                 end_attempt(byte_end_us, MasterEvent::CrcFailed, event);
-                break;
+                continue;
             }
             // A CRC-bad frame outside any open attempt's own window (or with no
             // transaction open at all) is not attributable to a specific dst_ — the
@@ -354,17 +383,25 @@ MasterEvent Master::poll(uint64_t now_us) {
             // distinguish (concurrent PR #137 review-fix pass, cross-checked here).
             // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
             open_ = false;
-            break; // this byte's bus activity is already recorded above
+            continue; // this byte's bus activity is already recorded above; keep draining
         }
         // Wrong src/dst/seq/response-bit, a matching frame whose opening instant fell
         // outside the window, or no transaction open at all: discarded silently (trunk
-        // §4), counted (FR-011), and does not end the attempt (data-model.md §4). A
-        // transaction in progress (open_, including gap-deferred between attempts) is
-        // charged to its own dst_; fully idle, there is no dst_ to charge, so the
-        // frame's own claimed source is used instead (bounds-checked: an intact frame's
-        // src is wire-derived and can claim any byte 0x00..0xFE).
-        if (open_)
+        // §4), counted (FR-011), and does not end the attempt (data-model.md §4). Charged
+        // to dst_ only while dst_'s own response window is running — spec US2 AC6 scopes
+        // the per-destination counter to frames "arriving during an open response window".
+        // Otherwise (gap-deferred before a first or retried transmission, or no transaction
+        // at all) there is no window to attribute it to, so the frame's own claimed source
+        // is charged instead (PR #137 review @3a15d29, LOW; bounds-checked: an intact
+        // frame's src is wire-derived and can claim any byte 0x00..0xFE).
+        if (awaiting)
             stats_[dst_].discards++;
+        // `<=` here differs only at f.src == kAddrCount, where it writes one AddrStats past the
+        // table — undefined behaviour with no defined observable to assert on. The native
+        // preset's ASan catches it (test "an unsolicited frame while idle whose claimed source
+        // is exactly kAddrCount"); the mutation build runs with sanitizers off (tools/mutate.sh),
+        // so that case cannot kill the mutant there.
+        // mutant-ok(accepted, cxx_lt_to_le): only an out-of-bounds write differs; ASan-only.
         else if (f.src < kAddrCount)
             stats_[f.src].discards++;
         // This frame's bus activity (for the T_gap rule, data-model.md §4 "Gap") is already

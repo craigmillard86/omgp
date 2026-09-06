@@ -43,6 +43,11 @@ public:
     bool feed(uint8_t byte, FrameView& out);      // true exactly when a frame is delivered by this byte
     void reset();                                 // back to Hunting; counters kept
     const DeframerStats& stats() const;
+    bool in_frame() const;                        // state != Hunting (InFrame or Escaped: a FLAG has been seen
+                                                  // and no discard has reset the parser). A state predicate
+                                                  // only — never false on a quiet wire. Added for Master's
+                                                  // T_resp in-flight test (PR #137, pending a ruling —
+                                                  // docs/OPEN-QUESTIONS.md 2026-09-06 "Deframer::in_frame()")
 };
 ```
 Guarantees: `feed` never reads memory other than `byte` and its own accumulator; delivered
@@ -72,8 +77,9 @@ public:
     bool busy() const;
     uint8_t attempts() const;                     // 0..3 for the open/last transaction
     void set_bit_rate(uint32_t bps);              // pass-through to the wire + BusStats.rate_changes;
-                                                  // bps == 0 refused: not forwarded, not counted (PR #137,
-                                                  // pending a ruling — docs/OPEN-QUESTIONS.md 2026-09-06)
+                                                  // refused (not forwarded, not counted) when byte_time_us(bps)
+                                                  // would be 0: bps == 0 and bps > 10 Mb/s (PR #137, pending a
+                                                  // ruling — docs/OPEN-QUESTIONS.md 2026-09-06, two entries)
     const AddrStats& stats(uint8_t addr) const;   // per destination (kAddrCount entries)
     const BusStats& bus_stats() const;
     void reset_stats();
@@ -82,9 +88,15 @@ public:
 Behaviour (tests assert each): a new transaction uses the destination's next 4-bit
 sequence; retries reuse it and set `retry`; at most `TRUNK_retries` retries; response
 window `[tx_end, tx_end + TRUNK_T_resp_us)`; a CRC-failed frame in the window ends the
-attempt at once; frames failing any acceptance check are discarded and counted; the next
-transmission starts no earlier than `last_activity + TRUNK_T_gap_us`, where `last_activity`
-is re-read on every `poll()` so a byte arriving during the deferral pushes the instant out.
+attempt at once; frames failing any acceptance check are discarded and counted — against
+`dst` while `dst`'s response window is open (spec US2 AC6), otherwise against the frame's own
+claimed `src` (when in range) — and a byte-for-byte drain: `poll()` reads every byte due at
+`now_us`, including those behind the byte that concluded an attempt; the next transmission
+starts no earlier than `last_activity + TRUNK_T_gap_us`, where `last_activity` is re-read on
+every `poll()` so a byte arriving during the deferral pushes the instant out. `begin()` does
+not drain the wire itself: its own collision guarantee assumes `poll(now_us)` immediately
+precedes it at the same `now_us` (the intended F3 loop `ev = poll(now); if (ev.kind != None)
+begin(...)`) — stated, not enforced (PR #137; enforcement tracked in #138).
 That push-out is bounded: deferral for activity that is not the host's own ends at
 `defer_origin + max_frame + TRUNK_T_gap_us` (`defer_origin` = the instant the transmission
 was first deferred to; `max_frame` = `kMaxWire` byte times at the current rate — one
