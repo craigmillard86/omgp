@@ -31,12 +31,18 @@ unit_sources() {
 # vouch for both — twice into the floor sum (#172 red team @3dde163, finding 1). Refused by
 # name before the bootstrap build and before the bootstrap unit walk. The cmake path is
 # unaffected: targets are named in CMakeLists, and the tool matches by object, not basename.
+# Basenames are taken line-wise in the shell, not via `xargs -n1 basename` (red team @6fbdebf
+# finding 2): xargs reads quotes as syntax, so a source named test_a'q.cpp made it print an
+# error and STOP, dropping every later line — and a colliding pair sorting after it went
+# unnamed, with xargs' status lost in `$(...)`. Names with a newline are outside what any
+# line-based list here can carry (find -name 'test_*.cpp' output); not handled.
 unit_sources_unique() {
-  local dup rc=0
-  for dup in $(unit_sources | xargs -rn1 basename | LC_ALL=C sort | uniq -d); do
-    echo "unit: $(unit_sources | grep "/$dup\$" | tr '\n' ' ')— same basename $dup: the bootstrap path builds one binary per basename, so these would share (and clobber) one" >&2
+  local dup p rc=0
+  while IFS= read -r dup; do
+    [ -n "$dup" ] || continue
+    echo "unit: $(unit_sources | while IFS= read -r p; do [ "${p##*/}" = "$dup" ] && printf '%s ' "$p"; done)— same basename $dup: the bootstrap path builds one binary per basename, so these would share (and clobber) one" >&2
     rc=1
-  done
+  done < <(unit_sources | while IFS= read -r p; do printf '%s\n' "${p##*/}"; done | LC_ALL=C sort | uniq -d)
   return "$rc"
 }
 # No symlink under the test source directories, at any depth, directory or file (red team

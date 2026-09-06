@@ -20,7 +20,10 @@ the run's own machine-readable record, and names every source that escaped:
               the decoy entry: an entry plus a stub object); no link line fails closed.
               The object must be at least as new as the source: an edited-after-build
               source is named ("source is newer than its object; rebuild") rather than
-              vouched for by a stale object (red team @ceab86f finding 3). An mtime
+              vouched for by a stale object (red team @ceab86f finding 3), and the binary
+              at least as new as the object: an object recompiled after the last link is
+              named ("object is newer than <binary>; rebuild") rather than credited to a
+              binary that cannot contain it (red team @6fbdebf finding 1). An mtime
               comparison is a control, not a guarantee (clock skew, touch).
   registered  `ctest --show-only=json-v1` in the build dir lists a test whose command is
               EXACTLY [<build>/<target>] — the target's own binary, compared as an absolute
@@ -467,6 +470,15 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path, pre: dict) -> i
         elif len(argv) > 1:
             failures.append(f"{rel}: registered as '{name}' with argument(s) {argv[1:]} — a filtered run is not "
                             f"execution of the source; register the whole binary (add_test(NAME {target} COMMAND {target}))")
+        elif os.path.getmtime(obj) > os.path.getmtime(binary):
+            # The chain's last hop, ordered in time (red team @6fbdebf finding 1): the link
+            # line says what the binary is linked FROM, not that the link ran after this
+            # object was written. An object recompiled after the last link — the build
+            # interrupted or failed at link — is not in the binary ctest ran. Same control as
+            # the source-vs-object rule above and the bootstrap path's `-nt`; a control, not
+            # a guarantee.
+            failures.append(f"{rel}: object {obj} is newer than {binary} (target {target}): compiled after the last "
+                            f"link, so the binary that ran cannot contain it; rebuild before verifying")
         elif os.path.getmtime(binary) > record_mtime:
             failures.append(f"{rel}: {binary} is newer than {junit} (the execution record predates this binary; rerun ctest)")
         elif name not in executed and name in truncated:

@@ -136,8 +136,9 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   under two targets are refused naming both: keeping the last one let a single appended
   entry re-credit a source to any registered target and made the verdict depend on entry
   order — red team @8b0e4f4) whose object exists, is
-  no older than the source (an edited-after-build source is named; an mtime comparison is
-  a control, not a guarantee) and is on the target's link line
+  no older than the source and no newer than the target's binary (an edited-after-build
+  source is named, and so is an object recompiled after the last link — red team @6fbdebf;
+  an mtime comparison is a control, not a guarantee) and is on the target's link line
   (`CMakeFiles/<target>.dir/link.txt`, the Makefiles generator's, read as a build artefact;
   absent, the check fails closed — an entry plus a stub object is not a compilation into
   the binary, red team @8b0e4f4), registered means an `add_test` whose command is exactly
