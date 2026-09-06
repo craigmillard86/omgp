@@ -61,10 +61,19 @@ class Responder {
         uint8_t bytes[kMaxWire] = {};
     };
 
-    // Decides new-vs-replay for one intact frame (or counts a discard for anything not
-    // addressed to my_addr / not a request) and schedules the response at
+    // Decides new-vs-replay for one intact frame addressed to my_addr, or counts a
+    // discard: for a frame not addressed to it, a request whose src is the reserved
+    // 0xFF marker (never answerable — see the .cpp), or one arriving while a previous
+    // response is still Scheduled. Schedules an accepted request's response at
     // request_end_us + turnaround_us_ (data-model.md §5).
     void on_request(const FrameFields& f, uint64_t request_end_us);
+
+    // Transmits the Scheduled response and returns to Listening if `now_us` has reached
+    // its deadline (data-model.md §5's Transmitting instant); no-op otherwise. Called
+    // both ahead of every drained byte and once more after the drain loop in poll(), so
+    // a response already due is flushed before on_request() can decide new-vs-replay for
+    // whatever frame comes next (see poll()'s own comment).
+    void transmit_if_due(uint64_t now_us);
 
     ByteWire& wire_;
     // Stored for the constructor-signature parity with Master/Health (link-cpp.md

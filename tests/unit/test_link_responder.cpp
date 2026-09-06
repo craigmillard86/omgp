@@ -268,8 +268,119 @@ TEST_CASE("a retry-flagged request before any answer has ever been given is trea
 
     REQUIRE(handler.calls == 1);
     REQUIRE(wire.transcript_size() == 1);
+    // data-model.md §5 "retry echoed": this is the only AS5/AS3 case that feeds retry ==
+    // 1 into a freshly-encoded (non-replay) response, so it is the only assertion in this
+    // file a stale (never-echoed) retry bit would fail (red-team @907dfbe finding #2).
+    REQUIRE(wire.transcript(0).retry);
     REQUIRE(responder.stats().replays_served == 0);
     REQUIRE(responder.stats().transactions == 1);
+}
+
+// --- red-team @907dfbe finding #2: retry bit must gate the replay decision -------------
+
+TEST_CASE("a NEW request reusing the buffered sequence with the retry bit clear "
+          "re-invokes the handler instead of replaying the stale buffer",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t p1[] = {0x01};
+    uint64_t end = inject_request(wire, request_bytes(kMyAddr, kPeer, false, 5, p1, sizeof p1), 0);
+    wire.advance_to(end + omgp::TRUNK_T_turn_min_us, responder);
+    REQUIRE(handler.calls == 1);
+    REQUIRE(wire.transcript_size() == 1);
+
+    // Same sequence (5) as the buffered response, but the retry bit is CLEAR: FR-016
+    // requires this be treated as new, not replayed — losing the `f.retry &&` conjunct
+    // in the replay decision would serve the stale seq-5 answer instead.
+    const uint8_t p2[] = {0x02};
+    const uint64_t retry_start = end + omgp::TRUNK_T_turn_min_us + 200 * byte_us();
+    end = inject_request(wire, request_bytes(kMyAddr, kPeer, false, 5, p2, sizeof p2), retry_start);
+    wire.advance_to(end + omgp::TRUNK_T_turn_min_us, responder);
+
+    REQUIRE(handler.calls == 2);
+    REQUIRE(wire.transcript_size() == 2);
+    REQUIRE(wire.transcript(1).seq == 5);
+    REQUIRE(wire.transcript(1).len == sizeof p2);
+    REQUIRE(wire.transcript(1).payload[0] == 0x02); // the NEW payload, not the stale one
+    REQUIRE(responder.stats().replays_served == 0);
+    REQUIRE(responder.stats().transactions == 2);
+}
+
+// --- red-team @907dfbe finding #1: src == 0xFF can never be answered -------------------
+
+TEST_CASE("a request claiming src == 0xFF is discarded rather than scheduling an "
+          "unanswerable response",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    // encode_frame only refuses dst == 0xFF, never src, so this frame is otherwise
+    // perfectly legal and the Deframer delivers it (link/frame.cpp:142 checks only
+    // dst). A response's dst IS the request's src, so my_addr_ would have to encode a
+    // frame with dst == 0xFF -- something encode_frame always refuses.
+    const uint8_t p[] = {0xAA, 0xBB};
+    uint64_t end = inject_request(wire, request_bytes(kMyAddr, 0xFF, false, 5, p, sizeof p), 0);
+    wire.advance_to(end + omgp::TRUNK_T_turn_min_us, responder);
+
+    REQUIRE(handler.calls == 0);
+    REQUIRE(wire.transcript_size() == 0);
+    REQUIRE(responder.stats().transactions == 0);
+    REQUIRE(responder.stats().discards == 1);
+
+    // FR-015: the replay buffer must stay untouched by the unanswerable frame, so a
+    // legitimate later retry of the SAME sequence (from a real station) is answered
+    // fresh rather than "replayed" as zero bytes.
+    const uint64_t t = end + 200 * byte_us();
+    end = inject_request(wire, request_bytes(kMyAddr, kPeer, true, 5, p, sizeof p), t);
+    wire.advance_to(end + omgp::TRUNK_T_turn_min_us, responder);
+
+    REQUIRE(handler.calls == 1);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).seq == 5);
+    REQUIRE(wire.transcript(0).len == sizeof p);
+    REQUIRE(responder.stats().replays_served == 0);
+    REQUIRE(responder.stats().transactions == 1);
+}
+
+// --- red-team @907dfbe finding #3: a second request must not silently steal a --------
+// --- not-yet-transmitted response --------------------------------------------------
+
+TEST_CASE("a second accepted request queued ahead of a late poll() does not silently "
+          "erase the first response; both are answered and the loss is never invisible",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t a[] = {0xA1};
+    const uint8_t b[] = {0xB2};
+    uint64_t end1 = inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, a, sizeof a), 0);
+    // The second request's bytes start one byte time after the first ends, well inside
+    // what would be the first response's turnaround window -- but neither request is
+    // drained until the single advance_to() below, well after both requests' own
+    // deadlines: a late poll() (FR-014), doubled.
+    const uint64_t t2 = end1 + byte_us();
+    uint64_t end2 = inject_request(wire, request_bytes(kMyAddr, 0x07, false, 2, b, sizeof b), t2);
+
+    wire.advance_to(end2 + omgp::TRUNK_T_turn_min_us, responder);
+
+    // Both requests handled and both answers reached the wire: transmit_if_due() flushes
+    // the first response (already overdue by the time its own on_request() ran) before
+    // the second request's on_request() can ever see state_ == Scheduled and treat it as
+    // a conflict.
+    REQUIRE(handler.calls == 2);
+    REQUIRE(wire.transcript_size() == 2);
+    REQUIRE(wire.transcript(0).seq == 1);
+    REQUIRE(wire.transcript(1).seq == 2);
+    REQUIRE(responder.stats().transactions == 2);
+    REQUIRE(responder.stats().discards == 0);
+    REQUIRE(responder.stats().late_responses == 1); // only the first response was late
 }
 
 // --- US3 AS4/FR-017: wrong address / corrupt frame -> discard, no transmission --------
