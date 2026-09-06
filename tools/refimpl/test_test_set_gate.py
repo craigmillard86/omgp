@@ -572,6 +572,41 @@ class TestCtestPath:
         assert "registration set differs from the run's record" in r.stderr, r.stderr
         assert "registered but not in" in r.stderr and "['test_b']" in r.stderr, r.stderr
 
+    def test_source_deleted_during_the_run_is_refused(self, tmp_path):
+        # Red team @2f40596 [MEDIUM], reproducer A verbatim: the snapshot fingerprinted the
+        # artefacts but not the SOURCE SET, and the check walks sources() AFTER ctest — so a
+        # built-but-never-registered source (escape 1, the one this gate exists for) is
+        # verified away by any test that deletes the file while running. The source list is
+        # now part of the snapshot; a tree that lost (or gained) a source is refused up front.
+        root = make_tree(tmp_path, registered=("test_a",))   # test_b: compiled + built, NOT registered
+        build = root / "build/native"
+        _executable(build / "test_a", "#!/usr/bin/env bash\n"
+                    f'rm -f "{root}/tests/unit/test_b.cpp"\n'
+                    'echo "EXECUTED: 600000"\n')
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "source set changed during the ctest run" in r.stderr, r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_source_rewritten_during_the_run_is_refused(self, tmp_path):
+        # The same fingerprint on the sources themselves: a source rewritten in place mid-run
+        # (same 15 bytes, mtime put back with `touch -r`, as in the binary scenario) is not
+        # the source the object was built from. The source-newer-than-object rule cannot see
+        # it; ctime can.
+        root = make_tree(tmp_path)
+        build = root / "build/native"
+        src = root / "tests/unit/test_b.cpp"     # make_tree wrote `// stub test_b\n`
+        _executable(build / "test_a", "#!/usr/bin/env bash\n"
+                    f'cp -p "{src}" "{src}.ref"\n'
+                    f"printf '// stub tost_b\\n' > \"{src}\"\n"
+                    f'touch -r "{src}.ref" "{src}"\n'
+                    'echo "EXECUTED: 600000"\n')
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "source changed during the ctest run" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
     def test_missing_record_is_a_named_failure(self, tmp_path):
         # stage_unit deletes the record before ctest; if ctest then writes none, the tool must
         # say so by name rather than fall over in the XML parser.
@@ -672,6 +707,54 @@ class TestBootstrapPath:
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_b.cpp" in r.stderr and "newer than its binary" in r.stderr, r.stderr
+
+    def test_binary_forged_by_an_earlier_test_is_refused(self, tmp_path):
+        # Red team @2f40596 [LOW], reproducer E verbatim: the bootstrap walk gathered each
+        # source's evidence INSIDE the loop that runs the binaries, so source n+1's binary was
+        # looked for after source n's binary had run arbitrary code — an earlier test could
+        # mint a later source's binary. Now every source's binary is required (and
+        # fingerprinted) BEFORE any binary runs: test_b's absence is named up front.
+        root = make_tree(tmp_path, ctest=False, compiled={"test_a": "test_a"}, binaries=("test_a",))
+        build = root / "build/native"
+        _executable(build / "test_a", "#!/usr/bin/env bash\n"
+                    f'printf "#!/usr/bin/env bash\\necho \\"EXECUTED: 600000\\"\\n" > "{build}/test_b"\n'
+                    f'chmod +x "{build}/test_b"\n'
+                    'echo "EXECUTED: 600000"\n')
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "no binary" in r.stderr, r.stderr
+        assert "verified" not in r.stdout and "executed 1200000" not in r.stdout, r.stdout
+
+    def test_binary_rewritten_during_the_run_is_refused_here_too(self, tmp_path):
+        # The other half of the same finding: a binary that EXISTS before the run but is
+        # overwritten by an earlier test (in place, size and mtime put back) is not the file
+        # stage_build produced; the pre-run fingerprint (dev, ino, size, mtime, ctime) refuses
+        # it after the run, as the ctest path's does.
+        root = make_tree(tmp_path, ctest=False, scripts={"test_b": 'echo "EXECUTED: 0"     '})
+        build = root / "build/native"
+        _executable(build / "test_a", "#!/usr/bin/env bash\n"
+                    f'cp -p "{build}/test_b" "{build}/test_b.ref"\n'
+                    f"printf '#!/usr/bin/env bash\\necho \"EXECUTED: 600000\"\\n' > \"{build}/test_b\"\n"
+                    f'touch -r "{build}/test_b.ref" "{build}/test_b"\n'
+                    'echo "EXECUTED: 600000"\n')
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "changed during the run" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_source_deleted_during_the_run_is_refused_here_too(self, tmp_path):
+        # Finding 1's bootstrap half. The red team found it held only because unit_sources()
+        # had been consumed before the first binary ran — timing, not construction. The source
+        # list is now taken once before the run and compared after it.
+        root = make_tree(tmp_path, ctest=False)
+        build = root / "build/native"
+        _executable(build / "test_a", "#!/usr/bin/env bash\n"
+                    f'rm -f "{root}/tests/unit/test_b.cpp"\n'
+                    'echo "EXECUTED: 600000"\n')
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "source set changed during the run" in r.stderr and "tests/unit/test_b.cpp" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
 
     def test_no_sources_is_a_failure_here_too(self, tmp_path):
         # Finding 5's bootstrap half: the source walk over nothing must not print
