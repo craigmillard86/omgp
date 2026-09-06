@@ -1361,3 +1361,39 @@ closed here as an in-scope robustness fix; the corpus and the masking divergence
 deferred and flagged for the CODEOWNER handling this PR's needs-human escalation.
 **Ruling:** pending — human (follow-up task scope).
 **Supersedes:** none.
+
+---
+
+## 2026-09-06 — Mull path filters are safe at RUN time; the "no include/exclude paths" rule was measured at compile time only
+
+**Context:** `deep-verify` timed out at its 45-minute limit on every push of PR #137 from
+`3a15d29` on (eight runs), and `attack-pr` twice at 50. The mutation step was the cost:
+`tools/mutate.sh` instruments every translation unit and the runner executed every mutant
+it found — 16 906 across the five `link/` oracle binaries at #137's round 19, of which
+`tools/mutate_report.py` kept **122** (only `l3/ link/ core/` on changed lines count; 2 671
+per binary are Catch2's amalgamated source). `test_link_master` alone: 4 050 mutants,
+14 m 30 s on 12 cores, and the runner has 4. The harness's recorded rule (research.md trap
+(4), `contracts/tooling.md` step 3, the comments in `mutate.sh`) says `includePaths`/
+`excludePaths` "must not be used at all" because excluding Catch2's `main()` TU removes the
+mutant dispatch. That was measured with the keys in the **compile-time** config, where it
+is true. Measured today on the same round-19 binaries with the keys in the **run-time**
+config only (`MULL_CONFIG` → a file with `includePaths: [^<root>/(l3|link|core)/.*]`,
+no rebuild): the runner discovers 4 050 mutants and executes 260 — exactly the set
+`in_scope()` keeps — in 43 s instead of 14 m 30 s, and all 260 statuses are identical to
+the full run (228 killed / 30 survived / 2 timeout both ways; `tools/mutate_diff_reports.py`
+lists any mutant that differs, and listed none). Dispatch is unaffected because the filter
+is applied after discovery, in the runner, not in the plugin. Demonstrated by that
+comparison, on Mull 0.34.0 / LLVM 14; CI runs the LLVM 18 package of the same release —
+the first completed `deep-verify` on the gate-budget PR is the check that it holds there.
+**Recommendation:** (a) phase-2 `mull.yml` carries `includePaths` derived from
+`mutate.cfg`'s `scope_dirs` (done in the gate-budget PR); the compile-time config stays
+mutators-only; the report post-filter stays the gate, so a regression in the runner filter
+can only make the run slower, never narrower than the gate. (b) Amend research.md trap (4)
+and `contracts/tooling.md` step 3 to say "at compile time" (done in place, marked). (c) Do
+NOT reach for the levers that would make the run faster by making the gate smaller:
+`timeout_ms`/`--minimum-timeout` (Timeout ranks as killed), `--coverage-info` (uncovered →
+`NoCoverage`, never triaged), a shorter oracle list, or Mull's `gitDiffRef` (drops added
+files — the 2026-08-28 entry above). Each is listed so it is not mistaken for free.
+**Ruling:** pending — human (tooling contract amendment; `tools/mutate.sh` is gate machinery).
+**Supersedes:** none — amends the "corrected measurement" entry of 2026-08-28 (its
+`gitDiffRef` finding stands; this entry narrows the *path-filter* finding to compile time).

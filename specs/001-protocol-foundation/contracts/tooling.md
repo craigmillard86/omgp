@@ -54,10 +54,18 @@ in `tools/mutate_report.py` (tested on synthetic Elements reports in
    `mutation: mull not present — skipped (blind spot: …)`.
 3. `build/mutate/mull.yml` holds mutators + timeout only and is written **before** a fresh
    instrumented clang build (`-fpass-plugin=… -g -grecord-command-line -O0`, sanitizers
-   off): the IR frontend reads it at compile time, every translation unit is instrumented
-   (any include/exclude path filter removes Catch2's `main()` TU and with it the run-time
-   mutant dispatch — measured on 0.34.0), and Mull's `gitDiffRef` is not used because it
-   drops all mutants in files the diff *adds*.
+   off): the IR frontend reads it at compile time, every translation unit that is built is
+   instrumented (any include/exclude path filter *at compile time* removes Catch2's `main()`
+   TU and with it the run-time mutant dispatch — measured on 0.34.0), and Mull's `gitDiffRef`
+   is not used because it drops all mutants in files the diff *adds*. The build is limited to
+   the oracle targets (`cmake --build --target <oracle…>`, Ninja when present): nothing else
+   runs under the runner. Before the runner starts the file is rewritten with timeout +
+   `includePaths` for `scope_dirs` (`^<root>/<dir>/.*`), so only scope-dir mutants are
+   *executed*; the runner captures no test output (`--no-output`; kills are exit-status);
+   the merge in step 4 is unchanged and still the gate. (Amended 2026-09-06, gate-budget PR —
+   pending a ruling, see `docs/OPEN-QUESTIONS.md` 2026-09-06 "Mull path filters are safe at
+   RUN time"; `tools/mutate_diff_reports.py` compares two Elements reports mutant by mutant
+   and is the evidence tool for it.)
 4. Runs the three unit binaries (`test_l3_header/payload/descriptor` — the property
    binaries are too slow per mutant at -O0) under the runner with `--workers $(nproc)`
    and the `IDE` + `Elements` reporters (+ `GitHubAnnotations` under CI); merges the
