@@ -118,7 +118,10 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   files, `ctest --show-only` and the run's `ctest --output-junit` record
   (`build/native/Testing/junit.xml`, deleted before ctest runs and refused if older than
   any registered binary) that every `tests/{unit,property}/test_*.cpp` was compiled,
-  registered and executed, naming every one that was not; the bootstrap path walks the
+  registered and executed, naming every one that was not — registered means an
+  `add_test` whose command is exactly the target's own binary with no arguments (a
+  filtered Catch2 run, or a same-named binary elsewhere, is refused), executed means an
+  `EXECUTED: <n>` line with n > 0 (red team @94f2462); the bootstrap path walks the
   SOURCES, so a source with no binary fails by name. Both paths print a `unit: verified N
   test binaries` line, and both fail when there are no sources at all. The record, not
   `LastTest.log`, is the execution evidence: the log interleaves the tests' own stdout
