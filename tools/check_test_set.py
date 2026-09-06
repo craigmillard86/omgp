@@ -110,7 +110,9 @@ os.walk's default swallows the error and omits the directory, so a mode-000 test
 hid its source from the set before and after the run alike (red team @3713ab0 finding 1).
 With links refused and every walk error refused, the walked set is the whole tree by
 construction — os.walk reaches every plain directory it is allowed to enter, and one it is
-not is named. This supersedes the @2f40596 lead-b statement (a symlinked source verified
+not is named, whether it cannot be listed (mode 000: scandir fails, onerror) or only cannot be
+searched (mode 400: scandir lists it, its entries cannot be lstat()ed — red team @4b78242
+finding 1: that was a traceback, not a name). This supersedes the @2f40596 lead-b statement (a symlinked source verified
 by the file it resolves to): a link is not a source. A flat glob would leave
 tests/unit/<sub>/test_x.cpp unchecked and unnamed (@ceab86f finding 4).
 
@@ -124,6 +126,7 @@ ctest path)` — N counts distinct binaries, so a multi-source target counts onc
 `unit: <source>: <reason>` line per failing source on stderr, exit 1.
 """
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -151,7 +154,11 @@ def walk(root: Path):
     whole tree (red team @8b0e4f4 finding 2: tests/unit/<link>/test_c.cpp was never named).
     So is every directory the walk could not enter: os.walk's default swallows scandir's
     OSError and simply omits the directory (red team @3713ab0 finding 1: a mode-000
-    tests/unit/deep hid test_c.cpp, and `verified 2` was printed over three sources)."""
+    tests/unit/deep hid test_c.cpp, and `verified 2` was printed over three sources). "Enter"
+    is search (x), not read: a mode-400 directory LISTS fine, so onerror never fires, but its
+    entries cannot be lstat()ed — that is named as the directory, before its entries are
+    touched, and any lstat that still fails is an error, never a traceback (red team
+    @4b78242 finding 1)."""
     srcs, links, errors = [], [], []
     for d in SOURCE_DIRS:
         top = root / d
@@ -166,11 +173,21 @@ def walk(root: Path):
             links.append(top)   # os.walk WOULD follow a symlink handed to it as the top
             continue
         for dirpath, dirnames, filenames in os.walk(top, onerror=errors.append):
+            if not os.access(dirpath, os.X_OK):
+                errors.append(PermissionError(errno.EACCES, "Permission denied (not searchable)", dirpath))
+                dirnames[:] = []    # nothing below is reachable; the directory itself is what is named
+                continue
             for name in dirnames + filenames:
                 path = Path(dirpath) / name
-                if path.is_symlink():
+                try:
+                    is_link = path.is_symlink()
+                    is_src = name in filenames and name.startswith("test_") and name.endswith(".cpp") and path.is_file()
+                except OSError as e:
+                    errors.append(e)    # e.g. the mode changed between the access() above and here
+                    continue
+                if is_link:
                     links.append(path)
-                elif name in filenames and name.startswith("test_") and name.endswith(".cpp") and path.is_file():
+                elif is_src:
                     srcs.append(path)
     return sorted(srcs), sorted(links), errors
 
@@ -308,7 +325,7 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path, pre: dict) -> i
                      f"directories: the source set is plain files and directories only, so whatever the link reaches "
                      f"is outside the set — replace the link with the files themselves"
                      for p in links]
-    link_failures += [f"{os.path.relpath(e.filename, root)}: could not be read ({e.strerror}) under the test source "
+    link_failures += [f"{os.path.relpath(e.filename or root, root)}: could not be read ({e.strerror}) under the test source "
                       f"directories: a directory the walk cannot enter hides whatever it holds from the set — "
                       f"fix its permissions"
                       for e in errors]

@@ -787,7 +787,8 @@ class TestCtestPath:
             os.chmod(deep, 0o700)   # owner only (CodeQL py/overly-permissive-file)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "Traceback" not in r.stderr, r.stderr
-        assert "unit: tests/unit/deep" in r.stderr and "could not be read" in r.stderr, r.stderr
+        # The DIRECTORY is named (`deep:`), not the entry the lstat tripped over (`deep/test_c.cpp`)
+        assert "unit: tests/unit/deep:" in r.stderr and "could not be read" in r.stderr, r.stderr
         assert "verified" not in r.stdout
 
     def test_executed_line_must_stand_alone(self, tmp_path):

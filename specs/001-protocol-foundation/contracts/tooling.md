@@ -127,8 +127,9 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   and `find` do not descend one and a source behind one was silently outside the set (red
   team @8b0e4f4), and so is a directory the walk cannot enter — `os.walk` otherwise swallows
   the error and omits it, so a mode-000 `tests/unit/deep` hid its source before and after
-  the run alike (red team @3713ab0); with links and walk errors refused the walked set is
-  the whole tree by construction — the `EXECUTED: <n>` line must stand alone (anchored
+  the run alike (red team @3713ab0), and a mode-400 one — listable, not searchable — was a
+  traceback rather than a name (red team @4b78242); with links and walk errors refused the
+  walked set is the whole tree by construction — the `EXECUTED: <n>` line must stand alone (anchored
   both ends; a line merely containing the marker is not the run's count) —
   was compiled, registered and executed, naming every one
   that was not — compiled means exactly ONE `compile_commands.json` entry (two entries
