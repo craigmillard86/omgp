@@ -21,7 +21,9 @@ the run's own machine-readable record, and names every source that escaped:
               registration of <other> (@ceab86f finding 5) — and the FILE the registration
               runs must be registered once: two registrations whose command[0] are one file
               (a link registered by its own path; @3dde163 finding 3) are both refused,
-              since one file cannot be two targets' binaries. Likewise one NAME, one
+              since one file cannot be two targets' binaries — and so is the same path
+              registered twice (@2f40596 lead a: only the first registration was read,
+              so a second, filtered one escaped the no-argument rule). Likewise one NAME, one
               registration: execution evidence is keyed by ctest test name, so a name
               shared by two registrations would hand one binary's run to the other
               (@aed9693; CMake permits it across add_subdirectory) — both are refused.
@@ -93,7 +95,10 @@ CMakeLists registers test_smoke as `smoke`.
 
 The source set is every test_*.cpp under tests/unit and tests/property at ANY depth
 (rglob), the same set pipeline.sh's unit_sources() walks; a flat glob would leave
-tests/unit/<sub>/test_x.cpp unchecked and unnamed (@ceab86f finding 4).
+tests/unit/<sub>/test_x.cpp unchecked and unnamed (@ceab86f finding 4). A source that is
+a symlink to another source is verified by the file it resolves to (@2f40596 lead b): its
+own cases are whatever that file holds, which is the stated per-binary limit above (the
+same as deleting a source's TEST_CASEs) — a visible tree change, not a rule here.
 
 Order matters: `ctest --show-only` REWRITES LastTest.log (measured on CMake 3.22: the log
 holds zero EXECUTED lines afterwards), so the log is read (as bytes) first and written
@@ -321,6 +326,13 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path, pre: dict) -> i
         if namesakes:
             failures.append(f"{rel}: registered as '{name}', but one name cannot identify two binaries' runs: "
                             f"'{name}' also registers {namesakes[0]} (execution evidence is per name)")
+        elif len(registered[binary]) > 1:
+            # The same path spelled twice is the twins rule's case with no link to resolve
+            # (red team @2f40596, lead a): only the first registration was examined, so a
+            # second, filtered one escaped the no-argument rule below.
+            others = [n for n, _ in registered[binary][1:]]
+            failures.append(f"{rel}: {binary} is registered more than once ('{name}' and {others}): one file, one "
+                            f"registration — a second run of the same binary is not evidence about a second target")
         elif twins:
             failures.append(f"{rel}: registered as '{name}', but the file {binary} runs is also registered as "
                             f"'{registered[twins[0]][0][0]}' ({twins[0]}): one file cannot be two targets' binaries, "
