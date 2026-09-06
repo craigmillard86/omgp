@@ -1361,3 +1361,252 @@ closed here as an in-scope robustness fix; the corpus and the masking divergence
 deferred and flagged for the CODEOWNER handling this PR's needs-human escalation.
 **Ruling:** pending — human (follow-up task scope).
 **Supersedes:** none.
+
+---
+
+## 2026-09-05 — Kind::CrcError's corrupted CRC byte is not a literal "XOR 0xFF"
+
+**Context:** review round 4 on #137 (MEDIUM). `contracts/mock-wire.md`'s Step table says
+Kind::CrcError produces "the real response with its last CRC byte XOR 0xFF". A bare XOR
+0xFF crosses the FLAG/ESCAPE byte-stuffing boundary for exactly four real high-byte values
+(0x7E/0x7D <-> 0x81/0x82), which would silently change the corrupted frame's wire length
+relative to the real response's — breaking every timing assertion in
+tests/unit/test_link_master.cpp that computes an expected instant from the UNCORRUPTED
+response's own encode_frame length. `tests/support/mock_wire.cpp`'s `corrupt_crc_hi()`
+deliberately picks a different (still-wrong) byte on the same side of that boundary for
+those four values instead, and is tested for length-preservation
+(`tests/unit/test_link_master.cpp`, "a CrcError response's wire length matches..."). T028
+(#46) is specified to generate the tooling/reference implementation's Kind::CrcError
+behaviour from this same contract table, so an implementation written from the table's
+literal text would not match `mock_wire.cpp`'s behaviour at those four values.
+**Recommendation:** amend `contracts/mock-wire.md`'s CrcError row to state the
+length-preserving exception (or reference `corrupt_crc_hi()`'s rule directly) before T028
+is implemented, so both implementations corrupt the CRC the same way at every value.
+**Ruling:** pending — human (contract-doc amendment; not one of CLAUDE.md's three
+authoritative `docs/` documents, but still a human-ruling artefact per GOVERNANCE §3).
+**Supersedes:** none.
+
+---
+
+## 2026-09-05 — Master::begin() refuses dst >= kAddrCount, beyond encode_frame's contract
+
+**Context:** review round on #137 (LOW). `contracts/link-cpp.md` specifies `begin()`'s
+address refusals "as `encode_frame`", which refuses only `dst == 0xFF` (trunk §5 reserved
+broadcast). `link/master.cpp`'s `begin()` adds a stricter refusal — `dst >= kAddrCount` →
+`Status::ReservedAddress` — because `next_seq_`/`stats_` are `kAddrCount`-entry tables
+indexed directly by `dst`; without it `begin(0x20, …)` wrote past both tables (the HIGH
+that refusal fixed). trunk §5 makes `0x00–0x0F` the only trunk node addresses, so the
+stricter refusal is correct and necessary, but the contract text now diverges from the
+implementation.
+**Recommendation:** amend `contracts/link-cpp.md`'s `begin()` refusal clause to state the
+`dst >= kAddrCount → ReservedAddress` guard explicitly (the same way the Kind::CrcError
+entry above records `corrupt_crc_hi()`'s deviation), so an implementation written from the
+contract matches `master.cpp`.
+**Ruling:** pending — human (contract-doc amendment; not one of CLAUDE.md's three
+authoritative `docs/` documents, but still a human-ruling artefact per GOVERNANCE §3).
+**Supersedes:** none.
+
+---
+
+## 2026-09-05 — Master::begin(dst == ADDR_host) is accepted; the host transacts with itself
+
+**Context:** review round on #137 (red-team, LOW). `Master::begin()` refuses `dst == 0xFF`
+and `dst >= kAddrCount`, but `ADDR_host` is itself a valid trunk address (`0x00..0x0F`), so
+`begin(ADDR_host, …)` is accepted: the master transmits a request to itself and can book a
+successful transaction against its own `stats_[ADDR_host]`. It does not crash or over-index
+(ADDR_host is in range) — but a single-master trunk has no reason to address itself, and
+`contracts/link-cpp.md` neither blesses nor forbids it. Adding a refusal is a behaviour
+change to `begin()`'s contract, so it is recorded here rather than implemented speculatively
+(CLAUDE.md working agreement: no speculative behaviour without a ruling or a safe default).
+**Recommendation:** refuse `dst == host_addr_` in `begin()` (e.g. `Status::ReservedAddress`,
+or a dedicated status) and state it in `contracts/link-cpp.md`, with a test. Low priority —
+no corruption today, only a nonsensical-but-accepted input.
+**Ruling:** pending — human (contract-doc amendment + a small behaviour change to `begin()`).
+**Supersedes:** none.
+
+---
+
+## 2026-09-05 — an in-window CRC failure ends the attempt and is charged to the polled node
+
+**Context:** review round on #137 (red-team, LOW). `Master::poll()` ends the open attempt on
+ANY in-window CRC failure (`end_attempt(CrcFailed)`) without waiting out the rest of `T_resp`,
+and charges `crc_failures` to `dst_`. A bad-CRC frame is by definition unattributable — its
+source field did not survive the CRC check — so a hostile station emitting a short bad-CRC
+frame early in node N's response window costs node N an attempt and a `crc_failure` even though
+node N's own conforming answer arrives later in that same window and would have been accepted.
+Repeated, trunk §7's failure accounting marks an innocent node SUSPECT on traffic it never sent
+— squarely the hostile-module threat model CLAUDE.md names for an open platform.
+**Recommendation:** the fast-fail is a literal reading of trunk §7 ("a CRC-failed response is a
+failure"), so changing it is a spec question, not a code cleanup. Two candidate rulings: (a)
+keep the fast-fail but do NOT charge `crc_failures`/health to `dst_` for a frame whose source
+cannot be authenticated; or (b) do not surrender the attempt at all — count the CRC failure on
+the bus, keep waiting out `T_resp`, and let a genuine answer still win. (b) costs latency only
+in the already-failing case and removes the amplification entirely; (a) is the smaller change.
+Recommend (b), with the bus-level count retained for diagnostics.
+**Ruling:** pending — human (trunk §7 semantics; affects health/SUSPECT accounting).
+**Supersedes:** none.
+
+---
+
+## 2026-09-05 — what should the Master do when the bus is NEVER idle for T_gap? (babble)
+
+**Context:** review round on #137 (red-team, HIGH). `fire_pending()` re-evaluates the
+gap-deferred transmit instant against the latest bus activity, so the engine never transmits
+on top of an arriving frame. The unhandled case is the opposite one: if a station keeps bytes
+on the wire continuously, `last_activity_ + T_gap` advances on every poll and the deferred
+instant is pushed out **indefinitely** — no transmission, no retry, no `Failed`, `busy()` true
+forever. trunk §3's "≥ T_gap of idle before transmitting" is physically unsatisfiable while
+that continues, so *some* deferral is correct; deferring silently and unboundedly is not.
+trunk §7 names babble as a failure mode, but this engine has no path to report it: the only
+outcomes it can produce today are `Answered` and `Failed{Timeout|CrcFailed}`.
+**Recommendation / what #137 now does:** option (a) below is IMPLEMENTED in #137; option (b)
+remains open and is tracked in #138. (a) The engine no longer sits in `PendingTransmit`
+indefinitely: the deferral is bounded by one worst-case frame (trunk §4) beyond the instant it
+was originally deferred to, and — critically — the guard fires only when the bus has actually
+DENIED a T_gap window in that time (the transmit instant is still in the future), never on
+elapsed time alone. An elapsed-time-only guard cannot tell a busy bus from an infrequent
+caller, and since `TRUNK_T_poll_us` (2000) exceeds that budget (1420 at `TRUNK_bit_rate`) it
+abandoned every gap-deferred transaction and retry at the documented superframe cadence on a
+completely idle wire. The transaction concludes `Failed{Timeout}` and NO per-node counter is
+charged, since the request never reached the node and booking it a failure would feed trunk
+§7's SUSPECT rule against an innocent node. (b) Still open: a caller cannot distinguish "the
+node did not answer" from "the trunk was unusable"; that needs a distinct bus-fault
+outcome/health transition, which changes `MasterEvent`'s contract and so wants a ruling.
+**Note on process:** an earlier revision of this entry said the whole question was deliberately
+left unimplemented in #137. That is superseded by the above — (a) shipped, (b) did not.
+**Ruling:** pending — human (trunk §7 babble semantics; may need a new MasterEvent outcome).
+**Supersedes:** none.
+
+---
+
+## 2026-09-05 — Master under a never-idle bus: bounded courtesy, then transmit (supersedes the babble entry)
+
+**Context:** seventh review round on #137 (red-team at `afed239`, HIGH). The prior entry's
+option (a) — conclude `Failed{Timeout}` once the bus has "denied a T_gap window" for one
+worst-case frame — was the third bound of that shape to be falsified: sampled at `poll()`
+instants, ONE stray byte per superframe made the bus look permanently busy, so a cheap
+adversary (or a noisy line) blocked every transaction with a false "babble" outcome that
+the caller reads as a node failure. The common root cause of all three: the engine observes
+and transmits only at `poll()` instants, so any inference "the bus is unusable" drawn from
+those samples is spoofable or a false positive, and any `Failed` it synthesises is
+node-shaped. Two corrections to the record while here: (1) trunk §7 does NOT name babble —
+the prior entry's "trunk §7 names babble as a failure mode" is wrong; the only authoritative
+babble text is `specs/002-trunk-link-layer/spec.md` Edge Cases "Babble" ("the host discards
+everything that is not the polled node's frame; the transaction in progress fails or succeeds
+on its own merits; the babbling node's health is not adjusted on the host side"). (2)
+contiguity of bytes within a frame (which `fire_pending()`'s protection argument relies on)
+comes from spec.md's "Assumptions" transmission-time model, not trunk §4.
+**Reading adopted (implemented in #137):** trunk §3 makes the host the only initiator ("no
+multi-master arbitration, no CSMA, no token") and owes ≥ `T_gap` of idle after ITS OWN
+transactions (FR-010's head clause: "the end of one transaction … and the start of the
+next"). Deferring a transmission for bytes that are not the host's own is a courtesy on top
+of that, bounded at `defer_origin + max_frame + T_gap` — long enough for any single frame
+already on the wire at the deferred instant to finish AND receive its full gap (established
+by construction in `fire_pending()`; demonstrated by `tests/unit/test_link_master.cpp`'s
+"worst-case-length frame starting exactly at the deferred instant" case). Past the cap the
+engine transmits on schedule and the transaction fails or succeeds on its own merits.
+`MasterEvent::Failed` reasons stay exactly `Timeout | CrcFailed`; nothing is ever concluded
+from the bus state. A trunk that stays jammed is found the way trunk §7 designed: every node's
+transactions time out → BUS_FAULT via the per-node accounting (data-model §7).
+**Tension acknowledged:** FR-010's parenthetical ("last byte transmitted or received") read
+literally is unsatisfiable under continuous foreign traffic, so every option departs from a
+literal reading somewhere; this one departs only for a station that is itself violating §3.
+**Trade-off (assumed, re F3):** under a stuck driver each transaction now concludes after its
+full three attempts (≈17 ms at the superframe cadence) instead of the falsified bound's ≈1.7 ms
+false-Fail, so BUS_FAULT is reached ~10× later — in exchange no bus condition is ever misread
+as a node outcome.
+**Contract text:** `contracts/link-cpp.md` ("Master engine") and `data-model.md` §4 "Gap" are
+amended in #137 to state the bound, marked *pending a ruling*; their previous wording
+("deferred to that instant", "no earlier than `last_activity + T_gap`") described the
+unbounded behaviour. Ruling wanted on the reading AND the amendment together.
+**Still open (#138):** option (b) of the prior entry — a distinct bus-level outcome/counter so a
+caller can tell "node silent" from "trunk unusable" (also wanted by the CRC-attribution entry
+above for its bus-level count); and `begin()` transmitting without first draining the wire,
+which means the cap's protection guarantee for a fresh `begin()` assumes `poll(now)` ran
+immediately before it (true of every test and the intended F3 loop; not enforced). trunk §10
+(open questions) has six numbered items; this deserves a seventh — a human edit to an
+authoritative doc.
+**Ruling:** pending — human (trunk §3/§7 reading; contract amendment; T3 artefacts).
+**Supersedes:** the 2026-09-05 entry "what should the Master do when the bus is NEVER idle for
+T_gap? (babble)" — its option (a) is withdrawn as falsified; its option (b) remains open in #138.
+
+## 2026-09-06 — bounded courtesy: the worst-case conclusion time is larger than the entry above states (FLAG-delimited babble)
+
+**Context:** red-team at `40355cf` (#137, MEDIUM). The entry above and the suite's "within a
+symbol-derived bound" case gave the time for a full three-attempt transaction under continuous
+babble as `3·(F + 2G + B) + 3·(n·B + R) + 6·P` (F = `kMaxWire` byte times, G = `T_gap`,
+B = one byte time, R = `T_resp`, P = poll cadence, n = request bytes). That is the bound for
+FLAG-FREE filler only: the filler never opens a frame, so the `T_resp` in-flight hold ("the
+timeout gates the START BIT — a frame that opened inside the window is allowed to finish",
+trunk §3) is never entered. A station that opens a frame on the last wire slot inside each
+attempt's window and streams `kMaxUnstuffed` escaped FLAGs holds that attempt's timeout off
+for one worst-case frame — exactly `kMaxWire·B` (= F), by construction from the Deframer's
+`Discard::TooLong` limit plus `frame_arriving()`'s one-byte slack; a second frame cannot add
+to it because its opening FLAG lands at or after the deadline, outside the window.
+**Corrected bound (implemented in #137):** `3·(F + 2G + B) + 3·(n·B + R + F) + 6·P` —
+≈ 9.7 ms at a 1 µs cadence / 1 Mb/s (measured 9.66 ms: tight), ≈ 21.7 ms at the superframe
+cadence, ≈ 88.8 ms at the fallback rate and superframe cadence (measured 84 ms). Pinned by
+two new cases in `tests/unit/test_link_master.cpp` (the FLAG-delimited adversary at both
+cadences and both rates; the single-attempt hold pinned EXACTLY at `deadline + kMaxWire·B`).
+The "≈17 ms" in the entry above is therefore the FLAG-free figure; the worst case at the
+superframe cadence is ≈ 21.7 ms, and the "~10× later BUS_FAULT" trade-off becomes ~13×.
+What is unchanged: `Failed{Timeout}` on the node's merits, never `CrcFailed`, never a Failed
+synthesised from the bus state; three transmissions; `busy()` clear afterwards.
+**Tension with trunk §6:** "host-visible within (backplane module-poll period) + (≤ 2 × T_poll),
+independent of load" is not met against such a station — one transaction alone may span up to ~11
+superframes (the bound; 6 measured at 1 Mb/s). §6 describes a conforming bus; a station transmitting outside its own response
+window is a §3 violator and the spec's remedy is §7's BUS_FAULT, not a faster conclusion. If
+the maintainers want a tighter worst case, the lever is the in-flight hold's length (today one
+worst-case frame, i.e. the Deframer's `kMaxUnstuffed`), not the courtesy cap. Recommended:
+accept the figure; note it against §6 in the trunk §10 item the entry above asks for.
+**Ruling:** pending — folded into the "bounded courtesy" ruling above.
+**Amends:** the 2026-09-05 "bounded courtesy" entry's ≈17 ms / ~10× figures (that entry's
+reading and contract text are unchanged).
+
+## 2026-09-06 — a bit-rate change while another station's frame is still arriving: what does the wire model mean?
+
+**Context:** red-team at `40355cf` (#137, LOW). `Master::poll()` computes every drained
+byte's END as `start + byte_time_us(wire.bit_rate())` at DRAIN time; `ByteWire::receive()`
+reports a byte's start instant only, not its duration. After `set_bit_rate()` upwards (trunk
+§7's recovery from the fallback rate back to `TRUNK_bit_rate`), bytes another station put on
+the wire at the OLD, slower rate are recorded as ending ~76 µs early, the engine perceives
+gaps > `T_gap` between them, and a gap-deferred transmit can go out INSIDE that frame
+(reproducer: frame spanning [494, 12706) at the fallback rate, rate raised at 494 + 10 slow
+bytes, host transmits at 1414). `fire_pending()`'s "never transmits over an arriving frame"
+holds by construction only at a CONSTANT rate; its comments and the T-4 case now say so
+(rule 11). Nothing in the suite asserts the collision invariant across a rate change.
+**Options:** (a) treat it as a modelling artefact — on real hardware a UART re-rated mid-frame
+receives framing errors/garbage, not the sender's bytes, so `MockWire` handing the old-rate
+bytes over intact after the change is the unrealistic part; the ByteWire contract
+(`byte-wire-and-clock.md`) would state that bytes already queued at a rate change are
+delivered as garbage / dropped, and no engine change is needed. (b) extend `ByteWire::receive()`
+to report each byte's duration (or the rate it was received at) so the engine can compute true
+ends — an interface change for F3/F4. (c) have the engine hold off for one worst-case frame at
+the OLD rate after any upward rate change — simple, but re-introduces a fixed hold of the kind
+this PR removed elsewhere. **Recommended:** (a), as a contract clarification; it matches the
+physics and keeps the engine's inference honest without new state. Until ruled, the claim in
+`master.cpp` is narrowed rather than the behaviour changed.
+**Where it lives:** #138 (Master follow-ups), alongside the `begin()`-drain assumption, which
+is the same shape of gap (a protection guarantee that holds only under an unstated operating
+assumption).
+**Ruling:** pending — human (ByteWire contract; F3/F4 interface).
+
+## 2026-09-06 — Master::set_bit_rate(0) is refused; the contract has no refusal clause
+
+**Context:** review at `e3af74d` (#137, LOW). `contracts/link-cpp.md` specifies `set_bit_rate`
+as "pass-through to the wire + `BusStats.rate_changes`" — no refusal, no return value. The
+engine calls `byte_time_us(wire_.bit_rate())` on every `poll()`, and `byte_time_us` has a
+nonzero precondition (`link/link_types.hpp`): a zero rate accepted here would make the engine
+violate its own precondition from the inside (an assert in a debug build, a divide-by-zero
+otherwise — red-team on #137, LOW). Implemented in #137: `bps == 0` returns without forwarding
+and without bumping `rate_changes` (pinned by `tests/unit/test_link_master.cpp` "set_bit_rate(0)
+is refused"). Every other divergence from that contract file in this PR was logged here; this one
+was not (review, LOW) — recorded now.
+**Options:** (a) refuse silently, as implemented — the caller (F3's HealthTracker, whose `Probe`
+rates come from trunk §9's two nonzero constants) can never legitimately pass 0, so a silent
+no-op is the least-surprise behaviour and keeps the `void` signature; (b) return a `Status`
+(`ReservedAddress`-style refusal code, or a new one) so a misuse is observable — an interface
+change for F3; (c) clamp to `TRUNK_bit_rate_fallback` — rejected: no rate is a defensible
+stand-in for "no rate". **Recommended:** (a), with the contract text amended to say so (done in
+#137, marked pending); revisit if F3 ever computes a rate rather than selecting one of §9's.
+**Ruling:** pending — human (contract text).

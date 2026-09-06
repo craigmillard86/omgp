@@ -19,7 +19,13 @@ WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=
 # 200580 = 200682 executed (16 binaries) minus ~102 slack — T023-T026 added
 # test_canonical_frame/test_l3_helper_dispatch/test_mock_wire/test_link_health.cpp;
 # raised 2026-09-05 (T027/#45, was 197000). NEVER lowered.
-UNIT_TEST_FLOOR=200580
+# 509360 = 509460 executed (17 binaries) minus 100 slack — T029/T031 added
+# test_link_master.cpp (308753 checks: its microsecond-cadence timing loops REQUIRE per poll);
+# raised 2026-09-06 (#137 review, MEDIUM: at 200580 the gate could not notice this binary being
+# dropped — 236588 executed at 40355cf was 36008 above it). Dropping test_link_master now
+# leaves ~200707 < floor, so the gate fires (demonstrated by that arithmetic, assuming the
+# other 16 binaries' counts are unchanged). Was 200580.
+UNIT_TEST_FLOOR=509360
 
 stage_codegen() {
   # Constants + vectors header from the YAML, then prove the human-authored docs tables
