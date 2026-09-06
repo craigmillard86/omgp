@@ -411,6 +411,38 @@ class TestCtestPath:
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_b.cpp" in r.stderr and "also registered" in r.stderr, r.stderr
 
+    def test_two_registrations_under_one_name_are_refused(self, tmp_path):
+        # Red team @aed9693 [MEDIUM]: registration is keyed by binary, execution by ctest test
+        # NAME, and nothing tied a name to one binary — so test_a's testcase `dup` vouched for
+        # test_b, which printed nothing. Real CMake produces this shape from add_subdirectory
+        # + a shared runtime dir (measured by the red team). One name, one registration: both
+        # sources are named.
+        root = make_tree(tmp_path, scripts={"test_b": "echo nothing-ran; exit 0"})
+        build = root / "build/native"
+        (build / "CTestTestfile.cmake").write_text(
+            f'add_test([=[dup]=] "{build / "test_a"}")\nadd_test([=[dup]=] "{build / "test_b"}")\n')
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "tests/unit/test_a.cpp" in r.stderr, r.stderr
+        assert "one name" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_registration_rewritten_during_the_run_is_refused(self, tmp_path):
+        # Same finding, reproducer 2: `ctest --show-only` runs AFTER the tests, so a test that
+        # rewrites CTestTestfile.cmake chooses the registration set the tool checks. The run's
+        # record names every test ctest saw; a registration set that differs from it is not
+        # the set that ran, and is refused as such.
+        root = make_tree(tmp_path, disabled=("test_b",))
+        build = root / "build/native"
+        rewrite = (f'cat > "{build}/CTestTestfile.cmake" <<EOF\n'
+                   f'add_test([=[test_a]=] "{build}/test_a")\nadd_test([=[test_a]=] "{build}/test_b")\nEOF\n'
+                   f'echo "EXECUTED: 600000"')
+        _executable(build / "test_a", f"#!/usr/bin/env bash\n{rewrite}\n")
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "registration set" in r.stderr and "record" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
     def test_missing_record_is_a_named_failure(self, tmp_path):
         # stage_unit deletes the record before ctest; if ctest then writes none, the tool must
         # say so by name rather than fall over in the XML parser.
