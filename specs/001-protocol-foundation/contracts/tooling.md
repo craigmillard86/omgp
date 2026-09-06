@@ -135,7 +135,14 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   that was not — compiled means exactly ONE `compile_commands.json` entry (two entries
   under two targets are refused naming both: keeping the last one let a single appended
   entry re-credit a source to any registered target and made the verdict depend on entry
-  order — red team @8b0e4f4) whose object exists, is
+  order — red team @8b0e4f4) whose object is THIS source's — exactly the path cmake derives
+  from the source, `CMakeFiles/<target>.dir/<source path relative to the root>.o`; an entry
+  naming another source's real, linked object satisfied every rule below and re-opened
+  escape 2 (red team @4012926); a test target declared in a subdirectory's CMakeLists
+  would be refused here by name, stated and not supported — and is the one plain file the
+  compiler wrote (not a symlink, not one of several hard-link names: `lstat`; the source and
+  the binary already had this rule and the object was the hop without it — red team
+  @4012926; no hard-link build mode is used in this repo, a control on that fact), exists, is
   no older than the source and no newer than the target's binary (an edited-after-build
   source is named, and so is an object recompiled after the last link — red team @6fbdebf;
   an mtime comparison is a control, not a guarantee) and is on the target's link line

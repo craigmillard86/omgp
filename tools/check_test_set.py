@@ -416,8 +416,39 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path, pre: dict) -> i
                             f"one source, one compile entry — a second entry is not evidence about the first target's run")
             continue
         target, obj, link = hits[0]
-        if not obj.exists():
+        # The entry's object must be THIS source's object (red team + review @4012926 finding
+        # 1): every rule below is about the object — exists, on the link line, in the binary
+        # that ran — and an entry crediting a source to another source's real, linked object
+        # passes all of them honestly (#133's escape 2 again, one level up from the stub-object
+        # form 8b0e4f4 refused). cmake derives the object's path from the source's:
+        # CMakeFiles/<target>.dir/<source path relative to the project dir>.o. Exactly that path
+        # is required, relative to the root — the test targets are declared in the root
+        # CMakeLists.txt; one declared in a subdirectory's would be refused here by name
+        # (stated: fails closed, not supported).
+        expected = link.parent / f"{rel}.o"
+        if os.path.abspath(obj) != os.path.abspath(expected):
+            failures.append(f"{rel}: compile entry's object {obj} is not this source's object (cmake writes {expected} "
+                            f"for target {target}): an object named for another source is not evidence that this one "
+                            f"was compiled, whatever binary it is linked into")
+            continue
+        # And it must be the one plain file the compiler wrote (finding 2): a symlink or a hard
+        # link at that path reaches some other file's bytes — the source, the link line and the
+        # binary have this rule; the object was the one hop without it. exists()/stat() follow
+        # links, so this is lstat. No hard-link build mode (ccache) is used in this repo, so a
+        # real tree's objects have one name each — a control on that fact.
+        try:
+            st = os.lstat(obj)
+        except OSError:
             failures.append(f"{rel}: object {obj} missing (target {target} not built)")
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            failures.append(f"{rel}: object {obj} is a symlink (-> {os.readlink(obj)}): not the file the compiler wrote "
+                            f"for this source, so not evidence that {target} contains it")
+            continue
+        if st.st_nlink > 1:
+            failures.append(f"{rel}: object {obj} is a hard link ({st.st_nlink} names for one file): its bytes are shared "
+                            f"with something this tool cannot name, so not evidence that {target} contains this "
+                            f"source's compilation")
             continue
         if src.stat().st_mtime > obj.stat().st_mtime:
             failures.append(f"{rel}: source is newer than its object {obj} (target {target}); rebuild before verifying")
