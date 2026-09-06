@@ -106,8 +106,12 @@ worst-case frame, trunk §4 / SC-008), and past that the host transmits on sched
 the host is the only initiator, no CSMA; a station still occupying the wire is a §3
 violator, and the transaction proceeds "on its own merits", spec.md Edge Cases "Babble").
 `Failed` reasons remain exactly `Timeout | Crc`: the engine never concludes a transaction
-from the bus state. *(Amended in PR #137 — pending a ruling, see `docs/OPEN-QUESTIONS.md`
-2026-09-05 "bounded courtesy".)*
+from the bus state. The bound is per attempt and scales with byte time: a whole transaction
+under a station that keeps the wire busy concludes within
+`3·(max_frame + 2·T_gap + byte) + 3·(request bytes·byte + T_resp) + 6·poll period` (≈5.5 ms
+at 1 Mb/s, ≈40 ms at the 115200 fallback), plus one `max_frame` per attempt when the traffic
+also opens a frame inside each `T_resp` window. *(Amended in PR #137 — pending a ruling, see
+`docs/OPEN-QUESTIONS.md` 2026-09-05 "bounded courtesy".)*
 
 ## Responder engine (`responder.hpp`) — trunk §3, §7
 

@@ -32,7 +32,10 @@ class Master {
     // on the wire as every request's src and the nodes mirror it into their answers' dst. For
     // 0xFF this engine's own Deframer discards every answer (reserved address, trunk §5) and
     // every transaction times out with no diagnostic. Recorded, not guarded (PR #137 review
-    // @2056e56, LOW; docs/OPEN-QUESTIONS.md 2026-09-06 "host_addr").
+    // @2056e56, LOW; docs/OPEN-QUESTIONS.md 2026-09-06 "host_addr"). That both uses read
+    // THIS parameter rather than ADDR_host is demonstrated by "a Master with a non-default
+    // host_addr…" (PR #137 red-team @050f397, MEDIUM: every other construction passes the
+    // default, so hardcoding it left the suite green).
     Master(ByteWire& wire, Clock& clock, uint8_t host_addr = omgp::ADDR_host);
 
     // Busy if a transaction is already open; PayloadTooLong/ReservedAddress as
@@ -151,6 +154,16 @@ class Master {
     // latched, so a set_bit_rate() during the deferral is honoured rather than frozen at the
     // old rate (PR #137 review, LOW). See fire_pending() for what this establishes and why no
     // poll-sampled "the bus is unusable" inference can be trusted instead.
+    //
+    // The cap is PER ATTEMPT and scales with byte time, so a whole transaction under a
+    // station that keeps the wire busy runs three courtesies plus three windows: within
+    // 3·(max_frame + 2·T_gap + byte) + 3·(request bytes·byte + T_resp) + 6·poll period —
+    // about 5.5 ms at 1 Mb/s, about 40 ms at the 115200 fallback (the rate trunk §7's
+    // BUS_FAULT re-probe runs at) — plus one worst-case frame per attempt when the babble also
+    // rides the T_resp in-flight hold. Demonstrated by "a transaction under continuous
+    // FLAG-free babble…" (both cadences, 1 Mb/s) and "a transaction under FLAG-delimited
+    // babble…" (both cadences, both rates); stated here because the per-attempt figure alone
+    // under-reads it (PR #137 red-team @050f397, LOW).
     uint64_t defer_origin_us_ = 0;
     // AwaitResponse only: tx_end of the CURRENT attempt - the acceptance window's lower
     // bound (contracts/link-cpp.md: "[tx_end, tx_end + T_resp)"). Needed because a retry

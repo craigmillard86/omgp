@@ -2975,3 +2975,75 @@ TEST_CASE("set_bit_rate() refuses a rate whose byte time truncates to zero: not 
     REQUIRE(master.bus_stats().rate_changes == 1);
     REQUIRE(byte_time_us(wire.bit_rate()) != 0);
 }
+
+// --- host_addr is load-bearing, not a default: every request carries it as src and every ---
+// --- answer is accepted against it (trunk §5; PR #137 red-team @050f397, MEDIUM: all 60 -----
+// --- constructions passed ADDR_host, so both uses could be hardcoded with the suite green) --
+
+TEST_CASE("a Master with a non-default host_addr puts it on the wire as src and accepts the "
+          "answer addressed to it",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t host = 0x05; // a node slot standing in as the host (trunk §5 range)
+    const uint8_t dst = 0x02;
+    Master master(wire, clock, host);
+
+    const uint8_t payload[] = {0x42};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).dst == dst);
+    REQUIRE(wire.transcript(0).src == host); // hardcoded ADDR_host would put 0x00 here
+
+    // The mock's responder mirrors the request's src into the answer's dst, so an engine
+    // accepting only `f.dst == ADDR_host` would discard this answer and time out instead.
+    MasterEvent ev{};
+    for (uint64_t t = 1; t <= omgp::TRUNK_T_poll_us && master.busy(); t += 5)
+        ev = wire.advance_to(t, master);
+    REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(ev.response.dst == host);
+    REQUIRE(ev.response.src == dst);
+    REQUIRE(master.stats(dst).transactions == 1);
+    REQUIRE(master.stats(dst).timeouts == 0);
+    REQUIRE(master.stats(dst).discards == 0);
+}
+
+// --- reset_stats() clears the per-address block AND the bus block (FR-011a "resettable by ---
+// --- the layer above"; PR #137 red-team @050f397, LOW: never called by any test) -----------
+
+TEST_CASE("reset_stats() clears every per-address counter and the bus counters", "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x03;
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t payload[] = {0xAA};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    MasterEvent ev{};
+    for (uint64_t t = 0; t <= 10 * omgp::TRUNK_T_poll_us && master.busy(); t += 10)
+        ev = wire.advance_to(t, master);
+    REQUIRE(ev.kind == MasterEvent::Failed);
+    master.set_bit_rate(omgp::TRUNK_bit_rate_fallback);
+    // Non-vacuity: every counter the reset must clear is nonzero first.
+    REQUIRE(master.stats(dst).transactions == 1);
+    REQUIRE(master.stats(dst).retries == 2);
+    REQUIRE(master.stats(dst).timeouts == 3);
+    REQUIRE(master.bus_stats().rate_changes == 1);
+
+    master.reset_stats();
+    for (uint8_t a = 0; a < kAddrCount; ++a) {
+        CAPTURE(a);
+        const AddrStats& s = master.stats(a);
+        REQUIRE(s.transactions == 0);
+        REQUIRE(s.retries == 0);
+        REQUIRE(s.timeouts == 0);
+        REQUIRE(s.crc_failures == 0);
+        REQUIRE(s.discards == 0);
+        REQUIRE(s.replays_served == 0);
+        REQUIRE(s.late_responses == 0);
+    }
+    REQUIRE(master.bus_stats().rate_changes == 0);
+    REQUIRE(master.bus_stats().bus_faults == 0);
+}
