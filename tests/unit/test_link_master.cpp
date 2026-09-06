@@ -475,6 +475,12 @@ TEST_CASE("a conforming node's answer is accepted at every legal payload length,
             ev = wire.advance_to(t, master);
         REQUIRE(ev.kind == MasterEvent::Answered);
         REQUIRE(ev.response.len == len);
+        // The CONTENTS too, at every length: the other content assertions in this file use a
+        // 2-byte payload and the 64-byte worst case, so a copy guard that skipped a one-byte
+        // answer (`f.len > 1`) delivered len == 1 with a stale payload byte and left the
+        // suite green (PR #137 red-team @87b6686, LOW, surviving mutant).
+        if (len > 0)
+            REQUIRE(std::memcmp(ev.response.payload, payload, len) == 0);
     }
 }
 
@@ -1937,6 +1943,44 @@ TEST_CASE("the cap on the T_resp in-flight hold admits the longest legitimate an
     REQUIRE_FALSE(master.busy());
 }
 
+TEST_CASE("a stream that overruns the Deframer stops holding the T_resp timeout off at the "
+          "abort, not at the time cap: frame_arriving()'s in_frame() conjunct is load-bearing",
+          "[link][timing:T_resp]") {
+    // "after which frame_arriving() is false one byte time later" (the FLAG-delimited babble
+    // case above) rests on the in_frame() conjunct, but no case streamed PAST a TooLong abort,
+    // so deleting that conjunct left the suite green: the resp_open + max_frame cap produces
+    // the same BOUND, just a release ~70 byte times later (PR #137 red-team @87b6686, LOW,
+    // surviving mutant). Here the stream keeps going to within two byte times of the cap and
+    // the timeout is asserted at the abort, strictly before the cap can release it.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x06;
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    REQUIRE(master.begin(dst, nullptr, 0) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, nullptr, 0).size()) * byte_us();
+    const uint64_t deadline = tx_end + omgp::TRUNK_T_resp_us;
+    const uint64_t resp_open = deadline - 1; // opens on the window's last microsecond
+    const uint64_t cap = resp_open + static_cast<uint64_t>(kMaxWire) * byte_us();
+
+    const uint8_t flag = static_cast<uint8_t>(omgp::TRUNK_flag_byte);
+    wire.inject_bytes(&flag, 1, resp_open);
+    // kMaxUnstuffed + 1 content bytes: the last one trips Discard::TooLong -> Hunting.
+    const uint64_t overrun_at = resp_open + static_cast<uint64_t>(kMaxUnstuffed + 1) * byte_us();
+    REQUIRE(overrun_at < cap); // strictly before the TIME cap
+    std::vector<uint8_t> filler;
+    for (uint64_t t = resp_open + byte_us(); t <= cap - 2 * byte_us(); t += byte_us())
+        filler.push_back(0x5A); // contiguous, never idle
+    wire.inject_bytes(filler.data(), filler.size(), resp_open + byte_us());
+
+    for (uint64_t t = byte_us(); t <= overrun_at + 2 * byte_us(); t += byte_us())
+        wire.advance_to(t, master);
+    REQUIRE(master.stats(dst).timeouts == 1); // released by in_frame(), not by the cap
+}
+
 TEST_CASE("a transaction under one byte per superframe poll, with a hostile FLAG opened inside "
           "every T_resp window, still concludes Failed{Timeout} within the FLAG-delimited bound",
           "[link][timing:T_gap][timing:T_resp][timing:retries]") {
@@ -3208,6 +3252,44 @@ TEST_CASE("a response opening exactly at tx_end — the window's closed lower bo
     REQUIRE(ev.kind == MasterEvent::Answered);
     REQUIRE(ev.response.len == sizeof long_body);
     REQUIRE(master.stats(dst).timeouts == 0);
+}
+
+TEST_CASE("a matching answer whose FLAG opens INSIDE the host's own transmission is discarded "
+          "by the window's lower bound: the bound is anchored at tx_end, not the transmit start",
+          "[link][timing:T_resp]") {
+    // Every other lower-bound case opens its stale frame before the transmit START as well as
+    // before tx_end, so `window_start_us_ = at_us` (the transmit start) left the suite green
+    // and accepted, as the attempt's answer, a frame that physically collided with the host's
+    // own request (PR #137 red-team @87b6686, LOW, surviving mutant). This opener lands halfway
+    // through the request: inside [tx_start, tx_end), outside [tx_end, tx_end + T_resp).
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x06;
+    const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+    wire.set_script(dst, silence, 3);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint64_t t0 = 1000;
+    wire.advance_to(t0, master); // the F3 loop's poll-then-begin
+    REQUIRE(master.begin(dst, nullptr, 0) == Status::Ok);
+    REQUIRE(wire.transcript(0).tx_start_us == t0);
+    const size_t req_n = request_bytes(dst, 0, false, nullptr, 0).size();
+    const uint64_t tx_end = t0 + static_cast<uint64_t>(req_n) * byte_us();
+
+    // A perfectly formed answer for THIS transaction (right src/dst/seq/response bit).
+    const std::vector<uint8_t> answer = response_bytes(dst, 0, nullptr, 0);
+    const uint64_t open_at = t0 + (req_n / 2) * byte_us();
+    REQUIRE(open_at > t0);
+    REQUIRE(open_at < tx_end); // strictly inside the host's own transmission
+    wire.inject_bytes(answer.data(), answer.size(), open_at);
+
+    const uint64_t end = open_at + static_cast<uint64_t>(answer.size()) * byte_us();
+    MasterEvent ev{};
+    for (uint64_t t = t0 + 1; t <= end + 4 * byte_us() && ev.kind == MasterEvent::None; ++t)
+        ev = wire.advance_to(t, master);
+    REQUIRE(ev.kind != MasterEvent::Answered);
+    REQUIRE(master.stats(dst).discards >= 1);
+    REQUIRE(master.busy()); // the attempt's own window is still open
 }
 
 TEST_CASE("set_bit_rate() refuses a rate whose byte time truncates to zero: not forwarded, not "

@@ -50,6 +50,13 @@ class Master {
     // to every byte that arrived meanwhile and can transmit into a frame already on the wire.
     // The intended F3 loop — `ev = poll(now); if (ev.kind != None) begin(next, ...)` —
     // satisfies it (PR #137 review @3a15d29, MEDIUM; contracts/link-cpp.md "Master engine").
+    //
+    // dst == host_addr (the host polling itself) is ACCEPTED — stated, not enforced: the only
+    // lower-bound refusal the contract lists is ReservedAddress for 0xFF, and index 0 is in
+    // range for the tables, so nothing here refuses it; the frame goes out with dst == src and
+    // the transaction fails or succeeds on whatever answers. Adding a refusal is a contract
+    // change and the maintainer's ruling (docs/OPEN-QUESTIONS.md 2026-09-05 "Master::begin(dst
+    // == ADDR_host) is accepted"; PR #137 red-team @9547634 and @87b6686, LOW).
     Status begin(uint8_t dst, const uint8_t* payload, size_t len);
 
     // The only receive path (analysis F1): drains ByteWire::receive() into the engine's
