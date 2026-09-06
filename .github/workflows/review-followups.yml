@@ -1,0 +1,78 @@
+name: review-followups
+# Files the reviewer's proposed FOLLOW-UPS (scope ruling #134) as `task` issues, so an
+# out-of-scope suggestion is TRACKED instead of evaporating (#136 red team, MEDIUM). Without
+# this the `## FOLLOW-UPS` section the reviewer emits had no consumer and neither agent could
+# open the issue.
+#
+# Deterministic github-script, no agent and no PR code: like agent-approve, the `issue_comment`
+# trigger runs the DEFAULT-branch definition, so a PR cannot rewrite this in its own diff.
+# Dedup by open-`task` title so re-review on each push does not re-file. Files `task` ONLY —
+# never `ready`/`queued`: release and enrichment stay a human/auto-release decision (GOVERNANCE
+# §1). A hard cap bounds a runaway comment.
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: review-followups-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  file:
+    if: >
+      github.event.issue.pull_request &&
+      github.event.comment.user.login == 'claude[bot]' &&
+      contains(github.event.comment.body, 'VERDICT(') &&
+      contains(github.event.comment.body, '## FOLLOW-UPS')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner, repo = context.repo.repo;
+            const CAP = 10;   // bound a runaway comment
+            const c = context.payload.comment;
+            if (!c || !c.user || c.user.login !== 'claude[bot]') { core.notice('followups: not a claude[bot] comment — untouched'); return; }
+            const body = String(c.body || '');
+            if (!body.includes('VERDICT(')) { core.notice('followups: not a verdict comment — untouched'); return; }
+            const issue = context.payload.issue;
+            if (!issue || !issue.pull_request) { core.notice('followups: comment is not on a PR — untouched'); return; }
+            const pr = issue.number;
+
+            // Extract the "## FOLLOW-UPS" section: bullets until the next heading, NOT EXAMINED,
+            // or the verdict line. Nothing after those is a follow-up.
+            const lines = body.split('\n');
+            const start = lines.findIndex(l => /^##\s*FOLLOW-UPS\b/i.test(l.trim()));
+            if (start < 0) { core.notice('followups: no FOLLOW-UPS section — nothing to file'); return; }
+            const items = [];
+            for (let i = start + 1; i < lines.length; i++) {
+              const t = lines[i].trim();
+              if (/^##\s/.test(t) || /^NOT EXAMINED:/i.test(t) || /^VERDICT\(/.test(t)) break;
+              const m = t.match(/^[-*]\s+(.*\S)\s*$/);
+              if (m && m[1].toLowerCase() !== 'none') items.push(m[1].trim());
+            }
+            if (!items.length) { core.notice('followups: none proposed — nothing to file'); return; }
+
+            // Dedup against open `task` issues by title.
+            const open = await github.paginate(github.rest.issues.listForRepo, {owner, repo, state: 'open', labels: 'task', per_page: 100});
+            const seen = new Set(open.filter(i => !i.pull_request).map(i => i.title));
+
+            let filed = 0;
+            for (const item of items.slice(0, CAP)) {
+              let title = item.replace(/^\[(HIGH|MEDIUM|LOW)\]\s*/i, '');   // drop a leading severity tag
+              title = (title.split(' — ')[0] || title).slice(0, 120).trim(); // the "TITLE — why" head
+              if (!title) continue;
+              if (seen.has(title)) { core.notice(`followups: '${title}' already an open task — skipped`); continue; }
+              const r = await github.rest.issues.create({owner, repo, title, labels: ['task'],
+                body: `Proposed by the review of #${pr} (scope ruling #134, docs/OPEN-QUESTIONS.md): ${item}\n\n` +
+                      'Labelled `task` only — release (`ready`/`queued`) and enrichment stay a maintainer/auto-release decision (GOVERNANCE.md §1). Close if not worth doing.'});
+              seen.add(title); filed++;
+              core.notice(`followups: filed ${r.data.html_url}`);
+            }
+            core.notice(`followups: filed ${filed} of ${items.length} proposed for #${pr}` + (items.length > CAP ? ` (capped at ${CAP})` : ''));

@@ -338,7 +338,7 @@ def test_review_fix_wiring():
     action = next(s for s in fix["steps"] if "claude-code-action" in s.get("uses", ""))
     prompt = action["with"]["prompt"]
     for must in ("CLAUDE.md", "OPERATING-POLICY", "./pipeline.sh", "tests/vectors/",
-                 "protocol/omgp-protocol.yaml", "HIGH and MEDIUM", "DEFERRED"):
+                 "protocol/omgp-protocol.yaml", "SCOPE POLICY", "BLOCKING finding"):
         assert must in prompt, must
     # The bound lives in agent-config.yml, not in the workflow: retuning it must not need a
     # workflow-scope push, because the fixer agent itself cannot edit .github/workflows/*.
@@ -346,9 +346,14 @@ def test_review_fix_wiring():
     assert "review_fix_max_attempts" in gate_script and "ATTEMPT_LABELS" in gate_script
     assert "review-fix-1" not in gate_script.replace("`review-fix-${i + 1}`", "")   # no hard-coded attempt list
     assert "review_fix_max_attempts: 4" in (ROOT / ".github" / "agent-config.yml").read_text()
-    # The severity policy is the point of the loop: LOW findings are not chased on their own.
-    assert "Fix a LOW finding ONLY if it is in code you are already" in prompt
-    assert "If EVERY finding is LOW, change no code at all" in prompt
+    # The scope policy (#134) is the point of the loop: findings route by SCOPE, not severity —
+    # blocking findings are fixed, follow-ups become issues, and a fix may SHRINK the diff
+    # (removing out-of-scope machinery, not only adding) — the lever that ends #128-style creep.
+    assert "A FOLLOW-UP finding" in prompt
+    assert "you MAY SHRINK" in prompt   # a blocking fix may remove out-of-scope work, not only add
+    # No silent all-follow-up stop branch (#136 red-team liveness fix): a `findings` verdict
+    # always means blocking, so the fixer always has work — the guardrail/liveness pins live
+    # in test_scope_routing_guardrails_are_pinned.
     # The fixer must not touch the loop's own bounds, open PRs, or approve anything.
     assert ".github/workflows/" in prompt and "Do not approve" in prompt
     tools = action["with"]["claude_args"]
@@ -358,6 +363,79 @@ def test_review_fix_wiring():
         p = next(s for s in yaml.safe_load((ROOT / ".github" / "workflows" / wfn).read_text())["jobs"][job]["steps"]
                  if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
         assert "`[HIGH]`" in p and "`[MEDIUM]`" in p and "`[LOW]`" in p, wfn
+
+
+def _verdict_prompt(wfn, job):
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / wfn).read_text(encoding="utf-8"))
+    return next(s for s in wf["jobs"][job]["steps"]
+                if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
+
+
+def test_scope_routing_guardrails_are_pinned():
+    """#136 red team [HIGH]: the ruling's permissive half (FOLLOW-UP / MAY SHRINK) was pinned,
+    but the sentences that BOUND it were not — so inverting "when unsure, BLOCK" to "prefer
+    FOLLOW-UP" kept the suite green. The guardrails are what make the loosening safe; pin them.
+
+    - Both verdict-emitting reviewers must carry the never-defer rule and key `clean` off the
+      absence of BLOCKING findings (not the absence of all findings).
+    - review-fix must state that a defect/security/weakened-test/spec-divergence is ALWAYS
+      blocking, whatever its label."""
+    review = _verdict_prompt("claude-review.yml", "review")
+    assert "NEVER route a defect" in review, "claude-review dropped the never-defer guardrail"
+    assert "When unsure, BLOCK" in review, "claude-review dropped the tie-breaker"
+    assert "NO BLOCKING findings" in review, "claude-review verdict must key off BLOCKING findings"
+
+    redteam = _verdict_prompt("red-team.yml", "attack-pr")
+    assert "NEVER route a weakness the change introduced" in redteam, "red-team dropped the never-defer guardrail"
+    assert "no CONFIRMED BLOCKING finding" in redteam, "red-team verdict must key off BLOCKING findings"
+    # The FOLLOW-UP class must be an ADVERSARIAL still-report, not a licence to stay quiet.
+    assert "Still report it" in redteam and "falsification is your job" in redteam
+
+    fix = _verdict_prompt("review-fix.yml", "fix")
+    assert "ALWAYS blocking" in fix, "review-fix dropped the never-defer guardrail"
+    # Liveness (#136 red team [MEDIUM]): no silent "all follow-up -> stop" branch that leaves
+    # a findings verdict with no push and no escalation.
+    assert "change\n                 no code" not in fix and "change no code" not in fix, (
+        "review-fix must not silently stop on an all-follow-up verdict (stall with no escalation)")
+
+
+# --- review follow-up filer (review-followups.yml, scope ruling #134) --------------------------
+
+REVIEW_FOLLOWUPS = ROOT / ".github" / "workflows" / "review-followups.yml"
+REVIEW_FOLLOWUPS_HARNESS = ROOT / "tests" / "workflows" / "review_followups_harness.js"
+
+
+@pytest.mark.skipif(shutil.which("node") is None,
+                    reason="node not present (blind spot: workflow scripts not exercised in this environment)")
+def test_review_followups_filer_against_mocked_github(tmp_path):
+    """The FOLLOW-UPS section needs a consumer, or an out-of-scope suggestion evaporates (#136
+    red team, MEDIUM). This runs the filer's github-script verbatim: parse the section, strip
+    the title, dedup open tasks, cap a runaway, and label `task` only."""
+    f = tmp_path / "scripts.json"
+    f.write_text(json.dumps({"file": _script("review-followups.yml", "file")}))
+    r = subprocess.run(["node", str(REVIEW_FOLLOWUPS_HARNESS), str(f), str(ROOT)],
+                       capture_output=True, text=True, cwd=ROOT, timeout=120)
+    print(r.stdout)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "FAIL" not in r.stdout and "cases passed" in r.stdout
+
+
+def test_review_followups_wiring():
+    """Safety lives in the YAML: default-branch definition (a PR can't rewrite it), least
+    privilege, and it files `task` only — never a label that releases work to the dispatcher."""
+    wf = yaml.safe_load(REVIEW_FOLLOWUPS.read_text())
+    on = wf[True] if True in wf else wf["on"]
+    assert on["issue_comment"]["types"] == ["created"]
+    perms = wf["permissions"]
+    assert perms["issues"] == "write" and perms.get("contents", "read") == "read" and "id-token" not in perms
+    job = wf["jobs"]["file"]
+    for must in ("issue.pull_request", "claude[bot]", "VERDICT(", "## FOLLOW-UPS"):
+        assert must in job["if"], must
+    script = next(s for s in job["steps"] if "actions/github-script" in s.get("uses", ""))["with"]["script"]
+    assert "labels: ['task']" in script, "the filer must label task"
+    for banned in ("'ready'", "'queued'", '"ready"', '"queued"'):
+        assert banned not in script, f"the filer must never apply a release label: {banned}"
+    assert "already an open task" in script and "CAP" in script   # dedup + runaway cap
 
 
 def test_both_workflows_declare_the_same_seven_sections():
