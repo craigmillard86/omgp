@@ -298,7 +298,7 @@ class TestCtestPath:
         # The broken registration also fails --snapshot; the missing record is checked before
         # any comparison, so an empty (well-formed) snapshot is enough to reach that line.
         stub = tmp_path / "pre-stub.json"
-        stub.write_text(json.dumps({"sources": {}, "compile_commands": "", "objects": {}, "registered": [], "binaries": {}}))
+        stub.write_text(json.dumps({"sources": {}, "compile_commands": "", "objects": {}, "links": {}, "registered": [], "binaries": {}}))
         r = run_tool("--ctest", "--pre", str(stub), cwd=root)
         assert r.returncode != 0 and "no execution record" in r.stderr, r.stderr
 
@@ -703,6 +703,18 @@ class TestCtestPath:
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_b.cpp" in r.stderr and "changed during the ctest run" in r.stderr, r.stderr
         assert "verified" not in r.stdout
+
+    def test_link_line_through_a_response_file_is_read(self, tmp_path):
+        # Positive: a link line that names its objects through an @response file (CMake's
+        # long-command shape) is read through it — else a real tree built that way would be
+        # refused wholesale, and the rsp path of linked_objects() would be untested code.
+        root = make_tree(tmp_path)
+        build = root / "build/native"
+        (build / "CMakeFiles/test_b.dir/objects1.rsp").write_text("CMakeFiles/test_b.dir/tests/unit/test_b.cpp.o\n")
+        (build / "CMakeFiles/test_b.dir/link.txt").write_text("/usr/bin/c++ -g @CMakeFiles/test_b.dir/objects1.rsp -o test_b\n")
+        r = run_unit(root)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert VERIFIED.search(r.stdout).group(1) == "2", r.stdout
 
     def test_symlinked_directory_under_the_source_dirs_is_refused(self, tmp_path):
         # Red team @8b0e4f4 [LOW]: rglob (Python 3.12) and `find` without -L do not descend a

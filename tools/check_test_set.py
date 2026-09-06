@@ -7,10 +7,17 @@
 out while the rest keep the sum above it (#133). This check reads the build artefacts and
 the run's own machine-readable record, and names every source that escaped:
 
-  compiled    compile_commands.json has an entry whose `file` is the source; its `-o`
-              object (relative to the entry's `directory`) exists; the object path names
-              the target: CMakeFiles/<target>.dir/...  (a CMakeLists line re-pointed at
-              another file leaves the source with NO entry — "compiled by no target").
+  compiled    compile_commands.json has EXACTLY ONE entry whose `file` is the source; its
+              `-o` object (relative to the entry's `directory`) exists; the object path
+              names the target: CMakeFiles/<target>.dir/...  (a CMakeLists line re-pointed
+              at another file leaves the source with NO entry — "compiled by no target").
+              Two entries under two targets are refused naming both (red team @8b0e4f4
+              finding 1: keeping the last entry let one appended entry re-credit a source
+              to any registered target, and made the verdict a function of entry order).
+              The object must also be on the target's LINK LINE — the Makefiles
+              generator's CMakeFiles/<target>.dir/link.txt, read as a build artefact —
+              else it was compiled into no binary (the same finding, escape 2 with only
+              the decoy entry: an entry plus a stub object); no link line fails closed.
               The object must be at least as new as the source: an edited-after-build
               source is named ("source is newer than its object; rebuild") rather than
               vouched for by a stale object (red team @ceab86f finding 3). An mtime
@@ -93,12 +100,15 @@ No sources at all is a failure, not a vacuous pass (review @7dbf9d8).
 Matching is by BINARY (basename of the target / command[0]), not by test name:
 CMakeLists registers test_smoke as `smoke`.
 
-The source set is every test_*.cpp under tests/unit and tests/property at ANY depth
-(rglob), the same set pipeline.sh's unit_sources() walks; a flat glob would leave
-tests/unit/<sub>/test_x.cpp unchecked and unnamed (@ceab86f finding 4). A source that is
-a symlink to another source is verified by the file it resolves to (@2f40596 lead b): its
-own cases are whatever that file holds, which is the stated per-binary limit above (the
-same as deleting a source's TEST_CASEs) — a visible tree change, not a rule here.
+The source set is every test_*.cpp under tests/unit and tests/property at any depth
+reached WITHOUT following symlinks (an explicit os.walk; the same set pipeline.sh's
+unit_sources() walks with `find`), and a symlink anywhere under those directories —
+directory or file — is refused by name: rglob on Python 3.12 and `find` without -L do not
+descend a symlinked directory, so tests/unit/<link>/test_c.cpp was silently outside the set
+(red team @8b0e4f4 finding 2). With links refused, the walked set is the whole tree by
+construction. This supersedes the @2f40596 lead-b statement (a symlinked source verified
+by the file it resolves to): a link is not a source. A flat glob would leave
+tests/unit/<sub>/test_x.cpp unchecked and unnamed (@ceab86f finding 4).
 
 Order matters: `ctest --show-only` REWRITES LastTest.log (measured on CMake 3.22: the log
 holds zero EXECUTED lines afterwards), so the log is read (as bytes) first and written
@@ -127,12 +137,34 @@ EXECUTED_RE = re.compile(r"^EXECUTED: (\d+)$")
 TRUNCATED_RE = re.compile(r"test output was removed since it exceeds the threshold")
 
 
+def walk(root: Path):
+    """(sorted test sources, sorted symlinks) under SOURCE_DIRS. An explicit os.walk that
+    does NOT follow links — the same set on every interpreter (rglob's symlink handling
+    differs by Python version) and the same set `find` without -L walks in pipeline.sh —
+    and every symlink it meets, directory or file, is returned to be REFUSED by name: what a
+    link reaches is outside the set, so a set that contained one would not be the whole
+    tree (red team @8b0e4f4 finding 2: tests/unit/<link>/test_c.cpp was never named)."""
+    srcs, links = [], []
+    for d in SOURCE_DIRS:
+        for dirpath, dirnames, filenames in os.walk(root / d):
+            for name in dirnames + filenames:
+                path = Path(dirpath) / name
+                if path.is_symlink():
+                    links.append(path)
+                elif name in filenames and name.startswith("test_") and name.endswith(".cpp") and path.is_file():
+                    srcs.append(path)
+    return sorted(srcs), sorted(links)
+
+
 def sources(root: Path):
-    return sorted(p for d in SOURCE_DIRS for p in (root / d).rglob("test_*.cpp") if p.is_file())
+    return walk(root)[0]
 
 
 def compiled_targets(build: Path):
-    """realpath(source) -> (target, object path) from compile_commands.json."""
+    """realpath(source) -> [(target, object path, link line path)] — EVERY compile_commands.json
+    entry for the source, not the last one (red team @8b0e4f4 finding 1: `out[src] = ...` in
+    a loop let one appended entry re-credit a source to any target). The link line is the
+    Makefiles generator's CMakeFiles/<target>.dir/link.txt beside the object."""
     out = {}
     for entry in json.loads((build / "compile_commands.json").read_text()):
         argv = shlex.split(entry["command"])
@@ -141,8 +173,26 @@ def compiled_targets(build: Path):
         obj = Path(entry["directory"]) / argv[argv.index("-o") + 1]
         m = TARGET_RE.search(obj.as_posix())
         if m:
-            out[os.path.realpath(entry["file"])] = (m.group(1), obj)
+            hit = (m.group(1), obj, Path(obj.as_posix()[:m.end()]) / "link.txt")
+            hits = out.setdefault(os.path.realpath(entry["file"]), [])
+            if hit not in hits:   # an entry repeated verbatim is one entry; two objects are two
+                hits.append(hit)
     return out
+
+
+def linked_objects(link: Path):
+    """abspath of every object named on a target's link line (its cwd is the build dir, two
+    levels up from CMakeFiles/<target>.dir; `@file` response files are read), or None when
+    there is no link line — another generator, or a deleted file — which fails closed."""
+    cwd = link.parents[2]
+    try:
+        tokens = shlex.split(link.read_text())
+        expanded = []
+        for tok in tokens:
+            expanded += shlex.split((cwd / tok[1:]).read_text()) if tok.startswith("@") else [tok]
+    except OSError:
+        return None
+    return {os.path.abspath(cwd / tok) for tok in expanded if tok.endswith(".o")}
 
 
 def registered_tests(build: Path):
@@ -210,28 +260,37 @@ def registration_list(registered) -> list:
 def snapshot(root: Path, build: Path, log: Path) -> dict:
     """The pre-run fingerprint stage_unit takes BEFORE ctest and hands to --ctest --pre: the
     source set (each source's identity), the compilation database (hashed), every source's
-    object, the registration set (name, argv) and every registered binary. Anything that
+    object(s) and link line(s), the registration set (name, argv) and every registered binary. Anything that
     differs after the run was written while the tests ran (or after them) and is not
     evidence about the run (red team @f8bce32; the sources: @2f40596)."""
     compiled, registered = read_artefacts(build, log)
-    srcs, objects = {}, {}
+    srcs, objects, links = {}, {}, {}
     for src in sources(root):
         srcs[src.relative_to(root).as_posix()] = identity(src)
-        hit = compiled.get(os.path.realpath(src))
-        if hit is not None:
-            objects[str(hit[1])] = identity(hit[1])
+        for _, obj, link in compiled.get(os.path.realpath(src), []):
+            objects[str(obj)] = identity(obj)
+            links[str(link)] = identity(link)
     return {
         "sources": srcs,
         "compile_commands": hashlib.sha256((build / "compile_commands.json").read_bytes()).hexdigest(),
         "objects": objects,
+        "links": links,
         "registered": registration_list(registered),
         "binaries": {path: identity(path) for path in registered},
     }
 
 
 def check_ctest(root: Path, build: Path, log: Path, junit: Path, pre: dict) -> int:
-    srcs = sources(root)
+    srcs, links = walk(root)
+    # A symlink under the source dirs, at any depth, directory or file (red team @8b0e4f4
+    # finding 2): named first, since what it reaches is by definition not in `srcs`.
+    link_failures = [f"{p.relative_to(root).as_posix()}: a symlink (-> {os.readlink(p)}) under the test source "
+                     f"directories: the source set is plain files and directories only, so whatever the link reaches "
+                     f"is outside the set — replace the link with the files themselves"
+                     for p in links]
     if not srcs:
+        for f in link_failures:
+            print(f"unit: {f}", file=sys.stderr)
         print(f"unit: no test sources under {', '.join(SOURCE_DIRS)} in {root} (nothing to verify is a failure, not a pass)",
               file=sys.stderr)
         return 1
@@ -241,7 +300,7 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path, pre: dict) -> i
     compiled, registered = read_artefacts(build, log)
     executed, truncated, recorded = executed_counts(junit)
     record_mtime = junit.stat().st_mtime
-    failures = []
+    failures = link_failures
     # Unchanged since the pre-run snapshot (red team @f8bce32; the source set @2f40596): the
     # source and registration sets are compared here, the sources, objects and binaries per
     # source below. The set first: a source the tree lost during the run is not in srcs, so
@@ -288,11 +347,18 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path, pre: dict) -> i
             failures.append(f"{rel}: source changed during the ctest run (not the file its object was built from); "
                             f"rebuild and rerun via stage_unit")
             continue
-        hit = compiled.get(os.path.realpath(src))
-        if hit is None:
+        hits = compiled.get(os.path.realpath(src), [])
+        if not hits:
             failures.append(f"{rel}: compiled by no target (no compile_commands.json entry; CMakeLists re-pointed or missing)")
             continue
-        target, obj = hit
+        if len(hits) > 1:
+            # One source, one compile entry (red team @8b0e4f4 finding 1): which of two
+            # targets' runs is this source's evidence is not readable from the database —
+            # taking the last entry made the verdict a function of entry order.
+            failures.append(f"{rel}: compiled into more than one target ({', '.join(sorted(t for t, _, _ in hits))}): "
+                            f"one source, one compile entry — a second entry is not evidence about the first target's run")
+            continue
+        target, obj, link = hits[0]
         if not obj.exists():
             failures.append(f"{rel}: object {obj} missing (target {target} not built)")
             continue
@@ -305,6 +371,23 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path, pre: dict) -> i
             continue
         if pre["objects"][str(obj)] != identity(obj):
             failures.append(f"{rel}: object {obj} changed during the ctest run; rebuild and rerun via stage_unit")
+            continue
+        # The object must be one the target's binary was LINKED from (its link line, a build
+        # artefact): an entry plus a stub object is not a compilation into that binary
+        # (red team @8b0e4f4 finding 1, escape 2 with only the decoy entry).
+        if pre["links"].get(str(link)) != identity(link):
+            failures.append(f"{rel}: link line {link} changed during the ctest run (or did not exist before it); "
+                            f"rebuild and rerun via stage_unit")
+            continue
+        linked = linked_objects(link)
+        if linked is None:
+            failures.append(f"{rel}: no link line for target {target} at {link} (the Makefiles generator writes it; "
+                            f"without it, what {target} was linked from cannot be read, so the compile entry is not "
+                            f"evidence of a binary)")
+            continue
+        if os.path.abspath(obj) not in linked:
+            failures.append(f"{rel}: object {obj} is not on target {target}'s link line ({link}): compiled, but linked "
+                            f"into no binary")
             continue
         binary = os.path.abspath(build / target)
         if binary not in registered:
@@ -356,7 +439,7 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path, pre: dict) -> i
         for f in failures:
             print(f"unit: {f}", file=sys.stderr)
         return 1
-    n = len({compiled[os.path.realpath(src)][0] for src in srcs})   # distinct targets, not sources
+    n = len({compiled[os.path.realpath(src)][0][0] for src in srcs})   # distinct targets, not sources
     print(f"unit: verified {n} test binar{'y' if n == 1 else 'ies'} (compiled, registered, executed; ctest path)")
     return 0
 
@@ -386,7 +469,7 @@ def main(argv=None) -> int:
         ap.error("--ctest needs --pre <snapshot taken before ctest ran> (stage_unit takes it with --snapshot)")
     try:
         pre = json.load(sys.stdin if str(a.pre) == "-" else a.pre.open())
-        for key in ("sources", "compile_commands", "objects", "registered", "binaries"):
+        for key in ("sources", "compile_commands", "objects", "links", "registered", "binaries"):
             pre[key]
     except (OSError, ValueError, KeyError, TypeError) as e:
         print(f"unit: no usable pre-run snapshot at {a.pre} ({e}); rerun via stage_unit", file=sys.stderr)

@@ -32,7 +32,7 @@ broken the `diff` prints differing hashes and `DETERMINISTIC` never appears.
 Expected tail:
 ```
 unit: executed <n> check(s) (ctest path)      # n ≥ UNIT_TEST_FLOOR
-unit: verified <k> test binaries (compiled, registered, executed; ctest path)   # k = distinct test binaries; every test_*.cpp under tests/{unit,property} (any depth) is in one
+unit: verified <k> test binaries (compiled, registered, executed; ctest path)   # k = distinct test binaries; every test_*.cpp under tests/{unit,property} (any depth, no symlinks — one is refused by name) is in one
 ==> pipeline green
 ```
 `quality` now includes `check_embedded.py` (zero findings). A stale binary cannot

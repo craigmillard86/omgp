@@ -111,7 +111,8 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   object, then each `tests/unit/*.cpp` + `tests/property/*.cpp` with `l3/*.cpp`,
   `l3_helper`, `crc_helper`; disclosure line unchanged. (Amended by #133: the source
   list is `unit_sources()` — every `test_*.cpp` under those two directories at any depth,
-  sorted — shared with the bootstrap `unit` walk.)
+  sorted, symlinks not followed and refused by name (red team @8b0e4f4) — shared with the
+  bootstrap `unit` walk.)
 - `unit`: run every test binary; the `EXECUTED: <n>` lines are summed (ctest path via
   `LastTest.log`, bootstrap via stdout); `UNIT_TEST_FLOOR` raised to the new total −
   small slack (documented in the commit that raises it: "raise when tests are added;
@@ -120,10 +121,20 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   files, `ctest --show-only` and the run's `ctest --output-junit` record
   (`build/native/Testing/junit.xml`, deleted before ctest runs and refused if older than
   any registered binary) that every `test_*.cpp` under `tests/unit` and `tests/property`
-  at any depth (red team @ceab86f) was compiled, registered and executed, naming every one
-  that was not — compiled means a `compile_commands.json` entry whose object exists and is
+  at any depth (red team @ceab86f) — reached without following symlinks, and a symlink
+  anywhere under those directories, file or directory, is refused by name, since `rglob`
+  and `find` do not descend one and a source behind one was silently outside the set (red
+  team @8b0e4f4; with links refused the walked set is the whole tree by construction) —
+  was compiled, registered and executed, naming every one
+  that was not — compiled means exactly ONE `compile_commands.json` entry (two entries
+  under two targets are refused naming both: keeping the last one let a single appended
+  entry re-credit a source to any registered target and made the verdict depend on entry
+  order — red team @8b0e4f4) whose object exists, is
   no older than the source (an edited-after-build source is named; an mtime comparison is
-  a control, not a guarantee), registered means an `add_test` whose command is exactly
+  a control, not a guarantee) and is on the target's link line
+  (`CMakeFiles/<target>.dir/link.txt`, the Makefiles generator's, read as a build artefact;
+  absent, the check fails closed — an entry plus a stub object is not a compilation into
+  the binary, red team @8b0e4f4), registered means an `add_test` whose command is exactly
   the target's own binary — compared as an absolute path without resolving symlinks, so a
   link to another target's binary is not a registration, and the file a registration runs
   must be registered once (a link registered by its own path is refused, both ways; red
@@ -136,9 +147,9 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   elsewhere, is refused); and all of that evidence must be UNCHANGED by the run: the
   stage takes `check_test_set.py --snapshot` before ctest (the source set with each
   source's dev/ino/size/mtime/ctime; sha256 of `compile_commands.json`; the same identity
-  of every source's object and every registered binary; the registration list) and hands
+  of every source's object(s), link line(s) and every registered binary; the registration list) and hands
   it to `--ctest --pre` on stdin — never via a file under `build/` — so a test that
-  writes a compile entry, an object, a registration or a binary while running is refused
+  writes a compile entry, an object, a link line, a registration or a binary while running is refused
   as "changed during the ctest run", and one that deletes or adds a test source while
   running as "source set changed during the ctest run" — the check walks the sources
   after ctest, so without the set in the snapshot a built-but-unregistered source was
@@ -164,7 +175,8 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   identity by stat is the same control as the ctest path's); and because that path
   builds one binary per BASENAME, two sources sharing a basename are refused by name
   before the bootstrap build and before the walk (red team @3dde163 — otherwise one
-  binary would vouch for both and count twice). Both paths print a `unit: verified N
+  binary would vouch for both and count twice), and a symlink under the source
+  directories is refused there too (red team @8b0e4f4). Both paths print a `unit: verified N
   test binaries` line (N = distinct binaries on the ctest path; sources, which the
   uniqueness check makes one-per-binary, on the bootstrap path), and both fail when
   there are no sources at all. The record, not

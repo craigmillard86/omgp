@@ -12,7 +12,8 @@ CXXFLAGS_BOOT="-std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefi
 WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=_Znwm -Wl,--wrap=_Znam"
 
 # The unit test SOURCE set, one line per file: every test_*.cpp under tests/unit and
-# tests/property, at any depth, sorted. Shared by the bootstrap build and the bootstrap unit
+# tests/property, at any depth, sorted — symlinks not followed (find -P), and refused by name
+# in unit_sources_plain() below. Shared by the bootstrap build and the bootstrap unit
 # walk (and mirrored by tools/check_test_set.py) so all three agree on what "every source"
 # means; a flat glob would leave tests/unit/<sub>/test_x.cpp silently unchecked (#172 red team
 # @ceab86f, finding 4). find's -name matches the file name only, so sorting is by full path.
@@ -36,6 +37,21 @@ unit_sources_unique() {
     echo "unit: $(unit_sources | grep "/$dup\$" | tr '\n' ' ')— same basename $dup: the bootstrap path builds one binary per basename, so these would share (and clobber) one" >&2
     rc=1
   done
+  return "$rc"
+}
+# No symlink under the test source directories, at any depth, directory or file (red team
+# @8b0e4f4 finding 2): `find` without -L does not descend a symlinked directory, so a source
+# behind one was outside the set and never named. The set is plain files and directories
+# only; a link is refused by name (the same rule as tools/check_test_set.py's walk()).
+unit_sources_plain() {
+  local d dirs=() l rc=0
+  for d in tests/unit tests/property; do [ -d "$d" ] && dirs+=("$d"); done
+  [ "${#dirs[@]}" -gt 0 ] || return 0
+  while IFS= read -r l; do
+    [ -n "$l" ] || continue
+    echo "unit: $l: a symlink (-> $(readlink "$l")) under the test source directories: the source set is plain files and directories only, so whatever the link reaches is outside the set — replace the link with the files themselves" >&2
+    rc=1
+  done < <(find "${dirs[@]}" -type l | LC_ALL=C sort)
   return "$rc"
 }
 
@@ -109,6 +125,7 @@ stage_build() {
     linksrcs=$(ls link/*.cpp 2>/dev/null || true)
     # One binary per unit_sources() entry, named by basename — so basenames must be unique.
     # test_smoke keeps its own main (linking it with Catch2's main would be a duplicate symbol).
+    unit_sources_plain || return 1
     unit_sources_unique || return 1
     while IFS= read -r t; do
       name=$(basename "$t" .cpp)
@@ -197,6 +214,7 @@ stage_unit() {
     # what utime cannot put back; root or a moved clock can).
     local total=0 count=0 t bin out rc n srcs
     local -A pre_id
+    unit_sources_plain || return 1
     unit_sources_unique || return 1
     srcs=$(unit_sources)   # taken ONCE, before the run; the loops below walk this list, not a fresh find
     while IFS= read -r t; do
