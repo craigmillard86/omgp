@@ -1882,6 +1882,61 @@ TEST_CASE("the time cap on the T_resp hold is exactly resp_open + kMaxWire byte 
         REQUIRE(master.stats(dst).timeouts == 1); // one microsecond past it: released
 }
 
+TEST_CASE("the cap on the T_resp in-flight hold admits the longest legitimate answer: a "
+          "worst-case-stuffed 64-byte response opening on the window's last microsecond is "
+          "delivered intact, with four byte times to spare",
+          "[link][timing:T_resp]") {
+    // The other side of the cap: no conforming response may ever reach it. This is the
+    // longest response frame the codec can produce — 64 payload bytes drawn from {FLAG, ESCAPE}
+    // (each stuffed to two wire bytes), chosen so that BOTH CRC bytes stuff as well: 2 FLAGs +
+    // 4 header + 128 + 4 = 138 wire bytes. The header bytes cannot stuff (addresses are < 16;
+    // ctrl is seq<<4 | flags, never 0x7E/0x7D; len is <= 64), so 138 is the encoder's maximum
+    // for a response — found by search over the Python reference encoder and asserted below
+    // against the C++ one. kMaxWire (142) is the codec's static sizing bound, four bytes above
+    // it. Opened on the window's last microsecond (Respond with a T_resp - 1 turnaround) and
+    // polled every byte time so intermediate polls land mid-frame past the deadline, exactly
+    // where the timeout check runs; the answer must still be delivered, not timed out.
+    const uint64_t B = byte_us();
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x03;
+    static const uint8_t payload[omgp::LIMIT_max_l3_payload] = {
+        0x7E, 0x7D, 0x7D, 0x7E, 0x7E, 0x7D, 0x7D, 0x7E, 0x7D, 0x7D, 0x7E, 0x7E, 0x7E,
+        0x7E, 0x7E, 0x7E, 0x7D, 0x7D, 0x7E, 0x7E, 0x7E, 0x7E, 0x7E, 0x7D, 0x7D, 0x7E,
+        0x7E, 0x7E, 0x7D, 0x7E, 0x7D, 0x7D, 0x7D, 0x7E, 0x7D, 0x7D, 0x7E, 0x7E, 0x7E,
+        0x7E, 0x7E, 0x7E, 0x7E, 0x7E, 0x7E, 0x7D, 0x7E, 0x7E, 0x7D, 0x7D, 0x7E, 0x7E,
+        0x7D, 0x7D, 0x7E, 0x7E, 0x7E, 0x7D, 0x7E, 0x7D, 0x7E, 0x7D, 0x7E, 0x7D};
+    const Step last_slot[] = {{dst, Kind::Respond, omgp::TRUNK_T_resp_us - 1}};
+    wire.set_script(dst, last_slot, 1);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const size_t n = response_bytes(dst, 0, payload, sizeof payload).size();
+    REQUIRE(n == static_cast<size_t>(kMaxWire) - 4); // 138: the search's maximum, C++ agrees
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size() * B);
+    const uint64_t deadline = tx_end + omgp::TRUNK_T_resp_us;
+    const uint64_t resp_open = deadline - 1;
+    const uint64_t full_end = resp_open + static_cast<uint64_t>(n) * B;
+    const uint64_t cap = resp_open + static_cast<uint64_t>(kMaxWire) * B;
+    REQUIRE(full_end > deadline);     // the answer outlasts the window: the hold is exercised
+    REQUIRE(full_end + 4 * B == cap); // and closes four byte times before the cap
+
+    MasterEvent ev{};
+    uint64_t delivered_at = 0;
+    for (uint64_t t = tx_end; t <= full_end && ev.kind == MasterEvent::None; t += B) {
+        ev = wire.advance_to(t, master);
+        delivered_at = t;
+    }
+    REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(delivered_at < cap);
+    REQUIRE(ev.response.len == sizeof payload);
+    REQUIRE(std::memcmp(ev.response.payload, payload, sizeof payload) == 0);
+    REQUIRE(master.stats(dst).timeouts == 0);
+    REQUIRE(master.stats(dst).retries == 0);
+    REQUIRE_FALSE(master.busy());
+}
+
 TEST_CASE("a transaction under one byte per superframe poll, with a hostile FLAG opened inside "
           "every T_resp window, still concludes Failed{Timeout} within the FLAG-delimited bound",
           "[link][timing:T_gap][timing:T_resp][timing:retries]") {

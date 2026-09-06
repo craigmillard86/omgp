@@ -1737,3 +1737,46 @@ count. Not added in #137: a `BusStats` field is a data-model change and this PR'
 contract amendments already await a ruling.
 **Ruling:** pending — human (data-model amendment).
 **Supersedes:** none.
+
+## 2026-09-06 — the T_resp in-flight hold was bounded in BYTES, not time; a time cap was added (amends the FLAG-delimited babble entry above)
+
+**Context:** red-team at `9547634` (#137, HIGH). The 2026-09-06 "FLAG-delimited babble" entry
+says the in-flight hold is "exactly `kMaxWire·B` (= F), by construction from the Deframer's
+`Discard::TooLong` limit plus `frame_arriving()`'s one-byte slack". That was true only for a
+CONTIGUOUS stream. `frame_arriving()` is sampled at `poll()` instants against the MOST RECENT
+byte (`now_us <= last_rx_us_ + B`); a station that puts one byte on the wire at every poll
+instant satisfies that at every observation the engine makes, and the silence between polls
+is never in view. The hold then ended only at `Discard::TooLong` — ~`kMaxWire` wire bytes,
+i.e. ~`kMaxWire` POLL PERIODS: 283 850 µs per attempt at the superframe cadence for 143
+attacker bytes (0.5 % duty), 852 000 µs for a three-attempt transaction, linear in the poll
+period and independent of bit rate. `busy()` true throughout — a liveness/starvation defect
+(it does terminate), and a falsified bound stated in four places (`master.hpp`,
+`master.cpp`, `contracts/link-cpp.md`, the test's "this is the maximum, not merely an
+instance"). Same class as the transmit-side deferral fixed with the courtesy cap; the
+receive side had no symmetric cap.
+**Fix (implemented in #137):** `frame_arriving()` additionally requires
+`now_us <= resp_open_us_ + max_frame_us()` — one worst-case frame from the opening FLAG,
+symmetric with the courtesy cap. Labelled: the cap is the MAXIMUM hold at any cadence **by
+construction** of the conjunction; for a contiguous stall the cap and the cadence bound
+release at the same instant (`deadline + F` when the FLAG lands at `deadline − 1`), so the
+contiguous figure and its test are unchanged; no legitimate response can reach the cap (at
+most `kMaxWire` contiguous bytes, SC-008's achievable maximum 140 — it closes ≥ 2B before
+it). **Demonstrated** by three cases in `tests/unit/test_link_master.cpp` (red before the
+cap, green after): one byte per superframe poll releases at the first poll past
+`resp_open + F` at both rates; the boundary is exact (`resp_open + F` still holds, `+ 1 µs`
+does not); a whole transaction under one byte per poll with a hostile FLAG in every window
+concludes `Failed{Timeout}` inside `3·(F + 2G + B) + 3·(n·B + R + F) + 6·P` at both rates.
+**Effect on the figures above:** the corrected bound in the entry above now holds at EVERY
+poll cadence (before, only at cadences where a byte time exceeds the poll period). The
+"~11 superframes" worst case and the ~13× BUS_FAULT trade-off stand; the lever remark
+("the in-flight hold's length") now names a real knob: the cap term, not the Deframer limit.
+**Alternative considered and rejected:** inter-byte gap detection in the drain loop
+(`deframer_.reset()` when a byte starts more than one byte time after the previous ended).
+More machinery, a tolerance choice that itself changes the bound (a lenient tolerance gives
+2F), and FR-011 counting questions for the synthesised discard. The cap is one conjunct.
+**Contract impact:** `contracts/link-cpp.md` (Master engine bound paragraph) and
+`data-model.md` §4 "Response acceptance" now state the cap — amended in #137 and marked
+pending, folded into the "bounded courtesy" ruling.
+**Ruling:** pending — folded into the "bounded courtesy" ruling above.
+**Amends:** the 2026-09-06 "FLAG-delimited babble" entry's "by construction … exactly F"
+sentence (true of a contiguous stream; the cap makes it true at any cadence).
