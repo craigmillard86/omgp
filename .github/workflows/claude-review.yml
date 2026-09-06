@@ -163,3 +163,38 @@ jobs:
             --model claude-opus-5
             --allowedTools "Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr checks*),Bash(gh pr comment*),Bash(gh run view*),Bash(gh run list*),Bash(gh issue view*),Read,Grep,Glob"
 
+      - name: A verdict for this head exists
+        # The action can finish "success" having posted nothing (it skips itself when this
+        # workflow file differs from main; a kill at timeout-minutes or a cancel-in-progress
+        # posts nothing either), and agent-approve then stalls the PR on a green check with no
+        # visible cause — at EVERY tier, since T0/T1 approvals hang off this verdict alone
+        # (run 34036822817 on #140: green, no VERDICT(review)). The review-side twin of
+        # red-team.yml's attack-pr guard (#141), added under the maintainer's direction
+        # 2026-09-06. Fail closed: the job is green only when a claude[bot] comment ends with
+        # a review verdict for exactly this head — the same shape agent-approve parses
+        # (agent-approve.yml verdictOf: body trimmed, LAST line only, trimmed, full sha; #103:
+        # a token mid-comment must never count). The jq keeps exactly that line per comment —
+        # the last line carrying a non-blank character, whitespace-trimmed — so a verdict
+        # followed by any trailing text, or quoted mid-comment, is no verdict here either
+        # (tools/refimpl/test_workflow_scripts.py runs this jq + grep against agent-approve's
+        # transcribed parser for both guards). Plain `gh api` under the job token: nothing is
+        # added to the reviewer's --allowedTools above. No `if`: every tier is reviewed, so
+        # every tier must show a verdict. Not a required check, so a PR that changes this file
+        # (T3, human-merged; the action does not run a workflow that differs from main) shows
+        # red here rather than a false green.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD: ${{ steps.head.outputs.sha }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+        run: |
+          if gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number || inputs.pr }}/comments" --paginate \
+               --jq '.[] | select(.user.login == "claude[bot]") | (.body // "") | split("\n") | map(select(test("\\S"))) | (last // "") | sub("^\\s+"; "") | sub("\\s+$"; "")' \
+             | grep -E "^VERDICT\(review\):[[:space:]]*(clean|findings)[[:space:]]*@[[:space:]]*$HEAD$" | grep -q .; then
+            echo "review: verdict present for $HEAD"
+          else
+            if gh pr view "$PR" -R "${{ github.repository }}" --json files --jq '.files[].path' | grep -qx '.github/workflows/claude-review.yml'; then
+              echo "review: this PR changes claude-review.yml, and claude-code-action does not run a workflow that differs from main — no review ran here (T3: the maintainer merges by hand; the first run after merge is the real one)" >&2
+            fi
+            echo "review: no VERDICT(review) for $HEAD — failing (the review pass posted nothing)" >&2
+            exit 1
+          fi

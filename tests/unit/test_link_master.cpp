@@ -102,6 +102,10 @@ std::vector<uint8_t> crc_bad_response(uint8_t node, uint8_t seq, const uint8_t* 
                                       size_t len) {
     std::vector<uint8_t> bad = response_bytes(node, seq, payload, len);
     REQUIRE(bad.size() > 6);
+    // Pre-flip too: were bad[5] an ESCAPE, bad[6] would be its stuffed partner and the flip
+    // would change what the frame MEANS on the wire, not just its CRC (PR #142 red-team
+    // @43ec6f5; true in fact for every caller, now required rather than observed).
+    REQUIRE(bad[5] != omgp::TRUNK_escape_byte);
     bad[5] = static_cast<uint8_t>(bad[5] ^ 0x02);
     REQUIRE(bad[5] != omgp::TRUNK_flag_byte);
     REQUIRE(bad[5] != omgp::TRUNK_escape_byte);
@@ -3632,9 +3636,10 @@ TEST_CASE("a second CRC-failed frame in the T_gap after an in-window CRC failure
     Master master(wire, clock, omgp::ADDR_host);
 
     REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
-    const uint64_t tx_end =
+    const uint64_t tx_end = // anchored on the transcript, not on begin() at t=0 (#142 review)
+        wire.transcript(0).tx_start_us +
         static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
-        byte_us();
+            byte_us();
     const uint64_t crc_end = response_full_end(tx_end, dst, 0, payload, sizeof payload);
 
     MasterEvent ev = wire.advance_to(crc_end, master);
@@ -3685,7 +3690,10 @@ TEST_CASE("a CRC-failed response opening EXACTLY at tx_end — zero turnaround �
     // request — precisely the faulty station trunk §7's accounting exists for — would then
     // have its garbled answer discarded silently and the host would wait out the whole
     // T_resp: a CRC failure converted into a timeout, on a different counter and with a
-    // later attempt end.
+    // later attempt end. The permissive lower bound is RULED, not accidental: trunk §3's
+    // T_turn_min binds the node, not the host — docs/OPEN-QUESTIONS.md 2026-09-06 "Host
+    // T_resp acceptance window stays [tx_end, tx_end + T_resp); T_turn_min binds the node,
+    // not the host", ADOPTED (a).
     FakeClock clock;
     MockWire wire(clock);
     const uint8_t dst = 0x06;

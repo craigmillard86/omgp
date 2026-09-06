@@ -101,18 +101,55 @@ stage_codegen() {
 }
 
 stage_quality() {
-  # Code quality gates: formatting + static analysis. Runs on every merge.
-  if command -v clang-format >/dev/null 2>&1; then
-    find core link l3 sim cli transport tools tests -name '*.cpp' -o -name '*.hpp' 2>/dev/null \
-      | xargs -r clang-format --dry-run --Werror
+  # Code quality gates: formatting + embedded-path rules. A CI gate since #135 (ci.yml's
+  # native job names this stage; before that nothing in CI ran it).
+  #
+  # The formatter is PINNED in tools/requirements.txt (clang-format==N, a pip wheel) because
+  # releases format differently: an unpinned gate would red every PR the day the runner image
+  # moved. The stage checks `clang-format --version` against that pin. On a CI runner
+  # (GITHUB_ACTIONS/CI set) a missing or mismatched formatter FAILS the stage — the silent
+  # `command -v` skip this replaced is exactly the hole #135 closed — so EVERY job that can
+  # run this stage must `pip install -r tools/requirements.txt` (the runner image's own
+  # clang-format was 18.1.3 on 2026-09-06, not the pin; tools/refimpl/test_quality_stage.py checks each
+  # job). Locally it is a disclosed skip with the fix named, and check_embedded still runs.
+  # No env override for the binary: one honoured on CI would let a stand-in vouch for files
+  # it never read (red team on #167); the tests shadow clang-format on PATH instead.
+  local want have
+  want=$(sed -n 's/^clang-format==\([0-9][0-9.]*\).*/\1/p' tools/requirements.txt)
+  [ -n "$want" ] || { echo "quality: tools/requirements.txt does not pin clang-format==N" >&2; return 1; }
+  have=$({ clang-format --version 2>/dev/null || true; } | sed -n 's/.*clang-format version \([0-9][0-9.]*\).*/\1/p')   # `|| true`: an absent binary is a finding, not a crash (set -eo pipefail)
+  if [ "$have" = "$want" ]; then
+    # Formatted set: the host-side and portable trees. esp32-host/ is NOT in it (pre-existing;
+    # follow-up filed from the #167 red team) and third_party/ is vendored.
+    local files
+    files=$(find core link l3 sim cli transport tools tests -name '*.cpp' -o -name '*.hpp' 2>/dev/null)
+    echo "$files" | xargs -r clang-format --dry-run --Werror
+    echo "quality: clang-format $want clean ($(echo "$files" | grep -c .) files)"
+  elif [ -n "${GITHUB_ACTIONS:-}${CI:-}" ]; then
+    echo "quality: clang-format $want is required on CI, found '${have:-none}' — pip install -r tools/requirements.txt" >&2
+    return 1
   else
-    echo "quality: clang-format not present (skipped in this env)"
+    echo "quality: clang-format $want not on PATH (found '${have:-none}') — formatting NOT checked; pip install -r tools/requirements.txt"
   fi
-  if command -v clang-tidy >/dev/null 2>&1 && [ -f build/native/compile_commands.json ]; then
+  # clang-tidy: OFF CI it runs automatically when it is on PATH and a cmake build tree exists
+  # (unchanged from before #135 — narrowing it would need a human instruction naming the
+  # check, GOVERNANCE §1). ON CI it is opt-in (OMGP_CLANG_TIDY=1): it is not pinned, and
+  # build/native/compile_commands.json exists there only on a warm cache — an automatic run
+  # would make the gate's verdict depend on cache state and on the runner's analyser version.
+  # Nothing in CI ran it before #135. Pinning it and making it a CI gate is a separate decision.
+  local tidy_ready=0
+  command -v clang-tidy >/dev/null 2>&1 && [ -f build/native/compile_commands.json ] && tidy_ready=1
+  if [ -n "${OMGP_CLANG_TIDY:-}" ] && [ "$tidy_ready" -eq 0 ]; then
+    echo "quality: OMGP_CLANG_TIDY is set but clang-tidy or build/native/compile_commands.json is missing" >&2
+    return 1
+  fi
+  if [ -n "${OMGP_CLANG_TIDY:-}" ] || { [ "$tidy_ready" -eq 1 ] && [ -z "${GITHUB_ACTIONS:-}${CI:-}" ]; }; then
     find core link l3 -name '*.cpp' 2>/dev/null \
       | xargs -r clang-tidy -p build/native --warnings-as-errors='*'
+  elif [ "$tidy_ready" -eq 1 ]; then
+    echo "quality: clang-tidy not run on CI (opt-in: OMGP_CLANG_TIDY=1; unpinned, cache-dependent build tree)"
   else
-    echo "quality: clang-tidy skipped (needs compile_commands.json from cmake build)"
+    echo "quality: clang-tidy not run (needs clang-tidy on PATH and a cmake build tree; on CI also OMGP_CLANG_TIDY=1)"
   fi
   # CLAUDE.md rules 1/4/5 for embedded-path code: no heap/exceptions/RTTI, no protocol
   # literals that the YAML defines, spec citations in l3/. Pure Python; runs on every path.
