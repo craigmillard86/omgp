@@ -46,6 +46,136 @@ def test_fuzz_smoke_without_clang_fails_with_disclosure():
     assert "blind spot" in out and "libFuzzer" in out
 
 
+# --- tools/fuzz-smoke.sh: the run-and-report half, with the five targets shimmed --------------
+# The real script needs clang+libFuzzer and a cmake build; what these cases exercise is the
+# part after the build — the wave scheduler, per-target exit-status attribution, the
+# artefact and log grep, and the summary — using shell scripts in build/fuzz in place of the
+# fuzzers and no-op cmake/clang++ shims on PATH (#141 review @d1fc20b, MEDIUM: the failure
+# and parallel paths had no test, and the `grep || true` fix landed without one).
+FUZZ_TARGETS = ("fuzz_header", "fuzz_payload", "fuzz_descriptor", "fuzz_roundtrip", "fuzz_frame")
+_FUZZ_SHIM = r"""#!/usr/bin/env bash
+# Stand-in for a libFuzzer target: prints the two stats lines the harness greps, forms a
+# barrier with its siblings when asked (proves they ran at the same time), drops an artefact
+# and sanitizer lines when asked, and exits with the status the spec dir names for it.
+me=$(basename "$0"); spec=$FUZZ_SHIM_DIR
+art=; for a in "$@"; do case "$a" in -artifact_prefix=*) art=${a#*=};; esac; done
+: > "$spec/started.$me"
+if [ -s "$spec/barrier" ]; then
+  n=$(cat "$spec/barrier"); ok=0
+  for _ in $(seq 50); do [ "$(ls "$spec"/started.* 2>/dev/null | wc -l)" -ge "$n" ] && { ok=1; break; }; sleep 0.1; done
+  [ "$ok" = 1 ] || { echo "shim: a barrier of $n never formed — the targets did not run together"; exit 99; }
+fi
+echo "#1234 DONE cov: 42 ft: 7"
+echo "stat::number_of_executed_units: 1234"
+if [ -f "$spec/$me.crash" ]; then
+  echo "==1==ERROR: AddressSanitizer: heap-buffer-overflow"; echo "SUMMARY: AddressSanitizer: heap-buffer-overflow"
+  : > "${art}crash-deadbeef"
+fi
+exit "$(cat "$spec/$me.exit" 2>/dev/null || echo 0)"
+"""
+
+
+def _fuzz_rig(tmp_path):
+    """A clone with the working-tree fuzz-smoke.sh, shim fuzzers in build/fuzz, no-op cmake and
+    clang++ shims, and an empty spec dir. Returns (runner, spec)."""
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", "--shared", "--no-checkout", str(ROOT), str(clone)], check=True)
+    subprocess.run(["git", "checkout", "-q", "HEAD"], cwd=clone, check=True)
+    (clone / "tools" / "fuzz-smoke.sh").write_text(FUZZ.read_text())
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    for tool in ("cmake", "clang++"):
+        (shim / tool).write_text("#!/usr/bin/env bash\nexit 0\n")
+        (shim / tool).chmod(0o755)
+    build = clone / "build" / "fuzz"
+    build.mkdir(parents=True)
+    for t in FUZZ_TARGETS:
+        (build / t).write_text(_FUZZ_SHIM)
+        (build / t).chmod(0o755)
+    spec = tmp_path / "spec"
+    spec.mkdir()
+
+    def runner(jobs=None, budget="5"):
+        env = {"OMGP_FUZZ_CXX": str(shim / "clang++"), "PATH": f"{shim}:{os.environ['PATH']}",
+               "FUZZ_SHIM_DIR": str(spec)}
+        if jobs is not None:
+            env["OMGP_FUZZ_JOBS"] = jobs
+        for f in spec.glob("started.*"):
+            f.unlink()
+        rc, out, _ = run(clone / "tools" / "fuzz-smoke.sh", budget, env_overrides=env, timeout=120)
+        lines = {t: next((l for l in out.splitlines() if l.startswith(f"fuzz: {t} ")), None) for t in FUZZ_TARGETS}
+        return rc, out, lines
+
+    return runner, spec
+
+
+def test_fuzz_smoke_serial_clean_run_reports_every_target(tmp_path):
+    runner, _spec = _fuzz_rig(tmp_path)
+    rc, out, lines = runner()
+    assert rc == 0, out
+    assert "fuzz: 1 target(s) at a time" in out and "clean rejections only across 5 targets" in out, out
+    for t in FUZZ_TARGETS:
+        assert lines[t] == f"fuzz: {t} runs=1234 cov=42 findings=0 exit=0", (t, out)
+
+
+def test_fuzz_smoke_target_dying_without_a_sanitizer_line_is_reported_and_the_rest_still_run(tmp_path):
+    """The bug the gate-budget PR found with an `exit 77` shim: no ERROR/SUMMARY line in the log,
+    so the report grep matched nothing and `set -eo pipefail` aborted the script at that target
+    — later targets unreported, no FINDINGS line. Every target must be reported, the dead one
+    with its own status, and the run must fail."""
+    runner, spec = _fuzz_rig(tmp_path)
+    (spec / "fuzz_descriptor.exit").write_text("77\n")
+    rc, out, lines = runner()
+    assert rc == 1, out
+    assert lines["fuzz_descriptor"] == "fuzz: fuzz_descriptor runs=1234 cov=42 findings=0 exit=77", out
+    for t in ("fuzz_roundtrip", "fuzz_frame"):     # the targets AFTER the dead one
+        assert lines[t] == f"fuzz: {t} runs=1234 cov=42 findings=0 exit=0", (t, out)
+    assert "fuzz: FINDINGS" in out and "reproduce:" not in out, out
+
+
+def test_fuzz_smoke_waves_attribute_each_status_and_artefact_to_its_own_target(tmp_path):
+    """OMGP_FUZZ_JOBS=2 runs waves of (header, payload) (descriptor, roundtrip) (frame): a
+    non-zero exit in the middle of a wave, a crash with an artefact, and a failure in the
+    final one-target wave must each land on the right line — `pids[k]`/`wave[k]` alignment."""
+    runner, spec = _fuzz_rig(tmp_path)
+    (spec / "fuzz_payload.exit").write_text("3\n")
+    (spec / "fuzz_roundtrip.crash").write_text("")
+    (spec / "fuzz_roundtrip.exit").write_text("1\n")
+    (spec / "fuzz_frame.exit").write_text("5\n")
+    rc, out, lines = runner(jobs="2")
+    assert rc == 1, out
+    assert "fuzz: 2 target(s) at a time" in out, out
+    assert lines["fuzz_header"].endswith("findings=0 exit=0"), out
+    assert lines["fuzz_payload"].endswith("findings=0 exit=3"), out
+    assert lines["fuzz_descriptor"].endswith("findings=0 exit=0"), out
+    assert lines["fuzz_roundtrip"].endswith("findings=1 exit=1"), out
+    assert lines["fuzz_frame"].endswith("findings=0 exit=5"), out
+    assert "SUMMARY: AddressSanitizer: heap-buffer-overflow" in out, out
+    assert "reproduce: build/fuzz/fuzz_roundtrip build/fuzz/artifacts/fuzz_roundtrip/crash-deadbeef" in out, out
+    assert out.count("reproduce:") == 1, out
+
+
+def test_fuzz_smoke_jobs_run_together_and_the_knob_is_clamped_and_validated(tmp_path):
+    """OMGP_FUZZ_JOBS=5: all five form a barrier (each waits until five have started, else exits
+    99), so a scheduler that ran them one at a time would report exit=99. 99 clamps to 5;
+    a non-integer is refused legibly and runs serially, not `unbound variable` (#141 review
+    @d1fc20b, LOW)."""
+    runner, spec = _fuzz_rig(tmp_path)
+    (spec / "barrier").write_text("5\n")
+    rc, out, lines = runner(jobs="5")
+    assert rc == 0 and "fuzz: 5 target(s) at a time" in out, out
+    assert all(lines[t].endswith("exit=0") for t in FUZZ_TARGETS), out
+    rc, out, _ = runner(jobs="99")
+    assert rc == 0 and "fuzz: 5 target(s) at a time" in out, out
+    (spec / "barrier").unlink()
+    for bad in ("abc", "0", "-2", ""):
+        rc, out, lines = runner(jobs=bad)
+        assert rc == 0 and "fuzz: 1 target(s) at a time" in out, (bad, out)
+        assert "unbound variable" not in out and "integer expression expected" not in out, (bad, out)
+        if bad not in ("",):
+            assert f"OMGP_FUZZ_JOBS='{bad}' is not a positive integer" in out, (bad, out)
+
+
 def test_diffcheck_frames_only_discloses_its_blind_spot():
     # --frames-only skips the crc/message/invalid/descriptor corpora (contracts/tooling.md
     # "every fast/partial path states its blind spot"); the summary line must say so, not
@@ -231,9 +361,17 @@ def _setup(tmp_path, source_lines, mutants, ranges=None):
     return root, reports
 
 
-def _report(tmp_path, root, reports, *extra):
+def _cfg_source_ext() -> str:
+    cp = configparser.ConfigParser()
+    cp.read(CFG)
+    return cp["policy"]["source_ext"]
+
+
+def _report(tmp_path, root, reports, *extra, source_ext=None):
+    # --source-ext is what mutate.sh passes from the cfg; the reporter has no default of its own.
     r = subprocess.run([sys.executable, str(REPORT), "--reports", str(reports), "--root", str(root),
                         "--scope-dirs", "l3 link core", "--ranges", str(tmp_path / "ranges.json"),
+                        "--source-ext", source_ext if source_ext is not None else _cfg_source_ext(),
                         "--out", str(tmp_path / "report.json"), *extra],
                        capture_output=True, text=True, cwd=ROOT)
     doc = json.loads((tmp_path / "report.json").read_text()) if (tmp_path / "report.json").exists() else {}
@@ -329,6 +467,179 @@ def test_report_no_reports_or_no_mutants_is_a_failure(tmp_path):
         f.unlink()
     rc, out, _ = _report(tmp_path, root, reports)
     assert rc == 1 and "no Mull reports" in out
+
+
+def test_report_diff_mode_fails_when_a_changed_dir_has_no_executed_mutants(tmp_path):
+    """A run-time path filter (mutate.sh phase 2) that matches one scope dir but not another
+    leaves total > 0, so the whole-scope blind-spot rule above never fires while every mutant
+    of the unmatched dir silently goes unexecuted (#141 review, LOW). Per changed dir: at
+    least one mutant, on ANY line, must have been executed — else it is a blind spot."""
+    root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": [[1, 8]], "link/y.cpp": [[1, 2]]})
+    (root / "link").mkdir()
+    (root / "link" / "y.cpp").write_text("int g() {\n    return 1;\n}\n")
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1, out
+    assert "link/" in out and "blind spot" in out and "no mutants under" in out
+    # An exempt(no-body) file is the one legitimate way for a changed dir to carry none. rc is
+    # 1 either way here (l3/x.cpp:2 is an unlabelled survivor), so the distinguishing
+    # assertion is the blind-spot message's absence (#141 review @a16d7a6: the earlier
+    # `"link/" not in out.split("survivor")[0]` held with the exemption branch deleted).
+    (root / "link" / "y.cpp").write_text("// mutation-exempt(no-body): declarations only\nint g();\n")
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1 and "UNLABELLED survivor: l3/x.cpp:2" in out, out
+    assert "no mutants under" not in out and "blind spot" not in out, out
+
+
+def test_report_diff_mode_per_dir_rule_ignores_non_source_changes(tmp_path):
+    """mutate.sh filters SCOPE to source extensions but builds scope_ranges.json from a plain
+    `git diff -U0 -- <scope dirs>`, so a docs/CMake touch under a scope dir reaches the
+    report as a changed file. The per-dir rule must not demand mutants for a dir whose only
+    change is such a file — else `link/frame.cpp` + `l3/README.md` reds deep-verify with
+    "no mutants under l3/" although no l3/ source changed (#141 review @a16d7a6, MEDIUM)."""
+    src = list(SRC)
+    src[1] = "    if (a >= 4) // mutant-ok(equivalent): 4 is never reached, callers pass < 4"
+    root, reports = _setup(tmp_path, src, MUTANTS,
+                           {"l3/x.cpp": [[1, 8]], "link/README.md": [[1, 3]], "link/CMakeLists.txt": [[1, 1]]})
+    (root / "link").mkdir()
+    (root / "link" / "README.md").write_text("# link\n\ndocs only\n")
+    (root / "link" / "CMakeLists.txt").write_text("add_library(omgp_link INTERFACE)\n")
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 0, out
+    assert "no mutants under" not in out and "blind spot" not in out, out
+    # A source change in that dir still trips the rule: the filter narrows, never disables it.
+    (root / "link" / "y.cpp").write_text("int g() {\n    return 1;\n}\n")
+    (tmp_path / "ranges.json").write_text(json.dumps(
+        {"l3/x.cpp": [[1, 8]], "link/README.md": [[1, 3]], "link/y.cpp": [[1, 3]]}))
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1 and "no mutants under link/" in out, out
+
+
+def test_source_extensions_have_one_source_of_truth(tmp_path):
+    """mutate.sh's SCOPE filter (diff AND whole-tree) and mutate_report.py's ranges filter each
+    carried their own extension list; an extension added to one and not the other (say .cxx)
+    would drop that file from `ranges`, so its survivors AND the per-changed-dir rule go quiet
+    at once, silently (#141 review @d1fc20b, MEDIUM). One line in tools/mutate.cfg now feeds
+    both — mutate.sh derives its grep and find from it and hands it to the reporter, which has
+    no default — and each consumer is pinned here against a cfg carrying an extra extension."""
+    exts = _cfg_source_ext().split()
+    assert {"cpp", "hpp"} <= set(exts) and "cxx" not in exts, exts
+    # mutate.sh, diff mode and whole-tree mode: a changed l3/z.cxx is out of scope with the cfg
+    # as committed, and in scope — listed, with the l3 oracle — once `cxx` joins the cfg line.
+    clone = shared_clone(tmp_path, "l3/z.cxx", "int z() { return 1; }\n")
+    for args in (("--diff", "HEAD~1", "--dry-run"), ("--dry-run",)):
+        rc, out, _ = run(clone / "tools" / "mutate.sh", *args)
+        assert rc == 0 and "l3/z.cxx" not in out, (args, out)
+    cfg = clone / "tools" / "mutate.cfg"
+    cfg.write_text(re.sub(r"^(source_ext *=.*)$", r"\1 cxx", cfg.read_text(), flags=re.M))
+    for args in (("--diff", "HEAD~1", "--dry-run"), ("--dry-run",)):
+        rc, out, _ = run(clone / "tools" / "mutate.sh", *args)
+        assert rc == 0 and "l3/z.cxx" in out.split("mutation: scope:", 1)[1].splitlines()[0], (args, out)
+        assert any(b.startswith("test_l3_") for b in oracle_line(out)), out
+    # mutate.sh hands that same cfg value to the reporter; no other list exists in either file.
+    sh = MUTATE.read_text()
+    assert re.search(r"^SOURCE_EXT=\$\(cfg source_ext\)$", sh, re.M), "mutate.sh must read source_ext from the cfg"
+    assert '--source-ext "$SOURCE_EXT"' in sh, "mutate.sh must pass the cfg list to mutate_report.py"
+    assert "cpp|hpp" not in sh and "'*.cpp'" not in sh, "a second extension list in mutate.sh"
+    assert "cpp|hpp" not in REPORT.read_text(), "a second extension list in mutate_report.py"
+    # The reporter's ranges filter follows what it is handed: link/y.cxx is a source (and the
+    # per-dir rule fires for link/) exactly when cxx is in the list it was given.
+    src = list(SRC)
+    src[1] = "    if (a >= 4) // mutant-ok(equivalent): 4 is never reached, callers pass < 4"
+    root, reports = _setup(tmp_path, src, MUTANTS, {"l3/x.cpp": [[1, 8]], "link/y.cxx": [[1, 3]]})
+    (root / "link").mkdir()
+    (root / "link" / "y.cxx").write_text("int g() {\n    return 1;\n}\n")
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main", source_ext="cpp hpp")
+    assert rc == 0 and "no mutants under" not in out, out
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main", source_ext="cpp hpp cxx")
+    assert rc == 1 and "no mutants under link/" in out, out
+    # And it refuses to run without the list — a default here would be the second copy.
+    r = subprocess.run([sys.executable, str(REPORT), "--reports", str(reports), "--root", str(root),
+                        "--scope-dirs", "l3 link core", "--ranges", str(tmp_path / "ranges.json"),
+                        "--out", str(tmp_path / "report.json"), "--ref", "origin/main"],
+                       capture_output=True, text=True, cwd=ROOT)
+    assert r.returncode == 2 and "--source-ext" in r.stderr, r.stderr
+
+
+def test_mutate_phase2_config_is_one_anchored_regex_per_scope_dir(tmp_path):
+    """The run-time includePaths filter is the one thing in mutate.sh that can silently narrow
+    what the runner executes (#141 review @a16d7a6, LOW): pin the generated phase-2 mull.yml
+    text — exactly one regex per configured scope dir, anchored on the physical root with
+    every regex metacharacter in that root escaped — without needing Mull. The clone lives
+    under a directory name built from metacharacters, so an unescaped ROOT would either fail
+    to match its own path or match far too much."""
+    weird = tmp_path / "r(o)[o]t+x.y$z"
+    weird.mkdir()
+    clone = weird / "clone"
+    subprocess.run(["git", "clone", "-q", "--shared", "--no-checkout", str(ROOT), str(clone)], check=True)
+    subprocess.run(["git", "checkout", "-q", "HEAD"], cwd=clone, check=True)
+    for rel in ("tools/mutate.sh", "tools/mutate.cfg"):
+        (clone / rel).write_text((ROOT / rel).read_text())
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--print-phase2-config")
+    assert rc == 0, out
+    physical = str(clone.resolve())
+    cp = configparser.ConfigParser()
+    cp.read(CFG)
+    scope_dirs = cp["policy"]["scope_dirs"].split()
+    lines = out.splitlines()
+    assert "includePaths:" in lines, out
+    paths = [line[4:] for line in lines[lines.index("includePaths:") + 1:] if line.startswith("  - ")]
+    assert len(paths) == len(scope_dirs) == len(set(paths)), out
+    for d, pattern in zip(scope_dirs, paths):
+        assert pattern.startswith("^") and pattern.endswith(f"/{d}/.*"), pattern
+        assert re.fullmatch(pattern, f"{physical}/{d}/a/b.cpp"), (pattern, physical)
+        assert not re.fullmatch(pattern, f"{physical}x/{d}/a.cpp"), pattern       # anchored on the root
+        assert not re.fullmatch(pattern, f"{physical}/tests/{d}/a.cpp"), pattern  # not a substring match
+        assert not re.fullmatch(pattern, f"{physical}/{d}x/a.cpp"), pattern       # the dir, not a prefix
+    # The other keys the runner reads: every mutator group, the pinned timeout, quiet.
+    assert f"timeout: {cp['policy']['timeout_ms']}" in lines and "quiet: true" in lines, out
+    for g in cp["mutators"]["groups"].split():
+        assert f"  - {g}" in lines[:lines.index("includePaths:")], out
+
+
+# --- tools/mutate_diff_reports.py: the evidence tool for mutate.sh changes -----------------------
+
+DIFF_REPORTS = ROOT / "tools" / "mutate_diff_reports.py"
+
+
+def _elements(tmp_path, name, files):
+    p = tmp_path / f"{name}.json"
+    p.write_text(json.dumps({"files": files}))
+    return p
+
+
+def _diff_reports(root, before, after):
+    r = subprocess.run([sys.executable, str(DIFF_REPORTS), str(before), str(after), "--root", str(root),
+                        "--scope-dirs", "l3 link core"], capture_output=True, text=True, cwd=ROOT)
+    return r.returncode, r.stdout + r.stderr
+
+
+def test_diff_reports_fails_when_it_compared_nothing(tmp_path):
+    """`differences: 0` from two reports with no in-scope mutant is vacuous, not evidence
+    (#141 review, MEDIUM): the tool must fail closed, exactly as mutate_report.py does."""
+    root = tmp_path / "repo"
+    only_tests = {str(root / "tests" / "unit" / "t.cpp"): {"mutants": [_mutant(1, 1, "cxx_add_to_sub", "Killed")]}}
+    rc, out = _diff_reports(root, _elements(tmp_path, "a", only_tests), _elements(tmp_path, "b", only_tests))
+    assert rc == 1 and "compared nothing" in out, out
+
+
+def test_diff_reports_keys_mutants_exactly_as_the_gate_does(tmp_path):
+    """Relative (`link/frame.cpp`) and root-absolute keys are the SAME mutant to
+    mutate_report.py (`rel_of` + `in_scope`); a substring match on `/link/` counted neither
+    form the same way (#141 review, MEDIUM). Identical sets → 0; one flipped status → listed, 1."""
+    root = tmp_path / "repo"
+    m = [_mutant(3, 5, "cxx_ge_to_gt", "Killed"), _mutant(9, 2, "cxx_add_to_sub", "Survived")]
+    rel = {"link/frame.cpp": {"mutants": m}}
+    absolute = {str(root / "link" / "frame.cpp"): {"mutants": m}}
+    rc, out = _diff_reports(root, _elements(tmp_path, "a", rel), _elements(tmp_path, "b", absolute))
+    assert rc == 0 and "before=2" in out and "after =2" in out and "differences: 0" in out, out
+    flipped = {"link/frame.cpp": {"mutants": [_mutant(3, 5, "cxx_ge_to_gt", "Killed"),
+                                              _mutant(9, 2, "cxx_add_to_sub", "Killed")]}}
+    rc, out = _diff_reports(root, _elements(tmp_path, "a", rel), _elements(tmp_path, "c", flipped))
+    assert rc == 1 and "link/frame.cpp:9:2 cxx_add_to_sub: Survived -> Killed" in out and "differences: 1" in out, out
+    # A mutant present on one side only is a difference too (a filter that DROPPED it).
+    dropped = {"link/frame.cpp": {"mutants": m[:1]}}
+    rc, out = _diff_reports(root, _elements(tmp_path, "a", rel), _elements(tmp_path, "d", dropped))
+    assert rc == 1 and "Survived -> -" in out, out
 
 
 def test_mutate_nothing_in_scope_is_fast(tmp_path):

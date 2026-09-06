@@ -1855,3 +1855,57 @@ first wording with the other two, and the babble outcome question reopens.
 **Amends:** the 2026-09-05 "bounded courtesy" entry's list of amended contract text (it
 named two of the three statements of the rule).
 **Supersedes:** none — amends, not replaces, the 2026-09-05 "bounded courtesy" entry (its reading stays live; see **Amends:**).
+
+---
+
+## 2026-09-06 — Mull path filters are safe at RUN time; the "no include/exclude paths" rule was measured at compile time only
+
+**Context:** `deep-verify` timed out at its 45-minute limit on every push of PR #137 from
+`3a15d29` on (eight runs), and `attack-pr` three times at 50 with no verdict (`e1978ab` on
+#128; `150d256`, `928877c` on #137). The mutation step was the cost:
+`tools/mutate.sh` instruments every translation unit and the runner executed every mutant
+it found — 16 906 across the five `link/` oracle binaries at #137's round 19, of which
+`tools/mutate_report.py` kept **122** (only `l3/ link/ core/` on changed lines count; 2 671
+per binary are Catch2's amalgamated source). `test_link_master` alone: 4 050 mutants,
+14 m 30 s on 12 cores, and the runner has 4. The harness's recorded rule (research.md trap
+(4), `contracts/tooling.md` step 3, the comments in `mutate.sh`) says `includePaths`/
+`excludePaths` "must not be used at all" because excluding Catch2's `main()` TU removes the
+mutant dispatch. That was measured with the keys in the **compile-time** config, where it
+is true. Measured today on the same round-19 binaries with the keys in the **run-time**
+config only (`MULL_CONFIG` → a file with `includePaths: [^<root>/(l3|link|core)/.*]`,
+no rebuild): the runner discovers 4 050 mutants and executes 260 — exactly the set
+`in_scope()` keeps — in 43 s instead of 14 m 30 s, and all 260 statuses are identical to
+the full run (228 killed / 30 survived / 2 timeout both ways; `tools/mutate_diff_reports.py`
+lists any mutant that differs, and listed none). Dispatch is unaffected because the filter
+is applied after discovery, in the runner, not in the plugin. Demonstrated by that
+comparison, on Mull 0.34.0 / LLVM 14. CI runs the LLVM 18 package of the same release;
+the gate-budget PR's own `deep-verify` cannot check that (its diff has no scope-dir source,
+so the mutation step is a no-op there — #141 review, HIGH), so it was checked in a
+`ubuntu:24.04` container with the CI recipe (clang 18.1.3, the pinned Mull LLVM-18 `.deb`,
+`--diff origin/main --require`) on #137's tree at `1057568`: the same gate line,
+`mutants=122 killed=112 survived=10 labelled[equivalent=8 accepted=2] unlabelled=0`, PASS,
+in 2 m 44 s on 12 cores; the unfiltered old-script run in the same container is the
+LLVM-18 oracle for the per-mutant comparison (recorded on the PR). Labelled (rule 11): the
+"executes only scope-dir mutants, same verdicts" claim is **demonstrated** on LLVM 14
+locally and on LLVM 18 in that container; that the 4-core GitHub runner behaves as the
+container is **assumed** (core count changes time, not verdicts) until the first T2 push
+after merge runs it — the log would show the old ~4 000-mutant counts if the filter matched
+nothing there.
+**Recommendation:** (a) phase-2 `mull.yml` carries `includePaths` derived from
+`mutate.cfg`'s `scope_dirs` (done in the gate-budget PR); the compile-time config stays
+mutators-only; the report post-filter stays the gate for what it SEES — it can only remove
+mutants, never restore ones the runner declined to execute, so a filter regex that silently
+misses one dir would narrow the gate with no signal (#141 review, LOW): `mutate_report.py`
+therefore fails a diff-scoped run in which a changed dir has no executed mutant at all (per
+changed dir, any line; exempt only when every changed file there is
+`mutation-exempt(no-body)`), and `mutate.sh` anchors the regexes on `pwd -P`. A regression
+in the runner filter then either makes the run slower or fails it — never narrows it
+silently. (b) Amend research.md trap (4)
+and `contracts/tooling.md` step 3 to say "at compile time" (done in place, marked). (c) Do
+NOT reach for the levers that would make the run faster by making the gate smaller:
+`timeout_ms`/`--minimum-timeout` (Timeout ranks as killed), `--coverage-info` (uncovered →
+`NoCoverage`, never triaged), a shorter oracle list, or Mull's `gitDiffRef` (drops added
+files — the 2026-08-28 entry above). Each is listed so it is not mistaken for free.
+**Ruling:** pending — human (tooling contract amendment; `tools/mutate.sh` is gate machinery).
+**Supersedes:** none — amends the "corrected measurement" entry of 2026-08-28 (its
+`gitDiffRef` finding stands; this entry narrows the *path-filter* finding to compile time).

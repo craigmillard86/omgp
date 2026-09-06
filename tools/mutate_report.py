@@ -7,7 +7,7 @@ Called by tools/mutate.sh after the runner; standalone:
 
   python3 tools/mutate_report.py --reports build/mutate/reports --root . \
       --scope-dirs "l3 link core" --ranges build/mutate/scope_ranges.json \
-      --ref origin/main --out build/mutate/report.json
+      --source-ext "cpp hpp h cc" --ref origin/main --out build/mutate/report.json
 
 Policy (tools/mutate.cfg [policy] — T3 constants, never relaxed to get green):
 
@@ -92,12 +92,31 @@ def parse_label(text: str, line: int, categories: list[str]) -> Label | None:
     return Label(category, mutators, m.group(3).strip(), line)
 
 
+def rel_of(root: str, path: str) -> str:
+    """A report's file key relative to --root (Mull records the absolute path CMake compiled
+    from; a key already relative is returned as is). Shared with mutate_diff_reports.py so
+    the evidence tool keys mutants exactly as this gate does."""
+    return path[len(root) + 1:] if path.startswith(root + "/") else path
+
+
+def in_scope(rel: str, line, scope_dirs: list[str], ranges: dict) -> bool:
+    """Embedded-path source (tests/tools carry mutants too but never count) and — with
+    --ref — on a line the diff added or changed (new files are whole-file ranges)."""
+    if not any(rel.startswith(d + "/") for d in scope_dirs):
+        return False
+    if not ranges:
+        return True
+    return any(a <= (line or -1) <= b for a, b in ranges.get(rel, []))
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--reports", required=True, help="directory of Mull Elements JSON reports")
     ap.add_argument("--root", required=True, help="repository root (report paths are made relative to it)")
     ap.add_argument("--scope-dirs", required=True, help="space-separated embedded-path directories")
     ap.add_argument("--ranges", required=True, help="JSON {rel_path: [[start, end], ...]}; {} = whole tree")
+    ap.add_argument("--source-ext", required=True,
+                    help="space-separated source extensions (tools/mutate.cfg source_ext, passed by mutate.sh)")
     ap.add_argument("--ref", default="", help="diff ref; empty = whole-tree trend mode")
     ap.add_argument("--out", required=True, help="report.json path")
     ap.add_argument("--max-unlabelled", type=int, default=0)
@@ -109,23 +128,27 @@ def main(argv=None) -> int:
     root = str(pathlib.Path(args.root).resolve())
     scope_dirs = args.scope_dirs.split()
     categories = args.categories.split()
-    ranges = json.load(open(args.ranges))
+    # mutate.sh builds the ranges from `git diff -U0 -- <scope dirs>` unfiltered, while its
+    # SCOPE (and so the oracle) keeps only source extensions; a README/CMakeLists touch under a
+    # scope dir would otherwise reach the per-dir blind-spot rule as a "changed file" and red
+    # the gate for a dir whose sources did not change (#141 review, MEDIUM). A non-source file
+    # can carry no mutant, so nothing that is counted changes. The extension list is the cfg's
+    # one line, handed over by mutate.sh — no copy here to drift from it (#141 review @d1fc20b).
+    source_re = re.compile(r"\.(" + "|".join(re.escape(e) for e in args.source_ext.split()) + r")$")
+    ranges = {rel: r for rel, r in json.load(open(args.ranges)).items() if source_re.search(rel)}
     reports = sorted(pathlib.Path(args.reports).glob("*.json"))
     diff_mode = bool(args.ref)
 
-    def rel_of(path: str) -> str:
-        return path[len(root) + 1:] if path.startswith(root + "/") else path
+    def _rel(path: str) -> str:
+        return rel_of(root, path)
 
-    def in_scope(rel: str, line) -> bool:
-        """Embedded-path source (tests/tools carry mutants too but never count) and — with
-        --ref — on a line the diff added or changed (new files are whole-file ranges)."""
-        if not any(rel.startswith(d + "/") for d in scope_dirs):
-            return False
-        if not ranges:
-            return True
-        return any(a <= (line or -1) <= b for a, b in ranges.get(rel, []))
+    def _in_scope(rel: str, line) -> bool:
+        return in_scope(rel, line, scope_dirs, ranges)
 
     best: dict[tuple, tuple[int, str]] = {}
+    # Mutants the runner EXECUTED per scope dir, on any line: the per-changed-dir blind-spot
+    # rule below reads this, not `best` (which is already line-filtered).
+    executed_by_dir: dict[str, int] = {d: 0 for d in scope_dirs}
     for r in reports:
         try:
             doc = json.loads(r.read_text())
@@ -133,10 +156,13 @@ def main(argv=None) -> int:
             print(f"mutation: could not parse {r.name}")
             continue
         for path, f in (doc.get("files") or {}).items():
-            rel = rel_of(path)
+            rel = _rel(path)
+            top = rel.split("/", 1)[0]
             for m in f.get("mutants", []):
+                if top in executed_by_dir:
+                    executed_by_dir[top] += 1
                 loc = (m.get("location") or {}).get("start") or {}
-                if not in_scope(rel, loc.get("line")):
+                if not _in_scope(rel, loc.get("line")):
                     continue
                 key = (rel, loc.get("line"), loc.get("column"), m.get("mutatorName"))
                 rank = RANK.get(m.get("status"), 0)
@@ -206,7 +232,7 @@ def main(argv=None) -> int:
             if not LABEL_ANY.search(text):
                 continue
             target = idx + 1 if comment_only(text) else idx   # a comment-only label governs the next line
-            if not in_scope(rel, target):
+            if not _in_scope(rel, target):
                 continue
             lab = parse_label(text, idx, categories)
             if lab is None or lab.error:
@@ -264,6 +290,27 @@ def main(argv=None) -> int:
             return 1
         print("mutation: scope is non-empty but Mull generated no mutants — failing (blind spot: instrumentation is not reaching the code)")
         return 1
+    if diff_mode and ranges:
+        # Per changed dir (diff mode): the runner must have executed at least one mutant under
+        # it, on ANY line. mutate.sh's run-time includePaths filter is one regex per scope dir
+        # against the absolute source path; a regex that matches `link/` but not `core/`
+        # leaves total > 0, so the rule above never fires while every core/ mutant silently
+        # goes unexecuted (#141 review, LOW). The report post-filter can only REMOVE mutants,
+        # never restore ones the runner declined to run — so this is the check that the
+        # filter reached every changed dir. Exempt: a dir whose changed files all carry
+        # `mutation-exempt(no-body)`.
+        silent = []
+        for d in sorted({rel.split("/", 1)[0] for rel in ranges}):
+            if executed_by_dir.get(d, 0):
+                continue
+            if all(exempt_reason(rel) is not None for rel in ranges if rel.startswith(d + "/")):
+                continue
+            silent.append(d)
+        if silent:
+            print("mutation: the runner executed no mutants under " + ", ".join(f"{d}/" for d in silent)
+                  + " although the diff changes sources there — failing (blind spot: the run-time path "
+                  "filter or instrumentation is not reaching that directory)")
+            return 1
     if malformed:
         print(f"mutation: {len(malformed)} malformed mutant-ok label(s) — failing (policy syntax, see ERROR lines)")
         return 1
