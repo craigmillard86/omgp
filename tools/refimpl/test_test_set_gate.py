@@ -732,6 +732,42 @@ class TestCtestPath:
         assert "tests/unit/sub" in r.stderr and "symlink" in r.stderr, r.stderr
         assert "verified" not in r.stdout
 
+    def test_unreadable_directory_under_the_source_dirs_is_refused(self, tmp_path):
+        # Red team @3713ab0 [MEDIUM]: os.walk without onerror= swallows the OSError scandir
+        # raises for a directory it cannot read, so tests/unit/deep/test_c.cpp was outside the
+        # set on the ctest path — before AND after the run, so the source-set comparison did
+        # not fire either — and the stage printed `verified 2` over a tree of three sources.
+        # A directory the walk cannot enter is refused by name, like a symlink: the walked set
+        # is the whole tree only if every directory in it was walked.
+        _need(os.geteuid() != 0, "root reads a mode-000 directory; the scenario needs an unprivileged uid")
+        root = make_tree(tmp_path)
+        deep = root / "tests/unit/deep"
+        deep.mkdir()
+        (deep / "test_c.cpp").write_text("// never built, never registered, never run\n")
+        os.chmod(deep, 0o000)
+        try:
+            r = run_unit(root)
+        finally:
+            os.chmod(deep, 0o755)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "unit: tests/unit/deep" in r.stderr and "could not be read" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_executed_line_must_stand_alone(self, tmp_path):
+        # Red team @3713ab0 [LOW]: EXECUTED_RE is anchored at both ends (^EXECUTED: (\d+)$) and
+        # no scenario failed with either anchor dropped. A line that merely CONTAINS the marker
+        # is not the run's own count: `EXECUTED: 600000 (cached)` kills the trailing anchor
+        # (the red team's mutant), `note: EXECUTED: 600000` the leading one (`^` dropped AND
+        # match -> search; either alone still anchors at the line start, so it is one mutant).
+        for sub, line in (("tail", 'echo "EXECUTED: 600000 (from the previous run, cached)"'),
+                          ("head", 'echo "note: EXECUTED: 600000"')):
+            (tmp_path / sub).mkdir()
+            root = make_tree(tmp_path / sub, scripts={"test_b": line})
+            r = run_unit(root)
+            assert r.returncode != 0, sub + "\n" + r.stdout + r.stderr
+            assert "tests/unit/test_b.cpp" in r.stderr and "did not run" in r.stderr, sub + "\n" + r.stderr
+            assert "verified" not in r.stdout, sub
+
     def test_symlinked_source_is_refused(self, tmp_path):
         # The file case of the same rule (supersedes the @2f40596 lead-b statement that a
         # symlinked source is verified by the file it resolves to): a link is not a source.
@@ -902,6 +938,24 @@ class TestBootstrapPath:
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/sub" in r.stderr and "symlink" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_unreadable_directory_is_refused_here_too(self, tmp_path):
+        # Red team @3713ab0 finding 1 measured this path failing CLOSED (`find` exits 1 on the
+        # unreadable directory and `set -e` ends the stage) but not by the stage's own name:
+        # the only message was find's. Named like a symlink, before the walk.
+        _need(os.geteuid() != 0, "root reads a mode-000 directory; the scenario needs an unprivileged uid")
+        root = make_tree(tmp_path, ctest=False)
+        deep = root / "tests/unit/deep"
+        deep.mkdir()
+        (deep / "test_c.cpp").write_text("// never built\n")
+        os.chmod(deep, 0o000)
+        try:
+            r = run_unit(root)
+        finally:
+            os.chmod(deep, 0o755)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "unit: tests/unit/deep" in r.stderr and "could not be read" in r.stderr, r.stderr
         assert "verified" not in r.stdout
 
     def test_no_sources_is_a_failure_here_too(self, tmp_path):
