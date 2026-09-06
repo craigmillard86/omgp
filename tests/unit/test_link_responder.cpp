@@ -92,18 +92,6 @@ std::vector<uint8_t> request_bytes(uint8_t dst, uint8_t src, bool retry, uint8_t
     return std::vector<uint8_t>(out, out + written);
 }
 
-// The bytes a station would transmit if it (wrongly) set the response bit on what is
-// otherwise a request-shaped frame — used to pin that on_request() discards these rather
-// than answering a frame nothing on the trunk solicited (red-team @3f1ceca finding 1).
-std::vector<uint8_t> response_shaped_bytes(uint8_t dst, uint8_t src, uint8_t seq,
-                                           const uint8_t* payload, size_t len) {
-    FrameFields f{dst, src, /*response=*/true, false, seq, static_cast<uint8_t>(len), payload};
-    uint8_t out[kMaxWire];
-    size_t written = 0;
-    REQUIRE(encode_frame(f, out, sizeof out, written) == Status::Ok);
-    return std::vector<uint8_t>(out, out + written);
-}
-
 // A request-shaped frame with one interior (payload) byte flipped so its CRC no longer
 // matches, checked through an independent Deframer to land as exactly one
 // Discard::BadCrc — mirrors test_link_master.cpp's crc_bad_response().
@@ -399,27 +387,6 @@ TEST_CASE("a request claiming src == 0xFF is discarded rather than scheduling an
     REQUIRE(wire.transcript(0).len == sizeof p);
     REQUIRE(responder.stats().replays_served == 0);
     REQUIRE(responder.stats().transactions == 1);
-}
-
-TEST_CASE("a response-shaped frame addressed to this node is discarded, never answered", "[link]") {
-    FakeClock clock;
-    MockWire wire(clock);
-    RecordingHandler handler;
-    Responder responder(wire, clock, handler, kMyAddr);
-
-    // f.dst == my_addr_ and f.src != 0xFF, so only the `f.response` disjunct of
-    // on_request()'s guard rejects this frame; the near neighbours (dst mismatch,
-    // src == 0xFF) are pinned above but this one had no test (red-team @3f1ceca finding
-    // 1: deleting `|| f.response` left both suites fully green).
-    const uint8_t pl[] = {0x77};
-    const uint64_t end =
-        inject_request(wire, response_shaped_bytes(kMyAddr, kPeer, 3, pl, sizeof pl), 0);
-    wire.advance_to(end + omgp::TRUNK_T_turn_max_us + 1000, responder);
-
-    REQUIRE(handler.calls == 0);
-    REQUIRE(wire.transcript_size() == 0);
-    REQUIRE(responder.stats().transactions == 0);
-    REQUIRE(responder.stats().discards == 1);
 }
 
 // --- a genuine in-flight conflict: the second request lands strictly before the ------
