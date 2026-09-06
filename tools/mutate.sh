@@ -145,9 +145,17 @@ rm -rf "$BUILD" && mkdir -p "$BUILD"
 } > "$BUILD/mull.yml"
 
 # --- instrumented build -------------------------------------------------------------------------
-cmake -S . -B "$BUILD" -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug -DOMGP_SANITIZERS=OFF \
+# Only the oracle binaries (and, through their link dependencies, the scope-dir libraries) are
+# built: the other unit binaries, the sim, the CLI and the tools never run under the runner,
+# so instrumenting them was pure build time (measured: the whole-tree instrumented build of
+# 17 binaries took ~15 min of a 17-min mutate.sh run at PR #137 round 19 on 12 cores). Ninja
+# when present (CI installs it); the default generator otherwise.
+GEN=()
+command -v ninja >/dev/null 2>&1 && GEN=(-G Ninja)
+cmake -S . -B "$BUILD" "${GEN[@]}" -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug -DOMGP_SANITIZERS=OFF \
   -DCMAKE_CXX_FLAGS="-fpass-plugin=$PLUGIN -g -grecord-command-line -O0" >/dev/null
-cmake --build "$BUILD" --parallel >/dev/null
+# shellcheck disable=SC2086
+cmake --build "$BUILD" --parallel --target $ORACLE >/dev/null
 # Library objects only: header-only code (constexpr helpers) is instrumented inside the test
 # TUs and shows up in the report, not in this count — the count is a sanity signal, the gate
 # is mutate_report.py's blind-spot rule.
@@ -212,8 +220,10 @@ for name in $ORACLE; do
   # mull-runner exits non-zero whenever survivors exist, so its exit code is not a failure
   # signal; a missing report is. (Every scope-dir mutant runs here; the diff scoping happens
   # in the merge below, so per-binary survivor counts are NOT the gate's numbers.)
+  # --no-output: kills are detected by exit status; the oracle's Catch2 stdout per mutant is
+  # never read, so it is not captured.
   ( cd "$BUILD" && "$RUNNER" --reporters IDE --reporters Elements "${EXTRA[@]}" --report-dir reports \
-      --report-name "$name" --ide-reporter-show-killed --timeout "$TIMEOUT_MS" \
+      --report-name "$name" --ide-reporter-show-killed --timeout "$TIMEOUT_MS" --no-output \
       --workers "${OMGP_MUTATE_WORKERS:-$(nproc)}" "./$name" > "$name.mull.log" 2>&1 ) || true
   if [ ! -f "$REPORTS/$name.json" ] && ! grep -q 'No mutants found' "$BUILD/$name.mull.log"; then
     echo "mutation: $name: runner produced no report — failing (see $BUILD/$name.mull.log):" >&2
