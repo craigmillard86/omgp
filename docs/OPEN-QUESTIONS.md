@@ -1950,3 +1950,67 @@ files — the 2026-08-28 entry above). Each is listed so it is not mistaken for 
 **Ruling:** pending — human (tooling contract amendment; `tools/mutate.sh` is gate machinery).
 **Supersedes:** none — amends the "corrected measurement" entry of 2026-08-28 (its
 `gitDiffRef` finding stands; this entry narrows the *path-filter* finding to compile time).
+
+---
+
+## 2026-09-06 — an idle-time discard is charged to the frame's CLAIMED in-range src; nothing authenticates it (amends the out-of-range entry above)
+
+**Context:** review at `1a55116` (#137, LOW). The out-of-range entry above records that a
+discarded frame claiming `src >= kAddrCount` is counted nowhere. Its in-range half was not
+recorded: with no transaction open (or one gap-deferred), `poll()` charges the discard to
+`stats_[f.src]` — spec US2 AC6 and issue #47 AC6 scope the per-destination counter to frames
+"arriving during an open response window" (the `awaiting` branch, correct and tested); the
+`else` branch is a design choice made in #137 beyond that criterion. `src` is wire-derived and
+unauthenticated (trunk §5 reserves only `0xFF`), so any station injecting intact frames with
+`src = 0x03` while the host is idle inflates `stats(0x03).discards` and node 3 never
+transmitted; nothing downstream can tell the two apart. **Impact today:** diagnostics only —
+no health or scheduling decision reads `AddrStats::discards` (a control: the current contents
+of `core/` and `link/`); it becomes load-bearing the moment `discards` feeds trunk §7
+SUSPECT/OFFLINE accounting, which is the same forgeability the "not attributable to a
+specific `dst_`" CRC branch was written to avoid.
+**Options:** (a) as the entry above — a bus-level `discards` counter in `BusStats` for every
+discard with no open window, in-range or not, so an unattributable discard is never charged
+to an address (per-address discards then mean "during that address's own window" and nothing
+else); (b) keep the claimed-src attribution and document it as unauthenticated, forbidding
+health logic from reading it; (c) drop the `else` branch and count idle-time discards nowhere
+(worsens the FR-011 gap the entry above records).
+**Recommendation:** (a), the same field and the same data-model amendment as the out-of-range
+entry — one counter closes both halves. Folded into #138 item 3 (bus-level outcome/counter),
+where the forgeability of the in-range half is now noted alongside the out-of-range half. Not
+changed in #137: the same data-model ruling is pending.
+**Ruling:** pending — human (data-model amendment; folds into the out-of-range entry's ruling).
+**Amends:** the out-of-range entry above (its "otherwise to the frame's own claimed `src`"
+description of the code is complete; this entry records that the in-range half is forgeable).
+**Supersedes:** none — amends, not replaces, the 2026-09-06 out-of-range entry (its reading stays live; see **Amends:**).
+
+---
+
+## 2026-09-06 — correction to the claimed-src entry above: the counting requirement is FR-011/FR-011a, not AC6, and `awaiting` is wider than "the window"
+
+**Context:** review at `9632347` (#142, LOW). The entry above attributes to "spec US2 AC6" a
+scoping AC6 does not state. `specs/002-trunk-link-layer/spec.md` AC6 says only that such a
+frame "is discarded and the window keeps running" — nothing about a counter. The counting
+requirement is FR-011 ("frames arriving while no transaction is open" are among the frames
+that MUST be discarded *and* MUST be counted) and FR-011a (the per-address counter block).
+Two corrections to the record the ruling will be made from:
+(a) the `else` branch is not a design choice "beyond" any criterion — FR-011 requires an
+idle-time discard to be counted *somewhere*, so the branch answers a requirement; what it
+chooses is *where* (the frame's claimed `src`). That is exactly why the entry's option (c)
+(count nowhere) is a regression against FR-011, and why option (a) — a bus-level counter —
+satisfies FR-011 without the forgeable attribution.
+(b) "the `awaiting` branch, correct and tested" is wider than the quoted window: `awaiting`
+is `open_ && sub_phase_ == AwaitResponse` (`link/master.cpp`), so a frame whose opening FLAG
+fell *outside* the window but during an open transaction is also charged to `stats_[dst_]`
+(the case "a matching answer whose FLAG opens INSIDE the host's own transmission is discarded
+by the window's lower bound" asserts that shape), and its `src` is just as unauthenticated.
+The forgeability recorded above is therefore not confined to the `else` branch; the
+`awaiting` branch charges the *polled* address rather than the claimed one, which is the
+attribution the spec's per-destination counter intends, but it too is driven by wire bytes.
+**Options:** unchanged from the entry above; (a) remains the recommendation and now rests on
+FR-011 explicitly.
+**Recommendation:** (a), as above. No code change here.
+**Ruling:** pending — human (same data-model amendment as the entry above).
+**Amends:** the 2026-09-06 "claimed in-range src" entry above (its options, recommendation and
+impact statement stand; its citation of AC6 as the counting criterion and its "beyond that
+criterion" characterisation of the `else` branch are withdrawn in favour of FR-011/FR-011a).
+**Supersedes:** none — amends, not replaces, the entry above (see **Amends:**).
