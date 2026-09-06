@@ -428,6 +428,24 @@ class TestCtestPath:
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_b.cpp" in r.stderr and "also registered" in r.stderr, r.stderr
 
+    def test_one_binary_registered_twice_by_its_own_path_is_refused(self, tmp_path):
+        # Red team @2f40596, lead (a): the one-file-one-registration rule compared distinct
+        # paths (links), so the SAME path registered twice — here a second, filtered
+        # registration of test_a — was accepted on its first registration alone and the
+        # no-argument rule was never applied to the second. One file, one registration,
+        # whichever way it is spelled.
+        root = make_tree(tmp_path)
+        build = root / "build/native"
+        (build / "CTestTestfile.cmake").write_text(
+            f'add_test([=[test_a]=] "{build / "test_a"}")\n'
+            f'add_test([=[test_a_tagged]=] "{build / "test_a"}" "[tag]")\n'
+            f'add_test([=[test_b]=] "{build / "test_b"}")\n')
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_a.cpp" in r.stderr and "registered more than once" in r.stderr, r.stderr
+        assert "test_a_tagged" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
     def test_two_registrations_under_one_name_are_refused(self, tmp_path):
         # Red team @aed9693 [MEDIUM]: registration is keyed by binary, execution by ctest test
         # NAME, and nothing tied a name to one binary — so test_a's testcase `dup` vouched for
