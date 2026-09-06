@@ -107,9 +107,14 @@ stage_unit() {
     # The JUnit record is this run's execution evidence (#172 red team: LastTest.log
     # interleaves the tests' stdout with ctest's framing, so a test could forge it; the
     # record's framing is XML the tests cannot write). Deleted first so a stale record can
-    # never stand in for this run's.
+    # never stand in for this run's. --test-output-size-passed: ctest keeps only the first
+    # 1024 bytes of a PASSING test's stdout in the record by default, and EXECUTED: is the
+    # LAST line the listener prints, so a chatty green binary would lose its evidence
+    # (red team @3880d35). Raised to 10 MB per test; the tool names a truncated record as
+    # such. (`--test-output-truncation head` is accepted and ignored by CMake 3.22 — measured.)
     rm -f build/native/Testing/junit.xml
-    ctest --preset native --output-on-failure --output-junit Testing/junit.xml
+    ctest --preset native --output-on-failure --output-junit Testing/junit.xml \
+      --test-output-size-passed 10000000
     # ctest only prints test-binary stdout inline on failure, so on a green
     # run the "EXECUTED: <n>" line lives in ctest's per-test log instead.
     local log="build/native/Testing/Temporary/LastTest.log"

@@ -121,7 +121,10 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   registered and executed, naming every one that was not — registered means an
   `add_test` whose command is exactly the target's own binary with no arguments (a
   filtered Catch2 run, or a same-named binary elsewhere, is refused), executed means an
-  `EXECUTED: <n>` line with n > 0 (red team @94f2462); the bootstrap path walks the
+  `EXECUTED: <n>` line with n > 0 (red team @94f2462) — ctest is run with
+  `--test-output-size-passed 10000000` because its default keeps only the first 1024 bytes
+  of a passing test's stdout, dropping the trailing `EXECUTED:` line, and the tool names a
+  record truncated that way (red team @3880d35); the bootstrap path walks the
   SOURCES, so a source with no binary fails by name. Both paths print a `unit: verified N
   test binaries` line, and both fail when there are no sources at all. The record, not
   `LastTest.log`, is the execution evidence: the log interleaves the tests' own stdout

@@ -22,7 +22,11 @@ the run's own machine-readable record, and names every source that escaped:
   executed    this run's Testing/junit.xml has a <testcase> for that registered name with
               status="run" whose <system-out> carries an `EXECUTED: <n>` line with n > 0.
               A DISABLED test is status="disabled" with system-out "Disabled"; a
-              SKIP_RETURN_CODE skip is status="notrun" (measured, CMake 3.22).
+              SKIP_RETURN_CODE skip is status="notrun" (measured, CMake 3.22). ctest keeps
+              only --test-output-size-passed bytes (default 1024) of a passing test's stdout
+              in the record, dropping the TAIL — where EXECUTED: is — and appends a marker
+              line (red team @3880d35); stage_unit raises the size, and a record that
+              carries the marker for a test with no EXECUTED line is named as truncated.
 
 Why the JUnit record and not Testing/Temporary/LastTest.log (PR #172 red team): the log
 interleaves ctest's framing (`N/M Testing:`, `Command:`) with the tests' own stdout, so a
@@ -66,6 +70,8 @@ from pathlib import Path
 SOURCE_DIRS = ("tests/unit", "tests/property")
 TARGET_RE = re.compile(r"CMakeFiles/([^/]+)\.dir/")
 EXECUTED_RE = re.compile(r"^EXECUTED: (\d+)$")
+# ctest's marker for a <system-out> it cut short (CMake 3.22 wording; a control, not a guarantee).
+TRUNCATED_RE = re.compile(r"test output was removed since it exceeds the threshold")
 
 
 def sources(root: Path):
@@ -98,16 +104,20 @@ def registered_tests(build: Path):
 
 
 def executed_counts(junit: Path):
-    """ctest test name -> the EXECUTED: count it printed, for <testcase>s with status="run"."""
-    out = {}
+    """(ctest test name -> the EXECUTED: count it printed, for <testcase>s with status="run";
+    set of names whose recorded stdout ctest truncated)."""
+    out, truncated = {}, set()
     for case in ET.parse(junit).getroot().iter("testcase"):
         if case.get("status") != "run":
             continue
-        for line in (case.findtext("system-out") or "").splitlines():
+        text = case.findtext("system-out") or ""
+        if TRUNCATED_RE.search(text):
+            truncated.add(case.get("name"))
+        for line in text.splitlines():
             m = EXECUTED_RE.match(line)
             if m:
                 out[case.get("name")] = int(m.group(1))
-    return out
+    return out, truncated
 
 
 def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
@@ -126,7 +136,7 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
     finally:
         if log_bytes is not None:
             log.write_bytes(log_bytes)   # hand the run's log back exactly as ctest left it
-    executed = executed_counts(junit)
+    executed, truncated = executed_counts(junit)
     record_mtime = junit.stat().st_mtime
     by_basename = {}   # for the "same name, wrong path" message only
     for path in registered:
@@ -157,6 +167,9 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
                             f"execution of the source; register the whole binary (add_test(NAME {target} COMMAND {target}))")
         elif os.path.getmtime(binary) > record_mtime:
             failures.append(f"{rel}: {binary} is newer than {junit} (the execution record predates this binary; rerun ctest)")
+        elif name not in executed and name in truncated:
+            failures.append(f"{rel}: registered as {target} (ctest test '{name}') ran, but ctest truncated its recorded output "
+                            f"before the EXECUTED line (--test-output-size-passed too small for this run of {junit}; rerun via stage_unit)")
         elif name not in executed:
             failures.append(f"{rel}: registered as {target} (ctest test '{name}') but did not run in this ctest run (DISABLED, skipped, or no EXECUTED line in {junit})")
         elif executed[name] == 0:
