@@ -180,6 +180,16 @@ void Responder::poll(uint64_t now_us) {
     // pending in buffer_ (red team @e510b29 finding 1; docs/OPEN-QUESTIONS.md
     // 2026-09-06). A response already due is flushed ahead of every byte, not just once
     // at the end, so a queued request is decoded the instant the wire is free.
+    //
+    // The other side of that rule, stated rather than hidden: one accepted request leaves
+    // Listening and ends this drain, so a single poll() answers at most ONE queued
+    // request, oldest first, and nothing bounds the backlog's age or depth or counts a
+    // request that waits in it (red team + review @17554c8 finding 1: requests arriving
+    // faster than poll() is called starve a later one indefinitely, every answer late,
+    // stats() otherwise unmoved). FR-014 ("MUST still transmit") and FR-017 ("never
+    // outside a response window") pull opposite ways on a stale queued request; which
+    // bound applies is docs/OPEN-QUESTIONS.md 2026-09-06 ("held-request queue is
+    // unbounded"), pending human -- not decided here.
     for (;;) {
         transmit_if_due(now_us);
         if (state_ != State::Listening)
