@@ -119,6 +119,9 @@ def make_tree(
         cc.append({"directory": str(build),
                    "command": f"/usr/bin/c++ -std=gnu++17 -o {obj} -c {src}",
                    "file": str(src)})
+        # The Makefiles generator's link line, naming the objects the binary was linked from
+        # (the real tree's CMakeFiles/<target>.dir/link.txt has exactly this shape).
+        (build / f"CMakeFiles/{target}.dir/link.txt").write_text(f"/usr/bin/c++ -g {obj} -o {target} \n")
     (build / "compile_commands.json").write_text(json.dumps(cc, indent=2))
     for t in binaries:
         body = scripts.get(t, f'echo "EXECUTED: {executed}"')
@@ -134,6 +137,20 @@ def make_tree(
                 reg.append(f"set_tests_properties([=[{t}]=] PROPERTIES {props[t]})")
         (build / "CTestTestfile.cmake").write_text("\n".join(reg) + "\n")
     return root
+
+
+def extra_entry(root: Path, src_name: str, target: str, *, first=False) -> None:
+    """One more compile_commands.json entry crediting tests/unit/<src_name>.cpp to <target>,
+    with a stub object where the entry says (red team @8b0e4f4 finding 1's reproducer)."""
+    build = root / "build/native"
+    src = root / "tests" / "unit" / f"{src_name}.cpp"
+    obj = f"CMakeFiles/{target}.dir/tests/unit/{src_name}.cpp.o"
+    (build / obj).parent.mkdir(parents=True, exist_ok=True)
+    (build / obj).write_bytes(b"\x7fELF-stub")
+    entry = {"directory": str(build), "command": f"/usr/bin/c++ -std=gnu++17 -o {obj} -c {src}", "file": str(src)}
+    cc = build / "compile_commands.json"
+    entries = json.loads(cc.read_text())
+    cc.write_text(json.dumps([entry] + entries if first else entries + [entry], indent=2))
 
 
 def run_unit(root: Path):
@@ -625,6 +642,94 @@ class TestCtestPath:
         assert "tests/unit/test_b.cpp" in r.stderr and "source changed during the ctest run" in r.stderr, r.stderr
         assert "verified" not in r.stdout
 
+    def test_second_compile_entry_crediting_another_target_is_refused(self, tmp_path):
+        # Red team @8b0e4f4 [MEDIUM], reproducer verbatim: compiled_targets() kept only the
+        # LAST compile_commands.json entry per source, so one extra entry crediting test_b.cpp
+        # to test_a (registered, executing) turned escape 1 green — and the verdict depended on
+        # entry order, which nothing controls. One source, one compile entry: a source with
+        # entries under two targets is refused naming both, whichever comes last.
+        for first in (False, True):
+            root = make_tree(tmp_path / str(first), registered=("test_a",))
+            extra_entry(root, "test_b", "test_a", first=first)
+            r = run_unit(root)
+            assert r.returncode != 0, r.stdout + r.stderr
+            assert "tests/unit/test_b.cpp" in r.stderr and "more than one target" in r.stderr, r.stderr
+            assert "test_a" in r.stderr and "test_b" in r.stderr, r.stderr
+            assert "verified" not in r.stdout
+
+    def test_disabled_target_with_a_second_compile_entry_is_refused(self, tmp_path):
+        # The same extra entry over escape 3 (registered but DISABLED).
+        root = make_tree(tmp_path, disabled=("test_b",))
+        extra_entry(root, "test_b", "test_a")
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "more than one target" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_compile_entry_whose_object_was_never_linked_is_refused(self, tmp_path):
+        # The same extra entry over escape 2 with the honest entry ABSENT: test_b.cpp's only
+        # entry credits it to test_a, so by the compilation database it is a second source of
+        # test_a's binary. The link line (CMakeFiles/test_a.dir/link.txt, a build artefact)
+        # says which objects that binary was linked from, and this one is not on it.
+        root = make_tree(tmp_path, compiled={"test_a": "test_a"})
+        extra_entry(root, "test_b", "test_a")
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "link line" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_missing_link_line_fails_closed(self, tmp_path):
+        # No link.txt for a target (another generator, or deleted): the linked-from check
+        # cannot be made, so the source is named rather than assumed linked.
+        root = make_tree(tmp_path)
+        (root / "build/native/CMakeFiles/test_b.dir/link.txt").unlink()
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "link.txt" in r.stderr, r.stderr
+
+    def test_link_line_rewritten_during_the_run_is_refused(self, tmp_path):
+        # The link line joins the snapshot: a test that rewrites it mid-run (here: to name an
+        # object it was not linked from) is refused like any other artefact written during
+        # the run.
+        root = make_tree(tmp_path, compiled={"test_a": "test_a"})
+        extra_entry(root, "test_b", "test_a")
+        build = root / "build/native"
+        link = build / "CMakeFiles/test_a.dir/link.txt"
+        _executable(build / "test_a", "#!/usr/bin/env bash\n"
+                    f"printf '/usr/bin/c++ -g CMakeFiles/test_a.dir/tests/unit/test_a.cpp.o "
+                    f"CMakeFiles/test_a.dir/tests/unit/test_b.cpp.o -o test_a\\n' > \"{link}\"\n"
+                    'echo "EXECUTED: 600000"\n')
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "changed during the ctest run" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_symlinked_directory_under_the_source_dirs_is_refused(self, tmp_path):
+        # Red team @8b0e4f4 [LOW]: rglob (Python 3.12) and `find` without -L do not descend a
+        # symlinked directory, so tests/unit/sub/test_c.cpp was outside the set on both paths
+        # and never named — while the docstring claimed "ANY depth". The set is plain files
+        # and directories: a symlink anywhere under tests/unit or tests/property is refused
+        # by name, so what the walk reaches is the whole set by construction.
+        root = make_tree(tmp_path)
+        hidden = root / "hidden"
+        hidden.mkdir()
+        (hidden / "test_c.cpp").write_text("// never built, never registered, never run\n")
+        (root / "tests/unit/sub").symlink_to(Path("../../hidden"), target_is_directory=True)
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/sub" in r.stderr and "symlink" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_symlinked_source_is_refused(self, tmp_path):
+        # The file case of the same rule (supersedes the @2f40596 lead-b statement that a
+        # symlinked source is verified by the file it resolves to): a link is not a source.
+        root = make_tree(tmp_path)
+        (root / "tests/unit/test_c.cpp").symlink_to(Path("test_a.cpp"))
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_c.cpp" in r.stderr and "symlink" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
     def test_missing_record_is_a_named_failure(self, tmp_path):
         # stage_unit deletes the record before ctest; if ctest then writes none, the tool must
         # say so by name rather than fall over in the XML parser.
@@ -774,6 +879,19 @@ class TestBootstrapPath:
         assert "source set changed during the run" in r.stderr and "tests/unit/test_b.cpp" in r.stderr, r.stderr
         assert "verified" not in r.stdout
 
+    def test_symlinked_directory_is_refused_here_too(self, tmp_path):
+        # Finding 2 (@8b0e4f4) on the bootstrap path: `find` without -L did not descend
+        # tests/unit/sub either.
+        root = make_tree(tmp_path, ctest=False)
+        hidden = root / "hidden"
+        hidden.mkdir()
+        (hidden / "test_c.cpp").write_text("// never built\n")
+        (root / "tests/unit/sub").symlink_to(Path("../../hidden"), target_is_directory=True)
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/sub" in r.stderr and "symlink" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
     def test_no_sources_is_a_failure_here_too(self, tmp_path):
         # Finding 5's bootstrap half: the source walk over nothing must not print
         # `verified 0` and exit 0.
@@ -834,3 +952,45 @@ def test_real_artefacts_minus_one_registration_name_that_source(tmp_path):
     assert "tests/unit/test_link_master.cpp" in r.stderr and "not registered" in r.stderr, r.stderr
     # Only that one: every other source is still consistent with the same artefacts.
     assert r.stderr.count("unit: tests/") == 1, r.stderr
+
+
+def test_real_artefacts_plus_one_decoy_entry_name_that_source(tmp_path):
+    # Red team @8b0e4f4 finding 1 on the REAL artefacts: the minus-one control's tree plus ONE
+    # compile_commands.json entry crediting test_link_master.cpp to test_smoke (a stub object
+    # where the entry says). At 8b0e4f4 this printed `verified 16` and exited 0: the repo's
+    # largest binary dropped out of the run and nothing compared the count against anything.
+    # The record is written by a real ctest run over THIS registration (the 16 real binaries,
+    # ~3 s), as the red team's reproducer did — the real tree's record still carries
+    # test_link_master, and the registration-vs-record rule would fire on it instead.
+    _need(TOOL.exists(), f"{TOOL.name} missing")
+    real = ROOT / "build/native"
+    _need((real / "CTestTestfile.cmake").exists(), "no cmake build tree at build/native")
+    _need(all((real / Path(src).stem).exists() for src in SOURCES), "not every test binary is built")
+    root = tmp_path / "scratch"
+    build = root / "build" / "native"
+    (build / "Testing" / "Temporary").mkdir(parents=True)
+    (root / "tests").symlink_to(ROOT / "tests", target_is_directory=True)
+    shutil.copy(real / "compile_commands.json", build / "compile_commands.json")
+    for src in SOURCES:
+        target = Path(src).stem
+        (build / target).symlink_to(real / target)
+    kept = [ln.replace(str(real), str(build))
+            for ln in (real / "CTestTestfile.cmake").read_text().splitlines()
+            if "test_link_master" not in ln and not ln.startswith("subdirs(")]
+    (build / "CTestTestfile.cmake").write_text("\n".join(kept) + "\n")
+    cc = build / "compile_commands.json"
+    entries = json.loads(cc.read_text())
+    victim = next(e["file"] for e in entries if e["file"].endswith("test_link_master.cpp"))
+    obj = "CMakeFiles/test_smoke.dir/tests/unit/test_link_master.cpp.o"
+    (build / obj).parent.mkdir(parents=True)
+    (build / obj).write_bytes(b"\x7fELF-decoy")
+    entries.append({"directory": str(build), "command": f"/usr/bin/c++ -o {obj} -c {victim}", "file": victim})
+    cc.write_text(json.dumps(entries))
+    pre = snapshot(root, build)
+    subprocess.run(["ctest", "--output-junit", "Testing/junit.xml", "--test-output-size-passed", "10000000"],
+                   cwd=build, capture_output=True, check=True, timeout=300)
+    r = run_tool("--ctest", "--pre", str(pre), "--root", str(root), "--build", str(build))
+    assert r.returncode != 0, r.stdout
+    assert "tests/unit/test_link_master.cpp" in r.stderr and "more than one target" in r.stderr, r.stderr
+    assert "test_smoke" in r.stderr, r.stderr
+    assert "verified" not in r.stdout
