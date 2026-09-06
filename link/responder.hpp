@@ -67,6 +67,13 @@ class Responder {
     void on_request(const FrameFields& f, uint64_t request_end_us);
 
     ByteWire& wire_;
+    // Stored for the constructor-signature parity with Master/Health (link-cpp.md
+    // "Responder engine") and for future use (a scheduled deadline check keyed off the
+    // engine's own clock rather than the now_us poll() already takes). poll() and
+    // on_request() take `now_us` explicitly, so clock_ itself is not yet read; the
+    // constructor body performs one discarded read, which silences clang's
+    // -Wunused-private-field (fuzz preset) without [[maybe_unused]] — some gcc versions
+    // reject that attribute on a data member under -Werror=attributes (see health.hpp).
     Clock& clock_;
     RequestHandler& handler_;
     uint8_t my_addr_;

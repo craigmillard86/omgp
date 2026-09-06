@@ -36,7 +36,9 @@ uint32_t total_discards(const DeframerStats& s) {
 Responder::Responder(ByteWire& wire, Clock& clock, RequestHandler& handler, uint8_t my_addr,
                      uint32_t turnaround_us)
     : wire_(wire), clock_(clock), handler_(handler), my_addr_(my_addr),
-      turnaround_us_(clamp_turnaround(turnaround_us)) {}
+      turnaround_us_(clamp_turnaround(turnaround_us)) {
+    (void)clock_; // discarded read: see the clock_ declaration comment in responder.hpp
+}
 
 const AddrStats& Responder::stats() const {
     return stats_;
