@@ -40,6 +40,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -344,6 +345,44 @@ class TestCtestPath:
         assert "tests/unit/test_b.cpp" in r.stderr and "truncated" in r.stderr, r.stderr
         assert "DISABLED" not in r.stderr, r.stderr
 
+    def test_source_newer_than_its_object_is_refused(self, tmp_path):
+        # Red team @ceab86f finding 3: freshness was binary-vs-record only. A source edited
+        # after its object was built was still "compiled, registered, executed" — its current
+        # contents never were. Named, like the record freshness: a control, not a guarantee.
+        root = make_tree(tmp_path)
+        assert run_unit(root).returncode == 0
+        src = root / "tests/unit/test_b.cpp"
+        src.write_text("// TEST_CASEs all deleted after the build\n")
+        t = time.time() + 60
+        os.utime(src, (t, t))
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "newer than its object" in r.stderr, r.stderr
+
+    def test_source_in_a_subdirectory_is_checked(self, tmp_path):
+        # Finding 4: a non-recursive glob made tests/unit/link/test_lost.cpp invisible — the
+        # forgotten-CMakeLists-line escape, one directory down. The walk is recursive now.
+        root = make_tree(tmp_path)
+        lost = root / "tests/unit/link/test_lost.cpp"
+        lost.parent.mkdir(parents=True)
+        lost.write_text("// never built, never registered, never run\n")
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/link/test_lost.cpp" in r.stderr and "compiled by no target" in r.stderr, r.stderr
+
+    def test_symlinked_binary_does_not_inherit_anothers_registration(self, tmp_path):
+        # Finding 5: keying both sides on realpath() let an UNREGISTERED test_b, whose binary
+        # is a symlink to test_a, inherit test_a's registration and execution. The target's own
+        # binary is compared by absolute path (no symlink resolution); realpath is only for the
+        # decoy message.
+        root = make_tree(tmp_path, registered=("test_a",))
+        build = root / "build/native"
+        (build / "test_b").unlink()
+        (build / "test_b").symlink_to(build / "test_a")
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "not registered" in r.stderr, r.stderr
+
     def test_missing_record_is_a_named_failure(self, tmp_path):
         # stage_unit deletes the record before ctest; if ctest then writes none, the tool must
         # say so by name rather than fall over in the XML parser.
@@ -384,6 +423,35 @@ class TestBootstrapPath:
         r = run_unit(root)
         assert r.returncode != 0
         assert "tests/unit/test_b.cpp" in r.stderr and "no binary" in r.stderr, r.stderr
+
+    def test_executed_zero_is_refused_here_too(self, tmp_path):
+        # Red team @ceab86f finding 1 [MEDIUM]: the bootstrap path printed "built and
+        # executed" for a binary that ran and executed NOTHING — the escape the ctest path
+        # refuses by name. Same predicate on both paths now: EXECUTED: n with n > 0.
+        root = make_tree(tmp_path, ctest=False, scripts={"test_b": 'echo "EXECUTED: 0"'})
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "EXECUTED: 0" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_no_executed_line_is_refused_here_too(self, tmp_path):
+        # The red team's standalone reproducer: a stub that prints anything but a count.
+        root = make_tree(tmp_path, ctest=False, scripts={"test_b": 'echo "hello, I ran nothing"'})
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "no EXECUTED line" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_source_in_a_subdirectory_is_named_here_too(self, tmp_path):
+        # Finding 4's bootstrap half: stage_build compiles the flat list, so a nested source
+        # has no binary — and the walk must reach it to say so.
+        root = make_tree(tmp_path, ctest=False)
+        lost = root / "tests/unit/link/test_lost.cpp"
+        lost.parent.mkdir(parents=True)
+        lost.write_text("// never built\n")
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/link/test_lost.cpp" in r.stderr and "no binary" in r.stderr, r.stderr
 
     def test_no_sources_is_a_failure_here_too(self, tmp_path):
         # Finding 5's bootstrap half: the source walk over nothing must not print
