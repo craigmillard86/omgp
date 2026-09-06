@@ -763,8 +763,30 @@ class TestCtestPath:
         try:
             r = run_unit(root)
         finally:
-            os.chmod(deep, 0o755)
+            os.chmod(deep, 0o700)   # owner only: enough for tmp_path's cleanup (CodeQL py/overly-permissive-file)
         assert r.returncode != 0, r.stdout + r.stderr
+        assert "unit: tests/unit/deep" in r.stderr and "could not be read" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_unsearchable_but_readable_directory_is_refused(self, tmp_path):
+        # Red team @4b78242 [LOW]: mode 0o400 — scandir() succeeds (readable), so os.walk's
+        # onerror= never fires, and the walk then lstat()s the entries it listed, which
+        # needs x on the parent: an uncaught PermissionError traceback out of the snapshot,
+        # not the by-name refusal the mode-000 case gets and the docs promise. The bootstrap
+        # path already named it (`! -executable`). A directory the walk cannot ENTER is
+        # named whether or not it can be LISTED.
+        _need(os.geteuid() != 0, "root enters a mode-400 directory; the scenario needs an unprivileged uid")
+        root = make_tree(tmp_path)
+        deep = root / "tests/unit/deep"
+        deep.mkdir()
+        (deep / "test_c.cpp").write_text("// never built, never registered, never run\n")
+        os.chmod(deep, 0o400)
+        try:
+            r = run_unit(root)
+        finally:
+            os.chmod(deep, 0o700)   # owner only (CodeQL py/overly-permissive-file)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "Traceback" not in r.stderr, r.stderr
         assert "unit: tests/unit/deep" in r.stderr and "could not be read" in r.stderr, r.stderr
         assert "verified" not in r.stdout
 
@@ -979,7 +1001,26 @@ class TestBootstrapPath:
         try:
             r = run_unit(root)
         finally:
-            os.chmod(deep, 0o755)
+            os.chmod(deep, 0o700)   # owner only: enough for tmp_path's cleanup (CodeQL py/overly-permissive-file)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "unit: tests/unit/deep" in r.stderr and "could not be read" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
+    def test_unsearchable_but_readable_directory_is_refused_here_too(self, tmp_path):
+        # Red team @4b78242: the killing test for `! -executable` in unit_sources_plain()'s
+        # probe — the mode-000 case above is matched by `! -readable` alone, so without this
+        # the clause could be dropped unnoticed. Green on the pristine tree (the probe already
+        # has the clause); RED with it removed.
+        _need(os.geteuid() != 0, "root enters a mode-400 directory; the scenario needs an unprivileged uid")
+        root = make_tree(tmp_path, ctest=False)
+        deep = root / "tests/unit/deep"
+        deep.mkdir()
+        (deep / "test_c.cpp").write_text("// never built\n")
+        os.chmod(deep, 0o400)
+        try:
+            r = run_unit(root)
+        finally:
+            os.chmod(deep, 0o700)   # owner only (CodeQL py/overly-permissive-file)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "unit: tests/unit/deep" in r.stderr and "could not be read" in r.stderr, r.stderr
         assert "verified" not in r.stdout
