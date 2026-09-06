@@ -16,7 +16,7 @@ struct Step { uint8_t node; Kind kind; uint32_t delay_us; uint16_t count; uint32
 | `Respond` | the node's `RequestHandler` (usually a real `Responder`) answers; first byte at `request_end + delay_us` (delay defaults to `TRUNK_T_turn_min_us`; a delay ≥ `TRUNK_T_resp_us` makes a "late" response for timeout tests) |
 | `Silence` | nothing is transmitted |
 | `Garbage` | `count` PRNG bytes (never containing a valid frame — checked at generation) starting at `request_end + delay_us`, then nothing |
-| `CrcError` | the real response with its last CRC byte XOR 0xFF, at `request_end + delay_us` |
+| `CrcError` | the real response with its last CRC byte replaced by a wrong one of the SAME stuffed length, at `request_end + delay_us`. Implemented as XOR 0xFF except for the four high-byte values where that crosses the FLAG/ESCAPE stuffing boundary (`0x7E`/`0x7D` ↔ `0x81`/`0x82`), where `corrupt_crc_hi()` (`tests/support/mock_wire.cpp`) picks a different wrong byte on the same side of it (FLAG ↔ ESCAPE; `0x81`/`0x82` XOR 0x01) — so the corrupted frame's wire length always equals the real response's. *(Amended in PR #137 from a literal "XOR 0xFF" — pending a ruling, `docs/OPEN-QUESTIONS.md` 2026-09-05 "Kind::CrcError's corrupted CRC byte"; T028/#46 must corrupt the same way.)* |
 | `Duplicate` | the real response, then the same bytes again `delay_us` after the first ends (used to plant a late duplicate that must be discarded) |
 | `Babble` | `count` PRNG bytes at `request_end + delay_us` **regardless of addressee** (also emitted when a different node is polled, i.e. outside any window) |
 | `Rate` | the node now "hears" only at `count` interpreted as bit rate (1 000 000 or 115 200); requests at another rate behave as `Silence` (or `Garbage` if `seed != 0`) |

@@ -1678,3 +1678,31 @@ to frames "arriving during an open response window". Now charged to the frame's 
 SUSPECT accounting). Contract text amended in #137, marked pending.
 **Ruling:** none needed for the fix (a bug against the PR's own stated property); the
 attribution change folds into the pending ruling on the amended contract text.
+
+---
+
+## 2026-09-06 — Master's constructor does not validate host_addr; an out-of-range value fails silently
+
+**Context:** review at `2056e56` (#137, LOW). `begin()` refuses `dst >= kAddrCount` and
+`dst == 0xFF` (entries above), but the constructor's `host_addr` gets no guard. It reaches the
+wire as every request's `src` and is the acceptance predicate `f.dst == host_addr_` in
+`poll()`. `Master m(wire, clock, 0xFF)`: `encode_frame` validates only `f.dst`, so requests go
+out with `src = 0xFF`; a conforming node mirrors it into its answer's `dst`, and the host's own
+Deframer discards every such answer as `Discard::ReservedAddress` (trunk §5). Every transaction
+then runs three attempts and concludes `Failed{Timeout}`, charging three timeouts per node
+toward SUSPECT (trunk §7) with no diagnostic. (Other out-of-range values, `0x10..0xFE`, are
+not discarded by anything — the engine works with them, in violation of trunk §5's address
+range.) Proved by construction from `link/frame.cpp`'s reserved-address discard; that every caller in the repo passes `ADDR_host` is the current
+contents of the repo — a control, not a guarantee. Same class as the `begin(dst == ADDR_host)`
+entry above (misuse-hardening of a construction-time constant, not a defect in the engine as
+used), so recorded rather than implemented speculatively; the precondition is now STATED on the
+constructor in `master.hpp` (trunk §5: `0x00..0x0F`).
+**Options:** (a) `begin()` returns `Status::ReservedAddress` while `host_addr_ >= kAddrCount`
+(the constructor cannot return a status; this makes the misuse observable at the first call
+that would put it on the wire, with a test at exactly `kAddrCount` and at `0xFF`); (b) the
+constructor substitutes `ADDR_host` — silent, and a different kind of surprise; (c) leave it
+stated-only, since F3 is the sole constructor caller and passes `ADDR_host`.
+**Recommendation:** (a), together with the `begin(dst == host_addr_)` refusal above — both
+are one ruling on what `begin()` refuses, and one contract clause.
+**Ruling:** pending — human (contract-doc amendment + a small behaviour change to `begin()`).
+**Supersedes:** none.

@@ -28,6 +28,11 @@ struct MasterEvent {
 // timing rules, and statistics (data-model.md §4/§8).
 class Master {
   public:
+    // host_addr is a trunk node address, 0x00..0x0F (trunk §5) — stated, not enforced: it goes
+    // on the wire as every request's src and the nodes mirror it into their answers' dst. For
+    // 0xFF this engine's own Deframer discards every answer (reserved address, trunk §5) and
+    // every transaction times out with no diagnostic. Recorded, not guarded (PR #137 review
+    // @2056e56, LOW; docs/OPEN-QUESTIONS.md 2026-09-06 "host_addr").
     Master(ByteWire& wire, Clock& clock, uint8_t host_addr = omgp::ADDR_host);
 
     // Busy if a transaction is already open; PayloadTooLong/ReservedAddress as
