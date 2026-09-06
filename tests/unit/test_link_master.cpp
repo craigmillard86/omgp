@@ -518,7 +518,10 @@ TEST_CASE("a CRC-failed response ends the attempt immediately, without waiting o
           "remaining timeout",
           "[link]") {
     // Kind::CrcError is implemented in mock_wire.cpp (T029's own slice of T030): the real
-    // response with its last CRC byte XOR 0xFF, per contracts/mock-wire.md.
+    // response with its last CRC byte replaced by a wrong one of the SAME stuffed length
+    // (XOR 0xFF except at the four values where that would change the wire length —
+    // corrupt_crc_hi()), per the amended contracts/mock-wire.md row. The same length is
+    // what lets crc_full_end below be computed from the UNCORRUPTED response's length.
     FakeClock clock;
     MockWire wire(clock);
     const uint8_t dst = 0x08;
@@ -735,6 +738,104 @@ TEST_CASE("a late duplicate of a concluded transaction's response is discarded d
     REQUIRE(ev.kind == MasterEvent::Answered);
     REQUIRE(master.stats(dst).transactions == 2);
     REQUIRE(master.stats(dst).retries == 0); // unaffected by the stale frame
+}
+
+TEST_CASE("US2 AC4 as written: a transaction that succeeded on its first retry, followed by a "
+          "late duplicate of the pre-retry response, is discarded and does not affect the next "
+          "transaction's outcome or counters",
+          "[link]") {
+    // The case above concludes transaction N on attempt 0; #47 AC4 / spec.md US2 AC4 state
+    // the precondition "succeeded on a retry" and the late copy as one "of the original
+    // (pre-retry) response" (PR #137 review @2627be9, MEDIUM: the checkbox was ticked
+    // against a differently-shaped test). Here attempt 0 meets Silence, the first retry is
+    // answered by a Duplicate step, and its repeat is the late copy. That repeat IS a copy of
+    // the pre-retry response byte for byte: a node's response never carries the retry bit
+    // (mock_wire.cpp response_fields(): `r.retry = false`; trunk §7 — the retry bit is the
+    // request's), and a retry reuses seq, so nothing on the wire tells the two apart.
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x09;
+    const uint8_t payload0[] = {0x01};
+    const uint8_t payload1[] = {0x02};
+
+    // Attempt 0 at t = 0, silence, timeout at tx_end0 + T_resp, the retry T_gap later (the
+    // instants the AC2 case pins); the Duplicate step answers the retry promptly.
+    const uint64_t tx_end0 = static_cast<uint64_t>(
+        request_bytes(dst, 0, false, payload0, sizeof payload0).size() * byte_us());
+    const uint64_t retry_start = tx_end0 + omgp::TRUNK_T_resp_us + omgp::TRUNK_T_gap_us;
+    const uint64_t retry_end =
+        retry_start +
+        static_cast<uint64_t>(request_bytes(dst, 0, true, payload0, sizeof payload0).size()) *
+            byte_us();
+    const uint64_t full_end_r = response_full_end(retry_end, dst, 0, payload0, sizeof payload0);
+    const uint64_t tx1_start = full_end_r + omgp::TRUNK_T_gap_us;
+    const uint64_t tx1_end =
+        tx1_start +
+        static_cast<uint64_t>(request_bytes(dst, 1, false, payload1, sizeof payload1).size()) *
+            byte_us();
+
+    // The late copy starts full_end_r + delay_us: chosen to land just after N+1 transmits,
+    // inside N+1's open window (same construction as the case above).
+    const uint32_t margin = 10;
+    const uint32_t duplicate_delay_us = static_cast<uint32_t>(tx1_end - full_end_r) + margin;
+    const uint32_t tx1_answer_delay_us = 110; // N+1's own answer clears the stale copy
+    const Step script[] = {
+        {dst, Kind::Silence},
+        {dst, Kind::Duplicate, duplicate_delay_us},
+        {dst, Kind::Respond, tx1_answer_delay_us},
+    };
+    wire.set_script(dst, script, 3);
+
+    Master master(wire, clock, omgp::ADDR_host);
+    REQUIRE(master.begin(dst, payload0, sizeof payload0) == Status::Ok);
+
+    MasterEvent ev = wire.advance_to(retry_start, master);
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE(wire.transcript_size() == 2); // attempt 0 timed out; the first retry is out
+    REQUIRE(wire.transcript(1).retry);
+    REQUIRE(wire.transcript(1).seq == 0);
+    REQUIRE(wire.transcript(1).tx_start_us == retry_start);
+
+    ev = wire.advance_to(full_end_r, master);
+    REQUIRE(ev.kind == MasterEvent::Answered); // succeeded on its first retry
+    REQUIRE(ev.response.seq == 0);
+    REQUIRE(master.attempts() == 2);
+    REQUIRE(master.stats(dst).transactions == 1);
+    REQUIRE(master.stats(dst).retries == 1);
+    REQUIRE(master.stats(dst).timeouts == 1);
+    REQUIRE_FALSE(master.busy());
+
+    // Transaction N+1 (seq 1), issued the instant N concludes; gap-deferred to tx1_start.
+    REQUIRE(master.begin(dst, payload1, sizeof payload1) == Status::Ok);
+    ev = wire.advance_to(tx1_start, master);
+    REQUIRE(wire.transcript_size() == 3);
+    REQUIRE(wire.transcript(2).seq == 1);
+    REQUIRE_FALSE(wire.transcript(2).retry);
+    REQUIRE(wire.transcript(2).tx_start_us == tx1_start);
+
+    const uint64_t stale_copy_start = full_end_r + duplicate_delay_us;
+    const size_t resp0_n = response_bytes(dst, 0, payload0, sizeof payload0).size();
+    const uint64_t stale_copy_end = stale_copy_start + resp0_n * byte_us();
+    REQUIRE(stale_copy_start > tx1_end); // non-vacuity: inside N+1's window, not N's
+    REQUIRE(stale_copy_end < tx1_end + omgp::TRUNK_T_resp_us);
+
+    const uint32_t discards_before = master.stats(dst).discards;
+    ev = wire.advance_to(stale_copy_end, master);
+    REQUIRE(ev.kind == MasterEvent::None); // seq 0 against N+1's 1: discarded
+    REQUIRE(master.stats(dst).discards == discards_before + 1);
+    REQUIRE(master.busy());
+
+    const uint64_t full_end1 =
+        response_full_end(tx1_end, dst, 1, payload1, sizeof payload1, tx1_answer_delay_us);
+    ev = wire.advance_to(full_end1, master);
+    REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(ev.response.seq == 1);
+    REQUIRE(master.attempts() == 1); // N+1 needed no retry
+    REQUIRE(master.stats(dst).transactions == 2);
+    REQUIRE(master.stats(dst).retries == 1);  // N's, unchanged by the stale copy
+    REQUIRE(master.stats(dst).timeouts == 1); // likewise
+    REQUIRE(master.stats(dst).crc_failures == 0);
+    REQUIRE_FALSE(master.busy());
 }
 
 // --- Acceptance window has a lower bound, not just T_resp's upper one ------------------

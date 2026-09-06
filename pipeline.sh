@@ -23,9 +23,9 @@ WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=
 # added test_link_master.cpp (then 308753 checks: its microsecond-cadence timing loops REQUIRE
 # per poll); raised 2026-09-06 (#137 review, MEDIUM: at 200580 the gate could not notice this
 # binary being dropped — 236588 executed at 40355cf was 36008 above it). The suite has grown
-# since and the floor is not chased upward: 511317 executed at #137's seventeenth round
-# (test_link_master 310610, the other 16 binaries 200707), slack 1957 (#137 review @050f397,
-# LOW: this derivation had gone stale). Dropping test_link_master leaves 200707 < floor, so
+# since and the floor is not chased upward: 511385 executed at #137's eighteenth round
+# (test_link_master 310676, the other 16 binaries 200709), slack 2025 (#137 review @050f397,
+# LOW: this derivation had gone stale). Dropping test_link_master leaves 200709 < floor, so
 # the gate fires (demonstrated by that arithmetic, assuming the other 16 binaries' counts are
 # unchanged). Was 200580.
 UNIT_TEST_FLOOR=509360

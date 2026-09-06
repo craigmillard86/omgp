@@ -301,7 +301,12 @@ TEST_CASE("Kind::CrcError answers with a CRC-invalid frame of the same wire leng
     size_t drained = 0;
     uint8_t byte;
     uint64_t start_us;
+    uint64_t first_start = 0;
+    uint64_t last_start = 0;
     while (wire.receive(byte, start_us)) {
+        if (drained == 0)
+            first_start = start_us;
+        last_start = start_us;
         if (d.feed(byte, view))
             delivered = true;
         ++drained;
@@ -312,6 +317,14 @@ TEST_CASE("Kind::CrcError answers with a CRC-invalid frame of the same wire leng
     REQUIRE_FALSE(delivered);
     REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::BadCrc)] == 1);
     REQUIRE(drained == real_answer.size());
+    // "at request_end + delay_us": the instant itself, pinned like the Duplicate case's.
+    // The drain count alone passes for every delay SMALLER than the scripted one (receive()
+    // releases a byte once start_us <= now), and test_link_master's CRC-timing cases derive
+    // their expected instants from this delay (PR #137 review @2627be9, MEDIUM).
+    REQUIRE(first_start == tx_end + 30);
+    REQUIRE(last_start ==
+            tx_end + 30 +
+                static_cast<uint64_t>(real_answer.size() - 1) * byte_time_us(omgp::TRUNK_bit_rate));
 }
 
 TEST_CASE("Kind::Duplicate answers with the real response, then the identical bytes again "

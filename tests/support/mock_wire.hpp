@@ -148,7 +148,9 @@ class MockWire : public omgp::link::ByteWire {
     void schedule_respond(const omgp::link::FrameFields& request, uint64_t tx_end,
                           uint32_t delay_us);
     // Kind::CrcError (contracts/mock-wire.md): the real response with its last CRC byte
-    // (crc_hi, unstuffed) XOR 0xFF, at request_end + delay_us.
+    // (crc_hi, unstuffed) replaced by a wrong one of the SAME stuffed length — XOR 0xFF
+    // except at the four values where that would change the wire length (corrupt_crc_hi()
+    // in mock_wire.cpp) — at request_end + delay_us.
     void schedule_crc_error(const omgp::link::FrameFields& request, uint64_t tx_end,
                             uint32_t delay_us);
     // Kind::Duplicate (contracts/mock-wire.md): the real (promptly, default-delay)
