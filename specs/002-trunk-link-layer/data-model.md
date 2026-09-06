@@ -74,8 +74,14 @@ Master state ∈ { Idle, Transmitting(until tx_end), AwaitResponse(until tx_end 
 - **Sequence**: per-destination counter `next_seq[16]`; `begin()` uses `next_seq[dst]++ & 0x0F`
   for a new transaction; retries reuse `seq` and set `retry`.
 - **Response acceptance** (all must hold): intact frame; `src == dst_of_request`;
-  `dst == 0x00` (host); `response == 1`; `seq == transaction.seq`; first byte's start
-  instant `< tx_end_us + T_resp`. A CRC-failed frame in the window ends the attempt
+  `dst == host_addr` (the Master's constructor argument, default `0x00` — a Master built
+  with another address accepts only frames to it); `response == 1`; `seq ==
+  transaction.seq`; first byte's start instant in `[tx_end_us, tx_end_us + T_resp)` — the
+  closed lower bound discards a "response" whose FLAG opened inside the host's own
+  transmission, as `contracts/link-cpp.md` already states (both amended in PR #137 review
+  @`1057568`, LOW: this list said `dst == 0x00` and gave only the upper bound; the code,
+  `link/master.cpp` `in_window` and the `host_addr_` compare, is what the tests pin). A
+  CRC-failed frame in the window ends the attempt
   immediately (§7: "CRC-failed response" is a failure, no need to wait for the timeout).
   A frame that opened inside the window and is still arriving at the window's end (bytes
   still coming at byte cadence) holds the `Timeout` off until it concludes — bounded at
