@@ -48,7 +48,7 @@ uint64_t byte_us() {
 
 // The bytes a real Master would transmit for a request to `dst` from `src`.
 std::vector<uint8_t> request_bytes(uint8_t dst, uint8_t src, bool retry, uint8_t seq,
-                                    const uint8_t* payload, size_t len) {
+                                   const uint8_t* payload, size_t len) {
     FrameFields f{dst, src, /*response=*/false, retry, seq, static_cast<uint8_t>(len), payload};
     uint8_t out[kMaxWire];
     size_t written = 0;
@@ -59,8 +59,8 @@ std::vector<uint8_t> request_bytes(uint8_t dst, uint8_t src, bool retry, uint8_t
 // A request-shaped frame with one interior (payload) byte flipped so its CRC no longer
 // matches, checked through an independent Deframer to land as exactly one
 // Discard::BadCrc — mirrors test_link_master.cpp's crc_bad_response().
-std::vector<uint8_t> crc_bad_request(uint8_t dst, uint8_t src, uint8_t seq,
-                                      const uint8_t* payload, size_t len) {
+std::vector<uint8_t> crc_bad_request(uint8_t dst, uint8_t src, uint8_t seq, const uint8_t* payload,
+                                     size_t len) {
     std::vector<uint8_t> bad = request_bytes(dst, src, false, seq, payload, len);
     REQUIRE(bad.size() > 6);
     bad[5] = static_cast<uint8_t>(bad[5] ^ 0x02);
@@ -104,7 +104,10 @@ TEST_CASE("a default-constructed Responder transmits its response's first byte e
 
     // Draining the request and deciding/encoding the answer is allocation-free
     // (CLAUDE.md rule 5) — nothing is due yet, one byte_time before the deadline.
-    HEAP_FREE_SCOPE({ wire.advance_to(deadline - 1, responder); });
+    // wire.advance_to()'s own REQUIRE machinery may allocate, so only the engine call
+    // itself (poll(), production code) is wrapped, not the test harness's clock step.
+    wire.advance_to(deadline - 1);
+    HEAP_FREE_SCOPE({ responder.poll(deadline - 1); });
     REQUIRE(wire.transcript_size() == 0);
     REQUIRE(handler.calls == 1);
 
@@ -178,8 +181,8 @@ TEST_CASE("a retry of the buffered sequence retransmits identical bytes without 
     Responder responder(wire, clock, handler, kMyAddr);
 
     const uint8_t payload[] = {0x01, 0x02};
-    uint64_t request_end = inject_request(
-        wire, request_bytes(kMyAddr, kPeer, false, 5, payload, sizeof payload), 0);
+    uint64_t request_end =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 5, payload, sizeof payload), 0);
     uint64_t deadline = request_end + omgp::TRUNK_T_turn_min_us;
     wire.advance_to(deadline, responder);
     REQUIRE(wire.transcript_size() == 1);
@@ -210,16 +213,15 @@ TEST_CASE("a retry of the buffered sequence retransmits identical bytes without 
 
 // --- US3 AS3/FR-016: a differing sequence is new ---------------------------------------
 
-TEST_CASE("a request with a different sequence is treated as new, replacing the buffer",
-          "[link]") {
+TEST_CASE("a request with a different sequence is treated as new, replacing the buffer", "[link]") {
     FakeClock clock;
     MockWire wire(clock);
     RecordingHandler handler;
     Responder responder(wire, clock, handler, kMyAddr);
 
     const uint8_t payload1[] = {0x01};
-    uint64_t end1 = inject_request(
-        wire, request_bytes(kMyAddr, kPeer, false, 3, payload1, sizeof payload1), 0);
+    uint64_t end1 =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 3, payload1, sizeof payload1), 0);
     wire.advance_to(end1 + omgp::TRUNK_T_turn_min_us, responder);
     REQUIRE(handler.calls == 1);
     REQUIRE(wire.transcript_size() == 1);
@@ -282,11 +284,10 @@ TEST_CASE("a frame for another address, and a corrupt frame, are discarded and n
 
     SECTION("addressed to a different node") {
         const uint8_t payload[] = {0x01};
-        uint64_t end = inject_request(
-            wire,
-            request_bytes(static_cast<uint8_t>(kMyAddr + 1), kPeer, false, 0, payload,
-                          sizeof payload),
-            0);
+        uint64_t end = inject_request(wire,
+                                      request_bytes(static_cast<uint8_t>(kMyAddr + 1), kPeer, false,
+                                                    0, payload, sizeof payload),
+                                      0);
         wire.advance_to(end + omgp::TRUNK_T_turn_max_us, responder);
         REQUIRE(handler.calls == 0);
         REQUIRE(wire.transcript_size() == 0);
@@ -330,8 +331,8 @@ TEST_CASE("a first poll() reached only after request_end + T_turn_max transmits 
     Responder responder(wire, clock, handler, kMyAddr);
 
     const uint8_t payload[] = {0x01};
-    uint64_t request_end = inject_request(
-        wire, request_bytes(kMyAddr, kPeer, false, 0, payload, sizeof payload), 0);
+    uint64_t request_end =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 0, payload, sizeof payload), 0);
     const uint64_t late_now = request_end + omgp::TRUNK_T_turn_max_us + 1000;
 
     // No intermediate poll(): the FIRST call after the request lands well past T_turn_max.
