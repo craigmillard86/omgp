@@ -1383,12 +1383,24 @@ no rebuild): the runner discovers 4 050 mutants and executes 260 — exactly the
 the full run (228 killed / 30 survived / 2 timeout both ways; `tools/mutate_diff_reports.py`
 lists any mutant that differs, and listed none). Dispatch is unaffected because the filter
 is applied after discovery, in the runner, not in the plugin. Demonstrated by that
-comparison, on Mull 0.34.0 / LLVM 14; CI runs the LLVM 18 package of the same release —
-the first completed `deep-verify` on the gate-budget PR is the check that it holds there.
+comparison, on Mull 0.34.0 / LLVM 14. CI runs the LLVM 18 package of the same release;
+the gate-budget PR's own `deep-verify` cannot check that (its diff has no scope-dir source,
+so the mutation step is a no-op there — #141 review, HIGH), so it was checked in a
+`ubuntu:24.04` container with the CI recipe (clang 18.1.3, the pinned Mull LLVM-18 `.deb`,
+`--diff origin/main --require`) on #137's tree at `1057568`: the same gate line,
+`mutants=122 killed=112 survived=10 labelled[equivalent=8 accepted=2] unlabelled=0`, PASS,
+in 2 m 44 s on 12 cores; the unfiltered old-script run in the same container is the
+LLVM-18 oracle for the per-mutant comparison (recorded on the PR).
 **Recommendation:** (a) phase-2 `mull.yml` carries `includePaths` derived from
 `mutate.cfg`'s `scope_dirs` (done in the gate-budget PR); the compile-time config stays
-mutators-only; the report post-filter stays the gate, so a regression in the runner filter
-can only make the run slower, never narrower than the gate. (b) Amend research.md trap (4)
+mutators-only; the report post-filter stays the gate for what it SEES — it can only remove
+mutants, never restore ones the runner declined to execute, so a filter regex that silently
+misses one dir would narrow the gate with no signal (#141 review, LOW): `mutate_report.py`
+therefore fails a diff-scoped run in which a changed dir has no executed mutant at all (per
+changed dir, any line; exempt only when every changed file there is
+`mutation-exempt(no-body)`), and `mutate.sh` anchors the regexes on `pwd -P`. A regression
+in the runner filter then either makes the run slower or fails it — never narrows it
+silently. (b) Amend research.md trap (4)
 and `contracts/tooling.md` step 3 to say "at compile time" (done in place, marked). (c) Do
 NOT reach for the levers that would make the run faster by making the gate smaller:
 `timeout_ms`/`--minimum-timeout` (Timeout ranks as killed), `--coverage-info` (uncovered →

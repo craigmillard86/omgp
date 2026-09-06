@@ -131,7 +131,9 @@ fi
 # phase 1 instruments every TU; phase 2 narrows what the runner EXECUTES to the scope dirs.
 # The build is always fresh: objects compiled without the config contain no mutants.
 python3 tools/codegen.py --vectors tests/vectors >/dev/null
-ROOT=$(pwd)
+# Physical path: Mull records the path CMake compiled from, and phase 2's includePaths
+# regexes are anchored on it — a symlinked logical path would match nothing (#141 review).
+ROOT=$(pwd -P)
 rm -rf "$BUILD" && mkdir -p "$BUILD"
 # Compile-time config: mutators only — every translation unit is instrumented. Measured on
 # 0.34.0: any includePaths/excludePaths HERE leaves the runner with "No mutants found",
@@ -172,13 +174,17 @@ echo "mutation: instrumented build done (mutated functions in library objects:$e
 # The report merge counts only scope_dirs anyway (mutate_report.py in_scope), so this drops
 # nothing the gate ever looked at — it stops executing what the merge discards: measured on
 # 0.34.0 at PR #137 round 19, test_link_master went 4050 mutants / 14m30s → 260 / 43s on 12
-# cores, every in-scope status identical (tools/mutate_diff_reports.py). Diff scoping is
+# cores, every in-scope status identical (tools/mutate_diff_reports.py). The merge can only
+# REMOVE mutants, never restore ones the runner declined to execute, so a filter regex that
+# silently misses a dir WOULD narrow the gate: mutate_report.py fails when a changed dir has
+# no executed mutant at all (its per-changed-dir blind-spot rule; #141 review). Diff scoping is
 # still NOT delegated to Mull's gitDiffRef: measured on 0.34.0, its filter keeps mutants in
 # modified files but drops every mutant in a file the diff ADDS (new-file hunks) — useless
 # for a feature whose PRs mostly add files. The merge below keeps only mutants on lines
 # `git diff -U0 <ref>` marks as added/changed under scope_dirs.
 ROOT_RE=$(printf '%s' "$ROOT" | sed 's/[][\.*^$+?(){}|\\]/\\&/g')
 {
+  echo "mutators:"; for g in $GROUPS_; do echo "  - $g"; done   # as phase 1; every pre-#141 run carried it here and ran, so the runner tolerates it — kept so phase 2 differs from phase 1 by includePaths alone (#141 review)
   echo "timeout: $TIMEOUT_MS"
   echo "quiet: true"
   echo "includePaths:"; for d in $SCOPE_DIRS; do echo "  - ^$ROOT_RE/$d/.*"; done

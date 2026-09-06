@@ -331,6 +331,69 @@ def test_report_no_reports_or_no_mutants_is_a_failure(tmp_path):
     assert rc == 1 and "no Mull reports" in out
 
 
+def test_report_diff_mode_fails_when_a_changed_dir_has_no_executed_mutants(tmp_path):
+    """A run-time path filter (mutate.sh phase 2) that matches one scope dir but not another
+    leaves total > 0, so the whole-scope blind-spot rule above never fires while every mutant
+    of the unmatched dir silently goes unexecuted (#141 review, LOW). Per changed dir: at
+    least one mutant, on ANY line, must have been executed — else it is a blind spot."""
+    root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": [[1, 8]], "link/y.cpp": [[1, 2]]})
+    (root / "link").mkdir()
+    (root / "link" / "y.cpp").write_text("int g() {\n    return 1;\n}\n")
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1, out
+    assert "link/" in out and "blind spot" in out and "no mutants under" in out
+    # An exempt(no-body) file is the one legitimate way for a changed dir to carry none.
+    (root / "link" / "y.cpp").write_text("// mutation-exempt(no-body): declarations only\nint g();\n")
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1 and "x.cpp:2" in out and "link/" not in out.split("survivor")[0], out
+
+
+# --- tools/mutate_diff_reports.py: the evidence tool for mutate.sh changes -----------------------
+
+DIFF_REPORTS = ROOT / "tools" / "mutate_diff_reports.py"
+
+
+def _elements(tmp_path, name, files):
+    p = tmp_path / f"{name}.json"
+    p.write_text(json.dumps({"files": files}))
+    return p
+
+
+def _diff_reports(root, before, after):
+    r = subprocess.run([sys.executable, str(DIFF_REPORTS), str(before), str(after), "--root", str(root),
+                        "--scope-dirs", "l3 link core"], capture_output=True, text=True, cwd=ROOT)
+    return r.returncode, r.stdout + r.stderr
+
+
+def test_diff_reports_fails_when_it_compared_nothing(tmp_path):
+    """`differences: 0` from two reports with no in-scope mutant is vacuous, not evidence
+    (#141 review, MEDIUM): the tool must fail closed, exactly as mutate_report.py does."""
+    root = tmp_path / "repo"
+    only_tests = {str(root / "tests" / "unit" / "t.cpp"): {"mutants": [_mutant(1, 1, "cxx_add_to_sub", "Killed")]}}
+    rc, out = _diff_reports(root, _elements(tmp_path, "a", only_tests), _elements(tmp_path, "b", only_tests))
+    assert rc == 1 and "compared nothing" in out, out
+
+
+def test_diff_reports_keys_mutants_exactly_as_the_gate_does(tmp_path):
+    """Relative (`link/frame.cpp`) and root-absolute keys are the SAME mutant to
+    mutate_report.py (`rel_of` + `in_scope`); a substring match on `/link/` counted neither
+    form the same way (#141 review, MEDIUM). Identical sets → 0; one flipped status → listed, 1."""
+    root = tmp_path / "repo"
+    m = [_mutant(3, 5, "cxx_ge_to_gt", "Killed"), _mutant(9, 2, "cxx_add_to_sub", "Survived")]
+    rel = {"link/frame.cpp": {"mutants": m}}
+    absolute = {str(root / "link" / "frame.cpp"): {"mutants": m}}
+    rc, out = _diff_reports(root, _elements(tmp_path, "a", rel), _elements(tmp_path, "b", absolute))
+    assert rc == 0 and "before=2" in out and "after =2" in out and "differences: 0" in out, out
+    flipped = {"link/frame.cpp": {"mutants": [_mutant(3, 5, "cxx_ge_to_gt", "Killed"),
+                                              _mutant(9, 2, "cxx_add_to_sub", "Killed")]}}
+    rc, out = _diff_reports(root, _elements(tmp_path, "a", rel), _elements(tmp_path, "c", flipped))
+    assert rc == 1 and "link/frame.cpp:9:2 cxx_add_to_sub: Survived -> Killed" in out and "differences: 1" in out, out
+    # A mutant present on one side only is a difference too (a filter that DROPPED it).
+    dropped = {"link/frame.cpp": {"mutants": m[:1]}}
+    rc, out = _diff_reports(root, _elements(tmp_path, "a", rel), _elements(tmp_path, "d", dropped))
+    assert rc == 1 and "Survived -> -" in out, out
+
+
 def test_mutate_nothing_in_scope_is_fast(tmp_path):
     rc, out, dt = run(MUTATE, "--diff", "HEAD", timeout=90)
     assert rc == 0, out
