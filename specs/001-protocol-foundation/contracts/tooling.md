@@ -109,7 +109,9 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
 - `quality`: add `python3 tools/check_embedded.py`.
 - `build` (bootstrap): compile `third_party/catch2/catch_amalgamated.cpp` once to an
   object, then each `tests/unit/*.cpp` + `tests/property/*.cpp` with `l3/*.cpp`,
-  `l3_helper`, `crc_helper`; disclosure line unchanged.
+  `l3_helper`, `crc_helper`; disclosure line unchanged. (Amended by #133: the source
+  list is `unit_sources()` — every `test_*.cpp` under those two directories at any depth,
+  sorted — shared with the bootstrap `unit` walk.)
 - `unit`: run every test binary; the `EXECUTED: <n>` lines are summed (ctest path via
   `LastTest.log`, bootstrap via stdout); `UNIT_TEST_FLOOR` raised to the new total −
   small slack (documented in the commit that raises it: "raise when tests are added;
@@ -117,23 +119,34 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   runs `tools/check_test_set.py`, which proves from `compile_commands.json`, the object
   files, `ctest --show-only` and the run's `ctest --output-junit` record
   (`build/native/Testing/junit.xml`, deleted before ctest runs and refused if older than
-  any registered binary) that every `tests/{unit,property}/test_*.cpp` was compiled,
-  registered and executed, naming every one that was not — registered means an
-  `add_test` whose command is exactly the target's own binary with no arguments (a
-  filtered Catch2 run, or a same-named binary elsewhere, is refused), executed means an
+  any registered binary) that every `test_*.cpp` under `tests/unit` and `tests/property`
+  at any depth (red team @ceab86f) was compiled, registered and executed, naming every one
+  that was not — compiled means a `compile_commands.json` entry whose object exists and is
+  no older than the source (an edited-after-build source is named; an mtime comparison is
+  a control, not a guarantee), registered means an `add_test` whose command is exactly
+  the target's own binary — compared as an absolute path without resolving symlinks, so a
+  link to another target's binary is not a registration — with no arguments (a filtered
+  Catch2 run, or a same-named binary elsewhere, is refused), executed means an
   `EXECUTED: <n>` line with n > 0 (red team @94f2462) — ctest is run with
   `--test-output-size-passed 10000000` because its default keeps only the first 1024 bytes
   of a passing test's stdout, dropping the trailing `EXECUTED:` line, and the tool names a
-  record truncated that way (red team @3880d35); the bootstrap path walks the
-  SOURCES, so a source with no binary fails by name. Both paths print a `unit: verified N
-  test binaries` line, and both fail when there are no sources at all. The record, not
+  record truncated that way (red team @3880d35); the bootstrap path walks the same
+  `unit_sources()` list, so a source with no binary fails by name, and applies the same
+  execution predicate: a binary that exits 0 with no `EXECUTED:` line, or `EXECUTED: 0`,
+  is named and fails the stage (red team @ceab86f). Both paths print a `unit: verified N
+  test binaries` line (N = distinct binaries), and both fail when there are no sources
+  at all. The record, not
   `LastTest.log`, is the execution evidence: the log interleaves the tests' own stdout
   with ctest's framing (PR #172 red team). The two paths have different predicates by
   design — ctest runs what cmake registered and the tool proves the sources are all in
   that set; bootstrap runs one binary per source that its own `stage_build` made — and
   a pipeline run never mixes them: a cmake tree without `CTestTestfile.cmake` takes the
   bootstrap path and fails at the first source with no bootstrap binary.)
-- `refimpl`: `python3 -m pytest -q tools/refimpl`.
+- `refimpl`: `python3 -m pytest -q -rs tools/refimpl`. Ordering dependency (#133):
+  `tools/refimpl/test_test_set_gate.py`'s two real-tree controls read `build/native`'s
+  artefacts and the JUnit record the same invocation's `unit` stage wrote, so `refimpl`
+  must follow `build unit` (the default list and `ci.yml`'s explicit list both do);
+  without them the controls skip locally and fail on CI (`GITHUB_ACTIONS`).
 - `codegen`: `python3 tools/codegen.py --vectors tests/vectors && python3 tools/codegen.py --check-docs`.
 - `esp32`: calls `stage_codegen` first so `build/gen/` exists on the host before the
   Docker build (the IDF image has no Jinja2).

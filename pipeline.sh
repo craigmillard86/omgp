@@ -11,6 +11,15 @@ CXXFLAGS_BOOT="-std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefi
 # Counting heap guard for Catch2 tests (tests/support/heap_guard.hpp) — mirrors CMakeLists.txt.
 WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=_Znwm -Wl,--wrap=_Znam"
 
+# The unit test SOURCE set, one line per file: every test_*.cpp under tests/unit and
+# tests/property, at any depth, sorted. Shared by the bootstrap build and the bootstrap unit
+# walk (and mirrored by tools/check_test_set.py) so all three agree on what "every source"
+# means; a flat glob would leave tests/unit/<sub>/test_x.cpp silently unchecked (#172 red team
+# @ceab86f, finding 4). find's -name matches the file name only, so sorting is by full path.
+unit_sources() {
+  find tests/unit tests/property -name 'test_*.cpp' 2>/dev/null | LC_ALL=C sort
+}
+
 # raise when tests are added; NEVER lower to get green (that change is itself T3)
 # 133865 = 133870 executed (9 binaries; the seeded property tests dominate) minus 5 slack —
 # T008/T009 follow-up, raised 2026-08-30 with test_link_types.cpp (was 133821)
@@ -79,10 +88,9 @@ stage_build() {
     support="$(ls tests/support/*.cpp) tools/canonical.cpp tools/l3_helper_dispatch.cpp"
     l3srcs=$(ls l3/*.cpp 2>/dev/null || true)
     linksrcs=$(ls link/*.cpp 2>/dev/null || true)
-    # One binary per tests/unit/test_*.cpp and tests/property/test_*.cpp. test_smoke keeps its
-    # own main (linking it with Catch2's main would be a duplicate symbol).
-    for t in tests/unit/test_*.cpp tests/property/test_*.cpp; do
-      [ -f "$t" ] || continue
+    # One binary per unit_sources() entry, named by basename. test_smoke keeps its own main
+    # (linking it with Catch2's main would be a duplicate symbol).
+    while IFS= read -r t; do
       name=$(basename "$t" .cpp)
       if [ "$name" = test_smoke ]; then
         g++ $CXXFLAGS_BOOT "$t" -o "$BIN/test_smoke"
@@ -90,7 +98,7 @@ stage_build() {
         g++ $CXXFLAGS_BOOT -I. -Il3 -Itools -Ithird_party/catch2 -Itests/support \
           "$t" $support $l3srcs $linksrcs "$BIN/catch2.o" $WRAP_LDFLAGS -o "$BIN/$name"
       fi
-    done
+    done < <(unit_sources)
     g++ $CXXFLAGS_BOOT tools/crc_helper.cpp -o "$BIN/crc_helper"
     g++ $CXXFLAGS_BOOT -I. -Il3 -Itools tools/l3_helper.cpp tools/l3_helper_dispatch.cpp \
       tools/canonical.cpp $l3srcs $linksrcs -o "$BIN/l3_helper"
@@ -139,13 +147,14 @@ stage_unit() {
     fi
     return "$rc"
   else
-    # One binary per SOURCE (the same list stage_build compiles): a source whose binary is
-    # missing fails by name (#133) instead of dropping out of a walk over build/native/test_*.
-    # Every binary runs; its output is always printed (even on failure) and the EXECUTED:
-    # lines are summed across binaries for the floor.
+    # One binary per SOURCE (the same unit_sources() list stage_build compiles): a source
+    # whose binary is missing fails by name (#133) instead of dropping out of a walk over
+    # build/native/test_*. Every binary runs; its output is always printed (even on failure)
+    # and the EXECUTED: lines are summed across binaries for the floor. The same predicate as
+    # the ctest path (red team @ceab86f, finding 1): exit 0 alone is not execution — the
+    # binary must print `EXECUTED: n` with n > 0, else it is named and the stage fails.
     local total=0 count=0 t bin out rc n
-    for t in tests/unit/test_*.cpp tests/property/test_*.cpp; do
-      [ -f "$t" ] || continue
+    while IFS= read -r t; do
       bin="$BIN/$(basename "$t" .cpp)"
       if [ ! -x "$bin" ]; then
         echo "unit: $t: no binary at $bin (not built, or built under another name)" >&2
@@ -160,10 +169,18 @@ stage_unit() {
         echo "unit: $(basename "$bin") failed (exit $rc)" >&2
         return "$rc"
       fi
-      n=$(printf '%s\n' "$out" | grep -o 'EXECUTED: [0-9]\+' | grep -o '[0-9]\+' | tail -1) || true
-      total=$((total + ${n:-0}))
+      n=$(printf '%s\n' "$out" | grep -o '^EXECUTED: [0-9]\+$' | grep -o '[0-9]\+' | tail -1) || true
+      if [ -z "$n" ]; then
+        echo "unit: $t: $(basename "$bin") exited 0 but printed no EXECUTED line — that is not execution" >&2
+        return 1
+      fi
+      if [ "$n" -eq 0 ]; then
+        echo "unit: $t: $(basename "$bin") reported EXECUTED: 0 — no test case executed" >&2
+        return 1
+      fi
+      total=$((total + n))
       count=$((count + 1))
-    done
+    done < <(unit_sources)
     if [ "$count" -eq 0 ]; then
       echo "unit: no test sources under tests/unit, tests/property (nothing to verify is a failure, not a pass)" >&2
       return 1
@@ -178,6 +195,12 @@ stage_unit() {
 }
 
 stage_refimpl() {
+  # Ordering dependency (red team @ceab86f, finding 2): tools/refimpl/test_test_set_gate.py's
+  # two real-tree controls read build/native's artefacts AND the JUnit record that THIS
+  # pipeline's `unit` stage wrote — so `refimpl` must follow `build unit` in the same
+  # invocation, as the default list and ci.yml's explicit list both do. Without them the
+  # controls skip locally and FAIL on CI (GITHUB_ACTIONS): a bare `./pipeline.sh refimpl`
+  # on a runner is a failure, not a pass.
   python3 tools/refimpl/omgp_crc.py
   python3 tools/refimpl/genvectors.py --check   # committed vectors byte-identical to the generator (rule 9; red-team finding 3 on PR #107)
   python3 -m pytest -q -rs tools/refimpl   # reference implementation + tool tests (jinja2/pytest: tools/requirements.txt); -rs names every skip, so a CI log says WHICH blind spot a skip is (#141 review: "3 skipped" was unreadable)

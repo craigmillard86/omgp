@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove that every tests/{unit,property}/test_*.cpp was compiled, registered and executed.
+"""Prove that every test_*.cpp under tests/{unit,property} was compiled, registered and executed.
 
 `pipeline.sh` `stage_unit` (ctest path) calls this after `ctest --preset native
 --output-junit Testing/junit.xml` and after summing the floor. The floor
@@ -11,9 +11,15 @@ the run's own machine-readable record, and names every source that escaped:
               object (relative to the entry's `directory`) exists; the object path names
               the target: CMakeFiles/<target>.dir/...  (a CMakeLists line re-pointed at
               another file leaves the source with NO entry — "compiled by no target").
+              The object must be at least as new as the source: an edited-after-build
+              source is named ("source is newer than its object; rebuild") rather than
+              vouched for by a stale object (red team @ceab86f finding 3). An mtime
+              comparison is a control, not a guarantee (clock skew, touch).
   registered  `ctest --show-only=json-v1` in the build dir lists a test whose command is
-              EXACTLY [<build>/<target>] — the target's own binary, by path (a same-named
-              binary elsewhere is a decoy: red team @94f2462 finding 2), with no arguments
+              EXACTLY [<build>/<target>] — the target's own binary, compared as an absolute
+              path WITHOUT resolving symlinks: build/<other> -> build/<target> is not a
+              registration of <other> (@ceab86f finding 5). A same-named binary elsewhere
+              is a decoy (red team @94f2462 finding 2). No arguments
               (an argument is a Catch2 filter; a spec matching nothing plus
               --allow-running-no-tests exits 0 with `EXECUTED: 0` — @94f2462 finding 1).
               CMakeLists registers `COMMAND ${name}` bare, and the binary lands at
@@ -49,12 +55,17 @@ No sources at all is a failure, not a vacuous pass (review @7dbf9d8).
 Matching is by BINARY (basename of the target / command[0]), not by test name:
 CMakeLists registers test_smoke as `smoke`.
 
+The source set is every test_*.cpp under tests/unit and tests/property at ANY depth
+(rglob), the same set pipeline.sh's unit_sources() walks; a flat glob would leave
+tests/unit/<sub>/test_x.cpp unchecked and unnamed (@ceab86f finding 4).
+
 Order matters: `ctest --show-only` REWRITES LastTest.log (measured on CMake 3.22: the log
 holds zero EXECUTED lines afterwards), so the log is read (as bytes) first and written
 back unchanged afterwards. Pure Python 3, standard library only; runs on every CI path.
 
 Exit 0 and one line `unit: verified N test binaries (compiled, registered, executed;
-ctest path)` when every source passes all three; otherwise one
+ctest path)` — N counts distinct binaries, so a multi-source target counts once (review
+@ceab86f, LOW) — when every source passes all three; otherwise one
 `unit: <source>: <reason>` line per failing source on stderr, exit 1.
 """
 import argparse
@@ -75,7 +86,7 @@ TRUNCATED_RE = re.compile(r"test output was removed since it exceeds the thresho
 
 
 def sources(root: Path):
-    return sorted(p for d in SOURCE_DIRS for p in (root / d).glob("test_*.cpp"))
+    return sorted(p for d in SOURCE_DIRS for p in (root / d).rglob("test_*.cpp") if p.is_file())
 
 
 def compiled_targets(build: Path):
@@ -93,13 +104,16 @@ def compiled_targets(build: Path):
 
 
 def registered_tests(build: Path):
-    """realpath(command[0]) -> [(ctest test name, command argv)] from `ctest --show-only=json-v1`."""
+    """abspath(command[0]) -> [(ctest test name, command argv)] from `ctest --show-only=json-v1`.
+
+    Absolute, normalised, symlinks NOT resolved: the key is the path ctest will exec, and
+    two paths that resolve to one file are two registrations of one binary, not of two."""
     out = subprocess.run(["ctest", "--show-only=json-v1"], cwd=build,
                          capture_output=True, text=True, check=True).stdout
     by_binary = {}
     for t in json.loads(out)["tests"]:
         if t.get("command"):
-            by_binary.setdefault(os.path.realpath(t["command"][0]), []).append((t["name"], t["command"]))
+            by_binary.setdefault(os.path.abspath(t["command"][0]), []).append((t["name"], t["command"]))
     return by_binary
 
 
@@ -152,10 +166,18 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
         if not obj.exists():
             failures.append(f"{rel}: object {obj} missing (target {target} not built)")
             continue
-        binary = os.path.realpath(build / target)
+        if src.stat().st_mtime > obj.stat().st_mtime:
+            failures.append(f"{rel}: source is newer than its object {obj} (target {target}); rebuild before verifying")
+            continue
+        binary = os.path.abspath(build / target)
         if binary not in registered:
+            real = os.path.realpath(binary)
             decoys = [d for d in by_basename.get(target, []) if d != binary]
-            if decoys:
+            aliases = [d for d in registered if os.path.realpath(d) == real]
+            if aliases:
+                failures.append(f"{rel}: built as {target} but not registered with ctest: the only registration reaching "
+                                f"this file runs {aliases[0]}, not {binary} (a link is not an add_test for {target})")
+            elif decoys:
                 failures.append(f"{rel}: built as {target} but the only registration named {target} runs {decoys[0]}, "
                                 f"which is not this target's binary {binary} (no add_test for it)")
             else:
@@ -178,7 +200,7 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
         for f in failures:
             print(f"unit: {f}", file=sys.stderr)
         return 1
-    n = len(srcs)
+    n = len({compiled[os.path.realpath(src)][0] for src in srcs})   # distinct targets, not sources
     print(f"unit: verified {n} test binar{'y' if n == 1 else 'ies'} (compiled, registered, executed; ctest path)")
     return 0
 

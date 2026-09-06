@@ -493,14 +493,18 @@ def test_real_artefacts_minus_one_registration_name_that_source(tmp_path):
     (root / "tests").symlink_to(ROOT / "tests", target_is_directory=True)
     shutil.copy(real / "compile_commands.json", build / "compile_commands.json")
     shutil.copy2(real / "Testing/junit.xml", build / "Testing/junit.xml")   # copy2: keep the mtime
-    # The registration must run THIS build dir's <target> (red team @94f2462 finding 2): the
-    # scratch tree's binaries are symlinks to the real ones, so realpath() meets on both sides.
-    # Without these links every source would be named — the decoy-path refusal, not this control.
+    # The registration must run THIS build dir's <target> by absolute path (red team @94f2462
+    # finding 2; @ceab86f finding 5 ended symlink resolution on the comparison): the scratch
+    # tree's binaries are symlinks to the real ones and the copied registrations are rewritten
+    # to name the scratch paths. Without either, every source would be named — the decoy-path
+    # refusal, not this control.
     for src in SOURCES:
         target = Path(src).stem
         (build / target).symlink_to(real / target)
-    kept = [ln for ln in (real / "CTestTestfile.cmake").read_text().splitlines()
+    kept = [ln.replace(str(real), str(build))
+            for ln in (real / "CTestTestfile.cmake").read_text().splitlines()
             if "test_link_master" not in ln and not ln.startswith("subdirs(")]
+    assert any(str(build) in ln for ln in kept), kept   # the rewrite found the real paths
     (build / "CTestTestfile.cmake").write_text("\n".join(kept) + "\n")
     r = run_tool("--ctest", "--root", str(root), "--build", str(build))
     assert r.returncode != 0, r.stdout
