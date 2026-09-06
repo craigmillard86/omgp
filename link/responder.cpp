@@ -121,10 +121,11 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
         // committing a transaction and a buffer entry for a response that was never
         // encoded.
         if (encode_frame(resp, buffer_.bytes, sizeof buffer_.bytes, written) != Status::Ok) {
-            // Unreachable: both of encode_frame's refusal conditions are excluded above
-            // (ReservedAddress: f.src != 0xFF; BufferTooSmall: resp_len bounded, kMaxWire
-            // static_asserted). Kept as defence in depth; no test can reach the counter to
-            // observe which way it moves.
+            // Unreachable: all three of encode_frame's refusal conditions (link/frame.hpp)
+            // are excluded above (PayloadTooLong and BufferTooSmall: resp_len bounded by
+            // sizeof payload == LIMIT_max_l3_payload, kMaxWire static_asserted;
+            // ReservedAddress: f.src != 0xFF). Kept as defence in depth; no test can reach
+            // the counter to observe which way it moves.
             // mutant-ok(accepted, cxx_post_inc_to_post_dec): unreachable by construction.
             stats_.discards++;
             return;

@@ -2416,3 +2416,33 @@ the `on_request` busy-discard branch is removed), with four cases in
 look at whether `data-model.md` §5 should state the "held in the receive queue" rule
 explicitly (a documentation clarification only).
 **Supersedes:** none.
+
+## 2026-09-06 — Responder "held, not discarded" rests on the `ByteWire` receive-queue depth; no minimum depth is stated anywhere
+
+**Context:** the 2026-09-06 entry above ("held, not discarded") adopts option (a): while a
+response is Scheduled or Transmitting the Responder does not drain the wire, and bytes that
+arrive meanwhile wait in the wire's receive queue. Both the red team and the review at
+`70d7660` (PR #149) point out what that assumption depends on and that nothing pins it:
+the engine declines to drain for up to `T_turn_max` plus one full response transmission,
+so the queue must hold whatever a conformant peer can send in that interval. `MockWire`
+holds `4 * kMaxWire` (568 B) and fails loudly on overflow — the native suite can never
+lose a held request silently (six max-payload requests, 432 B, were queued behind a busy
+Responder with `discards == 0`, red team @`70d7660`). The ESP32-S3 hardware UART FIFO is
+128 B, smaller than one worst-case stuffed frame (`kMaxWire == 142`); on the target the
+rule would rest on the IDF driver's ring buffer, not on the hardware FIFO. Unverified:
+the target was not instrumented (both jobs state this).
+**Options:** (a) state a minimum receive-queue depth in the `ByteWire` contract
+(`contracts/link-cpp.md`) that any implementation must provide, e.g. at least
+`2 * kMaxWire`, with an overrun counter the Responder's `stats()` can surface; (b) leave
+the depth to each `ByteWire` implementation and re-open when the F4 hardware transport is
+written; (c) have the Responder drain into a second buffer while busy (option (c) of the
+2026-09-06 entry — rejected there as speculative storage).
+**Recommendation:** (a), as a contract line only, at the point the hardware `ByteWire` is
+specified; no code change in #149. Under a strict-poll master (trunk §3) nothing arrives
+while the Responder is busy, so the depth only matters for the coarse-poll case the rule
+exists for; a stated minimum makes the FR-015 claim "held, not discarded" checkable
+against an implementation rather than assumed. Material to the human ruling the
+2026-09-06 entry awaits (whether `data-model.md` §5 should state the held-in-queue rule).
+**Ruling:** pending human. No code change; the Responder's behaviour and its tests are as
+in the 2026-09-06 entry.
+**Supersedes:** none (adds a dependency note to the 2026-09-06 entry; does not change it).
