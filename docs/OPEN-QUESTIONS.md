@@ -2042,8 +2042,10 @@ timeout → SUSPECT) already covers what the host does see. (b) enforce `window_
 tx_end + T_turn_min_us`: converts a sub-minimum answer into a silent discard plus a full
 T_resp timeout — a faulty station's CRC failure becomes a timeout on a different counter, the
 exact outcome the CRC lower-bound cases were written to prevent.
-**Recommendation:** (a). No code change; the test comment at the case above cites this
-entry so the permissiveness reads as ruled, not accidental.
+**Recommendation:** (a). No code change to `link/`; the test comment at the case above
+WILL cite this entry (deferred to the next f2-link PR touching that file; at the time of
+this entry it cites only the #142 red-team follow-up) so the permissiveness reads as ruled,
+not accidental.
 **Ruling:** ADOPTED (a) — human, 2026-09-06 (maintainer, Claude Code session: "keep
 permissive, document it"). The host window is `[tx_end, tx_end + T_resp)`; `T_turn_min`
 constrains the node under §3 and is not a host-side filter.
@@ -2154,8 +2156,8 @@ slot of that `src`; anything else is discarded and counted.
 
 ## 2026-09-06 — #110 F6: GET_EVENT drains are bounded per node per superframe; remaining_count is advisory (closes protocol §6 open question 4)
 
-**Context:** protocol §3.4 lets a node report `remaining_count` and the host drain until it
-reaches zero; a node that always reports more pending events holds the host in its drain loop
+**Context:** protocol §3.1 (the `GET_EVENT` row: "repeat until empty", `u8 remaining_count`)
+lets a node report `remaining_count` and the host drain until it reaches zero; a node that always reports more pending events holds the host in its drain loop
 and starves the superframe. §6 open question 4 asked how many events a single drain may
 take.
 **Recommendation:** at most K = 1 `GET_EVENT` per node per superframe; a per-node event-rate
