@@ -182,7 +182,7 @@ stage_unit() {
         return 1
       fi
       set +e
-      out=$("$bin")
+      out=$("$bin" </dev/null)   # not the loop's source list: a binary reading stdin must not eat it (review @3dde163)
       rc=$?
       set -e
       echo "$out"

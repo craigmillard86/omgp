@@ -47,10 +47,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 TOOL = ROOT / "tools" / "check_test_set.py"
-SOURCES = sorted(
+SOURCES = sorted(   # the same recursive set pipeline.sh's unit_sources() and the tool's sources() walk
     p.relative_to(ROOT).as_posix()
     for d in ("tests/unit", "tests/property")
-    for p in (ROOT / d).glob("test_*.cpp")
+    for p in (ROOT / d).rglob("test_*.cpp") if p.is_file()
 )
 ON_CI = bool(os.environ.get("GITHUB_ACTIONS"))
 HAVE_CTEST = shutil.which("ctest") is not None
