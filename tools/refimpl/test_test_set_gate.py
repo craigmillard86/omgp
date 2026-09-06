@@ -281,7 +281,7 @@ class TestCtestPath:
         # The broken registration also fails --snapshot; the missing record is checked before
         # any comparison, so an empty (well-formed) snapshot is enough to reach that line.
         stub = tmp_path / "pre-stub.json"
-        stub.write_text(json.dumps({"compile_commands": "", "objects": {}, "registered": [], "binaries": {}}))
+        stub.write_text(json.dumps({"sources": {}, "compile_commands": "", "objects": {}, "registered": [], "binaries": {}}))
         r = run_tool("--ctest", "--pre", str(stub), cwd=root)
         assert r.returncode != 0 and "no execution record" in r.stderr, r.stderr
 

@@ -134,11 +134,15 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   is refused as "registration set differs from the run's record" — a control, not a
   guarantee) — with no arguments (a filtered Catch2 run, or a same-named binary
   elsewhere, is refused); and all of that evidence must be UNCHANGED by the run: the
-  stage takes `check_test_set.py --snapshot` before ctest (sha256 of
-  `compile_commands.json`; dev/ino/size/mtime/ctime of every source's object and every
-  registered binary; the registration list) and hands it to `--ctest --pre` on stdin —
-  never via a file under `build/` — so a test that writes a compile entry, an object, a
-  registration or a binary while running is refused as "changed during the ctest run"
+  stage takes `check_test_set.py --snapshot` before ctest (the source set with each
+  source's dev/ino/size/mtime/ctime; sha256 of `compile_commands.json`; the same identity
+  of every source's object and every registered binary; the registration list) and hands
+  it to `--ctest --pre` on stdin — never via a file under `build/` — so a test that
+  writes a compile entry, an object, a registration or a binary while running is refused
+  as "changed during the ctest run", and one that deletes or adds a test source while
+  running as "source set changed during the ctest run" — the check walks the sources
+  after ctest, so without the set in the snapshot a built-but-unregistered source was
+  verified away by deleting it mid-run (red team @2f40596)
   (red team @f8bce32; the identity is a control, not a guarantee — ctime is what a
   size-and-mtime-preserving rewrite cannot restore without root or a moved clock; a test
   that reaches the shell's memory or rewrites the tool or `pipeline.sh` is outside what
@@ -152,7 +156,12 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   `unit_sources()` list, so a source with no binary fails by name, and applies the same
   execution predicate: a binary that exits 0 with no `EXECUTED:` line, or `EXECUTED: 0`,
   is named and fails the stage (red team @ceab86f); a source newer than its binary is
-  named (`rebuild before verifying`; a control, not a guarantee); and because that path
+  named (`rebuild before verifying`; a control, not a guarantee); the source list, every
+  binary's existence and freshness and its dev/ino/size/mtime/ctime are gathered BEFORE
+  any binary runs, and the list and identities must be unchanged after the run — a
+  binary is arbitrary code, so gathering source n+1's evidence after source n's binary
+  ran let an earlier test mint or overwrite a later source's binary (red team @2f40596;
+  identity by stat is the same control as the ctest path's); and because that path
   builds one binary per BASENAME, two sources sharing a basename are refused by name
   before the bootstrap build and before the walk (red team @3dde163 — otherwise one
   binary would vouch for both and count twice). Both paths print a `unit: verified N

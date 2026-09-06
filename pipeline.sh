@@ -16,8 +16,14 @@ WRAP_LDFLAGS="-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=
 # walk (and mirrored by tools/check_test_set.py) so all three agree on what "every source"
 # means; a flat glob would leave tests/unit/<sub>/test_x.cpp silently unchecked (#172 red team
 # @ceab86f, finding 4). find's -name matches the file name only, so sorting is by full path.
+# Only the directories that exist are walked: find exits 1 for a missing one, which under
+# pipefail made `srcs=$(unit_sources)` a silent `set -e` exit of the stage (red team
+# @2f40596, lead c — met as a real failure in the fake trees, which have no tests/property).
 unit_sources() {
-  find tests/unit tests/property -name 'test_*.cpp' 2>/dev/null | LC_ALL=C sort
+  local d dirs=()
+  for d in tests/unit tests/property; do [ -d "$d" ] && dirs+=("$d"); done
+  [ "${#dirs[@]}" -gt 0 ] || return 0
+  find "${dirs[@]}" -name 'test_*.cpp' | LC_ALL=C sort
 }
 # The bootstrap path has ONE binary per basename by construction ($BIN/$(basename $t .cpp)),
 # so two sources sharing a basename would clobber each other's build and let the survivor
@@ -134,10 +140,12 @@ stage_unit() {
     # LAST line the listener prints, so a chatty green binary would lose its evidence
     # (red team @3880d35). Raised to 10 MB per test; the tool names a truncated record as
     # such. (`--test-output-truncation head` is accepted and ignored by CMake 3.22 — measured.)
-    # Pre-run snapshot (red team @f8bce32): compile_commands.json, every source's object, the
-    # registration set and every registered binary are fingerprinted BEFORE ctest and must be
-    # found unchanged after it — a test that writes any of them while running (a forged
-    # compile entry + object for a source no target built made escape 2 green) is refused.
+    # Pre-run snapshot (red team @f8bce32; the source set @2f40596): the test source set,
+    # compile_commands.json, every source's object, the registration set and every registered
+    # binary are fingerprinted BEFORE ctest and must be found unchanged after it — a test that
+    # writes any of them while running (a forged compile entry + object for a source no target
+    # built made escape 2 green; deleting an unregistered source mid-run made escape 1 green,
+    # since the tool walks the sources after ctest) is refused.
     # Held in this shell's memory and handed over on stdin, not written under build/, so a
     # running test cannot rewrite the snapshot as well. (A test that reaches this shell's
     # memory, or rewrites tools/check_test_set.py or this script while running, is outside
@@ -180,9 +188,19 @@ stage_unit() {
     # binary must print `EXECUTED: n` with n > 0, else it is named and the stage fails. A
     # source newer than its binary is named too (@3dde163 finding 2; the ctest path's
     # source-vs-object rule in kind) — an mtime comparison is a control, not a guarantee.
-    local total=0 count=0 t bin out rc n
+    # Three passes, not one (red team @2f40596 finding 2): the evidence for every source —
+    # the source list itself, its binary's existence and freshness, and the binary's identity
+    # (dev, ino, size, mtime, ctime; what `stat` shows, as the ctest path's snapshot) — is
+    # gathered BEFORE any binary runs, because a binary is arbitrary code that can mint a
+    # later source's binary or overwrite it in place. After the run the source list and every
+    # identity must be unchanged. Identity by stat is a control, not a guarantee (ctime is
+    # what utime cannot put back; root or a moved clock can).
+    local total=0 count=0 t bin out rc n srcs
+    local -A pre_id
     unit_sources_unique || return 1
+    srcs=$(unit_sources)   # taken ONCE, before the run; the loops below walk this list, not a fresh find
     while IFS= read -r t; do
+      [ -n "$t" ] || continue
       bin="$BIN/$(basename "$t" .cpp)"
       if [ ! -x "$bin" ]; then
         echo "unit: $t: no binary at $bin (not built, or built under another name)" >&2
@@ -192,6 +210,11 @@ stage_unit() {
         echo "unit: $t: source is newer than its binary $bin; rebuild before verifying" >&2
         return 1
       fi
+      pre_id[$t]=$(stat -c '%d %i %s %.9Y %.9Z' "$bin")
+    done <<<"$srcs"
+    while IFS= read -r t; do
+      [ -n "$t" ] || continue
+      bin="$BIN/$(basename "$t" .cpp)"
       set +e
       out=$("$bin" </dev/null)   # not the loop's source list: a binary reading stdin must not eat it (review @3dde163)
       rc=$?
@@ -212,7 +235,19 @@ stage_unit() {
       fi
       total=$((total + n))
       count=$((count + 1))
-    done < <(unit_sources)
+    done <<<"$srcs"
+    if [ "$(unit_sources)" != "$srcs" ]; then
+      echo "unit: test source set changed during the run (before: $(tr '\n' ' ' <<<"$srcs")— after: $(unit_sources | tr '\n' ' ')) — a test deleted or added a test source? rerun" >&2
+      return 1
+    fi
+    while IFS= read -r t; do
+      [ -n "$t" ] || continue
+      bin="$BIN/$(basename "$t" .cpp)"
+      if [ "$(stat -c '%d %i %s %.9Y %.9Z' "$bin")" != "${pre_id[$t]}" ]; then
+        echo "unit: $t: $bin changed during the run (the file that ran is not the file stage_build produced — overwritten by an earlier test?); rebuild and rerun" >&2
+        return 1
+      fi
+    done <<<"$srcs"
     if [ "$count" -eq 0 ]; then
       echo "unit: no test sources under tests/unit, tests/property (nothing to verify is a failure, not a pass)" >&2
       return 1

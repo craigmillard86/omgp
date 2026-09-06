@@ -75,7 +75,11 @@ object and of every registered binary, and the registration list (name, argv). `
 refuses what differs: "compile_commands.json changed during the ctest run", "object … did
 not exist before the ctest run" / "changed during the ctest run", "registration set changed
 during the ctest run" (this also closes the rewrite-that-keeps-the-name-set residual the
-record comparison left), "<binary> changed during the ctest run". The snapshot is held in
+record comparison left), "<binary> changed during the ctest run"; and — red team @2f40596,
+reproducer A — the SOURCE SET itself, with each source's identity: the check walks
+sources() after ctest, so a built-but-never-registered source was verified away by a test
+that deleted the file mid-run ("source set changed during the ctest run", up front;
+"source changed during the ctest run" per source). The snapshot is held in
 the stage's shell variable and handed over on stdin, so a running test cannot rewrite it
 too. Identity by stat, not content: a rewrite in place changes ctime, which utime cannot
 put back — a control (root, or a clock moved), not a guarantee. What the snapshot cannot
@@ -200,16 +204,19 @@ def registration_list(registered) -> list:
 
 def snapshot(root: Path, build: Path, log: Path) -> dict:
     """The pre-run fingerprint stage_unit takes BEFORE ctest and hands to --ctest --pre: the
-    compilation database (hashed), every source's object, the registration set (name, argv)
-    and every registered binary. Anything that differs after the run was written while the
-    tests ran (or after them) and is not evidence about the run (red team @f8bce32)."""
+    source set (each source's identity), the compilation database (hashed), every source's
+    object, the registration set (name, argv) and every registered binary. Anything that
+    differs after the run was written while the tests ran (or after them) and is not
+    evidence about the run (red team @f8bce32; the sources: @2f40596)."""
     compiled, registered = read_artefacts(build, log)
-    objects = {}
+    srcs, objects = {}, {}
     for src in sources(root):
+        srcs[src.relative_to(root).as_posix()] = identity(src)
         hit = compiled.get(os.path.realpath(src))
         if hit is not None:
             objects[str(hit[1])] = identity(hit[1])
     return {
+        "sources": srcs,
         "compile_commands": hashlib.sha256((build / "compile_commands.json").read_bytes()).hexdigest(),
         "objects": objects,
         "registered": registration_list(registered),
@@ -230,8 +237,16 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path, pre: dict) -> i
     executed, truncated, recorded = executed_counts(junit)
     record_mtime = junit.stat().st_mtime
     failures = []
-    # Unchanged since the pre-run snapshot (red team @f8bce32): the registration set is
-    # compared here, the objects and binaries per source below.
+    # Unchanged since the pre-run snapshot (red team @f8bce32; the source set @2f40596): the
+    # source and registration sets are compared here, the sources, objects and binaries per
+    # source below. The set first: a source the tree lost during the run is not in srcs, so
+    # no per-source line could ever name it.
+    now_srcs = sorted(src.relative_to(root).as_posix() for src in srcs)
+    if now_srcs != sorted(pre["sources"]):
+        lost = sorted(set(pre["sources"]) - set(now_srcs))
+        gained = sorted(set(now_srcs) - set(pre["sources"]))
+        failures.append(f"source set changed during the ctest run (in the tree before the run and not after: {lost}; "
+                        f"after and not before: {gained}) — a test deleted or added a test source? rerun via stage_unit")
     if hashlib.sha256((build / "compile_commands.json").read_bytes()).hexdigest() != pre["compile_commands"]:
         failures.append("compile_commands.json changed during the ctest run (differs from the pre-run snapshot) — "
                         "a test wrote it? rebuild and rerun via stage_unit")
@@ -264,6 +279,10 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path, pre: dict) -> i
         by_basename.setdefault(os.path.basename(path), []).append(path)
     for src in srcs:
         rel = src.relative_to(root).as_posix()
+        if rel in pre["sources"] and pre["sources"][rel] != identity(src):
+            failures.append(f"{rel}: source changed during the ctest run (not the file its object was built from); "
+                            f"rebuild and rerun via stage_unit")
+            continue
         hit = compiled.get(os.path.realpath(src))
         if hit is None:
             failures.append(f"{rel}: compiled by no target (no compile_commands.json entry; CMakeLists re-pointed or missing)")
@@ -355,7 +374,7 @@ def main(argv=None) -> int:
         ap.error("--ctest needs --pre <snapshot taken before ctest ran> (stage_unit takes it with --snapshot)")
     try:
         pre = json.load(sys.stdin if str(a.pre) == "-" else a.pre.open())
-        for key in ("compile_commands", "objects", "registered", "binaries"):
+        for key in ("sources", "compile_commands", "objects", "registered", "binaries"):
             pre[key]
     except (OSError, ValueError, KeyError, TypeError) as e:
         print(f"unit: no usable pre-run snapshot at {a.pre} ({e}); rerun via stage_unit", file=sys.stderr)
