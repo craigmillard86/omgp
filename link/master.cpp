@@ -160,15 +160,31 @@ uint64_t Master::max_frame_us() const {
 }
 
 bool Master::frame_arriving(uint64_t now_us) const {
-    // in_frame(): an accumulation is open (a FLAG has been seen). On its own this stays true
-    // forever on a quiet wire, so it is paired with byte cadence: within a frame each byte
-    // starts exactly where the previous ended, so if more than one byte time has passed since
-    // the last byte was received, the transmitter has stopped and nothing is in flight.
-    // last_rx_us_ is the END of that byte, so the next byte of a live frame would arrive at
-    // last_rx_us_ and be drained by any poll at or after it — one full byte time of slack.
+    // A frame is STILL ARRIVING only if all three hold:
+    //  (a) in_frame(): an accumulation is open (a FLAG has been seen). On its own this stays
+    //      true forever on a quiet wire, so it is paired with
+    //  (b) byte cadence: within a frame each byte starts exactly where the previous ended
+    //      (spec.md "transmission-time model"), so if more than one byte time has passed since
+    //      the last byte was received, the transmitter has stopped and nothing is in flight.
+    //      last_rx_us_ is the END of that byte, so the next byte of a live frame would arrive
+    //      at last_rx_us_ and be drained by any poll at or after it — one byte time of slack.
+    //  (c) a time cap: less than one worst-case frame (kMaxWire byte times) has elapsed since
+    //      the opening FLAG. (b) alone is only a bound in BYTES, because this predicate is
+    //      sampled at poll() instants against the MOST RECENT byte: a station that puts one
+    //      byte on the wire at every poll instant satisfies (b) at every observation, and the
+    //      hold then ends only at Discard::TooLong — kMaxWire bytes, i.e. ~kMaxWire poll
+    //      periods (284 ms at T_poll, 0.5 % duty; PR #137 red-team, HIGH). No legitimate
+    //      response can outlast the cap: it is at most kMaxWire bytes long and contiguous, so
+    //      it closes >= 2 byte times before it (SC-008's achievable maximum is 140 wire bytes).
+    //      For a contiguous stall the cap and the cadence bound release at the same instant
+    //      (deadline + max_frame when the FLAG arrived at deadline - 1), so the cap is the
+    //      MAXIMUM hold at any cadence, not a change to the contiguous case — true by
+    //      construction of the conjunction; the exact boundary is pinned by test_link_master
+    //      "the time cap on the T_resp hold is exactly resp_open + kMaxWire byte times".
     if (!deframer_.in_frame())
         return false;
-    return now_us <= last_rx_us_ + byte_time_us(wire_.bit_rate());
+    return now_us <= last_rx_us_ + byte_time_us(wire_.bit_rate()) &&
+           now_us <= resp_open_us_ + max_frame_us();
 }
 
 void Master::fire_pending(uint64_t now_us) {
@@ -429,14 +445,18 @@ MasterEvent Master::poll(uint64_t now_us) {
     // review/red-team, HIGH: this previously timed out any response whose payload was
     // long enough that its closing FLAG arrived after tx_end + T_resp, which excludes
     // every payload above ~11 bytes at TRUNK_bit_rate and all of them at the fallback rate).
-    // BOUNDED (PR #137 review/red-team, MEDIUM): "allowed to finish" is not "forever", and the
-    // bound is byte CADENCE, not a fixed worst-case-frame cap. frame_arriving() is true from
-    // the opening FLAG onward while bytes keep coming, and goes false about one byte time
-    // after they stop — so a genuine response finishes however long it legitimately takes, a
-    // node that opened a frame then stalled (a trunk §7 failure class) stops holding the
-    // timeout off almost immediately, and a frame that merely CLOSED in the window (its
-    // closing FLAG is also the next frame's opening delimiter) no longer suppresses the
-    // timeout at all once the wire goes quiet — the forever-wedge this PR opened with.
+    // BOUNDED (PR #137 review/red-team, MEDIUM): "allowed to finish" is not "forever".
+    // frame_arriving() is true from the opening FLAG onward while bytes keep coming at byte
+    // cadence, goes false about one byte time after they stop, and in any case goes false one
+    // worst-case frame (max_frame_us()) after the opening FLAG (PR #137 red-team @9547634,
+    // HIGH: cadence alone is sampled only at poll instants, so it bounds the hold in BYTES,
+    // not time). So a genuine response finishes however long it legitimately takes (always
+    // inside the cap), a node that opened a frame then stalled (a trunk §7 failure class)
+    // stops holding the timeout off almost immediately, one that trickles a byte per poll
+    // stops holding it off at resp_open + max_frame at the latest, and a frame that merely
+    // CLOSED in the window (its closing FLAG is also the next frame's opening delimiter) no
+    // longer suppresses the timeout at all once the wire goes quiet — the forever-wedge this
+    // PR opened with.
     const bool frame_pending_in_window =
         frame_arriving(now_us) && resp_open_us_ >= window_start_us_ && resp_open_us_ < deadline_;
     if (open_ && sub_phase_ == SubPhase::AwaitResponse && event.kind == MasterEvent::None &&

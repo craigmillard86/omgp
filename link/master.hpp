@@ -83,11 +83,13 @@ class Master {
     void fire_pending(uint64_t now_us);
 
     // True while a frame is genuinely STILL ARRIVING on the wire at now_us: the Deframer has
-    // an accumulation open AND a byte has been received recently enough that the transmitter
-    // cannot have stopped. Bytes within a frame are contiguous (spec.md "Assumptions",
-    // transmission-time model: each byte starts where the previous one ended), so a silence
-    // longer than one byte time means the sender stalled — a trunk §7 failure class — and
-    // nothing is in flight any more.
+    // an accumulation open, AND a byte has been received recently enough that the transmitter
+    // cannot have stopped, AND less than one worst-case frame has elapsed since the opening
+    // FLAG. Bytes within a frame are contiguous (spec.md "Assumptions", transmission-time
+    // model: each byte starts where the previous one ended), so a silence longer than one
+    // byte time means the sender stalled — a trunk §7 failure class — and nothing is in flight
+    // any more; and no frame is longer than kMaxWire bytes, so nothing legitimate is still in
+    // flight one worst-case frame after its FLAG either.
     //
     // This is the "in flight" test the T_resp wait uses (trunk §3: the timeout gates the START
     // BIT, so a response that has started must be allowed to finish). The T_gap transmit guard
@@ -95,17 +97,23 @@ class Master {
     // own END, which keeps a deferred transmit off an arriving frame by itself. Deframer::
     // in_frame() alone is a state predicate that never goes false on a quiet wire; narrowing
     // it to `len_ > 0` instead goes blind for the first byte time of every frame (PR #137
-    // red-team, HIGH). Pairing state with byte cadence is what makes it both correct at a
-    // frame's START and bounded when a frame STALLS — no unbounded wait, and no fixed
-    // worst-case-frame hold that would keep the T_resp window open for ~1.4 ms after a few
-    // stray bytes. (fire_pending()'s worst-case-frame figure is a MAXIMUM wait, not a hold:
-    // it only ever brings a transmit forward.)
+    // red-team, HIGH). Pairing state with byte cadence makes it correct at a frame's START and
+    // releases a STALL within a byte time — but cadence is sampled only at poll() instants, so
+    // by itself it bounds the hold in bytes, not time: one byte per poll instant holds it for
+    // ~kMaxWire poll periods (PR #137 red-team @9547634, HIGH). The worst-case-frame term is
+    // the MAXIMUM hold at any cadence (true by construction of the conjunction; boundary pinned
+    // by test_link_master "the time cap on the T_resp hold is exactly resp_open + kMaxWire
+    // byte times"); a contiguous stall is still released by cadence long before it — the cap
+    // and the cadence bound coincide only when the frame is a full kMaxWire bytes. (Likewise
+    // fire_pending()'s worst-case-frame figure is a MAXIMUM wait: it only ever brings a
+    // transmit forward.)
     bool frame_arriving(uint64_t now_us) const;
 
     // Worst-case time for one frame on the wire at the current rate: kMaxWire stuffed bytes,
     // the codec's sizing bound (trunk §4; SC-008's achievable worst case is 140 of those 142).
     // Bounds how long fire_pending() defers a transmission for activity that is not the host's
-    // own before transmitting anyway — see defer_origin_us_.
+    // own before transmitting anyway (see defer_origin_us_), and how long frame_arriving()
+    // holds the T_resp timeout off after an in-window opening FLAG.
     uint64_t max_frame_us() const;
 
     ByteWire& wire_;
@@ -159,11 +167,15 @@ class Master {
     // station that keeps the wire busy runs three courtesies plus three windows: within
     // 3·(max_frame + 2·T_gap + byte) + 3·(request bytes·byte + T_resp) + 6·poll period —
     // about 5.5 ms at 1 Mb/s, about 40 ms at the 115200 fallback (the rate trunk §7's
-    // BUS_FAULT re-probe runs at) — plus one worst-case frame per attempt when the babble also
-    // rides the T_resp in-flight hold. Demonstrated by "a transaction under continuous
-    // FLAG-free babble…" (both cadences, 1 Mb/s) and "a transaction under FLAG-delimited
-    // babble…" (both cadences, both rates); stated here because the per-attempt figure alone
-    // under-reads it (PR #137 red-team @050f397, LOW).
+    // BUS_FAULT re-probe runs at) — plus at most one worst-case frame per attempt when the
+    // babble also opens a frame inside the T_resp window, since frame_arriving()'s hold is
+    // capped at resp_open + max_frame whatever the byte cadence (PR #137 red-team @9547634,
+    // HIGH: before the cap, one byte per poll instant stretched that term to ~kMaxWire poll
+    // periods per attempt). Demonstrated by "a transaction under continuous FLAG-free babble…"
+    // (both cadences, 1 Mb/s), "a transaction under FLAG-delimited babble…" (both cadences,
+    // both rates) and "a transaction under one byte per superframe poll, with a hostile FLAG
+    // opened inside every T_resp window…" (T_poll cadence, both rates); stated here because
+    // the per-attempt figure alone under-reads it (PR #137 red-team @050f397, LOW).
     uint64_t defer_origin_us_ = 0;
     // AwaitResponse only: tx_end of the CURRENT attempt - the acceptance window's lower
     // bound (contracts/link-cpp.md: "[tx_end, tx_end + T_resp)"). Needed because a retry

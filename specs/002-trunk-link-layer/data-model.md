@@ -77,6 +77,11 @@ Master state ∈ { Idle, Transmitting(until tx_end), AwaitResponse(until tx_end 
   `dst == 0x00` (host); `response == 1`; `seq == transaction.seq`; first byte's start
   instant `< tx_end_us + T_resp`. A CRC-failed frame in the window ends the attempt
   immediately (§7: "CRC-failed response" is a failure, no need to wait for the timeout).
+  A frame that opened inside the window and is still arriving at the window's end (bytes
+  still coming at byte cadence) holds the `Timeout` off until it concludes — bounded at
+  `resp_open + max_frame` (one worst-case frame from the opening FLAG), whatever the poll
+  cadence; no legitimate response can reach that cap. *(Amended in PR #137, red-team
+  @`9547634` HIGH — pending the same ruling as "Gap" below.)*
 - **Retry**: attempts 0, 1, 2 → at most 3 transmissions; after attempt 2 fails → `Failed`.
 - **Gap**: `last_activity` = end of the accepted response's last byte, or the last
   byte of a discarded frame, or the timeout instant; `begin()` before `last_activity +

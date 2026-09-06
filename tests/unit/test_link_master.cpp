@@ -1720,9 +1720,13 @@ TEST_CASE("the T_resp in-flight hold is at most one worst-case frame: a frame th
     // stops. frame_arriving() stays true for exactly one byte time past the last byte's end, so
     // the timeout fires at deadline - 1 + (1 + 140) * B + B == deadline + kMaxWire * B. One byte
     // more (the 71st append) would be TooLong -> Hunting and fire the timeout EARLIER, so this
-    // is the maximum, not merely an instance. Polled every microsecond so the figure is the
-    // engine's, not the cadence's. Also pins frame_arriving()'s `<=`: with `<` the timeout
-    // would fire one microsecond early (PR #137 red-team @40355cf, LOW).
+    // is the maximum a CONTIGUOUS stream can reach. It is the maximum at any cadence only
+    // because frame_arriving() also caps the hold at resp_open + kMaxWire * B — the same
+    // instant here — which the "one byte per superframe poll…" and "the time cap on the T_resp
+    // hold is exactly…" cases below pin (PR #137 red-team @9547634, HIGH). Polled every
+    // microsecond so the figure is the engine's, not the cadence's. Also pins the cadence
+    // term's `<=`: with `<` the timeout would fire one microsecond early (PR #137 red-team
+    // @40355cf, LOW).
     FakeClock clock;
     MockWire wire(clock);
     const uint8_t dst = 0x07;

@@ -109,8 +109,15 @@ violator, and the transaction proceeds "on its own merits", spec.md Edge Cases "
 from the bus state. The bound is per attempt and scales with byte time: a whole transaction
 under a station that keeps the wire busy concludes within
 `3·(max_frame + 2·T_gap + byte) + 3·(request bytes·byte + T_resp) + 6·poll period` (≈5.5 ms
-at 1 Mb/s, ≈40 ms at the 115200 fallback), plus one `max_frame` per attempt when the traffic
-also opens a frame inside each `T_resp` window. *(Amended in PR #137 — pending a ruling, see
+at 1 Mb/s, ≈40 ms at the 115200 fallback), plus at most one `max_frame` per attempt when the
+traffic also opens a frame inside each `T_resp` window. That last term is the **cap on the
+in-flight hold**: the `T_resp` timeout gates the start bit (trunk §3), so a response whose
+opening FLAG lands inside `[tx_end, tx_end + T_resp)` holds the timeout off while it is still
+arriving — bytes keep coming at byte cadence — but never past `resp_open + max_frame`. Cadence
+alone is sampled at `poll()` instants and so bounds the hold in bytes only (one byte per poll
+instant held it for `~kMaxWire` poll periods — 284 ms at `T_poll` — PR #137 red-team
+@`9547634`, HIGH); the cap makes the bound a time, and no legitimate response can reach it (at
+most `kMaxWire` contiguous bytes). *(Amended in PR #137 — pending a ruling, see
 `docs/OPEN-QUESTIONS.md` 2026-09-05 "bounded courtesy".)*
 
 ## Responder engine (`responder.hpp`) — trunk §3, §7
