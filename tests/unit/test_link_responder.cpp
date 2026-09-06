@@ -919,3 +919,70 @@ TEST_CASE("a request duplicated on the wire with the retry bit clear re-invokes 
     CHECK(wire.transcript_size() == 2); // a second response goes out unsolicited
     CHECK(responder.stats().replays_served == 0);
 }
+
+TEST_CASE("requests arriving faster than poll() is called queue up behind the held-request "
+          "rule: one answer per poll(), all of them late, the host's own request never "
+          "reached, nothing counted (open question, not asserted as desired)",
+          "[link]") {
+    // Red team @17554c8 finding 1 (MEDIUM), confirmed by review @17554c8 finding 1, re-run
+    // here with the suite's own helpers. "Held, not discarded" (docs/OPEN-QUESTIONS.md
+    // 2026-09-06) plus "one accepted request leaves Listening and ends the drain" means a
+    // poll() answers exactly ONE queued request, oldest first, with no bound on the
+    // backlog's age or depth. A station at 0x07 puts one request to this node on the bus
+    // every 300 us; the engine is polled every 1 ms; the host sends its own request at
+    // t = 8 ms. Pre-`70d7660` (drain always, discard-and-count while busy) the host was
+    // answered at the next poll and the dropped traffic was counted (discards == 48 in the
+    // red team's run); at this head neither happens. FR-014 (a late poll MUST still
+    // transmit) and FR-017 (MUST never transmit outside a response window) pull opposite
+    // ways on a stale queued request; the ruling is the maintainer's -- these CHECKs pin
+    // today's observable so the ruling's implementation starts from a failing test.
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    constexpr uint8_t kOther = 0x07;
+    const uint8_t flood_payload[] = {0x5A};
+    const uint8_t host_payload[] = {0xC3};
+    const uint64_t poll_period = 1000, flood_period = 300, host_at = 8000;
+    uint64_t next_flood = 0, host_end = 0;
+    int flooded = 0;
+    bool host_sent = false;
+    for (uint64_t t = 0; t <= 20 * poll_period; t += poll_period) {
+        // Everything the other station will have put on the bus before the next poll.
+        while (next_flood < t + poll_period) {
+            inject_request(wire,
+                           request_bytes(kMyAddr, kOther, false,
+                                         static_cast<uint8_t>(flooded & 0x0F), flood_payload,
+                                         sizeof flood_payload),
+                           next_flood);
+            ++flooded;
+            next_flood += flood_period;
+        }
+        if (!host_sent && t >= host_at) {
+            host_end = inject_request(
+                wire, request_bytes(kMyAddr, kPeer, false, 9, host_payload, sizeof host_payload),
+                t);
+            host_sent = true;
+        }
+        wire.advance_to(t, responder);
+    }
+    REQUIRE(host_sent);
+    REQUIRE(flooded == 70);
+
+    bool answered_host = false;
+    for (size_t i = 0; i < wire.transcript_size(); ++i)
+        if (wire.transcript(i).dst == kPeer)
+            answered_host = true;
+
+    // 21 polls, one answer each -- the first poll (t = 0) finds nothing yet decodable.
+    CHECK(wire.transcript_size() == 20);
+    CHECK(handler.calls == 20);
+    CHECK_FALSE(answered_host); // 12 ms after host_end, and still queued behind 0x07's frames
+    // Every answer went out after its request's window closed: FR-014's counter is the one
+    // signal that moves...
+    CHECK(responder.stats().late_responses == 20);
+    // ...and nothing else does: the starvation is invisible in stats().
+    CHECK(responder.stats().discards == 0);
+    CHECK(host_end + omgp::TRUNK_T_resp_us < 20 * poll_period); // the host gave up long ago
+}

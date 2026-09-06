@@ -2377,6 +2377,8 @@ request from a different station is treated as new rather than replaying the pre
 requester's buffered answer") written first and confirmed red before the fix.
 **Supersedes:** none.
 
+---
+
 ## 2026-09-06 — Responder: a request arriving while a response is Scheduled or Transmitting is held, not discarded; `data-model.md` §5 is silent on arrival while busy
 
 **Raised by:** red team @e510b29 on PR #149 (finding 1, BLOCKING), confirmed by the review
@@ -2417,6 +2419,8 @@ look at whether `data-model.md` §5 should state the "held in the receive queue"
 explicitly (a documentation clarification only).
 **Supersedes:** none.
 
+---
+
 ## 2026-09-06 — Responder "held, not discarded" rests on the `ByteWire` receive-queue depth; no minimum depth is stated anywhere
 
 **Context:** the 2026-09-06 entry above ("held, not discarded") adopts option (a): while a
@@ -2446,6 +2450,9 @@ against an implementation rather than assumed. Material to the human ruling the
 **Ruling:** pending human. No code change; the Responder's behaviour and its tests are as
 in the 2026-09-06 entry.
 **Supersedes:** none (adds a dependency note to the 2026-09-06 entry; does not change it).
+
+---
+
 ## 2026-09-06 — Responder `{peer, seq}` replay key (adopted above) lets one forged frame evict a pending station's replay entry and defeat FR-015 for that station's own retry
 
 **Raised by:** red team on PR #145 @ `d0cc3bf` (finding 1, BLOCKING). **Affects:**
@@ -2492,6 +2499,8 @@ expectation.
 agent makes unilaterally per CLAUDE.md/OPERATING-POLICY §2).
 **Amends:** none. **Supersedes:** none — narrows the entry above pending the ruling.
 
+---
+
 ## 2026-09-06 — `RequestHandler`'s "called at most once per NEW sequence" doc claim overclaims: a request duplicated with the retry bit CLEAR re-invokes it
 
 **Raised by:** red team on PR #145 @ `d0cc3bf` (finding 2, BLOCKING as a CLAUDE.md rule 11
@@ -2529,3 +2538,85 @@ entry immediately above.
 **Ruling:** pending — human (spec conflict between SC-004 and data-model.md §5 / trunk
 §7). Comment relabelled and pinning test added as the non-behaviour-changing part.
 **Amends:** none. **Supersedes:** none.
+
+---
+
+## 2026-09-06 — Responder "held, not discarded" makes the held-request queue unbounded and uncounted: one answer per `poll()`, oldest first; FR-014 and FR-017 conflict on a stale queued request
+
+**Raised by:** red team @17554c8 on PR #149 (finding 1, MEDIUM; finding 2, LOW), confirmed
+by the review at the same head (finding 1, MEDIUM, mechanism by construction from the diff).
+**Affects:** `link/responder.cpp` (`Responder::poll`), `specs/002-trunk-link-layer/spec.md`
+FR-014 / FR-017, the two 2026-09-06 entries above ("held, not discarded"; "rests on the
+`ByteWire` receive-queue depth").
+**Context:** the "held, not discarded" ruling above (option (a)) stops draining the wire
+while a response is Scheduled or Transmitting. Independently, one accepted request sets
+`state_ = Scheduled` and ends the drain loop, and simulated time does not advance inside a
+`poll()`. Together: **one `poll()` answers exactly one queued request, oldest first**, and
+nothing bounds how old a queued request may be, how deep the backlog grows, or counts a
+request while it waits. Reproducer (now `tests/unit/test_link_responder.cpp`, "requests
+arriving faster than poll() is called queue up …", CHECK-pinned as an open question, not
+asserted as desired): a station at 0x07 sends one request to the node every 300 µs, the
+engine is polled every 1 ms, the host sends its own request at t = 8 ms. At `17554c8` and at
+this head: 21 polls, 20 answers, all 20 counted `late_responses`, the host **never answered**
+12 ms after its request (host `T_resp` = 200 µs), `discards == 0`. Same run against the
+pre-`70d7660` rule (drain always; discard-and-count a request decoded while busy; red team's
+counterfactual): the host answered at the very next poll, `discards == 48`. On MockWire the
+backlog eventually overflows the receive queue loudly (`RX queue capacity exceeded`, red
+team finding 2); on the ESP32-S3 UART FIFO it would overflow silently, and no `AddrStats`
+field moves either way — the Responder cannot observe an overrun through `ByteWire`.
+**Two spec requirements pull opposite ways on a stale queued request.** FR-014: "If the
+engine is not given control until after that window has closed … it MUST still transmit —
+at once — and MUST count the occurrence as a late response"; the suite pins this at +1000 µs
+after `T_turn_max` (three cases: the single late poll, the queued pair, the queued retry).
+FR-017: the engine "MUST never transmit outside a response window". The spec's own Edge
+Cases resolve the pair for a *single* late poll ("the late poll is the simulator's defect,
+not the protocol's, and the counter is how a scenario notices") — not for a steady state in
+which every answer is late and the freshest request is unreachable. Both red teams cited
+the spec: @e510b29 asked for hold (FR-014/FR-015, "none dropped", which the ruling above
+adopted and the case "eight well-spaced requests … whatever the poll cadence" pins);
+@17554c8 asks for a bound (FR-017, and visibility). The traffic that reaches the state is
+either out-of-spec (only the host originates requests, trunk §3; a second station's
+requests are hostile or a bus fault) or a conformant host plus a poll cadence coarser than
+`T_resp` — the simulator's defect FR-014 is written for, but continuous rather than one-off.
+**Options:** (a) keep the rule (this head): unbounded, uncounted; FR-014 literal. (b) revert
+to drain-always with discard-and-count while busy (`e510b29`): bounded by the poll cadence
+and counted, but drops a queued trunk §7 retry against FR-015 (red team @e510b29 finding 1)
+and drops a fresh request behind a stale pending response. (c) **bound the hold by
+staleness**: a request decoded at `now_us > request_end_us + TRUNK_T_resp_us` is dropped and
+counted — the host's own exclusive timeout is the one point the spec gives at which the
+master has *provably* abandoned the transaction (spec.md Edge Cases: "a start bit at or
+after `T_resp` is late"; "the host discards the late response"), so nothing the host could
+still accept is ever dropped, and the backlog can never exceed one `T_resp` of arrivals per
+poll. FR-014's late-transmit survives for lateness in `(T_turn_max, T_resp]`; beyond it the
+counter, not the transmission, is what the scenario notices. Counter: a new `AddrStats`
+field (`stale_requests`) — a `contracts/link-cpp.md` and `data-model.md` §5 change — or
+reuse `discards` (no interface change, but conflates a stale request with a corrupt frame).
+(d) cap the queue depth instead (e.g. answer at most N per poll, drop-and-count the rest):
+bounds depth but not age, and N is a number the spec does not have.
+**Recommendation:** (c), with a distinct counter. It is the smallest rule that answers every
+request the host can still accept, never transmits a response the host is guaranteed to
+discard (which on a shared half-duplex bus can land inside the *next* transaction's window
+— the babble Edge Case — and fail another node's poll), and keeps the loss visible. It
+bounds a queued retry the same way: a retry decoded within `T_resp` of its *own* stop bit
+is replayed (FR-015); a staler one is dropped and counted like any stale request — the host
+that sent it has already timed it out too. It is a **spec change**: FR-014's "MUST still
+transmit" and FR-015's "MUST retransmit" as written have no upper bound, and three existing
+cases pin +1000 µs (the single late poll, the queued pair, the queued retry); under (c)
+those cases move to lateness ≤ `T_resp` and a fourth asserts drop-and-count beyond it.
+Not implemented here: CLAUDE.md "documents win; implement nothing speculative" — a MUST is
+being narrowed, and the two entries above already await the same human's look at
+`data-model.md` §5. What lands in #149 is the pinning test, this entry, and a comment in
+`Responder::poll` stating the consequence.
+**Corrects two sentences in the "held, not discarded" entry above** (review @17554c8
+finding 2): its recommendation says option (a) "never transmits outside a window (FR-017)"
+and "makes FR-014/015/016 hold uniformly for queued requests". Neither is unconditionally
+true: every held response answered after its window transmits outside it (that is what
+`late_responses` counts — 20 of 20 in the reproducer), and FR-014's late-transmit clause
+is what (a) leans on, not FR-017. The accurate form: (a) never transmits *over* another
+transmission (trunk §3 half-duplex, by construction of the Transmitting state) and never
+drops a request or a retry; it does transmit outside the window whenever the poll is late,
+counted. The entry's Impact/Options text stands; only those two absolutes are withdrawn.
+**Ruling:** pending — human. Options (a)–(d) above; the recommendation is (c) with a
+`stale_requests` counter. Until ruled, behaviour is (a) and the pinning test records it.
+**Amends:** the 2026-09-06 "held, not discarded" entry (two sentences of its recommendation,
+as stated). **Supersedes:** none.
