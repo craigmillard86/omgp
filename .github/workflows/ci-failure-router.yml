@@ -341,7 +341,7 @@ jobs:
       - name: Toolchain (so the agent can run the pipeline)
         run: |
           sudo apt-get update && sudo apt-get install -y cmake ninja-build
-          pip install jinja2 pyyaml pytest
+          pip install -r tools/requirements.txt   # includes the clang-format pin: a bare ./pipeline.sh reaches stage_quality, which FAILS on CI without it (#135; #167 review)
       - name: Claude Code — diagnose and fix on the agent's branch
         uses: anthropics/claude-code-action@v1
         with:
