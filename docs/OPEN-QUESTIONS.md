@@ -1367,7 +1367,8 @@ deferred and flagged for the CODEOWNER handling this PR's needs-human escalation
 ## 2026-09-06 — Mull path filters are safe at RUN time; the "no include/exclude paths" rule was measured at compile time only
 
 **Context:** `deep-verify` timed out at its 45-minute limit on every push of PR #137 from
-`3a15d29` on (eight runs), and `attack-pr` twice at 50. The mutation step was the cost:
+`3a15d29` on (eight runs), and `attack-pr` three times at 50 with no verdict (`e1978ab` on
+#128; `150d256`, `928877c` on #137). The mutation step was the cost:
 `tools/mutate.sh` instruments every translation unit and the runner executed every mutant
 it found — 16 906 across the five `link/` oracle binaries at #137's round 19, of which
 `tools/mutate_report.py` kept **122** (only `l3/ link/ core/` on changed lines count; 2 671
@@ -1390,7 +1391,12 @@ so the mutation step is a no-op there — #141 review, HIGH), so it was checked 
 `--diff origin/main --require`) on #137's tree at `1057568`: the same gate line,
 `mutants=122 killed=112 survived=10 labelled[equivalent=8 accepted=2] unlabelled=0`, PASS,
 in 2 m 44 s on 12 cores; the unfiltered old-script run in the same container is the
-LLVM-18 oracle for the per-mutant comparison (recorded on the PR).
+LLVM-18 oracle for the per-mutant comparison (recorded on the PR). Labelled (rule 11): the
+"executes only scope-dir mutants, same verdicts" claim is **demonstrated** on LLVM 14
+locally and on LLVM 18 in that container; that the 4-core GitHub runner behaves as the
+container is **assumed** (core count changes time, not verdicts) until the first T2 push
+after merge runs it — the log would show the old ~4 000-mutant counts if the filter matched
+nothing there.
 **Recommendation:** (a) phase-2 `mull.yml` carries `includePaths` derived from
 `mutate.cfg`'s `scope_dirs` (done in the gate-budget PR); the compile-time config stays
 mutators-only; the report post-filter stays the gate for what it SEES — it can only remove

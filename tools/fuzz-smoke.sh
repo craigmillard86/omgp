@@ -61,8 +61,13 @@ per=$((BUDGET / ${#TARGETS[@]}))
 # wearing the same number. Parallel is therefore opt-in for a quick local smoke
 # (OMGP_FUZZ_JOBS=5 ./tools/fuzz-smoke.sh 60), never the evidence run.
 jobs=${OMGP_FUZZ_JOBS:-1}
+case "$jobs" in
+  ''|*[!0-9]*|0)   # not a positive integer: say so and run serially (an `-lt` on "abc" only
+                   # warns, and the wave slice then dies with an unrelated `unbound variable`)
+    echo "fuzz: OMGP_FUZZ_JOBS='${jobs}' is not a positive integer — running 1 at a time"
+    jobs=1 ;;
+esac
 [ "$jobs" -gt "${#TARGETS[@]}" ] && jobs=${#TARGETS[@]}
-[ "$jobs" -lt 1 ] && jobs=1
 echo "fuzz: ${jobs} target(s) at a time"
 declare -A trc
 i=0

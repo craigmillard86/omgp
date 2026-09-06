@@ -7,7 +7,7 @@ Called by tools/mutate.sh after the runner; standalone:
 
   python3 tools/mutate_report.py --reports build/mutate/reports --root . \
       --scope-dirs "l3 link core" --ranges build/mutate/scope_ranges.json \
-      --ref origin/main --out build/mutate/report.json
+      --source-ext "cpp hpp h cc" --ref origin/main --out build/mutate/report.json
 
 Policy (tools/mutate.cfg [policy] — T3 constants, never relaxed to get green):
 
@@ -65,9 +65,6 @@ LABEL_ANY = re.compile(r"//\s*mutant-ok\b")
 # an empty report is otherwise indistinguishable from "instrumentation didn't reach the
 # code", which is exactly the failure mode this check exists to catch.
 NO_BODY_EXEMPT = re.compile(r"//\s*mutation-exempt\(no-body\)\s*:\s*(\S.*)")
-# The source extensions mutate.sh keeps in SCOPE (its line "SCOPE=... grep -E"); the two
-# must agree, so a changed file the oracle was not chosen for is never demanded mutants.
-SOURCE_RE = re.compile(r"\.(cpp|hpp|h|cc)$")
 
 
 class Label:
@@ -118,6 +115,8 @@ def main(argv=None) -> int:
     ap.add_argument("--root", required=True, help="repository root (report paths are made relative to it)")
     ap.add_argument("--scope-dirs", required=True, help="space-separated embedded-path directories")
     ap.add_argument("--ranges", required=True, help="JSON {rel_path: [[start, end], ...]}; {} = whole tree")
+    ap.add_argument("--source-ext", required=True,
+                    help="space-separated source extensions (tools/mutate.cfg source_ext, passed by mutate.sh)")
     ap.add_argument("--ref", default="", help="diff ref; empty = whole-tree trend mode")
     ap.add_argument("--out", required=True, help="report.json path")
     ap.add_argument("--max-unlabelled", type=int, default=0)
@@ -133,8 +132,10 @@ def main(argv=None) -> int:
     # SCOPE (and so the oracle) keeps only source extensions; a README/CMakeLists touch under a
     # scope dir would otherwise reach the per-dir blind-spot rule as a "changed file" and red
     # the gate for a dir whose sources did not change (#141 review, MEDIUM). A non-source file
-    # can carry no mutant, so nothing that is counted changes.
-    ranges = {rel: r for rel, r in json.load(open(args.ranges)).items() if SOURCE_RE.search(rel)}
+    # can carry no mutant, so nothing that is counted changes. The extension list is the cfg's
+    # one line, handed over by mutate.sh — no copy here to drift from it (#141 review @d1fc20b).
+    source_re = re.compile(r"\.(" + "|".join(re.escape(e) for e in args.source_ext.split()) + r")$")
+    ranges = {rel: r for rel, r in json.load(open(args.ranges)).items() if source_re.search(rel)}
     reports = sorted(pathlib.Path(args.reports).glob("*.json"))
     diff_mode = bool(args.ref)
 

@@ -739,3 +739,58 @@ def test_red_team_verdict_guard_cases_cover_both_answers():
     """The parametrised agreement above would be vacuous if every case had the same answer."""
     answers = {_agent_approve_would_accept(c, HEAD) for _, c in VERDICT_CASES}
     assert answers == {True, False}
+
+
+# --- red-team.yml: a restored build tree is another commit's binaries ---------------------------
+
+def _attack_steps():
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "red-team.yml").read_text())
+    return wf["jobs"]["attack-pr"]["steps"]
+
+
+def test_red_team_deletes_the_restored_binaries_before_the_agent_can_run_them(tmp_path):
+    """The cache restore keys on CMakeLists.txt/CMakePresets.json only, so build/native arrives
+    from another commit (normally main's), and the allow-list lets the agent run
+    ./build/native/* directly: skip the build and every experiment — the final "held" claim
+    included — executes main's code while reporting on the PR (#141 review @d1fc20b, MEDIUM).
+    A step between the restore and the agent deletes every executable under the restored
+    tree, so nothing under build/native can run until the PR's own build has produced it;
+    the step's exact shell is run here on a fake tree. Clock order is pinned alongside: the
+    BUDGET's job start is the first step, before checkout and the toolchain (LOW)."""
+    steps = _attack_steps()
+    idx = lambda pred: next(i for i, s in enumerate(steps) if pred(s))
+    restore = idx(lambda s: "actions/cache/restore" in s.get("uses", ""))
+    purge = idx(lambda s: s.get("name") == "Nothing runnable before the build")
+    agent = idx(lambda s: "claude-code-action" in s.get("uses", ""))
+    assert restore < purge < agent, [s.get("name") or s.get("uses") for s in steps]
+    assert steps[purge].get("if") == steps[restore].get("if"), "the purge must run whenever the restore does"
+    # No step between them may run anything from the tree.
+    assert all("build/native" not in (s.get("run") or "") for s in steps[restore + 1:purge])
+    run = steps[purge]["run"]
+    fake = tmp_path / "build" / "native"
+    (fake / "CMakeFiles" / "3.28" / "CompilerIdCXX").mkdir(parents=True)
+    (fake / "gen").mkdir()
+    executables = [fake / "test_link_master", fake / "scenario_runner", fake / "omgp", fake / "l3_helper",
+                   fake / "CMakeFiles" / "3.28" / "CompilerIdCXX" / "a.out"]
+    kept = [fake / "CMakeCache.txt", fake / "build.ninja", fake / "libomgp_link.a", fake / "gen" / "omgp_protocol.h"]
+    for p in executables:
+        p.write_text("#!/bin/sh\necho main's binary\n")
+        p.chmod(0o755)
+    for p in kept:
+        p.write_text("x")
+    r = subprocess.run(["bash", "-euo", "pipefail", "-c", run], cwd=tmp_path, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not any(p.exists() for p in executables), r.stdout
+    assert all(p.exists() for p in kept), "only executables go; objects, cache and headers stay for the incremental build"
+    assert f"removed {len(executables)} executable(s)" in r.stdout, r.stdout
+    # A cache miss (no tree at all) is not an error.
+    (tmp_path / "miss").mkdir()
+    r = subprocess.run(["bash", "-euo", "pipefail", "-c", run], cwd=tmp_path / "miss", capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    # The prompt tells the agent the same thing, so it does not go looking for the binaries.
+    prompt = steps[agent]["with"]["prompt"]
+    assert "another commit" in prompt and "build/native" in prompt, prompt
+    # LOW: the clock that the BUDGET quotes as the job start must be the first thing that runs.
+    clock = idx(lambda s: s.get("id") == "clock")
+    assert clock == 0, "the Clock step must be first: timeout-minutes counts from the job start, not from after checkout+toolchain"
+    assert "steps.clock.outputs.start" in prompt and "steps.clock.outputs.deadline" in prompt

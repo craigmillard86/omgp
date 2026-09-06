@@ -54,6 +54,18 @@ jobs:
       issues: write
       pull-requests: write
     steps:
+      - name: Clock
+        # The job is killed at timeout-minutes with nothing posted; a verdict that says what
+        # was NOT reached is worth more than no verdict (three 50-minute kills produced
+        # nothing: e1978ab on #128, 150d256 and 928877c on #137, 2026-09-05/06). The agent
+        # gets a deadline it can check with `date -u`. FIRST step, unconditionally: the kill
+        # counts from the job start, so a clock read after checkout and the toolchain would
+        # quote a start later than the real one and the margin before the kill would shrink
+        # by however long setup took (#141 review @d1fc20b, LOW).
+        id: clock
+        run: |
+          echo "start=$(date -u +%H:%M)Z" >> "$GITHUB_OUTPUT"
+          echo "deadline=$(date -u -d '+40 min' +%H:%M)Z" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with: {ref: '${{ github.event.pull_request.head.sha }}', fetch-depth: 0}
       - id: tier
@@ -84,15 +96,19 @@ jobs:
         with:
           path: build/native
           key: native-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json') }}
-      - name: Clock
-        # The job is killed at timeout-minutes with nothing posted; a verdict that says what
-        # was NOT reached is worth more than no verdict (two 50-minute kills on #137 produced
-        # nothing, 2026-09-05/06). The agent gets a deadline it can check with `date -u`.
+      - name: Nothing runnable before the build
+        # The key above has no commit in it, so the restored tree is another commit's
+        # binaries (normally main's), and the allow-list below runs ./build/native/* directly:
+        # an agent that skipped or cut short its own build would attack main's code and
+        # report on the PR — the final "held" claim included (#141 review @d1fc20b, MEDIUM).
+        # Delete every executable; objects, cache and headers stay for the incremental build.
+        # Pinned by tools/refimpl/test_workflow_scripts.py, which runs this shell on a fake tree.
         if: steps.tier.outputs.deep == 'true'
-        id: clock
         run: |
-          echo "start=$(date -u +%H:%M)Z" >> "$GITHUB_OUTPUT"
-          echo "deadline=$(date -u -d '+40 min' +%H:%M)Z" >> "$GITHUB_OUTPUT"
+          if [ -d build/native ]; then
+            n=$(find build/native -type f -perm -u+x -print -delete | wc -l)
+            echo "red-team: removed $n executable(s) from the restored build tree — it is from another commit; nothing under build/native runs until this PR's own build has produced it"
+          fi
       - name: Claude Code — adversarial attack on the change
         if: steps.tier.outputs.deep == 'true'
         uses: anthropics/claude-code-action@v1
@@ -117,7 +133,10 @@ jobs:
               have contained and check the suite would have caught it
             METHOD: write your attacks as real tests/scenarios in a scratch
             directory (do NOT modify existing tests). Build ONCE with
-            `./pipeline.sh codegen build`; never run a bare `./pipeline.sh`
+            `./pipeline.sh codegen build` — the restored build/native tree
+            is from another commit and its binaries were deleted, so
+            nothing there runs until that build has finished; never run a
+            bare `./pipeline.sh`
             (every stage, the whole suite — that is what the `native` job
             already did at this head). Per experiment run only what the
             experiment needs: the test binary of the directory you attack

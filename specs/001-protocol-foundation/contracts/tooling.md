@@ -59,7 +59,8 @@ in `tools/mutate_report.py` (tested on synthetic Elements reports in
    TU and with it the run-time mutant dispatch — measured on 0.34.0), and Mull's `gitDiffRef`
    is not used because it drops all mutants in files the diff *adds*. The build is limited to
    the oracle targets (`cmake --build --target <oracle…>`, Ninja when present): nothing else
-   runs under the runner. Before the runner starts the file is rewritten with timeout +
+   runs under the runner. Before the runner starts the file is rewritten (`mutate.sh
+   --print-phase2-config` shows it) with the same mutators, the timeout, `quiet: true` and
    `includePaths` for `scope_dirs` (`^<root>/<dir>/.*`), so only scope-dir mutants are
    *executed*; the runner captures no test output (`--no-output`; kills are exit-status);
    the merge in step 4 is unchanged and still the gate. (Amended 2026-09-06, gate-budget PR —

@@ -38,8 +38,14 @@ VERSION=$(cfg version)
 MAX_UNLABELLED=$(cfg max_unlabelled_survivors)
 CATEGORIES=$(cfg label_categories)
 SCOPE_DIRS=$(cfg scope_dirs)
+SOURCE_EXT=$(cfg source_ext)
 TIMEOUT_MS=$(cfg timeout_ms)
 GROUPS_=$(cfg groups)
+# The one extension list (mutate.cfg source_ext): the diff grep, the whole-tree find and
+# mutate_report.py's --source-ext are all derived from it, never restated (#141 review).
+if [ -z "$SOURCE_EXT" ]; then echo "mutate: source_ext missing from $CFG" >&2; exit 2; fi
+EXT_RE="\\.($(echo "$SOURCE_EXT" | tr ' ' '|'))\$"
+FIND_EXT=(); for e in $SOURCE_EXT; do [ ${#FIND_EXT[@]} -gt 0 ] && FIND_EXT+=(-o); FIND_EXT+=(-name "*.$e"); done
 
 # Physical path: Mull records the path CMake compiled from, and phase 2's includePaths
 # regexes are anchored on it — a symlinked logical path would match nothing (#141 review).
@@ -91,10 +97,10 @@ if [ -n "$REF" ] && ! git rev-parse --verify --quiet "$REF^{commit}" >/dev/null;
 fi
 if [ -n "$REF" ]; then
   # shellcheck disable=SC2086
-  SCOPE=$(git diff --name-only "$REF" -- $SCOPE_DIRS | grep -E '\.(cpp|hpp|h|cc)$' || true)
+  SCOPE=$(git diff --name-only "$REF" -- $SCOPE_DIRS | grep -E "$EXT_RE" || true)
 else
   # shellcheck disable=SC2086
-  SCOPE=$(find $SCOPE_DIRS -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' \) 2>/dev/null | sort)
+  SCOPE=$(find $SCOPE_DIRS -type f \( "${FIND_EXT[@]}" \) 2>/dev/null | sort)
 fi
 if [ -z "$SCOPE" ]; then
   echo "mutation: nothing in scope (${REF:-full tree}) — no changed sources under: $SCOPE_DIRS"
@@ -254,7 +260,7 @@ done
 TREND=()
 [ -n "$TREND_LOG" ] && TREND=(--trend-log "$TREND_LOG")
 python3 tools/mutate_report.py --reports "$REPORTS" --root "$ROOT" --scope-dirs "$SCOPE_DIRS" \
-  --ranges "$BUILD/scope_ranges.json" --ref "$REF" --out "$BUILD/report.json" \
+  --ranges "$BUILD/scope_ranges.json" --source-ext "$SOURCE_EXT" --ref "$REF" --out "$BUILD/report.json" \
   --max-unlabelled "$MAX_UNLABELLED" --categories "$CATEGORIES" "${TREND[@]}" || rc=1
 [ "$rc" -eq 0 ] && echo "mutation: PASS" || echo "mutation: FAIL" >&2
 exit $rc
