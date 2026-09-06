@@ -21,7 +21,15 @@ the run's own machine-readable record, and names every source that escaped:
               registration of <other> (@ceab86f finding 5) — and the FILE the registration
               runs must be registered once: two registrations whose command[0] are one file
               (a link registered by its own path; @3dde163 finding 3) are both refused,
-              since one file cannot be two targets' binaries. A same-named binary elsewhere
+              since one file cannot be two targets' binaries. Likewise one NAME, one
+              registration: execution evidence is keyed by ctest test name, so a name
+              shared by two registrations would hand one binary's run to the other
+              (@aed9693; CMake permits it across add_subdirectory) — both are refused.
+              And the registration set must be the set that ran: `ctest --show-only` is
+              read AFTER the tests, so its names must equal the record's <testcase> names
+              (any status); a test that rewrote CTestTestfile.cmake while running is
+              refused as "registration set differs from the run's record" (@aed9693,
+              reproducer 2). A same-named binary elsewhere
               is a decoy (red team @94f2462 finding 2). No arguments
               (an argument is a Catch2 filter; a spec matching nothing plus
               --allow-running-no-tests exits 0 with `EXECUTED: 0` — @94f2462 finding 1).
@@ -127,9 +135,11 @@ def registered_tests(build: Path):
 
 def executed_counts(junit: Path):
     """(ctest test name -> the EXECUTED: count it printed, for <testcase>s with status="run";
-    set of names whose recorded stdout ctest truncated)."""
-    out, truncated = {}, set()
+    set of names whose recorded stdout ctest truncated; list of every <testcase> name in the
+    record, any status — the set ctest actually saw, duplicates included)."""
+    out, truncated, recorded = {}, set(), []
     for case in ET.parse(junit).getroot().iter("testcase"):
+        recorded.append(case.get("name"))
         if case.get("status") != "run":
             continue
         text = case.findtext("system-out") or ""
@@ -139,7 +149,7 @@ def executed_counts(junit: Path):
             m = EXECUTED_RE.match(line)
             if m:
                 out[case.get("name")] = int(m.group(1))
-    return out, truncated
+    return out, truncated, recorded
 
 
 def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
@@ -158,8 +168,20 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
     finally:
         if log_bytes is not None:
             log.write_bytes(log_bytes)   # hand the run's log back exactly as ctest left it
-    executed, truncated = executed_counts(junit)
+    executed, truncated, recorded = executed_counts(junit)
     record_mtime = junit.stat().st_mtime
+    failures = []
+    by_name = {}   # ctest test name -> registered paths carrying it (one name, one registration)
+    for path, regs in registered.items():
+        for name, _ in regs:
+            by_name.setdefault(name, []).append(path)
+    if sorted(by_name) != sorted(set(recorded)) or len(recorded) != len(set(recorded)):
+        missing = sorted(set(by_name) - set(recorded))
+        extra = sorted(set(recorded) - set(by_name))
+        dups = sorted({n for n in recorded if recorded.count(n) > 1})
+        failures.append("registration set differs from the run's record "
+                        f"(registered but not in {junit}: {missing}; in the record but not registered: {extra}; "
+                        f"recorded more than once: {dups}) — CTestTestfile.cmake changed after ctest ran?")
     identity = {}   # registered path -> (st_dev, st_ino) of the file it runs, for the one-file-one-registration rule
     for path in registered:
         try:
@@ -170,7 +192,6 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
     by_basename = {}   # for the "same name, wrong path" message only
     for path in registered:
         by_basename.setdefault(os.path.basename(path), []).append(path)
-    failures = []
     for src in srcs:
         rel = src.relative_to(root).as_posix()
         hit = compiled.get(os.path.realpath(src))
@@ -200,7 +221,11 @@ def check_ctest(root: Path, build: Path, log: Path, junit: Path) -> int:
             continue
         name, argv = registered[binary][0]
         twins = [d for d, i in identity.items() if d != binary and i == identity.get(binary)]
-        if twins:
+        namesakes = [d for d in by_name.get(name, []) if d != binary]
+        if namesakes:
+            failures.append(f"{rel}: registered as '{name}', but one name cannot identify two binaries' runs: "
+                            f"'{name}' also registers {namesakes[0]} (execution evidence is per name)")
+        elif twins:
             failures.append(f"{rel}: registered as '{name}', but the file {binary} runs is also registered as "
                             f"'{registered[twins[0]][0][0]}' ({twins[0]}): one file cannot be two targets' binaries, "
                             f"so neither registration is a run of its own target")

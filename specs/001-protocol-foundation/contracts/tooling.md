@@ -127,7 +127,12 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
   the target's own binary — compared as an absolute path without resolving symlinks, so a
   link to another target's binary is not a registration, and the file a registration runs
   must be registered once (a link registered by its own path is refused, both ways; red
-  team @3dde163) — with no arguments (a filtered Catch2 run, or a same-named binary
+  team @3dde163), one ctest test NAME must register one binary (execution evidence is
+  keyed by name; CMake allows a duplicate across `add_subdirectory` — both refused; red
+  team @aed9693), and the registered set must equal the record's `<testcase>` names
+  (`ctest --show-only` runs after the tests; a test that rewrote `CTestTestfile.cmake`
+  is refused as "registration set differs from the run's record" — a control, not a
+  guarantee) — with no arguments (a filtered Catch2 run, or a same-named binary
   elsewhere, is refused), executed means an `EXECUTED: <n>` line with n > 0 (red team
   @94f2462) for the BINARY that contains the source's object — per-binary evidence, not
   proof that any one source's cases ran; one source per target in `CMakeLists.txt` makes
