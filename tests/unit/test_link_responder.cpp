@@ -32,10 +32,18 @@ namespace {
 // a retry replay must never bump `calls` (spec US3 AS2/FR-015).
 struct RecordingHandler : RequestHandler {
     int calls = 0;
+    // Set instead of REQUIRE'd inline: this can run inside a HEAP_FREE_SCOPE (whose own
+    // REQUIRE would count against the guard) and on link/'s -fno-exceptions stack, where a
+    // failing REQUIRE has no unwind support (review @033182a finding 3). Callers assert it
+    // once poll() has returned.
+    bool cap_violation = false;
 
     size_t handle(const uint8_t* req, size_t len, uint8_t* resp, size_t cap) override {
         ++calls;
-        REQUIRE(len <= cap);
+        if (len > cap) {
+            cap_violation = true;
+            return 0;
+        }
         if (len > 0)
             std::memcpy(resp, req, len);
         return len;
@@ -53,6 +61,20 @@ struct OversizedHandler : RequestHandler {
     size_t handle(const uint8_t*, size_t, uint8_t*, size_t cap) override {
         ++calls;
         return cap + 1;
+    }
+};
+
+// red-team @033182a finding 2: a handler that violates its own contract by returning more
+// than `cap` (here, a value that wraps a uint8_t length cast back into range) -- a wider
+// overflow than OversizedHandler's cap+1 above, which stays within a uint8_t.
+struct OverlongHandler : RequestHandler {
+    size_t ret = 0;
+    int calls = 0;
+
+    size_t handle(const uint8_t*, size_t, uint8_t* resp, size_t cap) override {
+        ++calls;
+        std::memset(resp, 0xEE, cap);
+        return ret;
     }
 };
 
@@ -122,10 +144,16 @@ TEST_CASE("a default-constructed Responder transmits its response's first byte e
     // itself (poll(), production code) is wrapped, not the test harness's clock step.
     wire.advance_to(deadline - 1);
     HEAP_FREE_SCOPE({ responder.poll(deadline - 1); });
+    REQUIRE_FALSE(handler.cap_violation);
     REQUIRE(wire.transcript_size() == 0);
     REQUIRE(handler.calls == 1);
 
-    wire.advance_to(deadline, responder);
+    // The respond half (wire_.transmit) is covered by its own guard too, not just the
+    // handle-and-encode half above (review @033182a finding 2; precedent
+    // test_link_master.cpp:2947-2953).
+    wire.advance_to(deadline);
+    HEAP_FREE_SCOPE({ responder.poll(deadline); });
+    REQUIRE_FALSE(handler.cap_violation);
     REQUIRE(wire.transcript_size() == 1);
     const auto& tx = wire.transcript(0);
     REQUIRE(tx.tx_start_us == deadline);
@@ -409,11 +437,12 @@ TEST_CASE("a second accepted request arriving while the first response is still 
     REQUIRE(responder.stats().discards == 1);
 }
 
-// --- red-team @907dfbe finding #3: a second request must not silently steal a --------
-// --- not-yet-transmitted response --------------------------------------------------
+// --- red-team @907dfbe finding #3 / review + red-team @033182a finding #1: a second ---
+// --- accepted request must neither silently steal the first response NOR collide -----
+// --- with it on the wire --------------------------------------------------------------
 
-TEST_CASE("a second accepted request queued ahead of a late poll() does not silently "
-          "erase the first response; both are answered and the loss is never invisible",
+TEST_CASE("a second request whose frame completes while the first response is still "
+          "occupying the wire is discarded and counted, never colliding with it",
           "[link]") {
     FakeClock clock;
     MockWire wire(clock);
@@ -432,17 +461,23 @@ TEST_CASE("a second accepted request queued ahead of a late poll() does not sile
 
     wire.advance_to(end2 + omgp::TRUNK_T_turn_min_us, responder);
 
-    // Both requests handled and both answers reached the wire: transmit_if_due() flushes
-    // the first response (already overdue by the time its own on_request() ran) before
-    // the second request's on_request() can ever see state_ == Scheduled and treat it as
-    // a conflict.
-    REQUIRE(handler.calls == 2);
-    REQUIRE(wire.transcript_size() == 2);
+    // The first response is transmitted in full -- never silently stolen -- and counted
+    // late, since request 1's own T_turn_max window had already closed by the time this
+    // (deliberately late) poll() ran.
+    REQUIRE(handler.calls == 1);
+    REQUIRE(wire.transcript_size() == 1);
     REQUIRE(wire.transcript(0).seq == 1);
-    REQUIRE(wire.transcript(1).seq == 2);
-    REQUIRE(responder.stats().transactions == 2);
-    REQUIRE(responder.stats().discards == 0);
-    REQUIRE(responder.stats().late_responses == 1); // only the first response was late
+    REQUIRE(responder.stats().transactions == 1);
+    REQUIRE(responder.stats().late_responses == 1);
+
+    // Request 2's frame only finishes decoding once the drain loop reaches its last byte,
+    // by which point transmit_if_due() has already flushed response 1: the wire is still
+    // physically occupied transmitting it (data-model.md Section 5
+    // Transmitting(until tx_end); trunk Section 3 is half-duplex). Colliding with it (the
+    // bug this test used to assert as correct, red-team @033182a finding 1) is worse than
+    // discarding it, and unlike the pre-attempt-2 code (907dfbe finding #3) the discard is
+    // counted, not invisible.
+    REQUIRE(responder.stats().discards == 1);
 }
 
 // --- US3 AS4/FR-017: wrong address / corrupt frame -> discard, no transmission --------
@@ -624,4 +659,61 @@ TEST_CASE("after transmitting, later poll() calls do not retransmit absent a new
 
     REQUIRE(wire.transcript_size() == 1);
     REQUIRE(handler.calls == 1);
+}
+
+// --- red-team @033182a finding #2: a handler return value >= 256 must be refused, not --
+// --- silently truncated by the uint8_t length cast ------------------------------------
+
+TEST_CASE("a RequestHandler returning 256 or more is refused, not truncated by the "
+          "uint8_t response-length cast",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    OverlongHandler handler;
+    // static_cast<uint8_t>(256) wraps to 0 -- a perfectly legal length -- unless the
+    // handler's return value is checked against its own `cap` before that cast runs.
+    handler.ret = 256;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t payload[] = {0x01, 0x02, 0x03};
+    uint64_t end =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 0, payload, sizeof payload), 0);
+    wire.advance_to(end + omgp::TRUNK_T_turn_min_us, responder);
+
+    REQUIRE(handler.calls == 1);
+    REQUIRE(responder.stats().discards == 1);
+    REQUIRE(wire.transcript_size() == 0);
+    REQUIRE(responder.stats().transactions == 0);
+}
+
+// --- red-team @033182a finding #3: a retry from a different station must not replay ---
+// --- the previous requester's buffered answer ------------------------------------------
+
+TEST_CASE("a retry-flagged request from a different station is treated as new rather "
+          "than replaying the previous requester's buffered answer",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t p[] = {0x5A};
+    uint64_t end1 = inject_request(wire, request_bytes(kMyAddr, kPeer, false, 5, p, sizeof p), 0);
+    wire.advance_to(end1 + omgp::TRUNK_T_turn_min_us, responder);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).dst == kPeer);
+
+    // A different station (0x07) happens to send retry=1 with the same sequence (5): the
+    // ReplayBuffer is keyed on sequence alone unless the buffered requester is also
+    // checked (docs/OPEN-QUESTIONS.md 2026-09-06).
+    const uint8_t q[] = {0x99};
+    const uint64_t start2 = end1 + omgp::TRUNK_T_turn_min_us + 200 * byte_us();
+    uint64_t end2 =
+        inject_request(wire, request_bytes(kMyAddr, 0x07, true, 5, q, sizeof q), start2);
+    wire.advance_to(end2 + omgp::TRUNK_T_turn_min_us, responder);
+
+    REQUIRE(wire.transcript_size() == 2);
+    REQUIRE(wire.transcript(1).dst == 0x07); // answered to the station that actually asked
+    REQUIRE(handler.calls == 2);             // treated as new, not replayed
+    REQUIRE(responder.stats().replays_served == 0);
 }
