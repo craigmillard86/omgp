@@ -124,20 +124,20 @@ fi
 
 # --- configuration is TWO-PHASE ----------------------------------------------------------------
 # The IR frontend plugin reads mull.yml at COMPILE time (mutators, include/exclude paths) and
-# the runner reads it again at RUN time (git diff filter, timeout). Both use the build
-# directory as cwd, so the file lives there. Measured on Mull 0.34.0: gitDiffRef present at
-# compile time makes the plugin embed NO mutants (its git lookup runs from a build
+# the runner reads it again at RUN time (path filter, git diff filter, timeout). Both use the
+# build directory as cwd, so the file lives there. Measured on Mull 0.34.0: gitDiffRef present
+# at compile time makes the plugin embed NO mutants (its git lookup runs from a build
 # subdirectory and matches nothing), while the same key at run time filters correctly. So
-# phase 1 instruments everything under the scope dirs; phase 2 appends the git filter.
+# phase 1 instruments every TU; phase 2 narrows what the runner EXECUTES to the scope dirs.
 # The build is always fresh: objects compiled without the config contain no mutants.
 python3 tools/codegen.py --vectors tests/vectors >/dev/null
 ROOT=$(pwd)
 rm -rf "$BUILD" && mkdir -p "$BUILD"
 # Compile-time config: mutators only — every translation unit is instrumented. Measured on
-# 0.34.0: any includePaths/excludePaths here leaves the runner with "No mutants found",
+# 0.34.0: any includePaths/excludePaths HERE leaves the runner with "No mutants found",
 # because excluding the TU that holds main() (Catch2's amalgamated source) removes the
-# run-time mutant dispatch the plugin injects there. Scoping is therefore done by the git
-# diff filter at run time plus a post-filter on the report (only scope_dirs are counted).
+# run-time mutant dispatch the plugin injects there. The same keys at RUN time are safe
+# (phase 2 below); the report post-filter (only scope_dirs are counted) stays as the gate.
 {
   echo "mutators:"; for g in $GROUPS_; do echo "  - $g"; done   # names must be known to Mull (see mutate.cfg)
   echo "timeout: $TIMEOUT_MS"
@@ -158,15 +158,22 @@ for d in $CHANGED_DIRS; do
 done
 echo "mutation: instrumented build done (mutated functions in library objects:$embedded)"
 
-# Phase 2 (run time): mutators + timeout only. Diff scoping is NOT delegated to Mull's
-# gitDiffRef: measured on 0.34.0, its filter keeps mutants in modified files but drops
-# every mutant in a file the diff ADDS (new-file hunks) — useless for a feature whose PRs
-# mostly add files. Instead every mutant runs (cheap with --workers) and the merge below
-# keeps only those on lines `git diff -U0 <ref>` marks as added/changed under scope_dirs.
+# Phase 2 (run time): timeout + a path filter restricting EXECUTION to the scope dirs. The
+# runner's includePaths (regexes over the absolute source path; mull_filters FilePathFilter)
+# are applied after discovery, so the Catch2 main() TU stays instrumented and dispatch works.
+# The report merge counts only scope_dirs anyway (mutate_report.py in_scope), so this drops
+# nothing the gate ever looked at — it stops executing what the merge discards: measured on
+# 0.34.0 at PR #137 round 19, test_link_master went 4050 mutants / 14m30s → 260 / 43s on 12
+# cores, every in-scope status identical (tools/mutate_diff_reports.py). Diff scoping is
+# still NOT delegated to Mull's gitDiffRef: measured on 0.34.0, its filter keeps mutants in
+# modified files but drops every mutant in a file the diff ADDS (new-file hunks) — useless
+# for a feature whose PRs mostly add files. The merge below keeps only mutants on lines
+# `git diff -U0 <ref>` marks as added/changed under scope_dirs.
+ROOT_RE=$(printf '%s' "$ROOT" | sed 's/[][\.*^$+?(){}|\\]/\\&/g')
 {
-  echo "mutators:"; for g in $GROUPS_; do echo "  - $g"; done
   echo "timeout: $TIMEOUT_MS"
   echo "quiet: true"
+  echo "includePaths:"; for d in $SCOPE_DIRS; do echo "  - ^$ROOT_RE/$d/.*"; done
 } > "$BUILD/mull.yml"
 # Changed-line ranges per in-scope file (new files are whole-file ranges), as JSON.
 if [ -n "$REF" ]; then
@@ -203,8 +210,8 @@ for name in $ORACLE; do
     rc=1; continue
   fi
   # mull-runner exits non-zero whenever survivors exist, so its exit code is not a failure
-  # signal; a missing report is. (All mutants run here; the diff scoping happens in the
-  # merge below, so per-binary survivor counts are NOT the gate's numbers.)
+  # signal; a missing report is. (Every scope-dir mutant runs here; the diff scoping happens
+  # in the merge below, so per-binary survivor counts are NOT the gate's numbers.)
   ( cd "$BUILD" && "$RUNNER" --reporters IDE --reporters Elements "${EXTRA[@]}" --report-dir reports \
       --report-name "$name" --ide-reporter-show-killed --timeout "$TIMEOUT_MS" \
       --workers "${OMGP_MUTATE_WORKERS:-$(nproc)}" "./$name" > "$name.mull.log" 2>&1 ) || true
