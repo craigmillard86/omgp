@@ -318,6 +318,32 @@ class TestCtestPath:
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_b.cpp" in r.stderr and "did not run" in r.stderr, r.stderr
 
+    def test_chatty_test_output_keeps_its_execution_evidence(self, tmp_path):
+        # Red team @3880d35: `ctest --output-junit` truncates a PASSING test's <system-out> at
+        # --test-output-size-passed (default 1024 bytes), dropping the TAIL — and EXECUTED: is
+        # the last line the listener prints. A binary that says 2 KB of anything on a green
+        # run lost its evidence and was blamed as DISABLED/skipped. (`--test-output-truncation
+        # head` is silently accepted and ignored by CMake 3.22 — measured; the size flag works.)
+        chatty = 'printf "%s\\n" "' + "x" * 2000 + '"\necho "EXECUTED: 600000"'
+        root = make_tree(tmp_path, scripts={"test_b": chatty})
+        r = run_unit(root)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert VERIFIED.search(r.stdout).group(1) == "2", r.stdout
+        assert "unit: executed 1200000 check(s) (ctest path)" in r.stdout
+
+    def test_truncated_record_is_named_as_truncated(self, tmp_path):
+        # The same tree, but the record written by a ctest WITHOUT the size flag (an out-of-band
+        # run): the tool must say the record is truncated, not "DISABLED, skipped".
+        chatty = 'printf "%s\\n" "' + "x" * 2000 + '"\necho "EXECUTED: 600000"'
+        root = make_tree(tmp_path, scripts={"test_b": chatty})
+        build = root / "build/native"
+        subprocess.run(["ctest", "--output-junit", "Testing/junit.xml"], cwd=build,
+                       capture_output=True, text=True, timeout=300, check=True)
+        r = run_tool("--ctest", cwd=root)
+        assert r.returncode != 0, r.stdout
+        assert "tests/unit/test_b.cpp" in r.stderr and "truncated" in r.stderr, r.stderr
+        assert "DISABLED" not in r.stderr, r.stderr
+
     def test_missing_record_is_a_named_failure(self, tmp_path):
         # stage_unit deletes the record before ctest; if ctest then writes none, the tool must
         # say so by name rather than fall over in the XML parser.
