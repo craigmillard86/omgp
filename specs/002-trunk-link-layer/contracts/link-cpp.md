@@ -90,7 +90,9 @@ sequence; retries reuse it and set `retry`; at most `TRUNK_retries` retries; res
 window `[tx_end, tx_end + TRUNK_T_resp_us)`; a CRC-failed frame in the window ends the
 attempt at once; frames failing any acceptance check are discarded and counted — against
 `dst` while `dst`'s response window is open (spec US2 AC6), otherwise against the frame's own
-claimed `src` (when in range) — and a byte-for-byte drain: `poll()` reads every byte due at
+claimed `src` when that is in range (a claimed `src` of `0x10..0xFE` is discarded and counted
+nowhere — an FR-011 tension recorded in `docs/OPEN-QUESTIONS.md` 2026-09-06, bus-level counter
+tracked in #138) — and a byte-for-byte drain: `poll()` reads every byte due at
 `now_us`, including those behind the byte that concluded an attempt; the next transmission
 starts no earlier than `last_activity + TRUNK_T_gap_us`, where `last_activity` is re-read on
 every `poll()` so a byte arriving during the deferral pushes the instant out. `begin()` does

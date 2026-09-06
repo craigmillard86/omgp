@@ -1706,3 +1706,34 @@ stated-only, since F3 is the sole constructor caller and passes `ADDR_host`.
 are one ruling on what `begin()` refuses, and one contract clause.
 **Ruling:** pending — human (contract-doc amendment + a small behaviour change to `begin()`).
 **Supersedes:** none.
+
+## 2026-09-06 — a discarded frame whose claimed src is out of range (0x10..0xFE) is counted nowhere; FR-011 says every discard MUST be counted
+
+**Context:** review at `5a458c2` (#137, MEDIUM). `poll()` charges a discarded frame to `dst`'s
+`AddrStats` while `dst`'s response window is open (spec US2 AC6), otherwise to the frame's
+own claimed `src` — guarded by `f.src < kAddrCount`, because `AddrStats` is a
+`kAddrCount`-entry table (FR-011a: "per trunk address") and an intact frame's `src` is
+wire-derived: the Deframer refuses only `dst == 0xFF`, so `src` can be any byte
+`0x00..0xFE`. A frame claiming `src = 0x40` while the host is idle or gap-deferred is
+therefore discarded and counted in no counter at all — every `stats(a).discards` stays 0 and
+`BusStats` has no discard field. FR-011 (`spec.md`) says such frames "MUST be counted
+(FR-011a) so tests and the simulator can observe them", with no in-range qualifier; FR-011a's
+counter block is per trunk address, so the two requirements can only both be met for
+in-range sources. Proved by construction from the table size; `tests/unit/test_link_master.cpp`
+"an unsolicited frame while idle whose claimed source is exactly kAddrCount…" pins the
+uncounted outcome (it exists to catch the off-by-one write under ASan). `frame.cpp`'s
+Deframer does not itself count either (its discards are visible only through `Master`).
+**Options:** (a) a bus-level `discards` counter in `BusStats` (data-model.md `BusStats`
+gains a field; FR-011a's "per bus" list gains "frames discarded with no attributable
+address") — the reading that keeps FR-011 unconditional; (b) amend FR-011 to "counted
+against the attributed address when there is one" — records the gap rather than closing it;
+(c) have the Deframer refuse `src >= kAddrCount` as a reserved/invalid address, so the frame
+never reaches `Master` as an intact frame (trunk §5's range is `0x00..0x0F`; but §5 reserves
+only `0xFF`, so this widens the Deframer's refusal beyond the spec text and removes the
+observability rather than adding it).
+**Recommendation:** (a), folded into #138 item 3 (bus-level outcome/counter) — same field
+family, same data-model amendment, and the CRC-attribution entry above also wants a bus-level
+count. Not added in #137: a `BusStats` field is a data-model change and this PR's
+contract amendments already await a ruling.
+**Ruling:** pending — human (data-model amendment).
+**Supersedes:** none.

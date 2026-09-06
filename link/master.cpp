@@ -393,7 +393,10 @@ MasterEvent Master::poll(uint64_t now_us) {
         // Otherwise (gap-deferred before a first or retried transmission, or no transaction
         // at all) there is no window to attribute it to, so the frame's own claimed source
         // is charged instead (PR #137 review @3a15d29, LOW; bounds-checked: an intact
-        // frame's src is wire-derived and can claim any byte 0x00..0xFE).
+        // frame's src is wire-derived and can claim any byte 0x00..0xFE). A claimed src of
+        // 0x10..0xFE has no AddrStats slot and is counted NOWHERE — FR-011 says every discard
+        // is counted, FR-011a's block is per address; recorded, not resolved here
+        // (docs/OPEN-QUESTIONS.md 2026-09-06 "claimed src is out of range"; #138 item 3).
         if (awaiting)
             stats_[dst_].discards++;
         // `<=` here differs only at f.src == kAddrCount, where it writes one AddrStats past the

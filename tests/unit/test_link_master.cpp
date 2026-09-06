@@ -2850,7 +2850,11 @@ TEST_CASE("an unsolicited frame while idle whose claimed source is exactly kAddr
     // Idle-path attribution indexes stats_ by the frame's own wire-derived src, guarded by
     // `f.src < kAddrCount`. kAddrCount itself is the first out-of-range index: with the guard
     // off by one this write would land past the table (ASan in the native preset). Every
-    // in-range record and the bus record are asserted untouched.
+    // in-range record and the bus record are asserted untouched. That the frame is then
+    // counted NOWHERE is what FR-011 ("MUST be counted") and FR-011a ("per trunk address")
+    // cannot both give for an out-of-range src; this case pins the bounds behaviour, not
+    // that outcome as correct (docs/OPEN-QUESTIONS.md 2026-09-06 "claimed src is out of
+    // range"; PR #137 review @5a458c2). A bus-level counter (#138) would change one line here.
     FakeClock clock;
     MockWire wire(clock);
     Master master(wire, clock, omgp::ADDR_host);
