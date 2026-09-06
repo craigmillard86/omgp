@@ -176,8 +176,9 @@ constexpr uint64_t kFarFuture = 1'000'000; // 1s: far past any single transactio
 // exactly what a real node would (see file comment); only what reaches Master back on
 // host_wire is shaped by `plan`. Returns once a terminal MasterEvent is produced. If `plan`
 // never both fails and reaches attempt 2, the loop terminates early on Answered.
-MasterEvent run_transaction(Loop& loop, uint8_t dst, const uint8_t* payload, size_t len,
-                            const Fault (&plan)[3]) {
+// Opens a transaction on the Master and makes sure its first request is actually on
+// host_wire's transcript before returning.
+void begin_transaction(Loop& loop, uint8_t dst, const uint8_t* payload, size_t len) {
     const size_t before = loop.host_wire.transcript_size();
     REQUIRE(loop.master.begin(dst, payload, len) == Status::Ok);
     if (loop.host_wire.transcript_size() == before) {
@@ -193,25 +194,48 @@ MasterEvent run_transaction(Loop& loop, uint8_t dst, const uint8_t* payload, siz
         loop.host_wire.advance_to(flush_to, loop.master);
         REQUIRE(loop.host_wire.transcript_size() > before);
     }
+}
+
+// One attempt, bridged: the Master's latest request copied onto node_wire, the real Responder
+// poll()ed through it, and its real, captured response returned for the caller to deliver
+// (or not) to host_wire.
+struct BridgedAttempt {
+    uint64_t req_tx_end;        // the request's last byte ends here on host_wire
+    uint64_t response_start_us; // the Responder's first response byte (default turnaround)
+    MockWire::TxRecord resp;    // the Responder's response as node_wire recorded it
+    std::vector<uint8_t> resp_bytes;
+};
+
+BridgedAttempt bridge_latest_request(Loop& loop, uint8_t dst) {
+    const size_t idx = loop.host_wire.transcript_size() - 1;
+    const auto req = loop.host_wire.transcript(idx); // copy: stable across further calls
+    const auto req_bytes =
+        encode_expected(dst, omgp::ADDR_host, false, req.retry, req.seq, req.payload, req.len);
+    const uint64_t req_tx_end =
+        req.tx_start_us + static_cast<uint64_t>(req_bytes.size()) * byte_us();
+
+    // Bridge the request to the real Responder (see file comment): inject_bytes(), never
+    // node_wire.transmit(), so MockWire itself never tries to auto-answer it.
+    loop.node_wire.inject_bytes(req_bytes.data(), req_bytes.size(), req.tx_start_us);
+    loop.node_wire.advance_to(req_tx_end, loop.responder); // drains the request
+    REQUIRE_FALSE(loop.handler.overflowed);
+    const uint64_t response_start_us = req_tx_end + omgp::TRUNK_T_turn_min_us; // default
+    loop.node_wire.advance_to(response_start_us, loop.responder); // transmits the reply
+
+    const auto resp = loop.node_wire.transcript(loop.node_wire.transcript_size() - 1);
+    return BridgedAttempt{req_tx_end, response_start_us, resp, encode_response(resp)};
+}
+
+MasterEvent run_transaction(Loop& loop, uint8_t dst, const uint8_t* payload, size_t len,
+                            const Fault (&plan)[3]) {
+    begin_transaction(loop, dst, payload, len);
 
     for (int attempt = 0; attempt < 3; ++attempt) {
-        const size_t idx = loop.host_wire.transcript_size() - 1;
-        const auto req = loop.host_wire.transcript(idx); // copy: stable across further calls
-        const auto req_bytes =
-            encode_expected(dst, omgp::ADDR_host, false, req.retry, req.seq, req.payload, req.len);
-        const uint64_t req_tx_end =
-            req.tx_start_us + static_cast<uint64_t>(req_bytes.size()) * byte_us();
-
-        // Bridge the request to the real Responder (see file comment): inject_bytes(), never
-        // node_wire.transmit(), so MockWire itself never tries to auto-answer it.
-        loop.node_wire.inject_bytes(req_bytes.data(), req_bytes.size(), req.tx_start_us);
-        loop.node_wire.advance_to(req_tx_end, loop.responder); // drains the request
-        REQUIRE_FALSE(loop.handler.overflowed);
-        const uint64_t response_start_us = req_tx_end + omgp::TRUNK_T_turn_min_us; // default
-        loop.node_wire.advance_to(response_start_us, loop.responder); // transmits the reply
-
-        const auto resp = loop.node_wire.transcript(loop.node_wire.transcript_size() - 1);
-        const auto resp_bytes = encode_response(resp);
+        const BridgedAttempt a = bridge_latest_request(loop, dst);
+        const uint64_t req_tx_end = a.req_tx_end;
+        const uint64_t response_start_us = a.response_start_us;
+        const auto& resp = a.resp;
+        const auto& resp_bytes = a.resp_bytes;
 
         const Fault fault = plan[attempt];
         if (fault == Fault::Clean || fault == Fault::Duplicate) {
@@ -342,15 +366,23 @@ TEST_CASE("SC-004 delay-past-T_resp at attempt 0: recovers via the retry; the st
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Answered);
     REQUIRE(ev.response.seq == 0);
+    REQUIRE(loop.master.attempts() == 2);
     REQUIRE(loop.handler.invocations == 1);
+    REQUIRE(loop.responder.stats().replays_served == 1);
     REQUIRE_FALSE(loop.master.busy());
+    REQUIRE(loop.master.stats(kNode).discards == 0); // nothing stray has arrived yet
 
     // The withheld attempt-0 response was scheduled at kFarFuture (run_transaction) — still
     // in host_wire's RX queue, since nothing has advanced the clock that far yet. Let it
-    // arrive now that the transaction has long since concluded: no busy(), no second event.
+    // arrive now that the transaction has long since concluded: no busy(), no second event,
+    // and the frame OBSERVED as a discard charged to its claimed source (link/master.cpp
+    // "no transaction at all ... the frame's own claimed source is charged") — the
+    // assertion that separates "delivered and ignored" from "never delivered" (red team
+    // @fc3fc1a finding 1: without it, deleting the stray from the wire left this cell green).
     const MasterEvent late = loop.host_wire.advance_to(kFarFuture + 10 * byte_us(), loop.master);
     REQUIRE(late.kind == MasterEvent::None);
     REQUIRE_FALSE(loop.master.busy());
+    REQUIRE(loop.master.stats(kNode).discards == 1);
 }
 
 TEST_CASE("SC-004 delay-past-T_resp through retry 1: recovers on the second retry; the stale "
@@ -361,8 +393,10 @@ TEST_CASE("SC-004 delay-past-T_resp through retry 1: recovers on the second retr
     const Fault plan[3] = {Fault::Drop, Fault::DelayPastTResp, Fault::Clean};
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(ev.response.seq == 0);
     REQUIRE(loop.master.attempts() == 3);
     REQUIRE(loop.handler.invocations == 1);
+    REQUIRE(loop.responder.stats().replays_served == 2);
 
     // run_transaction offsets each DelayPastTResp attempt's stray by attempt*10*T_resp so
     // several in one transaction never collide (attempt 1 here: kFarFuture + 10*T_resp).
@@ -370,6 +404,7 @@ TEST_CASE("SC-004 delay-past-T_resp through retry 1: recovers on the second retr
         kFarFuture + 10 * omgp::TRUNK_T_resp_us + 10 * byte_us(), loop.master);
     REQUIRE(late.kind == MasterEvent::None);
     REQUIRE_FALSE(loop.master.busy());
+    REQUIRE(loop.master.stats(kNode).discards == 1); // the one stray, observed
 }
 
 TEST_CASE("SC-004 delay-past-T_resp through retry 2: uses the full retry budget and still "
@@ -380,14 +415,17 @@ TEST_CASE("SC-004 delay-past-T_resp through retry 2: uses the full retry budget 
     const Fault plan[3] = {Fault::DelayPastTResp, Fault::DelayPastTResp, Fault::Clean};
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(ev.response.seq == 0);
     REQUIRE(loop.master.attempts() == static_cast<uint8_t>(omgp::TRUNK_retries) + 1);
     REQUIRE(loop.handler.invocations == 1);
+    REQUIRE(loop.responder.stats().replays_served == 2);
 
     // Two strays this time (attempts 0 and 1); advance past the later of the two.
     const MasterEvent late = loop.host_wire.advance_to(
         kFarFuture + 10 * omgp::TRUNK_T_resp_us + 10 * byte_us(), loop.master);
     REQUIRE(late.kind == MasterEvent::None);
     REQUIRE_FALSE(loop.master.busy());
+    REQUIRE(loop.master.stats(kNode).discards == 2); // both strays, observed
 }
 
 TEST_CASE("SC-004 delay-past-T_resp after give-up: Failed{Timeout}; the stale late answer is "
@@ -399,12 +437,76 @@ TEST_CASE("SC-004 delay-past-T_resp after give-up: Failed{Timeout}; the stale la
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Failed);
     REQUIRE(ev.reason == MasterEvent::Timeout);
+    REQUIRE(loop.master.attempts() == 3); // initial + TRUNK_retries, never a fourth
     REQUIRE(loop.handler.invocations == 1);
+    REQUIRE(loop.responder.stats().replays_served == 2);
+    REQUIRE_FALSE(loop.master.busy());
 
     // attempt 2's stray: kFarFuture + 20*T_resp (run_transaction's per-attempt offset).
     const MasterEvent late = loop.host_wire.advance_to(
         kFarFuture + 20 * omgp::TRUNK_T_resp_us + 10 * byte_us(), loop.master);
     REQUIRE(late.kind == MasterEvent::None);
+    REQUIRE_FALSE(loop.master.busy());
+    REQUIRE(loop.master.stats(kNode).discards == 1); // the stray, observed after give-up
+}
+
+// --- SC-004: delay-past-T_resp, AT the window's closing edge, while the attempt is open ------
+// The four cells above deliver their late answer long after the transaction concluded, so the
+// Master sees it with no window open at all — silence and lateness are the same thing to them,
+// and the window discipline (link/master.cpp: `in_window` at the acceptance check) is never
+// consulted (red team @fc3fc1a finding 2: deleting that conjunct left this file green). This
+// cell is the one where it is: the frame OPENS exactly at deadline_ = request_end + T_resp
+// (link/master.cpp:170) and is drained by the same poll() that times the attempt out, while
+// the attempt is still awaiting — one instant late, so discarded; one instant earlier and it
+// would be the answer (test_link_master.cpp pins that edge from the Master's side alone).
+
+TEST_CASE("SC-004 delay-past-T_resp at the boundary: a response opening exactly at the "
+          "attempt's T_resp deadline, drained by the poll() that times the attempt out, is "
+          "discarded and charged to the node; the retry's answer is accepted",
+          "[link][timing:T_resp]") {
+    Loop loop;
+    const uint8_t payload[] = {0x25};
+    begin_transaction(loop, kNode, payload, sizeof payload);
+    const BridgedAttempt a0 = bridge_latest_request(loop, kNode);
+
+    // trunk §3: the response window is [request_end, request_end + T_resp) on the START bit;
+    // this frame's opening FLAG lands on the closed edge.
+    const uint64_t deadline = a0.req_tx_end + omgp::TRUNK_T_resp_us;
+    loop.host_wire.inject_bytes(a0.resp_bytes.data(), a0.resp_bytes.size(), deadline);
+    const uint64_t late_end = deadline + static_cast<uint64_t>(a0.resp_bytes.size()) * byte_us();
+
+    // One poll sees the whole late frame (drained first, attempt still awaiting) and then the
+    // expired deadline: not Answered, discard charged to dst_ (the window WAS this node's),
+    // the attempt timed out, the retry pending.
+    const MasterEvent ev0 = loop.host_wire.advance_to(late_end, loop.master);
+    REQUIRE(ev0.kind == MasterEvent::None);
+    REQUIRE(loop.master.busy());
+    REQUIRE(loop.master.attempts() == 1);
+    REQUIRE(loop.master.stats(kNode).discards == 1);
+    REQUIRE(loop.master.stats(kNode).timeouts == 1);
+    REQUIRE(loop.handler.invocations == 1);
+
+    // The late frame's bytes were bus activity: the retry goes out T_gap after its last byte
+    // (data-model.md §4 "Gap"), same sequence, retry bit set (trunk §7).
+    const uint64_t retry_tx = late_end + omgp::TRUNK_T_gap_us;
+    REQUIRE(loop.host_wire.advance_to(retry_tx, loop.master).kind == MasterEvent::None);
+    REQUIRE(loop.host_wire.transcript_size() == 2);
+    REQUIRE(loop.host_wire.transcript(1).tx_start_us == retry_tx);
+    REQUIRE(loop.host_wire.transcript(1).retry);
+    REQUIRE(loop.host_wire.transcript(1).seq == 0);
+
+    // The real Responder replays; delivered clean and on time, it is the answer.
+    const BridgedAttempt a1 = bridge_latest_request(loop, kNode);
+    loop.host_wire.inject_bytes(a1.resp_bytes.data(), a1.resp_bytes.size(), a1.response_start_us);
+    const MasterEvent ev = loop.host_wire.advance_to(
+        a1.response_start_us + static_cast<uint64_t>(a1.resp_bytes.size()) * byte_us(),
+        loop.master);
+    REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(ev.response.seq == 0);
+    REQUIRE(loop.master.attempts() == 2);
+    REQUIRE(loop.handler.invocations == 1);
+    REQUIRE(loop.responder.stats().replays_served == 1);
+    REQUIRE(loop.master.stats(kNode).discards == 1);
     REQUIRE_FALSE(loop.master.busy());
 }
 
@@ -458,6 +560,13 @@ TEST_CASE("SC-004 CRC-corrupted response after give-up: Failed{CrcFailed} after 
 // --- SC-004: duplicate response -------------------------------------------------------------
 // trunk §7 "duplicate": the genuine answer always arrives and the transaction always
 // succeeds on it; the extra, late copy is what each cell checks is discarded without effect.
+// `handler.invocations == 1` is NOT load-bearing in this row (review @fc3fc1a, LOW): the
+// duplicate is of the RESPONSE, so the Responder sees each request once and the replay
+// buffer is exercised only by the Drop attempts these plans contain. What each cell here
+// pins is that the extra copy was delivered and OBSERVED as a discard — `stats(kNode).
+// discards` counts it (link/master.cpp: a frame with no window open is charged to its own
+// claimed source) — with no second event and no re-opened transaction (red team @fc3fc1a
+// finding 1: without the discard count, deleting the copy from the wire left the row green).
 
 TEST_CASE("SC-004 duplicate at attempt 0: succeeds once; the late duplicate has no effect",
           "[link]") {
@@ -470,6 +579,7 @@ TEST_CASE("SC-004 duplicate at attempt 0: succeeds once; the late duplicate has 
     REQUIRE(loop.master.attempts() == 1); // the genuine answer landed first attempt
     REQUIRE(loop.handler.invocations == 1);
     REQUIRE_FALSE(loop.master.busy());
+    REQUIRE(loop.master.stats(kNode).discards == 1); // the late copy, observed
 }
 
 TEST_CASE("SC-004 duplicate through retry 1: succeeds once the retry lands; the late "
@@ -480,8 +590,12 @@ TEST_CASE("SC-004 duplicate through retry 1: succeeds once the retry lands; the 
     const Fault plan[3] = {Fault::Drop, Fault::Duplicate, Fault::Clean};
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(ev.response.seq == 0);
     REQUIRE(loop.master.attempts() == 2);
     REQUIRE(loop.handler.invocations == 1);
+    REQUIRE(loop.responder.stats().replays_served == 1);
+    REQUIRE_FALSE(loop.master.busy());
+    REQUIRE(loop.master.stats(kNode).discards == 1); // the late copy, observed
 }
 
 TEST_CASE("SC-004 duplicate through retry 2: uses the full retry budget and still succeeds "
@@ -492,8 +606,12 @@ TEST_CASE("SC-004 duplicate through retry 2: uses the full retry budget and stil
     const Fault plan[3] = {Fault::Drop, Fault::Drop, Fault::Duplicate};
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(ev.response.seq == 0);
     REQUIRE(loop.master.attempts() == static_cast<uint8_t>(omgp::TRUNK_retries) + 1);
     REQUIRE(loop.handler.invocations == 1);
+    REQUIRE(loop.responder.stats().replays_served == 2);
+    REQUIRE_FALSE(loop.master.busy());
+    REQUIRE(loop.master.stats(kNode).discards == 1); // the late copy, observed
 }
 
 TEST_CASE("SC-004 duplicate after give-up: a late duplicate of the final, withheld attempt "
@@ -504,7 +622,10 @@ TEST_CASE("SC-004 duplicate after give-up: a late duplicate of the final, withhe
     const Fault plan[3] = {Fault::Drop, Fault::Drop, Fault::Drop};
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Failed);
+    REQUIRE(ev.reason == MasterEvent::Timeout);
+    REQUIRE(loop.master.attempts() == 3); // initial + TRUNK_retries, never a fourth
     REQUIRE(loop.handler.invocations == 1);
+    REQUIRE(loop.master.stats(kNode).discards == 0); // nothing has arrived at all yet
 
     // The real (withheld) attempt-2 response still exists on node_wire's own transcript;
     // deliver two late copies of it now, long after Master gave up.
@@ -520,6 +641,7 @@ TEST_CASE("SC-004 duplicate after give-up: a late duplicate of the final, withhe
         loop.master);
     REQUIRE(late.kind == MasterEvent::None);
     REQUIRE_FALSE(loop.master.busy());
+    REQUIRE(loop.master.stats(kNode).discards == 2); // both late copies, observed
 }
 
 // --- SC-005 "babble": extraneous bus noise between transactions ---------------------------
@@ -556,5 +678,13 @@ TEST_CASE("SC-005 babble: extraneous bus noise between transactions is silently 
     REQUIRE(ev2.kind == MasterEvent::Answered);
     // next_seq advanced past the first transaction only, and babble invoked nothing.
     REQUIRE(ev2.response.seq == 1);
+    REQUIRE(loop.master.attempts() == 1);
     REQUIRE(loop.handler.invocations == 2);
+    // The babble was bus activity all the same (FR-010; data-model.md §4 "Gap"): the second
+    // request could not go out until T_gap of idle after the burst's last byte. This is what
+    // shows the burst was delivered at all — with no babble on the wire, begin() at
+    // babble_end transmits synchronously, AT babble_end (red team @fc3fc1a finding 1).
+    REQUIRE(loop.host_wire.transcript_size() == 2);
+    REQUIRE(loop.host_wire.transcript(1).tx_start_us >= babble_end + omgp::TRUNK_T_gap_us);
+    REQUIRE(loop.host_wire.transcript(1).tx_start_us < kFarFuture + 10 * omgp::TRUNK_T_resp_us);
 }
