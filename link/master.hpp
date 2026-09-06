@@ -41,8 +41,12 @@ class Master {
     MasterEvent poll(uint64_t now_us);
 
     bool busy() const;
-    // Number of transmissions sent so far (1..3) for the open/last transaction.
+    // Number of transmissions sent so far (0..3, contracts/link-cpp.md) for the open/last
+    // transaction: 0 while a freshly begun transaction is still gap-deferred (busy() true,
+    // nothing on the wire yet), then 1..3.
     uint8_t attempts() const;
+    // Pass-through to the wire + BusStats.rate_changes; bps == 0 is refused (not forwarded, not
+    // counted) — see master.cpp and docs/OPEN-QUESTIONS.md 2026-09-06 "set_bit_rate(0)".
     void set_bit_rate(uint32_t bps);
 
     const AddrStats& stats(uint8_t addr) const;

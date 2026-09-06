@@ -71,7 +71,9 @@ public:
                                                   // The ONLY receive path — there is no public feed() (analysis F1).
     bool busy() const;
     uint8_t attempts() const;                     // 0..3 for the open/last transaction
-    void set_bit_rate(uint32_t bps);              // pass-through to the wire + BusStats.rate_changes
+    void set_bit_rate(uint32_t bps);              // pass-through to the wire + BusStats.rate_changes;
+                                                  // bps == 0 refused: not forwarded, not counted (PR #137,
+                                                  // pending a ruling — docs/OPEN-QUESTIONS.md 2026-09-06)
     const AddrStats& stats(uint8_t addr) const;   // per destination (kAddrCount entries)
     const BusStats& bus_stats() const;
     void reset_stats();

@@ -1590,3 +1590,23 @@ physics and keeps the engine's inference honest without new state. Until ruled, 
 is the same shape of gap (a protection guarantee that holds only under an unstated operating
 assumption).
 **Ruling:** pending — human (ByteWire contract; F3/F4 interface).
+
+## 2026-09-06 — Master::set_bit_rate(0) is refused; the contract has no refusal clause
+
+**Context:** review at `e3af74d` (#137, LOW). `contracts/link-cpp.md` specifies `set_bit_rate`
+as "pass-through to the wire + `BusStats.rate_changes`" — no refusal, no return value. The
+engine calls `byte_time_us(wire_.bit_rate())` on every `poll()`, and `byte_time_us` has a
+nonzero precondition (`link/link_types.hpp`): a zero rate accepted here would make the engine
+violate its own precondition from the inside (an assert in a debug build, a divide-by-zero
+otherwise — red-team on #137, LOW). Implemented in #137: `bps == 0` returns without forwarding
+and without bumping `rate_changes` (pinned by `tests/unit/test_link_master.cpp` "set_bit_rate(0)
+is refused"). Every other divergence from that contract file in this PR was logged here; this one
+was not (review, LOW) — recorded now.
+**Options:** (a) refuse silently, as implemented — the caller (F3's HealthTracker, whose `Probe`
+rates come from trunk §9's two nonzero constants) can never legitimately pass 0, so a silent
+no-op is the least-surprise behaviour and keeps the `void` signature; (b) return a `Status`
+(`ReservedAddress`-style refusal code, or a new one) so a misuse is observable — an interface
+change for F3; (c) clamp to `TRUNK_bit_rate_fallback` — rejected: no rate is a defensible
+stand-in for "no rate". **Recommended:** (a), with the contract text amended to say so (done in
+#137, marked pending); revisit if F3 ever computes a rate rather than selecting one of §9's.
+**Ruling:** pending — human (contract text).
