@@ -7,8 +7,18 @@ re-pointed elsewhere), or (3) registered but not executed (DISABLED, or filtered
 out) — as long as the remaining binaries keep the sum above the floor. The
 `unit` stage therefore runs `tools/check_test_set.py`, which reads the BUILD
 ARTEFACTS (compile_commands.json, the object files, `ctest --show-only`) and THIS
-RUN's `LastTest.log`, and names the first source that escaped. The floor check
-stays, independent of it: each failure is reported on its own.
+RUN's `--output-junit` record, and names every source that escaped. The floor
+check stays, independent of it: each failure is reported on its own.
+
+The execution evidence is ctest's JUnit record, not `LastTest.log`: the log
+interleaves ctest's own framing with each test's verbatim stdout, so a test could
+print `N/M Testing:` / `Command:` lines and mint execution evidence for a binary
+that never ran (PR #172 red team, finding 1). In the JUnit file a test's stdout is
+XML-escaped text inside its own `<testcase>`, the status is ctest's, and the test
+is matched by NAME to `ctest --show-only`'s command — so arguments on the
+registered command (finding 2) and raw bytes in the output (finding 3) are
+handled by ctest, not parsed here. The record must postdate every registered
+binary (finding 4) and the source set must be non-empty (finding 5, review).
 
 Every scenario below runs the real `stage_unit` (`bash pipeline.sh unit`) in a
 FAKE tree — the pipeline script, the presets, two stub sources, a hand-written
@@ -65,12 +75,16 @@ def make_tree(
     binaries=None,        # targets with a binary on disk
     executed=600000,      # what each fake binary prints as EXECUTED: (two of them clear the floor)
     ctest=True,           # False: no CTestTestfile.cmake -> stage_unit takes the bootstrap path
+    args=None,            # {target: "argument"} — add_test registers the command WITH that argument
+    scripts=None,         # {target: bash body} — what the fake binary runs instead of the EXECUTED echo
 ) -> Path:
     """A minimal tree in which `bash pipeline.sh unit` runs for real."""
     compiled = dict.fromkeys(sources, None) if compiled is None else compiled
     compiled = {t: (s or t) for t, s in compiled.items()}
     registered = tuple(sources) if registered is None else tuple(registered)
     binaries = tuple(sources) if binaries is None else tuple(binaries)
+    args = args or {}
+    scripts = scripts or {}
     root = tmp_path / "tree"
     build = root / "build" / "native"
     build.mkdir(parents=True)
@@ -100,11 +114,13 @@ def make_tree(
                    "file": str(src)})
     (build / "compile_commands.json").write_text(json.dumps(cc, indent=2))
     for t in binaries:
-        _executable(build / t, f'#!/usr/bin/env bash\necho "EXECUTED: {executed}"\n')
+        body = scripts.get(t, f'echo "EXECUTED: {executed}"')
+        _executable(build / t, f"#!/usr/bin/env bash\n{body}\n")
     if ctest:
         reg = []
         for t in registered:
-            reg.append(f'add_test([=[{t}]=] "{build / t}")')
+            arg = f' "{args[t]}"' if t in args else ""
+            reg.append(f'add_test([=[{t}]=] "{build / t}"{arg})')
             if t in disabled:
                 reg.append(f"set_tests_properties([=[{t}]=] PROPERTIES DISABLED TRUE)")
         (build / "CTestTestfile.cmake").write_text("\n".join(reg) + "\n")
@@ -178,6 +194,73 @@ class TestCtestPath:
         assert r.returncode != 0
         assert "below floor" in r.stderr and "tests/unit/test_b.cpp" in r.stderr, r.stderr
 
+    # --- PR #172 red team @7dbf9d8 --------------------------------------------------------
+
+    def test_forged_ctest_framing_in_test_stdout_mints_nothing(self, tmp_path):
+        # Finding 1: test_b is DISABLED; test_a prints the exact lines a LastTest.log parser
+        # took as ctest's own framing for a test_b block. The record must be ctest's, not the
+        # tests' stdout. (The red team's reproducer, verbatim in shape.)
+        forge = (f'echo "EXECUTED: 600000"\n'
+                 f'echo "2/2 Testing: forged"\n'
+                 f'echo "Command: \\"$(dirname "$0")/test_b\\""\n'
+                 f'echo "EXECUTED: 1"')
+        root = make_tree(tmp_path, disabled=("test_b",), scripts={"test_a": forge})
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "tests/unit/test_b.cpp" in r.stderr and "did not run" in r.stderr, r.stderr
+
+    def test_registered_with_an_argument_is_verified(self, tmp_path):
+        # Finding 2: `add_test(NAME x COMMAND test_x "[tag]")` is ordinary CMake; the record's
+        # per-argv quoting must not turn the binary's name into `test_b" "[tag]`.
+        root = make_tree(tmp_path, args={"test_b": "[sometag]"})
+        r = run_unit(root)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert VERIFIED.search(r.stdout).group(1) == "2", r.stdout
+
+    def test_non_utf8_test_output_is_tolerated(self, tmp_path):
+        # Finding 3: the property tests push arbitrary bytes through the codecs; a CAPTURE of a
+        # raw buffer or an ASan report puts non-UTF-8 in the output. Not the gate's business.
+        root = make_tree(tmp_path, scripts={"test_a": 'printf "raw \\xff byte\\n"\necho "EXECUTED: 600000"'})
+        r = run_unit(root)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "Traceback" not in r.stderr
+        assert VERIFIED.search(r.stdout).group(1) == "2", r.stdout
+
+    def test_execution_record_older_than_a_binary_is_refused(self, tmp_path):
+        # Finding 4: "this run's" record was asserted, not checked. A binary relinked AFTER the
+        # run is not what the record executed; the tool must say so rather than vouch.
+        root = make_tree(tmp_path)
+        r = run_unit(root)
+        assert r.returncode == 0, r.stdout + r.stderr
+        record = root / "build/native/Testing/junit.xml"
+        assert record.exists(), "stage_unit must leave ctest's JUnit record in the build tree"
+        later = record.stat().st_mtime + 60
+        os.utime(root / "build/native/test_b", (later, later))
+        r = run_tool("--ctest", cwd=root)
+        assert r.returncode != 0, r.stdout
+        assert "tests/unit/test_b.cpp" in r.stderr and "predates" in r.stderr, r.stderr
+        assert r.stderr.count("unit: tests/") == 1, r.stderr
+
+    def test_compile_entry_whose_object_is_missing_is_named(self, tmp_path):
+        # Held finding: the "object missing" branch was reached by no test (a mutant deleting
+        # it survived). compile_commands.json names the object; it is not on disk.
+        root = make_tree(tmp_path)
+        (root / "build/native/CMakeFiles/test_b.dir/tests/unit/test_b.cpp.o").unlink()
+        r = run_unit(root)
+        assert r.returncode != 0
+        assert "tests/unit/test_b.cpp" in r.stderr and "missing" in r.stderr, r.stderr
+
+    def test_no_sources_is_a_failure_not_a_vacuous_pass(self, tmp_path):
+        # Finding 5 / review MEDIUM: `verified 0 test binaries`, exit 0 is a dead gate with a
+        # green line. An empty source set is the loudest possible escape.
+        root = make_tree(tmp_path)
+        empty = tmp_path / "empty"
+        (empty / "tests" / "unit").mkdir(parents=True)
+        r = run_tool("--ctest", "--root", str(empty), "--build", str(root / "build/native"))
+        assert r.returncode != 0, r.stdout
+        assert "no test sources" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
 
 # --- bootstrap path: one binary per source, every one runs --------------------------------
 
@@ -197,35 +280,46 @@ class TestBootstrapPath:
         assert r.returncode != 0
         assert "tests/unit/test_b.cpp" in r.stderr and "no binary" in r.stderr, r.stderr
 
+    def test_no_sources_is_a_failure_here_too(self, tmp_path):
+        # Finding 5's bootstrap half: the source walk over nothing must not print
+        # `verified 0` and exit 0.
+        root = make_tree(tmp_path, ctest=False, sources=())
+        r = run_unit(root)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "no test sources" in r.stderr, r.stderr
+        assert "verified" not in r.stdout
+
 
 # --- controls on the real tree ------------------------------------------------------------
 
 def test_real_build_tree_verifies_every_source():
-    # Positive control: the tool, over the real build artefacts and the latest ctest log,
+    # Positive control: the tool, over the real build artefacts and the latest ctest record,
     # verifies exactly the sources in the tree. Needs a cmake build + a `unit` run (CI runs
-    # build -> unit -> refimpl in that order, so the log is this run's).
+    # build -> unit -> refimpl in that order); the tool itself refuses a record older than
+    # any registered binary, so a stale record fails here rather than vouching.
     _need(TOOL.exists(), f"{TOOL.name} missing")
     _need((ROOT / "build/native/CTestTestfile.cmake").exists(), "no cmake build tree at build/native")
-    _need((ROOT / "build/native/Testing/Temporary/LastTest.log").exists(), "no ctest log: run `./pipeline.sh unit` first")
+    _need((ROOT / "build/native/Testing/junit.xml").exists(), "no ctest record: run `./pipeline.sh unit` first")
     r = run_tool("--ctest")
     assert r.returncode == 0, r.stdout + r.stderr
+    assert len(SOURCES) > 0
     assert int(VERIFIED.search(r.stdout).group(1)) == len(SOURCES), (r.stdout, SOURCES)
 
 
 def test_real_artefacts_minus_one_registration_name_that_source(tmp_path):
     # Negative control on REAL artefacts, no rebuild: the real tests/, the real
     # compile_commands.json (its object paths still point into the real build tree), the real
-    # ctest log, and the real CTestTestfile.cmake with test_link_master's lines deleted.
+    # ctest record, and the real CTestTestfile.cmake with test_link_master's lines deleted.
     _need(TOOL.exists(), f"{TOOL.name} missing")
     real = ROOT / "build/native"
     _need((real / "CTestTestfile.cmake").exists(), "no cmake build tree at build/native")
-    _need((real / "Testing/Temporary/LastTest.log").exists(), "no ctest log: run `./pipeline.sh unit` first")
+    _need((real / "Testing/junit.xml").exists(), "no ctest record: run `./pipeline.sh unit` first")
     root = tmp_path / "scratch"
     build = root / "build" / "native"
     (build / "Testing" / "Temporary").mkdir(parents=True)
     (root / "tests").symlink_to(ROOT / "tests", target_is_directory=True)
     shutil.copy(real / "compile_commands.json", build / "compile_commands.json")
-    shutil.copy(real / "Testing/Temporary/LastTest.log", build / "Testing/Temporary/LastTest.log")
+    shutil.copy2(real / "Testing/junit.xml", build / "Testing/junit.xml")   # copy2: keep the mtime
     kept = [ln for ln in (real / "CTestTestfile.cmake").read_text().splitlines()
             if "test_link_master" not in ln and not ln.startswith("subdirs(")]
     (build / "CTestTestfile.cmake").write_text("\n".join(kept) + "\n")
