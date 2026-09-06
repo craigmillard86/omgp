@@ -13,13 +13,15 @@ namespace link {
 namespace {
 
 uint32_t clamp_turnaround(uint32_t turnaround_us) {
-    // mutant-ok(equivalent, cxx_lt_to_le): at turnaround_us == T_turn_min_us the
-    // fall-through path (final `return turnaround_us`) already yields T_turn_min_us, so
-    // widening `<` to `<=` returns the identical value via the other branch instead.
+    // At turnaround_us == T_turn_min_us the fall-through path (final `return
+    // turnaround_us`) already yields T_turn_min_us, so widening `<` to `<=` returns the
+    // identical value via the other branch instead.
+    // mutant-ok(equivalent, cxx_lt_to_le): the mutation and the original coincide.
     if (turnaround_us < omgp::TRUNK_T_turn_min_us)
         return omgp::TRUNK_T_turn_min_us;
-    // mutant-ok(equivalent, cxx_gt_to_ge): symmetric with T_turn_min_us above — at
-    // turnaround_us == T_turn_max_us the fall-through path already yields T_turn_max_us.
+    // Symmetric with T_turn_min_us above — at turnaround_us == T_turn_max_us the
+    // fall-through path already yields T_turn_max_us.
+    // mutant-ok(equivalent, cxx_gt_to_ge): the mutation and the original coincide.
     if (turnaround_us > omgp::TRUNK_T_turn_max_us)
         return omgp::TRUNK_T_turn_max_us;
     return turnaround_us;
@@ -30,10 +32,11 @@ uint32_t clamp_turnaround(uint32_t turnaround_us) {
 // "discards"), so a before/after delta of this total is enough to notice one byte-level
 // discard, whatever caused it — mirrors Master::poll's own bad_crc_before/after delta.
 uint32_t total_discards(const DeframerStats& s) {
-    // mutant-ok(equivalent, cxx_init_const): total is a fresh local re-initialized on
-    // every call; poll() only ever compares two such calls' results against each other
-    // (discards_before/after), so any constant initial offset is added to both sides of
-    // that comparison identically and cancels out of the delta.
+    // total is a fresh local re-initialized on every call; poll() only ever compares two
+    // such calls' results against each other (discards_before/after), so any constant
+    // initial offset is added to both sides of that comparison identically and cancels
+    // out of the delta.
+    // mutant-ok(equivalent, cxx_init_const): the mutation and the original coincide.
     uint32_t total = 0;
     for (uint32_t d : s.discarded)
         total += d;
@@ -94,9 +97,10 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
         const FrameFields resp{f.src,   my_addr_, /*response=*/true,
                                f.retry, f.seq,    static_cast<uint8_t>(resp_len),
                                payload};
-        // mutant-ok(equivalent, cxx_init_const): encode_frame() (link/frame.cpp)
-        // unconditionally overwrites `written` as its very first statement on every
-        // return path, so this initial value is never observed.
+        // encode_frame() (link/frame.cpp) unconditionally overwrites `written` as its
+        // very first statement on every return path, so this initial value is never
+        // observed.
+        // mutant-ok(equivalent, cxx_init_const): the mutation and the original coincide.
         size_t written = 0;
         // buffer_.bytes must be big enough for encode_frame's own worst-case bound for
         // the largest payload a RequestHandler can write (it never depends on this
@@ -138,6 +142,10 @@ void Responder::transmit_if_due(uint64_t now_us) {
     wire_.transmit(buffer_.bytes, buffer_.len, now_us);
     if (late)
         stats_.late_responses++;
+    // State::Listening is the enum's own zero value, and cxx_assign_const substitutes
+    // exactly that zero value for an assignment's RHS (see `written = 0`'s label above),
+    // so the mutated statement is byte-for-byte identical to this one.
+    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
     state_ = State::Listening;
 }
 

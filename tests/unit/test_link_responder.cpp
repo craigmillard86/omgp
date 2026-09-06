@@ -42,6 +42,20 @@ struct RecordingHandler : RequestHandler {
     }
 };
 
+// RequestHandler test double that misbehaves (contracts/link-cpp.md: a RequestHandler is
+// application code, not a trusted part of the engine): claims to have written more bytes
+// than its own `cap` -- and, unavoidably here, more than LIMIT_max_l3_payload, so
+// encode_frame() (link/frame.cpp) always refuses it with Status::PayloadTooLong. Never
+// writes past `cap` itself; only the returned count lies.
+struct OversizedHandler : RequestHandler {
+    int calls = 0;
+
+    size_t handle(const uint8_t*, size_t, uint8_t*, size_t cap) override {
+        ++calls;
+        return cap + 1;
+    }
+};
+
 uint64_t byte_us() {
     return byte_time_us(omgp::TRUNK_bit_rate);
 }
@@ -347,6 +361,54 @@ TEST_CASE("a request claiming src == 0xFF is discarded rather than scheduling an
     REQUIRE(responder.stats().transactions == 1);
 }
 
+// --- a genuine in-flight conflict: the second request lands strictly before the ------
+// --- first response is due, so transmit_if_due() cannot have flushed it first --------
+
+TEST_CASE("a second accepted request arriving while the first response is still "
+          "Scheduled (not yet due) is discarded, and the first response still lands",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    // The largest allowed turnaround leaves the most room for request B's own bytes to
+    // arrive before request A's response is due (see the timing check below).
+    Responder responder(wire, clock, handler, kMyAddr, omgp::TRUNK_T_turn_max_us);
+
+    const uint8_t a[] = {0xA1};
+    uint64_t end_a = inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, a, sizeof a), 0);
+    // Drains A only: now_us == end_a, strictly before deadline_a (end_a + turnaround), so
+    // transmit_if_due() cannot have fired yet -- state_ is left Scheduled.
+    wire.advance_to(end_a, responder);
+    REQUIRE(handler.calls == 1);
+    REQUIRE(wire.transcript_size() == 0);
+    REQUIRE(responder.stats().transactions == 1);
+    const uint64_t deadline_a = end_a + omgp::TRUNK_T_turn_max_us;
+
+    // Request B: zero-length payload keeps its own wire time short, so it fully arrives
+    // well before deadline_a even at the maximum turnaround.
+    const uint64_t t2 = end_a + byte_us();
+    uint64_t end_b = inject_request(wire, request_bytes(kMyAddr, 0x07, false, 2, nullptr, 0), t2);
+    REQUIRE(end_b < deadline_a); // otherwise this test would not exercise the conflict
+
+    // Drains B strictly before A's deadline: transmit_if_due(end_b) is a no-op (not due
+    // yet), so B's on_request() sees state_ == Scheduled -- the true in-flight conflict,
+    // not the "already due, flushed first" case covered above.
+    wire.advance_to(end_b, responder);
+    // B's handler is never invoked, neither response is transmitted yet, only A ever
+    // became a transaction, and B (only B) is discarded.
+    REQUIRE(handler.calls == 1);
+    REQUIRE(wire.transcript_size() == 0);
+    REQUIRE(responder.stats().transactions == 1);
+    REQUIRE(responder.stats().discards == 1);
+
+    // A's response still lands once its own deadline is reached; B leaves no trace.
+    wire.advance_to(deadline_a, responder);
+    REQUIRE(handler.calls == 1);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).seq == 1);
+    REQUIRE(responder.stats().discards == 1);
+}
+
 // --- red-team @907dfbe finding #3: a second request must not silently steal a --------
 // --- not-yet-transmitted response --------------------------------------------------
 
@@ -440,6 +502,27 @@ TEST_CASE("a second byte-level discard is counted on top of the first, not lost"
     REQUIRE(responder.stats().discards == 2);
     REQUIRE(handler.calls == 0);
     REQUIRE(wire.transcript_size() == 0);
+}
+
+// --- a misbehaving RequestHandler's oversized response is refused, not transmitted ----
+
+TEST_CASE("a RequestHandler that claims more bytes than its own cap is discarded rather "
+          "than transmitted",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    OversizedHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t payload[] = {0x01};
+    uint64_t end =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 3, payload, sizeof payload), 0);
+    wire.advance_to(end + omgp::TRUNK_T_turn_min_us, responder);
+
+    REQUIRE(handler.calls == 1);
+    REQUIRE(wire.transcript_size() == 0); // encode_frame refused it: nothing to transmit
+    REQUIRE(responder.stats().transactions == 0);
+    REQUIRE(responder.stats().discards == 1);
 }
 
 // --- idle wire: nothing transmitted -----------------------------------------------------
