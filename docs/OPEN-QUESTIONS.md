@@ -2726,6 +2726,29 @@ open is whether the latency is acceptable and how the target's FIFO bound is to 
 **Amends:** the 2026-09-07 entry "the Responder's late path defers for an idle bus" — same
 mechanism, this records what the deferral now costs. **Supersedes:** none.
 
+## 2026-09-07 — does trunk §4's T_gap bind every station, or only the host between its own transactions?
+
+**Context:** red team @`5830fc4` finding 3 (#149), reported by the red team itself as unsure
+rather than as a certain divergence — correctly, in my reading. When a Responder answers a
+request it held through a wait, that answer's deadline is already past, so it is transmitted
+the instant the previous response leaves the wire: measured `resp0 [2000, 2110)`,
+`resp1 start = 2110` — **zero idle** between two frames belonging to two different
+transactions. `docs/trunk-link-layer.md:27`/`:88` requires "≥ T_gap = 50 µs of bus idle
+between transactions", but names the **host** as the party that leaves it, and says nothing
+about a responder's own back-to-back frames. The engine enforces `T_gap` against bytes it
+RECEIVES (`transmit_if_due`) and never against bytes it SENDS. The existing case "two
+requests queued before one late poll ... the second the instant the wire is free" currently
+asserts the zero-gap behaviour, so this cannot be changed without a human instruction naming
+that test (GOVERNANCE §1).
+**Recommendation:** read §4's gap as binding **every** station, and have the Responder owe
+`T_gap` after its own transmission as well as after received bytes — a receiver cannot tell
+which station's frame preceded it, and the gap exists for the physical settling of an RS-485
+line, not for the host's bookkeeping. That is one line (fold `transmit_until_us_` into
+`last_activity_us_` on transmit) plus an update to the case above. The alternative, if the
+gap is deliberately the host's obligation alone, is to say so in trunk §4 so this engine is
+not read as violating it.
+**Ruling:** PENDING — human.
+
 ## 2026-09-07 — a CRC-corrupt frame arriving with no transaction open moves no counter at all
 
 **Context:** found while adding the CrcError row's missing "after give-up" cell to

@@ -175,6 +175,9 @@ void Responder::hold_or_discard(const FrameFields& f, uint64_t request_end_us) {
     // deleted, ASan aborts on exactly this line.
     // mutant-ok(accepted, cxx_ge_to_gt): unreachable by construction of poll()'s own stop.
     if (held_count_ >= kHeldRequests) {
+        // Inside that unreachable branch, so its own mutants are unreachable too; no test can
+        // reach the counter to observe which way it moves.
+        // mutant-ok(accepted, cxx_post_inc_to_post_dec): unreachable, as above.
         stats_.discards++;
         return;
     }
@@ -185,6 +188,11 @@ void Responder::hold_or_discard(const FrameFields& f, uint64_t request_end_us) {
     // (link/frame.cpp), so this copy cannot overrun slot.payload.
     static_assert(omgp::LIMIT_max_l3_payload <= sizeof(HeldRequest::payload),
                   "held_ payloads must hold the longest request the Deframer can deliver");
+    // `f.len >= 0` is true for every uint8_t, and memcpy of 0 bytes is a no-op, so widening
+    // the comparison changes nothing. Narrowing it the other way DOES lose the payload, and
+    // is killed by the distinct-payload assertions in "a request arriving when the hold is
+    // already full ..." (deep-verify @6440074 found the suite blind to exactly that).
+    // mutant-ok(equivalent, cxx_gt_to_ge): the mutation and the original coincide.
     if (f.len > 0)
         std::memcpy(slot.payload, f.payload, f.len);
     slot.request_end_us = request_end_us;
@@ -261,10 +269,23 @@ void Responder::transmit_if_due(uint64_t now_us, bool queue_drained, bool belief
         // the end of the wire's queue: it is a COMPLETE reading, and T_gap of idle after it
         // is a real gap. Stopped because a request is held: bytes may remain unread, so it
         // is a PARTIAL reading and acting on it is the frozen belief of red team @7d31410 --
-        // the wait falls back to the bounded cap instead, which is what Master documents and
-        // accepts (link/master.cpp:241-273). Never inferred from a buffer's occupancy: every
-        // revision that tried had a capacity boundary and reopened the collision at it, one
-        // byte further along each time (@b262d46, @2efcb67, @7a80ec3).
+        // the wait falls back to the bounded cap instead. Never inferred from a buffer's
+        // occupancy: every revision that tried had a capacity boundary and reopened the
+        // collision at it, one byte further along each time (@b262d46, @2efcb67, @7a80ec3).
+        //
+        // What the cap is NOT, corrected here after review @6440074 finding 2 asserted the
+        // opposite of what an earlier revision of this comment claimed: it is NOT "the
+        // protection level Master documents and accepts". Master's cap argument rests on a
+        // drain loop that never exits early (link/master.cpp:224-227, which records that
+        // when it once did, "the argument was false for exactly the bytes left behind it"),
+        // and this path is precisely that excluded case -- Master's cap without Master's
+        // precondition. Master further argues that any frame starting later than
+        // defer_origin + T_gap is a §3 violator "on every path into this state"; on the LATE
+        // path it is not, because the host has already timed this node out after T_resp and
+        // may legitimately open a new transaction T_gap after the bus goes idle. So a frame
+        // beginning inside this wait can be transmitted over, and red team @6440074 finding
+        // 1 demonstrates exactly that. It is an open defect, recorded in the PR and in
+        // docs/OPEN-QUESTIONS.md 2026-09-07, not a bound this comment may claim is safe.
         uint64_t want_us = cap_us;
         if (!belief_stale)
             want_us = has_activity_ ? last_activity_us_ + omgp::TRUNK_T_gap_us : now_us;
@@ -289,6 +310,9 @@ void Responder::poll(uint64_t now_us) {
     uint8_t byte;
     uint64_t start_us;
     // Set only where the drain stops with a request held; see there and transmit_if_due().
+    // Initialising it to `true` instead is NOT equivalent and is killed (11 cases): every
+    // wait would fall back to the cap. Only the `false`-to-0 rewrite coincides.
+    // mutant-ok(equivalent, cxx_init_const): the mutation and the original coincide.
     bool belief_stale = false;
     // The wire is drained only while Listening. Trunk §3 is half-duplex, one transaction
     // at a time: while a response is Scheduled (encoded, not yet due) or Transmitting
