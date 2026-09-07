@@ -1045,3 +1045,37 @@ TEST_CASE("SC-004 a response whose sequence is not the open transaction's is rej
     REQUIRE(ok.response.payload[0] == payload[0]);
     REQUIRE_FALSE(loop.master.busy());
 }
+
+// --- the payload assertions need a LENGTH dimension --------------------------------------
+// Red team @37502f5: every other cell carries a 1-byte payload, so `ev.response.len ==
+// sizeof payload` and `payload[0] == …` are both satisfied by a Responder that truncates
+// every response to its first byte — the matrix could not tell a full echo from a truncated
+// one. This cell carries the longest payload the protocol allows, through a fault path so the
+// bytes travel the replay buffer as well as the direct path, and compares all of them.
+
+TEST_CASE("SC-004 a maximum-length payload survives the replay buffer byte-for-byte: a "
+          "CRC-corrupted first answer, then the retry's replay, compared in full",
+          "[link]") {
+    Loop loop;
+    // Worst case for the codec as well as for length: every byte is a FLAG or ESCAPE, so the
+    // frame is maximally stuffed on both legs of the bridge.
+    uint8_t payload[omgp::LIMIT_max_l3_payload];
+    for (size_t i = 0; i < sizeof payload; ++i)
+        payload[i] = (i % 2 == 0) ? omgp::TRUNK_flag_byte : omgp::TRUNK_escape_byte;
+
+    const Fault plan[3] = {Fault::Corrupt, Fault::Clean, Fault::Clean};
+    const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
+
+    REQUIRE(ev.kind == MasterEvent::Answered);
+    REQUIRE(ev.response.seq == 0);
+    // The whole payload, not just its first byte: this is the assertion the other cells
+    // cannot make, because at length 1 truncation and fidelity are indistinguishable.
+    REQUIRE(ev.response.len == sizeof payload);
+    REQUIRE(std::memcmp(ev.response.payload, payload, sizeof payload) == 0);
+    // It came back through the replay buffer -- the retry was served from the node's stored
+    // bytes, not re-encoded -- so this also pins that the buffer holds a full-length frame.
+    REQUIRE(loop.handler.invocations == 1);
+    REQUIRE(loop.responder.stats().replays_served == 1);
+    REQUIRE(loop.master.stats(kNode).crc_failures == 1);
+    REQUIRE(loop.master.attempts() == 2);
+}
