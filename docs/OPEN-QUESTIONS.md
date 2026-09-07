@@ -2684,3 +2684,62 @@ gap is deliberately the host's obligation alone, is to say so in trunk §4 so th
 not read as violating it.
 **Ruling:** PENDING — human.
 **Amends:** none. **Supersedes:** none.
+
+## 2026-09-07 — the Responder's late path CAN transmit into a frame it has not read: the trade, both corners measured, and a correction
+
+**Supersedes** the Recommendation of the 2026-09-07 entry "a Responder that stops reading to
+avoid dropping: latency, and the ESP32-S3 RX FIFO". That entry says the adopted option "never
+transmits on a partial reading". **That is false**, and this entry exists because a ruling made
+from it would be made on a wrong premise (review @`a2157ff`, MEDIUM). It is also the entry the
+code comments in `link/responder.{hpp,cpp}` point at for "the open ruling on which corner of
+that trade to take" — until now no entry posed that ruling at all, so the escalation lived only
+in PR #149's thread. This is the record.
+
+**The defect, reproduced (red team @`6440074` finding 1; I reproduced it independently).** When
+`kHeldRequests` (2) requests have been decoded during one late wait, `poll()` stops draining
+before `wire_.receive()` and reads **nothing** for the rest of the deferral — up to
+`max_frame_us + T_gap` (1470 µs at `TRUNK_bit_rate`). At the cap `transmit_if_due()` fires
+unconditionally, against a bus the engine has not looked at since it stopped. Measured: a
+third station's frame occupying `[2631, 2721)` is transmitted over at `tx = 2661`. The
+consequence is trunk §7's: the corrupted frame was addressed to a THIRD node, which does not
+answer, and the host escalates that innocent node toward SUSPECT.
+
+**Why it keeps coming back.** Rounds 8–12 of #149 each moved this boundary — 142 bytes of a
+byte stash, then 143 with a reserve slot, then one held request, then two — and the same
+collision reappeared at the new boundary every time. It is not an oversight but a trilemma: on
+a bounded engine, FR-014 ("MUST still transmit"), FR-015/FR-016 ("nothing dropped") and FR-017
+("never outside a response window") cannot all hold. Any bounded holding capacity forces the
+engine to either stop reading (a blind window, hence this collision) or discard.
+
+**Both corners are built and measured, with the same probe:**
+
+| | the round-11 collision | requests lost | first answer in the probe |
+|---|---|---|---|
+| stop reading, hold 2 (**adopted**, current head) | **reproduces**: `tx = 2661`, inside the frame | none | 2661 (the full cap) |
+| never stop, hold 2, discard-and-count the excess | **closed**: `tx = 1341`, well before that frame | **regresses**: 7/8, 5/8, 4/8 answered at 400 µs / 1 ms / 2 ms poll periods — the defect the case "eight well-spaced requests … none discarded" was written to close (red team @`e510b29`), counted rather than silent | 1341 |
+
+The second is better on the collision *and* on latency, worse on loss. There is no third column
+in which both are green; four rounds of looking did not find one.
+
+**What the cap is not.** An earlier revision of `link/responder.hpp` claimed the bounded wait
+gives "the protection level Master documents and accepts". Retracted (review @`6440074`): the
+Master's cap argument rests on a drain loop that never exits early — `link/master.cpp:224-227`
+records that when it once did, "the argument was false for exactly the bytes left behind it" —
+and this path is precisely that excluded case. On the late path a frame beginning after
+`defer_origin + T_gap` is not necessarily a §3 violator either, because the host has already
+timed this node out and may legitimately open a new transaction.
+
+**Recommendation:** rule the trade, not the mechanism. If FR-017 and trunk §3 outrank
+FR-015/FR-016 when they conflict, take the second corner (never stop reading; discard and
+COUNT beyond the hold, making the loss visible in `stats()` where today the backlog is
+invisible) and amend the "none discarded" case to assert counted drops. If FR-015/FR-016 wins,
+keep the current corner and record the collision as an accepted, bounded risk in
+`docs/THREAT-MODEL.md`, with the bound stated: only reachable when two requests to this node
+complete inside one late wait, and confined to `max_frame_us + T_gap`. Either way, the losing
+side's cost should be written into the spec rather than left in a test comment. A third option
+— widen the hold — only moves the boundary again, as four rounds have shown.
+**Ruling:** PENDING — human. This is the entry to rule from; the earlier one's Recommendation
+clause is corrected here.
+**Amends:** the 2026-09-07 entry "a Responder that stops reading to avoid dropping" — its
+"never transmits on a partial reading" clause is false and is corrected here; the rest of that
+entry (the latency figures, the RX FIFO bound) stands. **Supersedes:** none.
