@@ -2262,3 +2262,31 @@ them" (FR-012) gets one sentence in `docs/protocol-l3.md` §3 (#155).
 **Ruling:** ADOPTED — human, 2026-09-06 (via #110): "add docs/THREAT-MODEL.md". #156
 (T3; CLAUDE.md is a ground-truth artefact).
 **Amends:** none. **Supersedes:** none.
+
+## 2026-09-07 — adversarial rounds are unbounded in time; scope routing alone does not terminate
+
+**Context:** #134/#136 bounded findings by SCOPE (a defect in the changed code blocks; an
+adjacent improvement is a filed follow-up). It did not bound them by TIME, and the two are
+independent. The red team's search space is the set of properties the code does *not* check
+— absent branches, which no mutation gate can enumerate — so a faithful PR can be attacked
+indefinitely and every round can be legitimate. Measured on this repo: #149 six adversarial
+rounds, #145 five, each round costing a `deep-verify` + `attack-pr` cycle; three of #149's
+six re-raised the same on-file unruled question, because an unruled divergence blocks by
+rule and no agent may rule it. #136's own body deferred the matching red-team half
+("aligning red-team's verdict at the T2 auto-merge boundary is its own task").
+**Recommendation:** `adversarial_round_budget: 3` in `.github/agent-config.yml`. A round is
+a HEAD, not a comment (review + red team at one commit is one round), counted by
+`tools/round_budget.py` in the shape `agent-approve` already parses. Rounds 1..N unchanged;
+past N a finding BLOCKS only if it is `[HIGH]`, a regression in code changed since the
+previous verdict head, or a false claim in the PR body — everything else is routed to
+`## FOLLOW-UPS` and filed as a `task` issue by `review-followups.yml`. Nothing is
+suppressed: findings are still reported in full with their reproducers, and the comment must
+name what the budget moved. Accepted cost, stated plainly: a clean verdict past the budget
+can co-exist with known, filed, non-HIGH weaknesses, and `agent-approve`/`agent-merge` act
+on that verdict. The `[HIGH]` hatch keeps a severe defect blocking at any round (#149's
+round-6 bus-busy finding would still have blocked). Kill switch `0`; unreadable fails closed
+to `0`; the counter and the budget are read from the default branch, never the PR.
+**Ruling:** PENDING — human. Drafted on the maintainer's direction (2026-09-07, "draft (2)
+as a T3 PR"); the direction authorises the draft and the workflow edits, not the ruling.
+**Amends:** the 2026-09-06 scope-routing entry (#134/#136) — adds a time bound to its scope
+bound; that entry's rules stand unchanged inside the budget. **Supersedes:** none.
