@@ -2690,3 +2690,38 @@ reader of §5 is not misled.
 **Ruling:** PENDING — human.
 **Amends:** `specs/002-trunk-link-layer/data-model.md` §5 (marker added in PR #149).
 **Supersedes:** none.
+
+## 2026-09-07 — a Responder that stops reading to avoid dropping: latency, and the ESP32-S3 RX FIFO
+
+**Context:** maintainer's ruling 2026-09-07 on #149, after red team @`b262d46` / @`2efcb67` /
+@`7a80ec3` found the same defect three rounds running at successively relocated boundaries.
+A late response must not key down on a bus the engine has not read, and the engine must not
+destroy a byte it has taken off the wire. With any fixed buffer those two duties collide at
+its capacity, so the engine now **decodes as it drains** and holds up to `kHeldRequests` (2)
+completed requests; on the next one it **stops reading**, leaving everything behind it in the
+wire's own receive queue, and reports its reading of the bus as partial — which makes the
+wait fall back to the bounded cap rather than to a `last_activity` it knows is incomplete.
+Nothing is dropped and nothing is destroyed; the cost is latency, and it is not small: a
+backlog drains at roughly one cap (`max_frame + T_gap`, ~1.47 ms) per absorbed batch rather
+than at wire speed. Measured on the suite's own cases: a 142-byte burst of back-to-back
+requests, all answered, takes ~23 ms to clear; the starvation cell at `test_link_responder`
+`:998` moves from 7 answers per 21 polls to 6.
+**Consequence worth stating plainly:** while the engine is stopped it is not draining, and
+the ESP32-S3's UART RX FIFO is 128 bytes — smaller than `kMaxWire` (142), already on file
+2026-09-06. On target, a long enough stop overflows that FIFO and the hardware drops bytes
+the model says are safely queued. The model's "nothing is lost" is therefore a statement
+about this engine, **not** about the node it runs on.
+**Recommendation:** accept the trade for now (it is the only one of the four considered that
+loses no request and never transmits on a partial reading), and treat the FIFO bound as the
+real limit: on target, size the poll cadence so a stop cannot outlast 128 bytes of arrivals,
+or drain into a driver-level ring larger than `kMaxWire`. Both are firmware-side, outside
+this PR. The alternative rulings, each rejected and why: transmit on a partial reading
+(the collision this PR was reopened to fix, three times); destroy the byte at a buffer bound
+(silently loses a request straddling it); discard-and-count the third request during a wait
+(counted, but re-opens the defect @`e510b29`'s "eight well-spaced requests ... none
+discarded" was written to close — measured at 6/8, 4/8 and 3/8 answered at 400 µs, 1 ms and
+2 ms cadences).
+**Ruling:** PENDING — human. The design is the maintainer's 2026-09-07 direction; what is
+open is whether the latency is acceptable and how the target's FIFO bound is to be met.
+**Amends:** the 2026-09-07 entry "the Responder's late path defers for an idle bus" — same
+mechanism, this records what the deferral now costs. **Supersedes:** none.
