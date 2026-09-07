@@ -152,8 +152,15 @@ public:
                                                   // when its reading of the bus is COMPLETE, and at
                                                   // defer_origin + max_frame + T_gap (the cap alone, whatever
                                                   // last_activity says) when the drain stopped with requests held
-                                                  // and the reading is therefore partial -- up to ~1.47 ms later
-                                                  // either way. Pending a ruling, see
+                                                  // and the reading is therefore partial. The wait is RATE-
+                                                  // DEPENDENT, because max_frame_us() recomputes from the wire's
+                                                  // current rate: ~1.47 ms at TRUNK_bit_rate (142*10 + 50 us) but
+                                                  // ~12.3 ms at TRUNK_bit_rate_fallback (142*86 + 50 us, byte_time
+                                                  // 86 us by integer division) -- 8.3x, and operative exactly when
+                                                  // the trunk is degraded, since HealthTracker re-probes at the
+                                                  // fallback rate under bus_fault(). Quoting only the 1 Mb/s figure
+                                                  // would mis-size anything built on this engine by an order of
+                                                  // magnitude on its known weak axis. Pending a ruling, see
                                                   // docs/OPEN-QUESTIONS.md 2026-09-07 "the Responder's late path
                                                   // defers for an idle bus" and, for the collision that wait can
                                                   // still cause, "...CAN transmit into a frame it has not read".)
