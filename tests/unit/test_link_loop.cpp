@@ -213,6 +213,12 @@ struct BridgedAttempt {
 };
 
 BridgedAttempt bridge_latest_request(Loop& loop, uint8_t dst) {
+    // What the node had said BEFORE this attempt. Without it the read below silently picks up
+    // the previous attempt's record when the Responder transmits nothing, re-encodes it and
+    // injects it as though the node had just answered -- same seq, same payload, so no content
+    // assertion can tell. A Responder that counted replays_served and never scheduled the
+    // retransmit passed 13 of 18 cells that way (red team @410ce9f finding 2).
+    const size_t node_frames_before = loop.node_wire.transcript_size();
     const size_t idx = loop.host_wire.transcript_size() - 1;
     const auto req = loop.host_wire.transcript(idx); // copy: stable across further calls
     const auto req_bytes =
@@ -228,8 +234,17 @@ BridgedAttempt bridge_latest_request(Loop& loop, uint8_t dst) {
     const uint64_t response_start_us = req_tx_end + omgp::TRUNK_T_turn_min_us; // default
     loop.node_wire.advance_to(response_start_us, loop.responder); // transmits the reply
 
+    // The node really answered THIS attempt, and the record below is that answer.
+    REQUIRE(loop.node_wire.transcript_size() == node_frames_before + 1);
     const auto resp = loop.node_wire.transcript(loop.node_wire.transcript_size() - 1);
-    return BridgedAttempt{req_tx_end, response_start_us, resp, encode_response(resp)};
+    // ...and it answered when trunk §9 says it may. The instant is OBSERVED from the node's
+    // own transcript, not assumed: the bridge used to inject at its own computed
+    // req_tx_end + T_turn_min regardless, so a node keying down with zero turnaround -- a
+    // trunk §3 violation on half-duplex RS-485 -- was silently re-timed and the whole file
+    // stayed green (red team @410ce9f finding 3).
+    REQUIRE(resp.tx_start_us >= req_tx_end + omgp::TRUNK_T_turn_min_us);
+    REQUIRE(resp.tx_start_us <= req_tx_end + omgp::TRUNK_T_turn_max_us);
+    return BridgedAttempt{req_tx_end, resp.tx_start_us, resp, encode_response(resp)};
 }
 
 MasterEvent run_transaction(Loop& loop, uint8_t dst, const uint8_t* payload, size_t len,
@@ -948,4 +963,54 @@ TEST_CASE("SC-004 a retry whose sequence differs from the node's buffered answer
     REQUIRE(loop.handler.invocations == 2);
     REQUIRE(loop.responder.stats().replays_served == 0);
     REQUIRE(loop.responder.stats().transactions == 2);
+}
+
+// --- FR-011: the accepted response's sequence, given something to reject -------------------
+// Red team @410ce9f finding 1: every cell asserts `ev.response.seq == <the transaction's>`,
+// but no cell ever puts a response with a DIFFERENT sequence on the wire, so those 18
+// assertions could not fail -- the Master would have to accept a mismatched answer first.
+// This cell supplies the mismatch, in the window, where the acceptance check actually runs.
+
+TEST_CASE("SC-004 a response whose sequence is not the open transaction's is rejected inside "
+          "the window; the transaction is still awaiting, and the right answer is accepted",
+          "[link]") {
+    Loop loop;
+    const uint8_t payload[] = {0x61};
+    begin_transaction(loop, kNode, payload, sizeof payload);
+    const BridgedAttempt a = bridge_latest_request(loop, kNode);
+    REQUIRE(a.resp.seq == 0); // the open transaction's own sequence
+
+    // The node's real answer, re-encoded with a NEIGHBOURING sequence and delivered inside the
+    // window: everything else about it is right, which is what makes it the interesting case.
+    const std::vector<uint8_t> wrong_seq =
+        encode_expected(a.resp.dst, a.resp.src, a.resp.response, a.resp.retry,
+                        static_cast<uint8_t>((a.resp.seq + 1) & 0x0F), a.resp.payload, a.resp.len);
+    loop.host_wire.inject_bytes(wrong_seq.data(), wrong_seq.size(), a.response_start_us);
+    const uint64_t wrong_end =
+        a.response_start_us + static_cast<uint64_t>(wrong_seq.size()) * byte_us();
+    const MasterEvent rejected = loop.host_wire.advance_to(wrong_end, loop.master);
+
+    // Not accepted, and the transaction is untouched: still open, still one attempt, and the
+    // frame charged as a discard (link/master.cpp charges the node whose window is open).
+    REQUIRE(rejected.kind == MasterEvent::None);
+    REQUIRE(loop.master.busy());
+    REQUIRE(loop.master.attempts() == 1);
+    REQUIRE(loop.master.stats(kNode).discards == 1);
+    REQUIRE(loop.handler.invocations == 1); // the node answered once; nothing re-asked
+
+    // The retry that follows carries the SAME sequence (trunk §7) and its answer is accepted,
+    // so the rejection above was about the sequence and not about the frame being unwelcome.
+    const uint64_t retry_at = wrong_end + omgp::TRUNK_T_resp_us + omgp::TRUNK_T_gap_us;
+    loop.host_wire.advance_to(retry_at, loop.master);
+    REQUIRE(loop.master.attempts() == 2);
+    const BridgedAttempt b = bridge_latest_request(loop, kNode);
+    REQUIRE(b.resp.seq == 0);
+    loop.host_wire.inject_bytes(b.resp_bytes.data(), b.resp_bytes.size(), b.response_start_us);
+    const MasterEvent ok = loop.host_wire.advance_to(
+        b.response_start_us + static_cast<uint64_t>(b.resp_bytes.size()) * byte_us(), loop.master);
+    REQUIRE(ok.kind == MasterEvent::Answered);
+    REQUIRE(ok.response.seq == 0);
+    REQUIRE(ok.response.len == sizeof payload);
+    REQUIRE(ok.response.payload[0] == payload[0]);
+    REQUIRE_FALSE(loop.master.busy());
 }
