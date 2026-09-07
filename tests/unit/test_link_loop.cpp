@@ -718,3 +718,65 @@ TEST_CASE("SC-005 babble: extraneous bus noise between transactions is silently 
     REQUIRE(loop.host_wire.transcript(1).tx_start_us >= babble_end + omgp::TRUNK_T_gap_us);
     REQUIRE(loop.host_wire.transcript(1).tx_start_us < kFarFuture + 10 * omgp::TRUNK_T_resp_us);
 }
+
+// --- FR-015/FR-016: the replay key's SEQUENCE conjunct, exercised end to end --------------
+// Review + red team @97d0fb3: in every other cell of this file `f.seq == buffer_.seq` is
+// constant-true whenever `buffer_.valid` is, because each cell runs one transaction on a
+// fresh Loop and so only one sequence ever exists. `is_replay = f.retry && buffer_.valid`
+// would be indistinguishable from the real predicate across the whole matrix -- the per-cell
+// `seq` assertions cannot fail for the reason FR-011 names when there is no other
+// transaction to be confused with. This cell supplies the second one.
+
+TEST_CASE("SC-004 a retry whose sequence differs from the node's buffered answer is treated "
+          "as NEW, not replayed: the handler runs again and the reply carries the new "
+          "sequence",
+          "[link]") {
+    Loop loop;
+
+    // Transaction A: clean, so the Responder's replay buffer ends up holding seq 0.
+    const uint8_t a_payload[] = {0x51};
+    const Fault clean[3] = {Fault::Clean, Fault::Clean, Fault::Clean};
+    const MasterEvent ev_a = run_transaction(loop, kNode, a_payload, sizeof a_payload, clean);
+    REQUIRE(ev_a.kind == MasterEvent::Answered);
+    REQUIRE(ev_a.response.seq == 0);
+    REQUIRE(loop.handler.invocations == 1);
+
+    // Transaction B, seq 1. Its FIRST attempt never reaches the node at all -- the request is
+    // lost on the way out, not the response on the way back -- so the node's buffer still
+    // holds A's seq 0 when B's retry arrives with the retry bit SET (spec US3 AS5's shape,
+    // reached here through the real Master's own retry machinery).
+    const uint8_t b_payload[] = {0x52};
+    begin_transaction(loop, kNode, b_payload, sizeof b_payload);
+    const size_t attempt0_idx = loop.host_wire.transcript_size() - 1;
+    const auto attempt0 = loop.host_wire.transcript(attempt0_idx);
+    REQUIRE(attempt0.seq == 1);
+    REQUIRE_FALSE(attempt0.retry);
+    // Not bridged: the node never sees it. Let the Master's own T_resp time it out.
+    const uint64_t attempt0_end =
+        attempt0.tx_start_us + static_cast<uint64_t>(attempt0.len + 8) * byte_us();
+    loop.host_wire.advance_to(attempt0_end + omgp::TRUNK_T_resp_us + omgp::TRUNK_T_gap_us,
+                              loop.master);
+    REQUIRE(loop.master.attempts() == 2); // the retry has gone out
+    REQUIRE(loop.master.stats(kNode).timeouts == 1);
+
+    const auto retry = loop.host_wire.transcript(loop.host_wire.transcript_size() - 1);
+    REQUIRE(retry.retry); // trunk §7: same sequence, retry bit set
+    REQUIRE(retry.seq == 1);
+
+    // Now bridge that retry to the node, whose buffer holds seq 0 from transaction A.
+    const BridgedAttempt r = bridge_latest_request(loop, kNode);
+    loop.host_wire.inject_bytes(r.resp_bytes.data(), r.resp_bytes.size(), r.response_start_us);
+    const uint64_t full_end =
+        r.response_start_us + static_cast<uint64_t>(r.resp_bytes.size()) * byte_us();
+    const MasterEvent ev_b = loop.host_wire.advance_to(full_end, loop.master);
+
+    // Treated as NEW: the handler ran a second time and the answer carries B's own sequence.
+    // Had the node replayed A's buffered response instead, the handler count would still be
+    // 1 and the reply would carry seq 0 -- which is exactly what the `seq` assertions in
+    // every other cell cannot distinguish.
+    REQUIRE(ev_b.kind == MasterEvent::Answered);
+    REQUIRE(ev_b.response.seq == 1);
+    REQUIRE(loop.handler.invocations == 2);
+    REQUIRE(loop.responder.stats().replays_served == 0);
+    REQUIRE(loop.responder.stats().transactions == 2);
+}
