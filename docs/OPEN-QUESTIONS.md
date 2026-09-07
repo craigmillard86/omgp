@@ -2653,7 +2653,7 @@ answer, and that entry's recommended `f.src == ADDR_host` screen does not addres
 **Context:** review @`2efcb67` (#149), MEDIUM. FR-014 (`spec.md`) says a late poll "MUST still
 transmit — at once", and `data-model.md` §5 says "transmitted at `now`". Since @`71caba0`'s
 red-team HIGH the engine instead transmits at
-`min(last_activity + T_gap, defer_origin + max_frame_us + T_gap)` — up to ~1.47 ms later —
+`min(last_activity + T_gap, defer_origin + max_frame_us + T_gap)` — up to ~1.47 ms at `TRUNK_bit_rate`, ~12.3 ms at the fallback rate (the wait is rate-dependent: `max_frame_us()` recomputes from the wire's current rate, and `HealthTracker` re-probes at the fallback under `bus_fault()`) later —
 because "at once" on a bus another station is occupying means keying down inside that
 station's frame, corrupting a frame addressed to a THIRD node and driving it toward SUSPECT
 under trunk §7. Both documents outrank the code (CLAUDE.md), so the divergence is recorded
@@ -2702,7 +2702,7 @@ completed requests; on the next one it **stops reading**, leaving everything beh
 wire's own receive queue, and reports its reading of the bus as partial — which makes the
 wait fall back to the bounded cap rather than to a `last_activity` it knows is incomplete.
 Nothing is dropped and nothing is destroyed; the cost is latency, and it is not small: a
-backlog drains at roughly one cap (`max_frame + T_gap`, ~1.47 ms) per absorbed batch rather
+backlog drains at roughly one cap (`max_frame + T_gap`, ~1.47 ms at `TRUNK_bit_rate`, ~12.3 ms at the fallback rate (the wait is rate-dependent: `max_frame_us()` recomputes from the wire's current rate, and `HealthTracker` re-probes at the fallback under `bus_fault()`)) per absorbed batch rather
 than at wire speed. Measured on the suite's own cases: a 142-byte burst of back-to-back
 requests, all answered, takes ~23 ms to clear; the starvation cell at `test_link_responder`
 `:998` moves from 7 answers per 21 polls to 6.
@@ -2821,6 +2821,34 @@ clause is corrected here.
 **Amends:** the 2026-09-07 entry "a Responder that stops reading to avoid dropping" — its
 "never transmits on a partial reading" clause is false and is corrected here; the rest of that
 entry (the latency figures, the RX FIFO bound) stands. **Supersedes:** none.
+
+## 2026-09-07 — retraction: the Responder's late-path deferral is NOT "exactly" the Master's courtesy, and not to be adopted "verbatim"
+
+**Amends** the 2026-09-07 entry "the Responder's late path defers for an idle bus, which
+FR-014 and data-model §5 do not describe". That entry calls the deferral "exactly the courtesy
+§4 already records for the Master" and recommends adopting it "verbatim". **Both words are
+wrong**, and this PR says so in three other places — `link/responder.cpp` ("Master's cap
+without Master's precondition"), `data-model.md` §5 as amended, and the 2026-09-07 entry
+"…CAN transmit into a frame it has not read". The entry whose *title* names the deferral was
+the one place still asserting the equivalence, so a maintainer opening it by title would rule
+on a mechanism the engine does not implement — the wrong-premise failure the other retraction
+exists to prevent for its neighbour (review @`18ef2a8`).
+
+**What is actually true.** §4's Master property rests on a drain loop that **never exits
+early**: `last_activity` advances with every byte received during the deferral, so the engine
+"never transmits over an arriving frame". The Responder's late path *does* exit early — that
+is what `belief_stale` reports — so it has the Master's cap without the Master's precondition,
+and on that path it can key down inside a frame it has not read.
+
+**Correspondingly, the recommendation is narrowed:** adopt the Master's bounded courtesy for
+the Responder's *complete-reading* case, where the precondition does hold, and rule the
+stale-reading case as part of the trilemma in "…CAN transmit into a frame it has not read" —
+which remains **the entry to rule from**. The wait's magnitude is rate-dependent: `~1.47 ms`
+at `TRUNK_bit_rate` and `~12.3 ms` at `TRUNK_bit_rate_fallback` (142 × 86 µs + 50), the larger
+figure being the operative one when the trunk is degraded.
+**Ruling:** PENDING — human, as part of the trilemma entry.
+**Amends:** the 2026-09-07 "…defers for an idle bus" entry — its "exactly" and "verbatim" are
+retracted here. **Supersedes:** none.
 
 ## 2026-09-07 — a CRC-corrupt frame arriving with no transaction open moves no counter at all
 
