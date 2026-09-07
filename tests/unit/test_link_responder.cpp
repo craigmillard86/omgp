@@ -1050,27 +1050,33 @@ TEST_CASE("requests arriving faster than poll() is called queue up behind the he
         if (wire.transcript(i).dst == kPeer)
             answered_host = true;
 
-    // 17 answers over 21 polls, not one per poll: on the FR-014 late path the engine now
-    // drains the whole receive queue before judging the bus (red team @71caba0 finding 1 /
-    // @7d31410 finding 1), so on a bus this busy the last byte drained at a poll instant
-    // ENDS after that instant -- bytes within a frame are contiguous -- and the T_gap rule
-    // defers the answer to the next poll. That is Master's own documented behaviour under
-    // continuous traffic, verbatim (link/master.cpp:215-235: "the deferred instant stays
-    // ahead of `now` for as long as bytes keep coming"), and it is a latency change, not a
-    // new starvation: the backlog still grows without bound and the host is still never
-    // reached, which is what this case pins. Previous pin at 71caba0: 20/20/0, when the
-    // engine stopped draining at the first decoded request and judged the bus from a
-    // staler last_activity_.
-    CHECK(wire.transcript_size() == 17);
-    CHECK(handler.calls == 17);
+    // 7 answers over 21 polls, not one per poll. Two rules compose here, and both are
+    // consequences of the engine refusing to transmit on a belief it cannot support:
+    //   - on the FR-014 late path it drains the whole receive queue before judging the bus
+    //     (red team @71caba0 / @7d31410), so on a bus this busy the last byte drained at a
+    //     poll instant ENDS after that instant and the T_gap rule defers the answer -- this
+    //     alone gave 17, and is Master's own documented behaviour under continuous traffic
+    //     (link/master.cpp:215-235);
+    //   - once the stash is full the drain stops taking bytes at all (it must: a byte it
+    //     cannot hold would already have been consumed, and lost -- red team @b262d46), so
+    //     last_activity_us_ stops being refreshed and says nothing further about the bus.
+    //     The engine then waits out the bounded cap rather than acting on a frozen belief,
+    //     which is what makes this cell 7 rather than 17.
+    // A LATENCY change, not a new starvation: the backlog still grows without bound and the
+    // host is still never reached, which is what this case pins. Previous pins: 20/20/0 at
+    // 71caba0 (stop draining at the first decoded request), 17/17/1 at b262d46 (drain
+    // everything, but a byte lost at the stash bound). The alternative -- transmitting at
+    // last_activity + T_gap while blind -- restores 17 at the cost of keying down inside a
+    // frame the engine has not read, which is the defect this PR was reopened to fix.
+    // docs/OPEN-QUESTIONS.md 2026-09-06 (FR-014 vs FR-017) still governs the desired
+    // behaviour; this is a pin of today's, not a claim about what it should be.
+    CHECK(wire.transcript_size() == 7);
+    CHECK(handler.calls == 7);
     CHECK_FALSE(answered_host); // 12 ms after host_end, and still queued behind 0x07's frames
-    // Every answer went out after its request's window closed: FR-014's counter is the one
-    // signal that moves...
-    CHECK(responder.stats().late_responses == 17);
-    // ...and essentially nothing else does: the starvation is still invisible in stats().
-    // The single discard is one byte-level discard of the flood's own truncated tail, not a
-    // dropped request -- the backlog itself is still uncounted, which is the open question.
-    CHECK(responder.stats().discards == 1);
+    CHECK(responder.stats().late_responses == 7);
+    // Nothing is discarded: no byte is consumed that cannot be kept, so the backlog is still
+    // entirely invisible in stats() -- which is the open question.
+    CHECK(responder.stats().discards == 0);
     CHECK(host_end + omgp::TRUNK_T_resp_us < 20 * poll_period); // the host gave up long ago
 }
 
@@ -1374,4 +1380,97 @@ TEST_CASE("the bounded wait starts afresh for each late response: a second trans
     }
     REQUIRE(responder.stats().transactions == 2);
     REQUIRE(responder.stats().late_responses == 2);
+}
+
+TEST_CASE("a request re-fed from the stash inside its own turnaround window is answered and "
+          "NOT counted late: the stashed byte's own instant is what decides",
+          "[link][timing:T_turn_max]") {
+    // Red team @b262d46 finding 2. An earlier revision labelled the stashed start instant
+    // "unobservable", on the ground that a re-fed request is ALWAYS past T_turn_max by the
+    // time it is re-fed. False on the CAP path: the cap can fire with less than T_gap of
+    // idle, so a request that arrived just before it is re-fed while still inside its own
+    // window -- answered on time, and rightly not counted late. Replacing the stored instant
+    // with anything else (a constant, a cadence-derived value) makes request_end_us wrong
+    // and moves late_responses, so this case is what pins the field.
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t p[] = {0x22};
+    const std::vector<uint8_t> a = request_bytes(kMyAddr, kPeer, false, 3, p, sizeof p);
+    const uint64_t end_a = inject_request(wire, a, 1000);
+
+    const uint64_t defer_origin = end_a + omgp::TRUNK_T_turn_max_us + 1;
+    const uint64_t max_frame_us = static_cast<uint64_t>(kMaxWire) * byte_us();
+    const uint64_t cap = defer_origin + max_frame_us + omgp::TRUNK_T_gap_us;
+
+    // Sparse noise -- one byte every 40 us, inside T_gap -- so the bus never grants the gap,
+    // the wait runs to the cap, and the stash never fills.
+    const uint8_t noise = 0x5C;
+    const uint8_t p2[] = {0x77};
+    const std::vector<uint8_t> b = request_bytes(kMyAddr, kPeer, false, 5, p2, sizeof p2);
+    const uint64_t b_start = cap - static_cast<uint64_t>(b.size()) * byte_us();
+    for (uint64_t t = end_a + 60; t + 40 < b_start; t += 40)
+        wire.inject_bytes(&noise, 1, t);
+    wire.inject_bytes(b.data(), b.size(), b_start);
+    const uint64_t end_b = b_start + static_cast<uint64_t>(b.size()) * byte_us();
+
+    for (uint64_t t = defer_origin; t <= end_a + 6000; t += byte_us())
+        wire.advance_to(t, responder);
+
+    REQUIRE(wire.transcript_size() == 2);
+    REQUIRE(handler.calls == 2);
+    REQUIRE(wire.transcript(0).seq == 3); // A, released by the cap
+    REQUIRE(wire.transcript(1).seq == 5); // B, re-fed from the stash and answered
+    INFO("end_b=" << end_b << " tx1=" << wire.transcript(1).tx_start_us);
+    // B's answer goes out within its own turnaround window, measured from B's OWN end --
+    // which is only known because the stash kept that byte's instant.
+    REQUIRE(wire.transcript(1).tx_start_us <= end_b + omgp::TRUNK_T_turn_max_us);
+    REQUIRE(responder.stats().late_responses == 1); // A only; B was on time
+}
+
+TEST_CASE("a request whose first byte lands exactly on the stash bound is answered, not "
+          "swallowed: the drain stops BEFORE taking a byte it cannot hold",
+          "[link]") {
+    // Red team @b262d46 finding 1 (BLOCKING). An earlier revision took the byte off the wire
+    // and only then asked the stash to hold it: at the bound the byte was consumed and
+    // dropped, so a legal request straddling it lost its opening byte and the rest of its
+    // frame was re-fed as headless garbage -- silently unanswered. The check now precedes
+    // wire_.receive(), so a byte is never taken unless there is room for it.
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t a[] = {0xA1};
+    const uint64_t end_a =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, a, sizeof a), 1000);
+
+    // Exactly kMaxWire filler bytes arrive during the wait, so the stash is full to the byte
+    // -- and then a perfectly legal request follows, its first byte landing on the bound.
+    std::vector<uint8_t> filler(kMaxWire, 0x5C);
+    REQUIRE(filler[0] != omgp::TRUNK_flag_byte);
+    const uint64_t filler_start = end_a + 1;
+    wire.inject_bytes(filler.data(), filler.size(), filler_start);
+    const uint64_t filler_end = filler_start + filler.size() * byte_us();
+
+    const uint8_t b[] = {0xB2};
+    const std::vector<uint8_t> b_bytes = request_bytes(kMyAddr, 0x07, false, 2, b, sizeof b);
+    const uint64_t end_b = inject_request(wire, b_bytes, filler_end);
+
+    // One late poll well past everything: it fills the stash and must stop there, leaving
+    // B's every byte on the wire. Then poll on until the backlog has drained.
+    wire.advance_to(end_b + 5000, responder);
+    for (int i = 1; i <= 40; ++i)
+        wire.advance_to(end_b + 5000 + static_cast<uint64_t>(i) * 40 * byte_us(), responder);
+
+    // Both requests answered: A first (it was already pending), then B.
+    REQUIRE(handler.calls == 2);
+    REQUIRE(wire.transcript_size() == 2);
+    REQUIRE(wire.transcript(0).seq == 1);
+    REQUIRE(wire.transcript(0).dst == kPeer);
+    REQUIRE(wire.transcript(1).seq == 2);
+    REQUIRE(wire.transcript(1).dst == 0x07);
+    REQUIRE(responder.stats().transactions == 2);
 }

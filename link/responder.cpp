@@ -161,27 +161,26 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
     deadline_us_ = request_end_us + turnaround_us_;
 }
 
-bool Responder::stash(uint8_t byte, uint64_t start_us) {
+void Responder::stash(uint8_t byte, uint64_t start_us) {
     // The stash keeps arrival order and each byte's own start instant, so a re-fed byte is
     // indistinguishable to the Deframer (and to the timing computed from it) from one read
     // straight off the wire.
+    // Unreachable: poll() establishes room before it consumes a byte (see there). Kept as
+    // defence in depth against an out-of-bounds write, never as the place the bound is
+    // enforced; no test can reach it.
+    // mutant-ok(accepted, cxx_ge_to_gt): unreachable by construction of poll()'s own check.
     if (held_.len >= kMaxWire)
-        return false;
+        return;
     held_.bytes[held_.len] = byte;
-    // The only thing this value is ever read for is the request_end_us of a request
-    // completed from re-fed bytes. No test distinguishes it from a cadence-derived instant,
-    // and that is a property of the timings rather than a gap in the suite: at either
-    // protocol-defined bit rate such a request is ALWAYS already past its T_turn_max window
-    // by the time it is re-fed -- the wait it sat through ends at least T_gap after the bus
-    // goes idle, and a response transmission (>= 6 byte times) follows before the stash is
-    // re-fed, which together exceed T_turn_max -- so both values land on the same side of
-    // every bound the engine tests. That stops holding at a rate fast enough to make T_gap
-    // plus a response shorter than T_turn_max, which is why the true value is the one kept.
-    // mutant-ok(accepted): unobservable at TRUNK_bit_rate and the fallback rate, by the
-    // bound above; kept because it is the correct value, not because it is untested.
+    // Each byte's own start instant, kept verbatim. It is READ for the request_end_us of a
+    // request completed from re-fed bytes, and that is observable: an earlier revision
+    // claimed such a request is always past its T_turn_max window by the time it is re-fed,
+    // which is false on the CAP path -- the cap can fire with less than T_gap of idle, so
+    // the re-fed request lands INSIDE its own window and is answered without being counted
+    // late (red team @b262d46 finding 2, now the killing test "a request re-fed from the
+    // stash inside its own turnaround window is answered, and NOT counted late").
     held_.start_us[held_.len] = start_us;
     held_.len++;
-    return true;
 }
 
 bool Responder::refeed(bool& delivered, FrameView& view, uint64_t& start_us) {
@@ -266,7 +265,16 @@ void Responder::transmit_if_due(uint64_t now_us, bool queue_drained) {
         // no longer; past it, a station still occupying the wire is a §3 violator and the
         // transaction goes out on schedule.
         const uint64_t cap_us = defer_origin_us_ + max_frame_us() + omgp::TRUNK_T_gap_us;
-        uint64_t want_us = has_activity_ ? last_activity_us_ + omgp::TRUNK_T_gap_us : now_us;
+        // A full stash means the drain has stopped taking bytes (poll(): it must, or it
+        // would destroy them), so last_activity_us_ is no longer being refreshed and says
+        // nothing about the bus from here on. Acting on it would be exactly the frozen
+        // belief of red team @7d31410, just bounded by the stash instead of by one held
+        // request. Blind therefore means "wait out the cap" -- the bounded fallback -- not
+        // "assume idle": the engine transmits on schedule at cap_us and no earlier.
+        const bool blind = held_.len >= kMaxWire;
+        uint64_t want_us = cap_us;
+        if (!blind)
+            want_us = has_activity_ ? last_activity_us_ + omgp::TRUNK_T_gap_us : now_us;
         // `a > b ? b : a` and `a >= b ? b : a` both compute min(a, b); they differ only at
         // a == b, where both branches yield the same value (Master's label, :278-281).
         // mutant-ok(equivalent, cxx_gt_to_ge): min(a, b) either way.
@@ -341,6 +349,14 @@ void Responder::poll(uint64_t now_us) {
         const bool waiting = past_window(now_us);
         if (!listening && !waiting)
             break;
+        // Checked BEFORE the byte is taken off the wire, not after: wire_.receive() consumes,
+        // so a stash that fills between the two would destroy the byte it could not hold --
+        // an intact request straddling the bound was silently swallowed and the rest of its
+        // frame re-fed as headless garbage (red team @b262d46 finding 1). Full, the drain
+        // simply stops and everything, including this byte, waits in the wire's receive
+        // queue exactly as it did before the stash existed.
+        if (waiting && held_.len >= kMaxWire)
+            break;
         if (!wire_.receive(byte, start_us))
             break;
         // Every byte drained, whatever becomes of it, is evidence the bus was busy: its END
@@ -353,9 +369,9 @@ void Responder::poll(uint64_t now_us) {
         if (waiting) {
             // Stash, do not decode: the Deframer's accumulator must not advance while a
             // response is pending, or a request completing here would have to be answered
-            // (impossible, one transaction at a time) or dropped (against FR-015).
-            if (!stash(byte, start_us))
-                break; // stash full: the rest waits in the wire's queue, as it used to
+            // (impossible, one transaction at a time) or dropped (against FR-015). Room was
+            // established above, so this cannot refuse.
+            stash(byte, start_us);
             continue;
         }
 
