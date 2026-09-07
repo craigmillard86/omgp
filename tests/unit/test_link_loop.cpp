@@ -351,6 +351,16 @@ TEST_CASE("SC-004 drop after give-up: Failed{Timeout} after exactly 3 transmissi
     REQUIRE(loop.master.attempts() == 3); // initial + TRUNK_retries, never a fourth
     REQUIRE(loop.handler.invocations == 1);
     REQUIRE_FALSE(loop.master.busy());
+    // FR-011 (#52: "every matrix cell asserts the sequence the Responder accepted equals the
+    // open transaction's own"): a Failed cell has no ev.response to read it from, but the
+    // Responder DID accept and answer all three attempts -- its own transcript carries the
+    // sequence it echoed, and every attempt of one transaction carries seq 0 (review
+    // @c7adea0, LOW).
+    REQUIRE(loop.node_wire.transcript_size() == 3);
+    for (size_t i = 0; i < 3; ++i) {
+        INFO("attempt " << i);
+        REQUIRE(loop.node_wire.transcript(i).seq == 0);
+    }
 }
 
 // --- SC-004: response delayed past T_resp -------------------------------------------------
@@ -555,6 +565,16 @@ TEST_CASE("SC-004 CRC-corrupted response after give-up: Failed{CrcFailed} after 
     REQUIRE(loop.handler.invocations == 1);
     REQUIRE(loop.master.stats(kNode).crc_failures == 3);
     REQUIRE_FALSE(loop.master.busy());
+    // FR-011 (#52: "every matrix cell asserts the sequence the Responder accepted equals the
+    // open transaction's own"): a Failed cell has no ev.response to read it from, but the
+    // Responder DID accept and answer all three attempts -- its own transcript carries the
+    // sequence it echoed, and every attempt of one transaction carries seq 0 (review
+    // @c7adea0, LOW).
+    REQUIRE(loop.node_wire.transcript_size() == 3);
+    for (size_t i = 0; i < 3; ++i) {
+        INFO("attempt " << i);
+        REQUIRE(loop.node_wire.transcript(i).seq == 0);
+    }
 }
 
 // --- SC-004: duplicate response -------------------------------------------------------------
@@ -626,6 +646,16 @@ TEST_CASE("SC-004 duplicate after give-up: a late duplicate of the final, withhe
     REQUIRE(loop.master.attempts() == 3); // initial + TRUNK_retries, never a fourth
     REQUIRE(loop.handler.invocations == 1);
     REQUIRE(loop.master.stats(kNode).discards == 0); // nothing has arrived at all yet
+    // FR-011 (#52: "every matrix cell asserts the sequence the Responder accepted equals the
+    // open transaction's own"): a Failed cell has no ev.response to read it from, but the
+    // Responder DID accept and answer all three attempts -- its own transcript carries the
+    // sequence it echoed, and every attempt of one transaction carries seq 0 (review
+    // @c7adea0, LOW).
+    REQUIRE(loop.node_wire.transcript_size() == 3);
+    for (size_t i = 0; i < 3; ++i) {
+        INFO("attempt " << i);
+        REQUIRE(loop.node_wire.transcript(i).seq == 0);
+    }
 
     // The real (withheld) attempt-2 response still exists on node_wire's own transcript;
     // deliver two late copies of it now, long after Master gave up.
