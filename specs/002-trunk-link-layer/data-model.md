@@ -128,8 +128,13 @@ Responder state ∈ { Listening, Scheduled(response at request_end + turnaround_
   `AddrStats.late_responses` is incremented; nothing is dropped. *(Amended in PR #149,
   red-team @`71caba0` HIGH — "at `now`" is qualified by the same bounded courtesy §4 records
   for the Master: outside its window the engine owes trunk §3 a bus that is idle, so it
-  transmits at `min(last_activity + T_gap, defer_origin + max_frame + T_gap)` rather than
-  keying down inside another station's frame. Pending a ruling, see `OPEN-QUESTIONS.md`
+  transmits at `min(last_activity + T_gap, defer_origin + max_frame + T_gap)` when its reading
+  of the bus is COMPLETE, and at `defer_origin + max_frame + T_gap` — the cap alone, whatever
+  `last_activity` says — when the drain stopped with requests held and the reading is therefore
+  partial, rather than keying down inside another station's frame. (Both corners stated after
+  red team @`aa23fb9`: the earlier wording gave only the `min`, which is not the formula the
+  engine implements on the stale-belief path — and that path is the one the open collision
+  finding is about.) Pending a ruling, see `OPEN-QUESTIONS.md`
   2026-09-07 "the Responder's late path defers for an idle bus".)*
 
 ## 6. Node health record
