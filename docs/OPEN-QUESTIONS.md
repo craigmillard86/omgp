@@ -2773,3 +2773,28 @@ a node, and that is the point: it is bus-level evidence. Not implemented here �
 observable rather than changed it.
 **Ruling:** PENDING — human. If adopted, it wants its own issue against T031.
 **Amends:** none. **Supersedes:** none.
+
+## 2026-09-07 — SC-004's collapsed cells: only the Drop row's is collapsed now, so the earlier entry's proposal is no longer what #145 does
+
+**Context:** review @`410ce9f` (#145), LOW. The 2026-09-06 entry "SC-004's 'retry 1'/'retry 2'
+columns collapse to one case for Drop/CrcError at `TRUNK_retries == 2`" recommends dropping
+*two* non-distinguishable cells and asks for a ruling on "14 SC-004 cases … for the
+Drop/CrcError rows". That is no longer the tree it describes: at `049abac` the **CrcError**
+row regained a real fourth cell — a corrupt frame arriving with **no transaction open**,
+which is a distinct scenario rather than a verbatim duplicate (the Duplicate and Delay rows
+test the same no-window shape). Only the **Drop** row's cell is collapsed at this head, so
+the matrix is **15 of the 16** cells #52 enumerates, not 14. A maintainer reading the earlier
+entry would be ruling on a proposal this PR no longer makes, and that entry is where two of
+the review's findings route their decision — hence this one, appended rather than edited
+(CLAUDE.md: supersede by appending, never by editing history).
+**Recommendation:** unchanged in substance for the Drop row, and narrowed to it: accept
+**15** SC-004 cells, the missing one being Drop's "retry 2", which at `TRUNK_retries == 2`
+scripts `{Drop, Drop, Drop}` — byte-identical to its own "after give-up" cell, so a
+sixteenth case could only be a verbatim duplicate. The alternatives named in the earlier
+entry (raise `TRUNK_retries` for this suite; redefine what "retry 2" asserts for a
+non-terminal-recovery fault) stand, and both remain worse than accepting 15.
+**Ruling:** PENDING — human. Rule on THIS entry; the 2026-09-06 one describes a tree that no
+longer exists.
+**Amends:** none. **Supersedes:** the 2026-09-06 entry "SC-004's 'retry 1'/'retry 2' columns
+collapse to one case for Drop/CrcError at TRUNK_retries == 2" — same question, corrected
+scope (Drop only) and corrected count (15, not 14).
