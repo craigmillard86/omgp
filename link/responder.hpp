@@ -75,12 +75,21 @@ class Responder {
         uint8_t bytes[kMaxWire] = {};
     };
 
-    // One request decoded while a late response was still waiting for an idle bus, kept
-    // unanswered until the wire is free. ONE, and then the drain STOPS: everything behind it
-    // stays in the wire's own receive queue, exactly as it did before any of this existed,
-    // so nothing is ever destroyed or dropped (FR-015/FR-016; the property
-    // test_link_responder.cpp's "eight well-spaced requests ... none discarded" pins, itself
-    // the fix for red team @e510b29).
+    // Requests decoded while a late response was still waiting for an idle bus, kept
+    // unanswered until the wire is free. kHeldRequests of them, and then the drain STOPS:
+    // everything behind stays in the wire's own receive queue, exactly as it did before any
+    // of this existed, so THIS ENGINE never destroys or drops a request (FR-015/FR-016; the
+    // property test_link_responder.cpp's "eight well-spaced requests ... none discarded"
+    // pins, itself the fix for red team @e510b29).
+    //
+    // That guarantee stops at the engine's edge, and claiming otherwise would be false (red
+    // team @5830fc4 finding 2): it holds because MockWire's receive queue is 4 * kMaxWire.
+    // The pinned target's UART RX FIFO is 128 bytes -- smaller than kMaxWire (142) -- and the
+    // blind window while stopped is up to max_frame + T_gap of arrivals, so on an ESP32-S3 a
+    // long enough stop overflows that FIFO and the HARDWARE drops bytes this engine believes
+    // are safely queued. docs/OPEN-QUESTIONS.md 2026-09-07 records it. It is a firmware-side
+    // bound (poll cadence, or a driver ring larger than kMaxWire), not something this file
+    // can fix.
     //
     // Stopping means the engine has left bytes unread, so from that instant its picture of
     // the bus is INCOMPLETE -- and it says so (poll()'s belief_stale) rather than judging
