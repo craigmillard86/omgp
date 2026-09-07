@@ -490,6 +490,15 @@ TEST_CASE("SC-004 delay-past-T_resp through retry 2: uses the full retry budget 
     REQUIRE(late.kind == MasterEvent::None);
     REQUIRE_FALSE(loop.master.busy());
     REQUIRE(loop.master.stats(kNode).discards == 2); // both strays, observed
+    // FR-011, as the other Failed cells carry it: the Responder accepted and answered every
+    // attempt of ONE transaction, so its own transcript must show that transaction's sequence
+    // on each. When this loop was added at 7ecfac8 there were three Failed cells; there are
+    // five at this head, and two had been left without it (review @049abac).
+    REQUIRE(loop.node_wire.transcript_size() == 3);
+    for (size_t i = 0; i < 3; ++i) {
+        INFO("attempt " << i);
+        REQUIRE(loop.node_wire.transcript(i).seq == 0);
+    }
 }
 
 TEST_CASE("SC-004 delay-past-T_resp after give-up: Failed{Timeout}; the stale late answer is "
@@ -687,6 +696,15 @@ TEST_CASE("SC-004 CRC-corrupted frame after give-up: a corrupt frame arriving wi
     REQUIRE_FALSE(loop.master.busy());
     REQUIRE(loop.master.attempts() == 3);
     REQUIRE(loop.handler.invocations == 1);
+    // FR-011, as the other Failed cells carry it: the Responder accepted and answered every
+    // attempt of ONE transaction, so its own transcript must show that transaction's sequence
+    // on each. When this loop was added at 7ecfac8 there were three Failed cells; there are
+    // five at this head, and two had been left without it (review @049abac).
+    REQUIRE(loop.node_wire.transcript_size() == 3);
+    for (size_t i = 0; i < 3; ++i) {
+        INFO("attempt " << i);
+        REQUIRE(loop.node_wire.transcript(i).seq == 0);
+    }
     // ...and it is counted NOWHERE. Measured, not assumed -- this cell was written expecting
     // crc_failures + 1 and found otherwise. A corrupt frame never decodes, so there is no
     // f.src to charge it to (link/master.cpp's discard accounting charges dst_ while
