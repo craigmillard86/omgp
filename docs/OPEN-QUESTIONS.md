@@ -2748,6 +2748,7 @@ line, not for the host's bookkeeping. That is one line (fold `transmit_until_us_
 gap is deliberately the host's obligation alone, is to say so in trunk §4 so this engine is
 not read as violating it.
 **Ruling:** PENDING — human.
+**Amends:** none. **Supersedes:** none.
 
 ## 2026-09-07 — a CRC-corrupt frame arriving with no transaction open moves no counter at all
 
