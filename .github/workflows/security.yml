@@ -21,7 +21,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y cmake ninja-build
           pip install jinja2 pyyaml
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: c-cpp, python, actions
           queries: security-and-quality
@@ -33,7 +33,7 @@ jobs:
               - third_party
       - name: Build for analysis
         run: ./pipeline.sh codegen build
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
 
   dependency-review:
     if: github.event_name == 'pull_request'
