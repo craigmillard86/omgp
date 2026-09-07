@@ -181,6 +181,13 @@ void Responder::hold_or_discard(const FrameFields& f, uint64_t request_end_us) {
         stats_.discards++;
         return;
     }
+    // Modulo kHeldRequests == 2, addition and subtraction coincide: -y ≡ y (mod 2), so
+    // (head + count) % 2 == (head - count) % 2 for every reachable pair. Checked exhaustively
+    // over the reachable domain (head in {0,1}, count in {0,1,2}): no pair differs. The
+    // static_assert below is what keeps this true -- at kHeldRequests == 3 the two DO differ
+    // (head=0,count=1 is the first), and the label would then be wrong rather than merely
+    // stale, so the depth may not change without revisiting it.
+    // mutant-ok(equivalent, cxx_add_to_sub): the mutation and the original coincide mod 2.
     HeldRequest& slot = held_[(held_head_ + held_count_) % kHeldRequests];
     slot.f = f;
     slot.f.payload = slot.payload;
@@ -343,6 +350,8 @@ void Responder::poll(uint64_t now_us) {
             // first, before any newer byte is drained, so arrival order is preserved.
             HeldRequest h = held_[held_head_];
             h.f.payload = h.payload;
+            // mutant-ok(equivalent, cxx_add_to_sub): as at the append above -- mod 2,
+            // (head + 1) and (head - 1) are the same index.
             held_head_ = (held_head_ + 1) % kHeldRequests;
             held_count_--;
             on_request(h.f, h.request_end_us);
