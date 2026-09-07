@@ -121,6 +121,12 @@ class Responder {
     // partial -- and two completed frames during one wait is itself evidence the bus was
     // busy, so the pessimism is then earned rather than assumed.
     static constexpr size_t kHeldRequests = 2;
+    // The ring's index arithmetic in responder.cpp carries two `mutant-ok(equivalent,
+    // cxx_add_to_sub)` labels whose justification is that -y ≡ y (mod 2). That is a property
+    // of THIS depth, not of the ring: at 3 the labels become false. Changing the depth means
+    // revisiting them, and this assert is what makes that impossible to miss.
+    static_assert(kHeldRequests == 2,
+                  "responder.cpp's mod-2 equivalence labels assume a hold depth of exactly 2");
 
     // Decides new-vs-replay for one intact frame addressed to my_addr, or counts a
     // discard: for a frame this node is not addressed by or could never answer — a
