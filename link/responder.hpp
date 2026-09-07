@@ -75,15 +75,26 @@ class Responder {
         uint8_t bytes[kMaxWire] = {};
     };
 
-    // One decoded request that arrived while a late response was still waiting for an idle
-    // bus (see poll()): the wire's own receive queue can no longer hold it, because the
-    // engine must drain those bytes to see the bus at all. At most ONE — a second complete
-    // frame ends the drain and stays in the wire's queue, exactly as before.
-    struct HeldRequest {
-        bool valid = false;
-        FrameFields f = {};
-        uint8_t payload[omgp::LIMIT_max_l3_payload] = {};
-        uint64_t request_end_us = 0;
+    // Bytes drained from the wire while a late response was still waiting for an idle bus
+    // (see poll()), kept in arrival order with each byte's own start instant and re-fed to
+    // the Deframer, unchanged, once the wire is free. The engine cannot see the bus without
+    // reading it, and it must not lose what it reads: this is where those two duties meet
+    // (red team @7d31410 finding 1 — an earlier revision held one DECODED request instead
+    // and stopped draining, so its belief about the bus froze at that frame's last byte and
+    // the response went out inside the next station's transmission).
+    //
+    // Sized at kMaxWire — one worst-case stuffed frame — which is deliberately the same
+    // bound the deferral cap uses: while the stash has room the engine sees every byte, and
+    // by the time a station could fill it the cap has released the response anyway. Full,
+    // the drain stops and later bytes wait in the wire's own receive queue as before.
+    struct HeldBytes {
+        uint16_t len = 0;  // bytes stashed
+        uint16_t next = 0; // re-feed cursor; next == len means "drained, nothing pending"
+        uint8_t bytes[kMaxWire] = {};
+        // Each byte's own START instant, kept verbatim rather than re-derived from a cadence
+        // assumption: the gaps between frames are real, and this is the value a re-fed
+        // request's request_end_us is computed from.
+        uint64_t start_us[kMaxWire] = {};
     };
 
     // Decides new-vs-replay for one intact frame addressed to my_addr, or counts a
@@ -99,10 +110,13 @@ class Responder {
     // trunk §5: the claimed source of an accepted request, and this node's own address.
     bool acceptable(const FrameFields& f) const;
 
-    // The late path's counterpart to on_request(): a frame decoded while a response is
-    // still waiting for an idle bus is either discarded and counted (not this node's) or
-    // held, unanswered, until the wire is free.
-    void hold_or_discard(const FrameFields& f, uint64_t request_end_us);
+    // Stash one byte drained during the wait (see HeldBytes). False when the stash is full,
+    // which ends the drain — the byte is NOT consumed in that case.
+    bool stash(uint8_t byte, uint64_t start_us);
+
+    // Feed the Deframer one stashed byte, if any is pending, exactly as poll()'s drain loop
+    // feeds a byte from the wire. Returns false when the stash is empty.
+    bool refeed(bool& delivered, FrameView& view, uint64_t& start_us);
 
     // True while a scheduled response is already outside trunk §9's turnaround window, the
     // FR-014 late-poll path: the one state in which the engine must judge the bus for
@@ -159,7 +173,7 @@ class Responder {
     uint64_t defer_origin_us_ = 0;
     bool has_defer_origin_ = false;
 
-    HeldRequest held_ = {};
+    HeldBytes held_ = {};
 
     AddrStats stats_ = {};
 };
