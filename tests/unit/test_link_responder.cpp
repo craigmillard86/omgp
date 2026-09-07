@@ -1050,15 +1050,27 @@ TEST_CASE("requests arriving faster than poll() is called queue up behind the he
         if (wire.transcript(i).dst == kPeer)
             answered_host = true;
 
-    // 21 polls, one answer each -- the first poll (t = 0) finds nothing yet decodable.
-    CHECK(wire.transcript_size() == 20);
-    CHECK(handler.calls == 20);
+    // 17 answers over 21 polls, not one per poll: on the FR-014 late path the engine now
+    // drains the whole receive queue before judging the bus (red team @71caba0 finding 1 /
+    // @7d31410 finding 1), so on a bus this busy the last byte drained at a poll instant
+    // ENDS after that instant -- bytes within a frame are contiguous -- and the T_gap rule
+    // defers the answer to the next poll. That is Master's own documented behaviour under
+    // continuous traffic, verbatim (link/master.cpp:215-235: "the deferred instant stays
+    // ahead of `now` for as long as bytes keep coming"), and it is a latency change, not a
+    // new starvation: the backlog still grows without bound and the host is still never
+    // reached, which is what this case pins. Previous pin at 71caba0: 20/20/0, when the
+    // engine stopped draining at the first decoded request and judged the bus from a
+    // staler last_activity_.
+    CHECK(wire.transcript_size() == 17);
+    CHECK(handler.calls == 17);
     CHECK_FALSE(answered_host); // 12 ms after host_end, and still queued behind 0x07's frames
     // Every answer went out after its request's window closed: FR-014's counter is the one
     // signal that moves...
-    CHECK(responder.stats().late_responses == 20);
-    // ...and nothing else does: the starvation is invisible in stats().
-    CHECK(responder.stats().discards == 0);
+    CHECK(responder.stats().late_responses == 17);
+    // ...and essentially nothing else does: the starvation is still invisible in stats().
+    // The single discard is one byte-level discard of the flood's own truncated tail, not a
+    // dropped request -- the backlog itself is still uncounted, which is the open question.
+    CHECK(responder.stats().discards == 1);
     CHECK(host_end + omgp::TRUNK_T_resp_us < 20 * poll_period); // the host gave up long ago
 }
 
@@ -1112,9 +1124,17 @@ TEST_CASE("a response already outside its window is not keyed down on top of ano
     // FR-014: transmitted, not dropped, and counted as outside its window.
     REQUIRE(responder.stats().late_responses == 1);
     REQUIRE(responder.stats().transactions == 1);
-    // The other station's request was drained while the response waited; it is not this
-    // node's, so it is discarded and counted exactly as it would be while Listening.
+    // The other station's bytes were DRAINED while the response waited -- that is how the
+    // engine knew the bus was busy -- but not decoded: they are stashed, so nothing has
+    // been discarded yet (red team @7d31410 finding 1: decoding during the wait is what
+    // froze the belief, so the stash is what replaced it).
+    REQUIRE(responder.stats().discards == 0);
+    // Once the wire is free the stash is re-fed in arrival order and the frame is judged
+    // exactly as it would have been read live: not this node's, so discarded and counted.
+    wire.advance_to(other_end + omgp::TRUNK_T_gap_us + 100 * byte_us(), responder);
     REQUIRE(responder.stats().discards == 1);
+    REQUIRE(responder.stats().transactions == 1); // and never answered
+    REQUIRE(wire.transcript_size() == 1);
 }
 
 TEST_CASE("the wait for an idle bus is bounded: a station occupying the wire without pause "
@@ -1155,9 +1175,16 @@ TEST_CASE("the wait for an idle bus is bounded: a station occupying the wire wit
     }
     REQUIRE(sent); // never starved, though the bus was never idle
     const uint64_t tx = wire.transcript(0).tx_start_us;
-    INFO("defer_origin=" << defer_origin << " tx=" << tx
-                         << " cap=" << defer_origin + max_frame_us + omgp::TRUNK_T_gap_us);
-    REQUIRE(tx <= defer_origin + max_frame_us + omgp::TRUNK_T_gap_us);
+    const uint64_t cap = defer_origin + max_frame_us + omgp::TRUNK_T_gap_us;
+    INFO("defer_origin=" << defer_origin << " tx=" << tx << " cap=" << cap);
+    // EXACTLY the cap, not merely "no later than": the bus is never idle for T_gap here, so
+    // the cap is the only thing that can release the response, and pinning the instant pins
+    // the cap's own composition -- defer_origin PLUS one worst-case frame PLUS T_gap. An
+    // upper bound alone is satisfied by every cap that is too SMALL (a subtracted term, a
+    // constant), which is the failure that matters: too small means keying down into a frame
+    // that has not finished. (Poll cadence is one byte time and max_frame + T_gap is a whole
+    // number of them, so the first poll at or after the cap IS the cap.)
+    REQUIRE(tx == cap);
     REQUIRE(tx < babble_end); // sent while the babble was still going, not after it stopped
     REQUIRE(responder.stats().late_responses == 1);
 }
@@ -1235,4 +1262,116 @@ TEST_CASE("a Responder constructed with an address outside trunk §5's L2 range 
     REQUIRE(handler.calls == 0);
     REQUIRE(responder.stats().transactions == 0);
     REQUIRE(responder.stats().discards == 1);
+}
+
+// --- red team @7d31410 finding 1 (BLOCKING): a held request must not blind the engine -----
+// The previous revision held one DECODED request and stopped draining there, so
+// last_activity_us_ froze at that frame's last byte and every later poll transmitted at
+// held_end + T_gap whatever was physically on the wire -- the bounded wait never binding,
+// because the engine never saw a busy bus to wait for. Bytes are stashed undecoded now, so
+// the belief stays current for everything the engine could read.
+
+TEST_CASE("a request addressed to this node arriving during the wait does not blind it: a "
+          "third station's frame behind that request is still not transmitted over",
+          "[link][timing:T_gap]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    // A: answered by this node, and its response is already on the late path.
+    const uint8_t a[] = {0xA1};
+    const uint64_t end_a =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, a, sizeof a), 1000);
+
+    // B: a second station's request to THIS node -- the frame that used to be "held" and
+    // freeze the belief. C: a third station's frame starting one byte time after B ends.
+    const uint8_t b[] = {0xB2};
+    const uint64_t start_b = end_a + 1000;
+    const uint64_t end_b =
+        inject_request(wire, request_bytes(kMyAddr, 0x07, false, 2, b, sizeof b), start_b);
+    const uint8_t c[] = {0xC3};
+    const uint64_t start_c = end_b + byte_us();
+    const uint64_t end_c =
+        inject_request(wire, request_bytes(0x02, kPeer, false, 3, c, sizeof c), start_c);
+    REQUIRE(start_c > end_b); // C really does start after B, so B is "held" first
+
+    // A poll landing inside C, and past end_b + T_gap -- the instant the frozen belief used
+    // to authorise a transmission.
+    const uint64_t mid_c = start_c + (end_c - start_c) / 2;
+    REQUIRE(mid_c > end_b + omgp::TRUNK_T_gap_us);
+    wire.advance_to(mid_c, responder);
+    REQUIRE(wire.transcript_size() == 0); // nothing keyed down inside C
+
+    // ...and it still goes out once C has ended and the bus has been idle for T_gap.
+    wire.advance_to(end_c + omgp::TRUNK_T_gap_us, responder);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).seq == 1); // A's answer, first
+    REQUIRE(wire.transcript(0).tx_start_us >= end_c + omgp::TRUNK_T_gap_us);
+
+    // B was stashed, not lost: it is answered next, and C -- addressed elsewhere -- is
+    // discarded and counted, exactly as if both had been read live.
+    wire.advance_to(end_c + omgp::TRUNK_T_gap_us + 200 * byte_us(), responder);
+    REQUIRE(handler.calls == 2);
+    REQUIRE(wire.transcript_size() == 2);
+    REQUIRE(wire.transcript(1).seq == 2);
+    REQUIRE(wire.transcript(1).dst == 0x07);
+    // C sits behind B in the stash, so it is re-fed on a later poll() -- one accepted
+    // request ends a drain, here as everywhere (the "one answer per poll" rule).
+    for (int i = 0; i < 3; ++i)
+        wire.advance_to(end_c + omgp::TRUNK_T_gap_us +
+                            static_cast<uint64_t>(300 + 100 * i) * byte_us(),
+                        responder);
+    REQUIRE(responder.stats().discards == 1);
+    REQUIRE(handler.calls == 2); // C is never answered
+    REQUIRE(wire.transcript_size() == 2);
+}
+
+TEST_CASE("the bounded wait starts afresh for each late response: a second transaction under "
+          "the same babble waits its own full cap, not one measured from the first",
+          "[link][timing:T_gap]") {
+    // The origin of the wait is cleared on every transmit. Left set, a later deferral would
+    // inherit the FIRST one's origin, so its cap would already be in the past and the engine
+    // would transmit at once -- the exact behaviour the cap exists to prevent, reappearing
+    // on every transaction after the first.
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint64_t max_frame_us = static_cast<uint64_t>(kMaxWire) * byte_us();
+    const uint8_t p[] = {0x33};
+
+    uint64_t next_seq = 1;
+    uint64_t tx_of_previous = 0;
+    for (int round = 0; round < 2; ++round) {
+        const uint64_t request_at = round == 0 ? 1000 : tx_of_previous + 4000;
+        const uint64_t request_end = inject_request(
+            wire,
+            request_bytes(kMyAddr, kPeer, false, static_cast<uint8_t>(next_seq++), p, sizeof p),
+            request_at);
+        // Continuous non-frame noise from just after the request until well past the cap.
+        std::vector<uint8_t> noise(250, 0x5C);
+        const uint64_t babble_start = request_end + 1;
+        wire.inject_bytes(noise.data(), noise.size(), babble_start);
+        const uint64_t babble_end = babble_start + noise.size() * byte_us();
+
+        const uint64_t defer_origin = request_end + omgp::TRUNK_T_turn_max_us + 1;
+        const uint64_t cap = defer_origin + max_frame_us + omgp::TRUNK_T_gap_us;
+        const size_t before = wire.transcript_size();
+        for (uint64_t t = defer_origin; t <= babble_end && wire.transcript_size() == before;
+             t += byte_us())
+            wire.advance_to(t, responder);
+        REQUIRE(wire.transcript_size() == before + 1);
+        const uint64_t tx = wire.transcript(before).tx_start_us;
+        INFO("round " << round << " defer_origin=" << defer_origin << " tx=" << tx
+                      << " cap=" << cap);
+        REQUIRE(tx == cap); // its OWN cap, both times
+        tx_of_previous = tx;
+        // Let the response finish and the stash drain before the next round's request.
+        for (int i = 1; i <= 12; ++i)
+            wire.advance_to(tx + static_cast<uint64_t>(i) * 30 * byte_us(), responder);
+    }
+    REQUIRE(responder.stats().transactions == 2);
+    REQUIRE(responder.stats().late_responses == 2);
 }

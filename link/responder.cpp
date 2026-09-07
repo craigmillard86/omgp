@@ -161,30 +161,43 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
     deadline_us_ = request_end_us + turnaround_us_;
 }
 
-void Responder::hold_or_discard(const FrameFields& f, uint64_t request_end_us) {
-    // Reached only from the late path, where the engine drains the wire to see the bus
-    // (poll()). A frame it could not answer anyway is discarded and counted exactly as it
-    // would be while Listening — the same screen, so the only difference from before this
-    // round is WHEN the discard is counted, not whether.
-    if (!acceptable(f)) {
-        stats_.discards++;
-        return;
+bool Responder::stash(uint8_t byte, uint64_t start_us) {
+    // The stash keeps arrival order and each byte's own start instant, so a re-fed byte is
+    // indistinguishable to the Deframer (and to the timing computed from it) from one read
+    // straight off the wire.
+    if (held_.len >= kMaxWire)
+        return false;
+    held_.bytes[held_.len] = byte;
+    // The only thing this value is ever read for is the request_end_us of a request
+    // completed from re-fed bytes. No test distinguishes it from a cadence-derived instant,
+    // and that is a property of the timings rather than a gap in the suite: at either
+    // protocol-defined bit rate such a request is ALWAYS already past its T_turn_max window
+    // by the time it is re-fed -- the wait it sat through ends at least T_gap after the bus
+    // goes idle, and a response transmission (>= 6 byte times) follows before the stash is
+    // re-fed, which together exceed T_turn_max -- so both values land on the same side of
+    // every bound the engine tests. That stops holding at a rate fast enough to make T_gap
+    // plus a response shorter than T_turn_max, which is why the true value is the one kept.
+    // mutant-ok(accepted): unobservable at TRUNK_bit_rate and the fallback rate, by the
+    // bound above; kept because it is the correct value, not because it is untested.
+    held_.start_us[held_.len] = start_us;
+    held_.len++;
+    return true;
+}
+
+bool Responder::refeed(bool& delivered, FrameView& view, uint64_t& start_us) {
+    if (held_.next >= held_.len) {
+        // Fully re-fed: reset so the next deferral starts from an empty stash. Both indices
+        // are cleared together — a stale `len` with a reset cursor would re-deliver bytes
+        // the Deframer has already seen, and a stash left looking FULL would make the engine
+        // blind for every later response (killing test: "the bounded wait starts afresh").
+        held_.len = 0;
+        held_.next = 0;
+        return false;
     }
-    // Otherwise it is a request this node owes an answer to, and the wire's receive queue
-    // is no longer holding it for us: it moves into the engine, unanswered, until the
-    // pending response has gone out. Nothing is dropped (FR-015/FR-016; red team @e510b29
-    // finding 1). held_.valid is false here by construction — poll() stops draining while
-    // it is set — so no held request can be overwritten by a later one.
-    held_.f = f;
-    held_.f.payload = held_.payload;
-    // f.len is bounded by the Deframer, which refuses anything longer as Discard::BadLength
-    // (link/frame.cpp) — so this copy cannot overrun held_.payload.
-    static_assert(omgp::LIMIT_max_l3_payload <= sizeof(HeldRequest::payload),
-                  "held_.payload must hold the longest request the Deframer can deliver");
-    if (f.len > 0)
-        std::memcpy(held_.payload, f.payload, f.len);
-    held_.request_end_us = request_end_us;
-    held_.valid = true;
+    start_us = held_.start_us[held_.next];
+    delivered = deframer_.feed(held_.bytes[held_.next], view);
+    held_.next++;
+    return true;
 }
 
 bool Responder::past_window(uint64_t now_us) const {
@@ -296,50 +309,69 @@ void Responder::poll(uint64_t now_us) {
     for (;;) {
         transmit_if_due(now_us, /*queue_drained=*/false);
         const bool listening = state_ == State::Listening;
-        if (listening && held_.valid) {
-            // The wire is free again: the request decoded during the wait is answered
-            // before any newer byte is drained, so the queue keeps its arrival order.
-            const HeldRequest h = held_;
-            held_.valid = false;
-            FrameFields f = h.f;
-            f.payload = h.payload;
-            on_request(f, h.request_end_us);
+        // `held_.len > 0`, not `next < len`: the last re-fed byte leaves the cursor AT len,
+        // and it is refeed() that clears both. Entering only while bytes remain would leave
+        // a spent stash looking permanently FULL, so stash() would refuse every later byte
+        // and the engine would be blind on the wire from the second late response onward
+        // (killing test: "the bounded wait starts afresh for each late response").
+        if (listening && held_.len > 0) {
+            // The wire is free again: bytes stashed during the wait are re-fed BEFORE any
+            // newer byte is drained, so arrival order is preserved end to end, and an
+            // accepted request among them ends this drain exactly as one from the wire does.
+            bool delivered = false;
+            FrameView view{};
+            uint64_t held_start_us = 0;
+            const uint32_t discards_before = total_discards(deframer_.stats());
+            if (!refeed(delivered, view, held_start_us))
+                continue;
+            if (delivered) {
+                on_request(view.f, held_start_us + byte_time_us(wire_.bit_rate()));
+            } else if (total_discards(deframer_.stats()) > discards_before) {
+                stats_.discards++;
+            }
             continue;
         }
-        // Listening: the normal drain. past_window(): a response whose window has closed
-        // is waiting for an idle bus, and the ONLY way this engine can see the bus is to
-        // read it — so it does, and holds what it decodes (red team @71caba0 finding 1).
-        // While Transmitting, and while Scheduled INSIDE the window, bytes still wait
-        // untouched in the wire's receive queue (red team @e510b29 finding 1).
-        if (!listening && !(past_window(now_us) && !held_.valid))
+        // Listening: the normal drain. past_window(): a response whose window has closed is
+        // waiting for an idle bus, and the ONLY way this engine can see the bus is to read
+        // it -- so it does, stashing every byte instead of decoding it, which keeps the
+        // belief current without answering a second request while one response is still
+        // pending (red team @71caba0 finding 1, @7d31410 finding 1). While Transmitting, and
+        // while Scheduled INSIDE the window, bytes wait untouched in the wire's receive
+        // queue as before (red team @e510b29 finding 1).
+        const bool waiting = past_window(now_us);
+        if (!listening && !waiting)
             break;
         if (!wire_.receive(byte, start_us))
             break;
-        // Every byte drained, whatever becomes of it, is evidence the bus was busy: its
-        // END instant, since within a frame each byte starts where the previous one ended
-        // (Master's identical recording, link/master.cpp:215-227).
+        // Every byte drained, whatever becomes of it, is evidence the bus was busy: its END
+        // instant, since within a frame each byte starts where the previous one ended
+        // (Master's identical recording, link/master.cpp:215-227). Recorded for a stashed
+        // byte too -- that is the whole point of draining during the wait.
         last_activity_us_ = start_us + byte_time_us(wire_.bit_rate());
         has_activity_ = true;
+
+        if (waiting) {
+            // Stash, do not decode: the Deframer's accumulator must not advance while a
+            // response is pending, or a request completing here would have to be answered
+            // (impossible, one transaction at a time) or dropped (against FR-015).
+            if (!stash(byte, start_us))
+                break; // stash full: the rest waits in the wire's queue, as it used to
+            continue;
+        }
 
         const uint32_t discards_before = total_discards(deframer_.stats());
         FrameView view{};
         const bool delivered = deframer_.feed(byte, view);
         if (delivered) {
-            const uint64_t request_end_us = start_us + byte_time_us(wire_.bit_rate());
-            if (listening) {
-                on_request(view.f, request_end_us);
-            } else {
-                hold_or_discard(view.f, request_end_us);
-            }
+            on_request(view.f, start_us + byte_time_us(wire_.bit_rate()));
             continue;
         }
         if (total_discards(deframer_.stats()) > discards_before)
             stats_.discards++;
     }
-    // The drain loop has stopped: either the wire's queue is empty, or a decoded request
-    // is held behind the response that must go out first. Only now can a late response be
-    // judged against the bus (transmit_if_due's own comment) -- the in-window path already
-    // fired at the top of the loop.
+    // The drain loop has stopped: the wire's queue is empty, an accepted request ended it,
+    // or the stash is full. Only now -- with last_activity_us_ current for every byte the
+    // engine could read -- can a late response be judged against the bus.
     transmit_if_due(now_us, /*queue_drained=*/true);
 }
 
