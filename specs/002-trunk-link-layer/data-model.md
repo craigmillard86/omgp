@@ -107,7 +107,7 @@ Master state ∈ { Idle, Transmitting(until tx_end), AwaitResponse(until tx_end 
 ## 5. Responder
 
 ```
-ReplayBuffer { bool valid; u8 seq; u16 len; u8 bytes[142] }
+ReplayBuffer { bool valid; u8 seq; u8 peer; u16 len; u8 bytes[142] }
 Responder state ∈ { Listening, Scheduled(response at request_end + turnaround_us), Transmitting(until tx_end) }
 ```
 

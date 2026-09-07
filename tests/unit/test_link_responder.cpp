@@ -1071,9 +1071,26 @@ TEST_CASE("requests arriving faster than poll() is called queue up behind the he
     CHECK(handler.calls == 7);
     CHECK_FALSE(answered_host); // 12 ms after host_end, and still queued behind 0x07's frames
     CHECK(responder.stats().late_responses == 6);
-    // Still nothing counted: no byte is consumed that cannot be kept, so the backlog itself
-    // remains invisible in stats() -- which is the open question.
+    // Nothing counted -- and this is the assertion most likely to be misread, so it says what
+    // it does NOT mean (review @8093b48). `discards == 0` here is not "nothing was lost". It
+    // is "nothing the ENGINE consumed was dropped", which is a much weaker statement: the
+    // requests this cell never answers are still sitting in the wire's receive queue at the
+    // last poll, uncounted because the engine never read them.
     CHECK(responder.stats().discards == 0);
+    // Why the run stops here, rather than at the load this cell's own documentation names.
+    // Continue the same 300 us / 1 ms probe and at ~t = 23 ms MockWire's receive queue
+    // (4 * kMaxWire = 568 bytes) overflows -- and mock_wire.hpp makes that a harness REQUIRE
+    // failure by design ("no silent drop"), so the run would end as a harness fault rather
+    // than as an assertion about the engine. That is exactly the loss described in
+    // link/responder.hpp and in docs/OPEN-QUESTIONS.md 2026-09-07: 74 offered, 7 answered,
+    // destroyed at the wire with stats() showing nothing. This cell deliberately stops just
+    // short of it and pins the boundary instead, so the stopping point is a stated choice
+    // rather than a coincidence.
+    // The backlog, by arithmetic on this cell's own numbers: 70 requests offered, 7 accepted,
+    // so 63 are still sitting unread on the wire -- and none of them is counted anywhere.
+    REQUIRE(flooded == 70);
+    REQUIRE(flooded - handler.calls == 63);
+    REQUIRE(responder.stats().discards == 0);
     CHECK(host_end + omgp::TRUNK_T_resp_us < 20 * poll_period); // the host gave up long ago
 }
 

@@ -2781,6 +2781,7 @@ engine to either stop reading (a blind window, hence this collision) or discard.
 | | the round-11 collision | requests lost | first answer in the probe |
 |---|---|---|---|
 | stop reading, hold 2 (**adopted**, current head) | **reproduces**: `tx = 2661`, inside the frame | none | 2661 (the full cap) |
+| ...the same stop, on a bus that is **silent** | n/a | none | **1331 µs late** — with the hold full the engine cannot tell a busy bus from a quiet one, because it stops before `wire_.receive()`. Both rows are one property, which is why moving the boundary never helped (red team @`80df7af` finding 2) |
 | never stop, hold 2, discard-and-count the excess | **closed**: `tx = 1341`, well before that frame | **regresses**: 7/8, 5/8, 4/8 answered at 400 µs / 1 ms / 2 ms poll periods — the defect the case "eight well-spaced requests … none discarded" was written to close (red team @`e510b29`), counted rather than silent | 1341 |
 
 The second is better on the collision *and* on latency, worse on loss. There is no third column
@@ -2793,6 +2794,18 @@ records that when it once did, "the argument was false for exactly the bytes lef
 and this path is precisely that excluded case. On the late path a frame beginning after
 `defer_origin + T_gap` is not necessarily a §3 violator either, because the host has already
 timed this node out and may legitimately open a new transaction.
+
+**Decisive update (red team @`bab7378` finding 2), which weakens the adopted corner in the one
+dimension it was chosen for.** "Nothing is dropped" holds for the engine's bookkeeping, not end
+to end. The blind window RECURS every cap cycle while the hold is full, so the cumulative
+exposure is unbounded rather than one worst-case frame — and it fires in the native harness,
+not only on target: one station offering this node a request every 300 µs (~37 % occupancy,
+conformant) against a 1 ms poll gives **74 requests offered, 7 answered**, with MockWire's own
+568-byte queue overflowing at t = 23 ms. `stats().discards` stays **0** throughout, because the
+engine never sees the bytes the wire destroyed. Pre-@`e510b29` this same branch counted them
+(48 discards). So the choice is not "lose nothing" versus "lose some, counted"; it is **lose
+some, uncounted, at the wire** versus **lose some, counted, in the engine** — and FR-016's
+`stats().discards` channel exists for exactly the second.
 
 **Recommendation:** rule the trade, not the mechanism. If FR-017 and trunk §3 outrank
 FR-015/FR-016 when they conflict, take the second corner (never stop reading; discard and
