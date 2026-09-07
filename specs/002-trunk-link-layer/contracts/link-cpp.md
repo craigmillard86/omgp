@@ -148,8 +148,12 @@ public:
                                                   // (Amended in PR #149, red team @71caba0 HIGH: "immediately" is
                                                   // qualified by trunk §3's media access -- outside its window the
                                                   // engine owes an idle bus, so it transmits at
-                                                  // min(last_activity + T_gap, defer_origin + max_frame + T_gap),
-                                                  // up to ~1.47 ms later. Pending a ruling, see
+                                                  // min(last_activity + T_gap, defer_origin + max_frame + T_gap)
+                                                  // when its reading of the bus is COMPLETE, and at
+                                                  // defer_origin + max_frame + T_gap (the cap alone, whatever
+                                                  // last_activity says) when the drain stopped with requests held
+                                                  // and the reading is therefore partial -- up to ~1.47 ms later
+                                                  // either way. Pending a ruling, see
                                                   // docs/OPEN-QUESTIONS.md 2026-09-07 "the Responder's late path
                                                   // defers for an idle bus" and, for the collision that wait can
                                                   // still cause, "...CAN transmit into a frame it has not read".)
