@@ -65,6 +65,9 @@ uint32_t xorshift32_next(uint32_t& state);
 // CrcError's corrupted CRC byte"). Same stuffed wire length as an uncorrupted
 // encode_frame(f, ...). Returns 0 (nothing written) if `cap` is too small, mirroring
 // encode_frame's BufferTooSmall convention without a Status return.
+// Precondition: f.len <= omgp::LIMIT_max_l3_payload; returns 0 if it is not, as it does
+// when `cap` is too small (review @c69679c: the payload bound is the caller's to respect,
+// and refusing is how this function says so on an -fno-exceptions stack).
 size_t encode_crc_corrupted(const omgp::link::FrameFields& f, uint8_t* out, size_t cap);
 
 // Scripted ByteWire (contracts/mock-wire.md). `clock` is shared with the engine(s) under

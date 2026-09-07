@@ -320,6 +320,12 @@ TEST_CASE("SC-004 drop at attempt 0: recovers on the first retry, handler invoke
     const Fault plan[3] = {Fault::Drop, Fault::Clean, Fault::Clean};
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Answered);
+    // The ANSWER ITSELF, not just its header: the handler echoes the request's payload, so
+    // this is what separates "the right answer came back" from "a frame with the right
+    // seq came back" -- the distinction the replay buffer exists to make, and the one
+    // nothing in this file asserted (red team @c69679c finding 1).
+    REQUIRE(ev.response.len == sizeof payload);
+    REQUIRE(ev.response.payload[0] == payload[0]);
     REQUIRE(ev.response.seq == 0); // accepted seq == this transaction's own seq
     REQUIRE(loop.master.attempts() == 2);
     REQUIRE(loop.handler.invocations == 1); // retry replayed, never re-invoked
@@ -333,6 +339,12 @@ TEST_CASE("SC-004 drop through retry 1: recovers on the second retry, handler in
     const Fault plan[3] = {Fault::Drop, Fault::Drop, Fault::Clean};
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Answered);
+    // The ANSWER ITSELF, not just its header: the handler echoes the request's payload, so
+    // this is what separates "the right answer came back" from "a frame with the right
+    // seq came back" -- the distinction the replay buffer exists to make, and the one
+    // nothing in this file asserted (red team @c69679c finding 1).
+    REQUIRE(ev.response.len == sizeof payload);
+    REQUIRE(ev.response.payload[0] == payload[0]);
     REQUIRE(ev.response.seq == 0);
     REQUIRE(loop.master.attempts() == 3);
     REQUIRE(loop.handler.invocations == 1);
@@ -375,6 +387,12 @@ TEST_CASE("SC-004 delay-past-T_resp at attempt 0: recovers via the retry; the st
     const Fault plan[3] = {Fault::DelayPastTResp, Fault::Clean, Fault::Clean};
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Answered);
+    // The ANSWER ITSELF, not just its header: the handler echoes the request's payload, so
+    // this is what separates "the right answer came back" from "a frame with the right
+    // seq came back" -- the distinction the replay buffer exists to make, and the one
+    // nothing in this file asserted (red team @c69679c finding 1).
+    REQUIRE(ev.response.len == sizeof payload);
+    REQUIRE(ev.response.payload[0] == payload[0]);
     REQUIRE(ev.response.seq == 0);
     REQUIRE(loop.master.attempts() == 2);
     REQUIRE(loop.handler.invocations == 1);
@@ -403,6 +421,12 @@ TEST_CASE("SC-004 delay-past-T_resp through retry 1: recovers on the second retr
     const Fault plan[3] = {Fault::Drop, Fault::DelayPastTResp, Fault::Clean};
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Answered);
+    // The ANSWER ITSELF, not just its header: the handler echoes the request's payload, so
+    // this is what separates "the right answer came back" from "a frame with the right
+    // seq came back" -- the distinction the replay buffer exists to make, and the one
+    // nothing in this file asserted (red team @c69679c finding 1).
+    REQUIRE(ev.response.len == sizeof payload);
+    REQUIRE(ev.response.payload[0] == payload[0]);
     REQUIRE(ev.response.seq == 0);
     REQUIRE(loop.master.attempts() == 3);
     REQUIRE(loop.handler.invocations == 1);
@@ -425,6 +449,12 @@ TEST_CASE("SC-004 delay-past-T_resp through retry 2: uses the full retry budget 
     const Fault plan[3] = {Fault::DelayPastTResp, Fault::DelayPastTResp, Fault::Clean};
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Answered);
+    // The ANSWER ITSELF, not just its header: the handler echoes the request's payload, so
+    // this is what separates "the right answer came back" from "a frame with the right
+    // seq came back" -- the distinction the replay buffer exists to make, and the one
+    // nothing in this file asserted (red team @c69679c finding 1).
+    REQUIRE(ev.response.len == sizeof payload);
+    REQUIRE(ev.response.payload[0] == payload[0]);
     REQUIRE(ev.response.seq == 0);
     REQUIRE(loop.master.attempts() == static_cast<uint8_t>(omgp::TRUNK_retries) + 1);
     REQUIRE(loop.handler.invocations == 1);
@@ -512,6 +542,12 @@ TEST_CASE("SC-004 delay-past-T_resp at the boundary: a response opening exactly 
         a1.response_start_us + static_cast<uint64_t>(a1.resp_bytes.size()) * byte_us(),
         loop.master);
     REQUIRE(ev.kind == MasterEvent::Answered);
+    // The ANSWER ITSELF, not just its header: the handler echoes the request's payload, so
+    // this is what separates "the right answer came back" from "a frame with the right
+    // seq came back" -- the distinction the replay buffer exists to make, and the one
+    // nothing in this file asserted (red team @c69679c finding 1).
+    REQUIRE(ev.response.len == sizeof payload);
+    REQUIRE(ev.response.payload[0] == payload[0]);
     REQUIRE(ev.response.seq == 0);
     REQUIRE(loop.master.attempts() == 2);
     REQUIRE(loop.handler.invocations == 1);
@@ -532,6 +568,12 @@ TEST_CASE("SC-004 CRC-corrupted response at attempt 0: ends that attempt immedia
     const Fault plan[3] = {Fault::Corrupt, Fault::Clean, Fault::Clean};
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Answered);
+    // The ANSWER ITSELF, not just its header: the handler echoes the request's payload, so
+    // this is what separates "the right answer came back" from "a frame with the right
+    // seq came back" -- the distinction the replay buffer exists to make, and the one
+    // nothing in this file asserted (red team @c69679c finding 1).
+    REQUIRE(ev.response.len == sizeof payload);
+    REQUIRE(ev.response.payload[0] == payload[0]);
     REQUIRE(ev.response.seq == 0);
     REQUIRE(loop.master.attempts() == 2);
     REQUIRE(loop.handler.invocations == 1);
@@ -546,6 +588,12 @@ TEST_CASE("SC-004 CRC-corrupted response through retry 1: recovers on the second
     const Fault plan[3] = {Fault::Corrupt, Fault::Corrupt, Fault::Clean};
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Answered);
+    // The ANSWER ITSELF, not just its header: the handler echoes the request's payload, so
+    // this is what separates "the right answer came back" from "a frame with the right
+    // seq came back" -- the distinction the replay buffer exists to make, and the one
+    // nothing in this file asserted (red team @c69679c finding 1).
+    REQUIRE(ev.response.len == sizeof payload);
+    REQUIRE(ev.response.payload[0] == payload[0]);
     REQUIRE(ev.response.seq == 0);
     REQUIRE(loop.master.attempts() == 3);
     REQUIRE(loop.handler.invocations == 1);
@@ -595,6 +643,12 @@ TEST_CASE("SC-004 duplicate at attempt 0: succeeds once; the late duplicate has 
     const Fault plan[3] = {Fault::Duplicate, Fault::Clean, Fault::Clean};
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Answered);
+    // The ANSWER ITSELF, not just its header: the handler echoes the request's payload, so
+    // this is what separates "the right answer came back" from "a frame with the right
+    // seq came back" -- the distinction the replay buffer exists to make, and the one
+    // nothing in this file asserted (red team @c69679c finding 1).
+    REQUIRE(ev.response.len == sizeof payload);
+    REQUIRE(ev.response.payload[0] == payload[0]);
     REQUIRE(ev.response.seq == 0);
     REQUIRE(loop.master.attempts() == 1); // the genuine answer landed first attempt
     REQUIRE(loop.handler.invocations == 1);
@@ -610,6 +664,12 @@ TEST_CASE("SC-004 duplicate through retry 1: succeeds once the retry lands; the 
     const Fault plan[3] = {Fault::Drop, Fault::Duplicate, Fault::Clean};
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Answered);
+    // The ANSWER ITSELF, not just its header: the handler echoes the request's payload, so
+    // this is what separates "the right answer came back" from "a frame with the right
+    // seq came back" -- the distinction the replay buffer exists to make, and the one
+    // nothing in this file asserted (red team @c69679c finding 1).
+    REQUIRE(ev.response.len == sizeof payload);
+    REQUIRE(ev.response.payload[0] == payload[0]);
     REQUIRE(ev.response.seq == 0);
     REQUIRE(loop.master.attempts() == 2);
     REQUIRE(loop.handler.invocations == 1);
@@ -626,6 +686,12 @@ TEST_CASE("SC-004 duplicate through retry 2: uses the full retry budget and stil
     const Fault plan[3] = {Fault::Drop, Fault::Drop, Fault::Duplicate};
     const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
     REQUIRE(ev.kind == MasterEvent::Answered);
+    // The ANSWER ITSELF, not just its header: the handler echoes the request's payload, so
+    // this is what separates "the right answer came back" from "a frame with the right
+    // seq came back" -- the distinction the replay buffer exists to make, and the one
+    // nothing in this file asserted (red team @c69679c finding 1).
+    REQUIRE(ev.response.len == sizeof payload);
+    REQUIRE(ev.response.payload[0] == payload[0]);
     REQUIRE(ev.response.seq == 0);
     REQUIRE(loop.master.attempts() == static_cast<uint8_t>(omgp::TRUNK_retries) + 1);
     REQUIRE(loop.handler.invocations == 1);
@@ -739,6 +805,8 @@ TEST_CASE("SC-004 a retry whose sequence differs from the node's buffered answer
     const MasterEvent ev_a = run_transaction(loop, kNode, a_payload, sizeof a_payload, clean);
     REQUIRE(ev_a.kind == MasterEvent::Answered);
     REQUIRE(ev_a.response.seq == 0);
+    REQUIRE(ev_a.response.len == sizeof a_payload);
+    REQUIRE(ev_a.response.payload[0] == a_payload[0]);
     REQUIRE(loop.handler.invocations == 1);
 
     // Transaction B, seq 1. Its FIRST attempt never reaches the node at all -- the request is
@@ -776,6 +844,10 @@ TEST_CASE("SC-004 a retry whose sequence differs from the node's buffered answer
     // every other cell cannot distinguish.
     REQUIRE(ev_b.kind == MasterEvent::Answered);
     REQUIRE(ev_b.response.seq == 1);
+    // B's OWN payload, not A's. This is the assertion that would catch a replay of A's
+    // buffered answer even if the sequence somehow matched -- content, not just header.
+    REQUIRE(ev_b.response.len == sizeof b_payload);
+    REQUIRE(ev_b.response.payload[0] == b_payload[0]);
     REQUIRE(loop.handler.invocations == 2);
     REQUIRE(loop.responder.stats().replays_served == 0);
     REQUIRE(loop.responder.stats().transactions == 2);

@@ -55,6 +55,16 @@ size_t encode_crc_corrupted(const omgp::link::FrameFields& f, uint8_t* out, size
     // on the engine-under-test's call stack (transmit() -> schedule_crc_error()), so a
     // capacity refusal must be a return value here, not a REQUIRE (see fault_'s
     // declaration in mock_wire.hpp for why this file never throws off that stack).
+    // encode_frame's OTHER refusal, which this used to skip on the grounds that `request` was
+    // "a frame this same MockWire just decoded" -- no longer true since the symbol gained
+    // external linkage and gained a caller that builds FrameFields by hand (review @c69679c).
+    // Without it, f.len = 200 with a 512-byte `out` passes the capacity check below (414 <=
+    // 512) and then writes 206 bytes into unstuffed[kMaxUnstuffed], which is 70: a stack
+    // overflow. Every in-repo caller happens to pass cap <= kMaxWire, which bounds f.len to
+    // 64 -- but that is a property of the repo's current contents, a control, not a guarantee
+    // this function may rely on.
+    if (f.len > omgp::LIMIT_max_l3_payload)
+        return 0;
     const size_t needed = 2 + 2 * (kHeaderLen + static_cast<size_t>(f.len) + kCrcLen);
     if (cap < needed)
         return 0;
