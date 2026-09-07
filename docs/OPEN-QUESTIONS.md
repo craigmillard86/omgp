@@ -2730,6 +2730,18 @@ and this path is precisely that excluded case. On the late path a frame beginnin
 `defer_origin + T_gap` is not necessarily a §3 violator either, because the host has already
 timed this node out and may legitimately open a new transaction.
 
+**Decisive update (red team @`bab7378` finding 2), which weakens the adopted corner in the one
+dimension it was chosen for.** "Nothing is dropped" holds for the engine's bookkeeping, not end
+to end. The blind window RECURS every cap cycle while the hold is full, so the cumulative
+exposure is unbounded rather than one worst-case frame — and it fires in the native harness,
+not only on target: one station offering this node a request every 300 µs (~37 % occupancy,
+conformant) against a 1 ms poll gives **74 requests offered, 7 answered**, with MockWire's own
+568-byte queue overflowing at t = 23 ms. `stats().discards` stays **0** throughout, because the
+engine never sees the bytes the wire destroyed. Pre-@`e510b29` this same branch counted them
+(48 discards). So the choice is not "lose nothing" versus "lose some, counted"; it is **lose
+some, uncounted, at the wire** versus **lose some, counted, in the engine** — and FR-016's
+`stats().discards` channel exists for exactly the second.
+
 **Recommendation:** rule the trade, not the mechanism. If FR-017 and trunk §3 outrank
 FR-015/FR-016 when they conflict, take the second corner (never stop reading; discard and
 COUNT beyond the hold, making the loss visible in `stats()` where today the backlog is

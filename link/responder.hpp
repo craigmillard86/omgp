@@ -82,14 +82,28 @@ class Responder {
     // property test_link_responder.cpp's "eight well-spaced requests ... none discarded"
     // pins, itself the fix for red team @e510b29).
     //
-    // That guarantee stops at the engine's edge, and claiming otherwise would be false (red
-    // team @5830fc4 finding 2): it holds because MockWire's receive queue is 4 * kMaxWire.
-    // The pinned target's UART RX FIFO is 128 bytes -- smaller than kMaxWire (142) -- and the
-    // blind window while stopped is up to max_frame + T_gap of arrivals, so on an ESP32-S3 a
-    // long enough stop overflows that FIFO and the HARDWARE drops bytes this engine believes
-    // are safely queued. docs/OPEN-QUESTIONS.md 2026-09-07 records it. It is a firmware-side
-    // bound (poll cadence, or a driver ring larger than kMaxWire), not something this file
-    // can fix.
+    // That guarantee stops at the engine's edge, and it is weaker than an earlier revision of
+    // this comment claimed (red team @5830fc4 finding 2, then @bab7378 finding 2, which
+    // corrected the bound):
+    //
+    //  - the blind window is up to max_frame + T_gap of arrivals PER OCCURRENCE, and it
+    //    RECURS every cap cycle while the hold stays full, so the cumulative exposure is
+    //    unbounded, not one worst-case frame. Saying only the per-occurrence figure, as this
+    //    comment used to, understated it;
+    //  - it therefore fires in the NATIVE harness too, not just on target: one station
+    //    offering this node a request every 300 us (~37% bus occupancy, nothing in it
+    //    violating trunk §3/§9) against a 1 ms poll gives 74 requests offered, 7 answered,
+    //    and MockWire's own 568-byte receive queue overflowing at t = 23 ms;
+    //  - and the loss is INVISIBLE: stats().discards stays 0 throughout, because the engine
+    //    never sees the bytes the wire destroyed. Pre-@e510b29 this same branch COUNTED them
+    //    (48 discards in that comparison), so relative to earlier heads this is a telemetry
+    //    regression, which FR-016's "counted in stats().discards" channel exists to prevent.
+    //
+    // So "this engine never destroys or drops a request" is true and load-bearing only for
+    // the engine's own bookkeeping; end to end, under an ordinary offered load, requests ARE
+    // lost -- at the wire, uncounted. That materially weakens the reason this corner of the
+    // trade was chosen, and it is recorded as such in docs/OPEN-QUESTIONS.md 2026-09-07 for
+    // the maintainer's ruling. The ESP32-S3's 128-byte RX FIFO is the same exposure, earlier.
     //
     // Stopping means the engine has left bytes unread, so from that instant its picture of
     // the bus is INCOMPLETE -- and it says so (poll()'s belief_stale) rather than judging
