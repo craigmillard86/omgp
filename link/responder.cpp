@@ -350,8 +350,13 @@ void Responder::poll(uint64_t now_us) {
             // first, before any newer byte is drained, so arrival order is preserved.
             HeldRequest h = held_[held_head_];
             h.f.payload = h.payload;
-            // mutant-ok(equivalent, cxx_add_to_sub): as at the append above -- mod 2,
-            // (head + 1) and (head - 1) are the same index.
+            // As at the append above: mod kHeldRequests == 2, (head + 1) and (head - 1) are
+            // the same index, so the mutation and the original coincide. (The label must be
+            // the LAST comment line before the code it governs -- tools/mutate_report.py
+            // reads "the line directly beneath". Written above a second comment line, it
+            // covered that line instead and the gate reported it stale while the real
+            // survivor sat one line further down.)
+            // mutant-ok(equivalent, cxx_add_to_sub): the mutation and the original coincide.
             held_head_ = (held_head_ + 1) % kHeldRequests;
             held_count_--;
             on_request(h.f, h.request_end_us);
