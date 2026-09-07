@@ -109,12 +109,107 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
 - `quality`: add `python3 tools/check_embedded.py`.
 - `build` (bootstrap): compile `third_party/catch2/catch_amalgamated.cpp` once to an
   object, then each `tests/unit/*.cpp` + `tests/property/*.cpp` with `l3/*.cpp`,
-  `l3_helper`, `crc_helper`; disclosure line unchanged.
+  `l3_helper`, `crc_helper`; disclosure line unchanged. (Amended by #133: the source
+  list is `unit_sources()` — every `test_*.cpp` under those two directories at any depth,
+  sorted, symlinks not followed and refused by name (red team @8b0e4f4), a directory the
+  walk cannot enter refused by name (red team @3713ab0) — shared with the bootstrap `unit`
+  walk.)
 - `unit`: run every test binary; the `EXECUTED: <n>` lines are summed (ctest path via
   `LastTest.log`, bootstrap via stdout); `UNIT_TEST_FLOOR` raised to the new total −
   small slack (documented in the commit that raises it: "raise when tests are added;
-  NEVER lower").
-- `refimpl`: `python3 -m pytest -q tools/refimpl`.
+  NEVER lower"). (Amended by #133: the floor is the COUNT gate only. The ctest path also
+  runs `tools/check_test_set.py`, which proves from `compile_commands.json`, the object
+  files, `ctest --show-only` and the run's `ctest --output-junit` record
+  (`build/native/Testing/junit.xml`, deleted before ctest runs and refused if older than
+  any registered binary) that every `test_*.cpp` under `tests/unit` and `tests/property`
+  at any depth (red team @ceab86f) — reached without following symlinks, and a symlink
+  anywhere under those directories, file or directory, is refused by name, since `rglob`
+  and `find` do not descend one and a source behind one was silently outside the set (red
+  team @8b0e4f4), and so is a directory the walk cannot enter — `os.walk` otherwise swallows
+  the error and omits it, so a mode-000 `tests/unit/deep` hid its source before and after
+  the run alike (red team @3713ab0), and a mode-400 one — listable, not searchable — was a
+  traceback rather than a name (red team @4b78242); with links and walk errors refused the
+  walked set is the whole tree by construction — the `EXECUTED: <n>` line must stand alone (anchored
+  both ends; a line merely containing the marker is not the run's count) —
+  was compiled, registered and executed, naming every one
+  that was not — compiled means exactly ONE `compile_commands.json` entry (two entries
+  under two targets are refused naming both: keeping the last one let a single appended
+  entry re-credit a source to any registered target and made the verdict depend on entry
+  order — red team @8b0e4f4) whose object is THIS source's — exactly the path cmake derives
+  from the source, `CMakeFiles/<target>.dir/<source path relative to the root>.o`; an entry
+  naming another source's real, linked object satisfied every rule below and re-opened
+  escape 2 (red team @4012926); a test target declared in a subdirectory's CMakeLists
+  would be refused here by name, stated and not supported — and is the one plain file the
+  compiler wrote (not a symlink, not one of several hard-link names: `lstat`; the source and
+  the binary already had this rule and the object was the hop without it — red team
+  @4012926; no hard-link build mode is used in this repo, a control on that fact), exists, is
+  no older than the source and no newer than the target's binary (an edited-after-build
+  source is named, and so is an object recompiled after the last link — red team @6fbdebf;
+  an mtime comparison is a control, not a guarantee) and is on the target's link line
+  (`CMakeFiles/<target>.dir/link.txt`, the Makefiles generator's, read as a build artefact;
+  absent, the check fails closed — an entry plus a stub object is not a compilation into
+  the binary, red team @8b0e4f4), which must itself be no newer than the binary (a line
+  regenerated after the last link describes a binary not yet linked — red team @17315ed)
+  and must produce that binary (its `-o`; a line producing another file is named, not
+  credited — red team @17315ed), registered means an `add_test` whose command is exactly
+  the target's own binary — compared as an absolute path without resolving symlinks, so a
+  link to another target's binary is not a registration, and the file a registration runs
+  must be registered once (a link registered by its own path is refused, both ways; red
+  team @3dde163; the same path registered twice likewise — red team @2f40596), one ctest test NAME must register one binary (execution evidence is
+  keyed by name; CMake allows a duplicate across `add_subdirectory` — both refused; red
+  team @aed9693), and the registered set must equal the record's `<testcase>` names
+  (`ctest --show-only` runs after the tests; a test that rewrote `CTestTestfile.cmake`
+  is refused as "registration set differs from the run's record" — a control, not a
+  guarantee) — with no arguments (a filtered Catch2 run, or a same-named binary
+  elsewhere, is refused); and all of that evidence must be UNCHANGED by the run: the
+  stage takes `check_test_set.py --snapshot` before ctest (the source set with each
+  source's dev/ino/size/mtime/ctime; sha256 of `compile_commands.json`; the same identity
+  of every source's object(s), link line(s) and every registered binary; the registration list) and hands
+  it to `--ctest --pre` on stdin — never via a file under `build/` — so a test that
+  writes a compile entry, an object, a link line, a registration or a binary while running is refused
+  as "changed during the ctest run", and one that deletes or adds a test source while
+  running as "source set changed during the ctest run" — the check walks the sources
+  after ctest, so without the set in the snapshot a built-but-unregistered source was
+  verified away by deleting it mid-run (red team @2f40596)
+  (red team @f8bce32; the identity is a control, not a guarantee — ctime is what a
+  size-and-mtime-preserving rewrite cannot restore without root or a moved clock; a test
+  that reaches the shell's memory or rewrites the tool or `pipeline.sh` is outside what
+  reading artefacts can establish, stated). Executed means an `EXECUTED: <n>` line with n > 0 (red team
+  @94f2462) for the BINARY that contains the source's object — per-binary evidence, not
+  proof that any one source's cases ran; one source per target in `CMakeLists.txt` makes
+  the two coincide, a control on the build files, not a guarantee — ctest is run with
+  `--test-output-size-passed 10000000` because its default keeps only the first 1024 bytes
+  of a passing test's stdout, dropping the trailing `EXECUTED:` line, and the tool names a
+  record truncated that way (red team @3880d35); the bootstrap path walks the same
+  `unit_sources()` list, so a source with no binary fails by name, and applies the same
+  execution predicate: a binary that exits 0 with no `EXECUTED:` line, or `EXECUTED: 0`,
+  is named and fails the stage (red team @ceab86f); a source newer than its binary is
+  named (`rebuild before verifying`; a control, not a guarantee); the source list, every
+  binary's existence and freshness and its dev/ino/size/mtime/ctime are gathered BEFORE
+  any binary runs, and the list and identities must be unchanged after the run — a
+  binary is arbitrary code, so gathering source n+1's evidence after source n's binary
+  ran let an earlier test mint or overwrite a later source's binary (red team @2f40596;
+  identity by stat is the same control as the ctest path's); and because that path
+  builds one binary per BASENAME, two sources sharing a basename are refused by name
+  before the bootstrap build and before the walk (red team @3dde163 — otherwise one
+  binary would vouch for both and count twice), and a symlink under the source
+  directories is refused there too (red team @8b0e4f4), as is a directory `find` cannot
+  enter (red team @3713ab0; `find -P` already exited 1 on it, but named by find, not the
+  stage). Both paths print a `unit: verified N
+  test binaries` line (N = distinct binaries on the ctest path; sources, which the
+  uniqueness check makes one-per-binary, on the bootstrap path), and both fail when
+  there are no sources at all. The record, not
+  `LastTest.log`, is the execution evidence: the log interleaves the tests' own stdout
+  with ctest's framing (PR #172 red team). The two paths have different predicates by
+  design — ctest runs what cmake registered and the tool proves the sources are all in
+  that set; bootstrap runs one binary per source that its own `stage_build` made — and
+  a pipeline run never mixes them: a cmake tree without `CTestTestfile.cmake` takes the
+  bootstrap path and fails at the first source with no bootstrap binary.)
+- `refimpl`: `python3 -m pytest -q -rs tools/refimpl`. Ordering dependency (#133):
+  `tools/refimpl/test_test_set_gate.py`'s two real-tree controls read `build/native`'s
+  artefacts and the JUnit record the same invocation's `unit` stage wrote, so `refimpl`
+  must follow `build unit` (the default list and `ci.yml`'s explicit list both do);
+  without them the controls skip locally and fail on CI (`GITHUB_ACTIONS`).
 - `codegen`: `python3 tools/codegen.py --vectors tests/vectors && python3 tools/codegen.py --check-docs`.
 - `esp32`: calls `stage_codegen` first so `build/gen/` exists on the host before the
   Docker build (the IDF image has no Jinja2).
