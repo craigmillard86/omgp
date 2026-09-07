@@ -181,7 +181,7 @@ void Responder::hold_or_discard(const FrameFields& f, uint64_t request_end_us) {
         stats_.discards++;
         return;
     }
-    HeldRequest& slot = held_[held_count_];
+    HeldRequest& slot = held_[(held_head_ + held_count_) % kHeldRequests];
     slot.f = f;
     slot.f.payload = slot.payload;
     // f.len is bounded by the Deframer, which refuses anything longer as Discard::BadLength
@@ -341,10 +341,9 @@ void Responder::poll(uint64_t now_us) {
         if (listening && held_count_ > 0) {
             // The wire is free again: requests decoded during the wait are answered, oldest
             // first, before any newer byte is drained, so arrival order is preserved.
-            HeldRequest h = held_[0];
+            HeldRequest h = held_[held_head_];
             h.f.payload = h.payload;
-            for (size_t i = 1; i < held_count_; ++i)
-                held_[i - 1] = held_[i];
+            held_head_ = (held_head_ + 1) % kHeldRequests;
             held_count_--;
             on_request(h.f, h.request_end_us);
             continue;

@@ -201,7 +201,13 @@ class Responder {
     uint64_t defer_origin_us_ = 0;
     bool has_defer_origin_ = false;
 
+    // A ring, not a shifted array. The shift it replaces was two mutants deep-verify could
+    // not kill (`i < held_count_` -> `<=`, `++i` -> `--i`): the slot a mis-shift corrupts is
+    // never read afterwards, so only ASan noticed, and the mutation build has no ASan. Here
+    // every index arithmetic error hands on_request() the WRONG held request, which the
+    // arrival-order assertions catch (red team @6440074's four-request case).
     HeldRequest held_[kHeldRequests] = {};
+    size_t held_head_ = 0;
     size_t held_count_ = 0;
 
     AddrStats stats_ = {};
