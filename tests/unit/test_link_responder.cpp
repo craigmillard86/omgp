@@ -1061,3 +1061,178 @@ TEST_CASE("requests arriving faster than poll() is called queue up behind the he
     CHECK(responder.stats().discards == 0);
     CHECK(host_end + omgp::TRUNK_T_resp_us < 20 * poll_period); // the host gave up long ago
 }
+
+// --- red team @71caba0 finding 1 (BLOCKING, HIGH): listen before transmitting ------------
+// --- Inside its response window the engine owns the bus by protocol (trunk §3: the host --
+// --- is the only initiator and is waiting out T_resp, "a node must never transmit -------
+// --- outside its response window"). Once that window has closed -- the FR-014 late-poll --
+// --- path -- the guarantee is gone, so the engine must form the belief byte_wire.hpp ----
+// --- requires of it ("never transmits while it believes the bus is busy") from what is ---
+// --- actually on the wire, exactly as Master::fire_pending does (link/master.cpp:205). ---
+
+TEST_CASE("a response already outside its window is not keyed down on top of another "
+          "station's in-flight frame: it waits for T_gap of idle after that frame",
+          "[link][timing:T_gap]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t p[] = {0x11};
+    const uint64_t request_end =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, p, sizeof p), 1000);
+
+    // This node polls once per superframe (T_poll = 2 ms), the cadence FR-014 exists for.
+    // The host timed out after T_resp and is now polling a DIFFERENT node; that request
+    // occupies the bus while this node's own answer is still due.
+    const uint64_t other_start = request_end + 1000;
+    const std::vector<uint8_t> other = request_bytes(0x02, kPeer, false, 2, p, sizeof p);
+    const uint64_t other_end = inject_request(wire, other, other_start);
+    const uint64_t mid_frame = other_start + (other_end - other_start) / 2;
+    REQUIRE(mid_frame > request_end + omgp::TRUNK_T_turn_max_us); // the window has closed
+
+    wire.advance_to(mid_frame, responder);
+    // Nothing on the wire: half of another station's frame is in flight (trunk §3 is
+    // half-duplex), and the engine has drained those bytes rather than staying blind to
+    // them, so it knows.
+    REQUIRE(wire.transcript_size() == 0);
+    REQUIRE(handler.calls == 1); // the response is encoded and pending, just not sent
+
+    // The frame ends; the engine still owes it T_gap of idle (data-model.md §4 "Gap").
+    wire.advance_to(other_end, responder);
+    REQUIRE(wire.transcript_size() == 0);
+    wire.advance_to(other_end + omgp::TRUNK_T_gap_us - 1, responder);
+    REQUIRE(wire.transcript_size() == 0);
+
+    wire.advance_to(other_end + omgp::TRUNK_T_gap_us, responder);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).tx_start_us == other_end + omgp::TRUNK_T_gap_us);
+    REQUIRE(wire.transcript(0).dst == kPeer);
+    REQUIRE(wire.transcript(0).seq == 1);
+    // FR-014: transmitted, not dropped, and counted as outside its window.
+    REQUIRE(responder.stats().late_responses == 1);
+    REQUIRE(responder.stats().transactions == 1);
+    // The other station's request was drained while the response waited; it is not this
+    // node's, so it is discarded and counted exactly as it would be while Listening.
+    REQUIRE(responder.stats().discards == 1);
+}
+
+TEST_CASE("the wait for an idle bus is bounded: a station occupying the wire without pause "
+          "delays a late response by at most one worst-case frame plus T_gap, never "
+          "starves it",
+          "[link][timing:T_gap]") {
+    // Master::fire_pending's cap (link/master.cpp:277), for the same reason: past it, a
+    // station still holding the wire is a trunk §3 violator, and FR-014's "MUST still
+    // transmit" wins over a courtesy gap that an unbounded babbler could deny forever.
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t p[] = {0x22};
+    const uint64_t request_end =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 3, p, sizeof p), 1000);
+
+    // Non-frame noise, one byte every byte time, from before the window closes until long
+    // after: the bus never goes idle for T_gap, at any poll instant.
+    const uint64_t babble_start = request_end + 1;
+    const uint64_t max_frame_us = static_cast<uint64_t>(kMaxWire) * byte_us();
+    // Long enough to still be going at the cap (defer_origin + max_frame + T_gap), short
+    // enough for MockWire's receive queue (4 * kMaxWire, contracts/mock-wire.md).
+    std::vector<uint8_t> noise(300, 0x5C);
+    REQUIRE(noise[0] != omgp::TRUNK_flag_byte);
+    wire.inject_bytes(noise.data(), noise.size(), babble_start);
+    const uint64_t babble_end = babble_start + noise.size() * byte_us();
+
+    // The first poll is already past the window (the FR-014 late path), so it is also the
+    // instant the response first found the bus busy -- the origin of the bounded wait.
+    // Polling every byte time from there keeps the observation of the babble continuous.
+    const uint64_t defer_origin = request_end + omgp::TRUNK_T_turn_max_us + 1;
+    bool sent = false;
+    for (uint64_t t = defer_origin; t <= babble_end && !sent; t += byte_us()) {
+        wire.advance_to(t, responder);
+        sent = wire.transcript_size() > 0;
+    }
+    REQUIRE(sent); // never starved, though the bus was never idle
+    const uint64_t tx = wire.transcript(0).tx_start_us;
+    INFO("defer_origin=" << defer_origin << " tx=" << tx
+                         << " cap=" << defer_origin + max_frame_us + omgp::TRUNK_T_gap_us);
+    REQUIRE(tx <= defer_origin + max_frame_us + omgp::TRUNK_T_gap_us);
+    REQUIRE(tx < babble_end); // sent while the babble was still going, not after it stopped
+    REQUIRE(responder.stats().late_responses == 1);
+}
+
+TEST_CASE("a request that completes while a late response waits for the bus is held, not "
+          "lost: it is answered once the response has gone out",
+          "[link]") {
+    // The @e510b29 rule (a request arriving while a response is pending is held, never
+    // discarded) still holds on the deferral path -- the engine now drains those bytes to
+    // see the bus, so the holding moves from the wire's receive queue into the engine, one
+    // decoded request deep; anything behind it stays queued as before.
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t a[] = {0xA1};
+    const uint64_t end_a =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, a, sizeof a), 1000);
+
+    // B is addressed to THIS node and completes while A's answer is late and waiting.
+    const uint8_t b[] = {0xB2};
+    const uint64_t start_b = end_a + 1000;
+    const uint64_t end_b =
+        inject_request(wire, request_bytes(kMyAddr, 0x07, false, 2, b, sizeof b), start_b);
+    const uint64_t mid_b = start_b + (end_b - start_b) / 2;
+
+    wire.advance_to(mid_b, responder); // A's answer deferred: B is in flight
+    REQUIRE(wire.transcript_size() == 0);
+
+    wire.advance_to(end_b + omgp::TRUNK_T_gap_us, responder);
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).seq == 1); // A's answer, sent once the bus was idle
+    REQUIRE(wire.transcript(0).dst == kPeer);
+
+    // B was decoded while A's answer waited and is answered next -- not discarded.
+    const uint64_t tx_end_a =
+        wire.transcript(0).tx_start_us + static_cast<uint64_t>(wire.transcript(0).len) * byte_us();
+    wire.advance_to(tx_end_a + omgp::TRUNK_T_gap_us + omgp::TRUNK_T_turn_max_us, responder);
+    REQUIRE(handler.calls == 2);
+    REQUIRE(wire.transcript_size() == 2);
+    REQUIRE(wire.transcript(1).seq == 2);
+    REQUIRE(wire.transcript(1).dst == 0x07);
+    REQUIRE(responder.stats().transactions == 2);
+    REQUIRE(responder.stats().discards == 0);
+}
+
+// --- red team @71caba0 finding 3 (LOW): the engine's OWN address is wire-visible ---------
+
+TEST_CASE("a Responder constructed with an address outside trunk §5's L2 range never "
+          "originates a frame: every request is discarded and counted",
+          "[link]") {
+    // 71caba0 bounded the wire-derived f.src; my_addr_ becomes the src of every frame this
+    // node originates (responder.cpp "src = my_addr"), and was unbounded -- the symmetric
+    // half. Master::begin refuses an out-of-range dst (link/master.cpp:85-88) rather than
+    // putting a non-L2 address on the trunk; the same rule here, at the only place a
+    // Responder can enforce it without a Status-returning constructor.
+    // 0xFF is excluded here only because no frame can carry it as a dst at all: the codec
+    // refuses it (link/frame.cpp:17-18) and the Deframer discards it (`:142`), so such a
+    // Responder is unreachable rather than dangerous.
+    const uint8_t bad_addr = GENERATE(static_cast<uint8_t>(kAddrCount), static_cast<uint8_t>(0x40),
+                                      static_cast<uint8_t>(0xFE));
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, bad_addr);
+
+    const uint8_t p[] = {0x01};
+    const uint64_t end =
+        inject_request(wire, request_bytes(bad_addr, kPeer, false, 0, p, sizeof p), 1000);
+    wire.advance_to(end + omgp::TRUNK_T_turn_max_us + 1000, responder);
+
+    INFO("my_addr=" << int(bad_addr));
+    REQUIRE(wire.transcript_size() == 0);
+    REQUIRE(handler.calls == 0);
+    REQUIRE(responder.stats().transactions == 0);
+    REQUIRE(responder.stats().discards == 1);
+}
