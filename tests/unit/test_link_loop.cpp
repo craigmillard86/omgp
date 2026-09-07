@@ -490,15 +490,6 @@ TEST_CASE("SC-004 delay-past-T_resp through retry 2: uses the full retry budget 
     REQUIRE(late.kind == MasterEvent::None);
     REQUIRE_FALSE(loop.master.busy());
     REQUIRE(loop.master.stats(kNode).discards == 2); // both strays, observed
-    // FR-011, as the other Failed cells carry it: the Responder accepted and answered every
-    // attempt of ONE transaction, so its own transcript must show that transaction's sequence
-    // on each. When this loop was added at 7ecfac8 there were three Failed cells; there are
-    // five at this head, and two had been left without it (review @049abac).
-    REQUIRE(loop.node_wire.transcript_size() == 3);
-    for (size_t i = 0; i < 3; ++i) {
-        INFO("attempt " << i);
-        REQUIRE(loop.node_wire.transcript(i).seq == 0);
-    }
 }
 
 TEST_CASE("SC-004 delay-past-T_resp after give-up: Failed{Timeout}; the stale late answer is "
@@ -521,6 +512,16 @@ TEST_CASE("SC-004 delay-past-T_resp after give-up: Failed{Timeout}; the stale la
     REQUIRE(late.kind == MasterEvent::None);
     REQUIRE_FALSE(loop.master.busy());
     REQUIRE(loop.master.stats(kNode).discards == 1); // the stray, observed after give-up
+    // FR-011, as the other Failed cells carry it: the Responder accepted and answered every
+    // attempt of ONE transaction, so its own transcript must show that transaction's sequence
+    // on each. Review @68a52ac: the previous commit put this loop on the ANSWERED "through
+    // retry 2" cell -- which already reads ev.response.seq -- and left this one, the cell that
+    // actually needed it, uncovered. Placed by the Failed cells' line numbers this time.
+    REQUIRE(loop.node_wire.transcript_size() == 3);
+    for (size_t i = 0; i < 3; ++i) {
+        INFO("attempt " << i);
+        REQUIRE(loop.node_wire.transcript(i).seq == 0);
+    }
 }
 
 // --- SC-004: delay-past-T_resp, AT the window's closing edge, while the attempt is open ------
