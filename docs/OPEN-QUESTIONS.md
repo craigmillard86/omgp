@@ -2716,6 +2716,7 @@ engine to either stop reading (a blind window, hence this collision) or discard.
 | | the round-11 collision | requests lost | first answer in the probe |
 |---|---|---|---|
 | stop reading, hold 2 (**adopted**, current head) | **reproduces**: `tx = 2661`, inside the frame | none | 2661 (the full cap) |
+| ...the same stop, on a bus that is **silent** | n/a | none | **1331 µs late** — with the hold full the engine cannot tell a busy bus from a quiet one, because it stops before `wire_.receive()`. Both rows are one property, which is why moving the boundary never helped (red team @`80df7af` finding 2) |
 | never stop, hold 2, discard-and-count the excess | **closed**: `tx = 1341`, well before that frame | **regresses**: 7/8, 5/8, 4/8 answered at 400 µs / 1 ms / 2 ms poll periods — the defect the case "eight well-spaced requests … none discarded" was written to close (red team @`e510b29`), counted rather than silent | 1341 |
 
 The second is better on the collision *and* on latency, worse on loss. There is no third column
