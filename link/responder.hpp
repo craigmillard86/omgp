@@ -75,33 +75,40 @@ class Responder {
         uint8_t bytes[kMaxWire] = {};
     };
 
-    // Bytes drained from the wire while a late response was still waiting for an idle bus
-    // (see poll()), kept in arrival order with each byte's own start instant and re-fed to
-    // the Deframer, unchanged, once the wire is free. The engine cannot see the bus without
-    // reading it, and it must not lose what it reads: this is where those two duties meet
-    // (red team @7d31410 finding 1 — an earlier revision held one DECODED request instead
-    // and stopped draining, so its belief about the bus froze at that frame's last byte and
-    // the response went out inside the next station's transmission).
+    // One request decoded while a late response was still waiting for an idle bus, kept
+    // unanswered until the wire is free. ONE, and then the drain STOPS: everything behind it
+    // stays in the wire's own receive queue, exactly as it did before any of this existed,
+    // so nothing is ever destroyed or dropped (FR-015/FR-016; the property
+    // test_link_responder.cpp's "eight well-spaced requests ... none discarded" pins, itself
+    // the fix for red team @e510b29).
     //
-    // Sized at kMaxWire — one worst-case stuffed frame — which is deliberately the same
-    // bound the deferral cap uses: while the stash has room the engine sees every byte, and
-    // by the time a station could fill it the cap has released the response anyway. Full,
-    // the drain stops and later bytes wait in the wire's own receive queue as before.
-    struct HeldBytes {
-        uint16_t len = 0;  // bytes stashed
-        uint16_t next = 0; // re-feed cursor; next == len means "drained, nothing pending"
-        // kMaxWire + 1: the extra slot is the RESERVE. A byte that finds the stash otherwise
-        // full is still stored -- never dropped -- and its arrival is itself the evidence
-        // that there was more on the wire than the engine has read, which is what makes the
-        // belief stale. Without it the drain broke on fullness before ever discovering
-        // whether the wire still had anything, so a bus that had just gone quiet was read as
-        // unread and the response held a further max_frame + T_gap (red team @2efcb67).
-        uint8_t bytes[kMaxWire + 1] = {};
-        // Each byte's own START instant, kept verbatim rather than re-derived from a cadence
-        // assumption: the gaps between frames are real, and this is the value a re-fed
-        // request's request_end_us is computed from.
-        uint64_t start_us[kMaxWire + 1] = {};
+    // Stopping means the engine has left bytes unread, so from that instant its picture of
+    // the bus is INCOMPLETE -- and it says so (poll()'s belief_stale) rather than judging
+    // T_gap against a reading it knows to be partial. A stale belief falls back to the
+    // bounded cap, which is the protection level Master documents and accepts
+    // (link/master.cpp:241-273), not a new weakness.
+    //
+    // The alternative, stashing raw bytes to re-feed later, was tried and abandoned across
+    // red team @b262d46 / @2efcb67 / @7a80ec3: any fixed buffer has a capacity at which the
+    // engine must either destroy a byte or stop reading, and each revision moved that
+    // boundary by one byte rather than closing it. One decoded request has no such capacity:
+    // it is always holdable.
+    struct HeldRequest {
+        FrameFields f = {};
+        uint8_t payload[omgp::LIMIT_max_l3_payload] = {};
+        uint64_t request_end_us = 0;
     };
+
+    // How many completed requests one wait may absorb before the engine stops reading. TWO,
+    // and the second is not arbitrary: with one, the engine stopped as soon as anything
+    // completed -- including when the wire was already empty behind it -- so the ordinary
+    // "two requests queued ahead of one late poll" case fell back to the cap and every
+    // answer in it was delayed by ~1.47 ms (measured against this suite's own :536 and :561
+    // cases). Two lets the engine reach the end of the queue in that case and see for itself
+    // that the bus is quiet. Past two it stops, holds what it has, and says its reading is
+    // partial -- and two completed frames during one wait is itself evidence the bus was
+    // busy, so the pessimism is then earned rather than assumed.
+    static constexpr size_t kHeldRequests = 2;
 
     // Decides new-vs-replay for one intact frame addressed to my_addr, or counts a
     // discard: for a frame this node is not addressed by or could never answer — a
@@ -116,20 +123,10 @@ class Responder {
     // trunk §5: the claimed source of an accepted request, and this node's own address.
     bool acceptable(const FrameFields& f) const;
 
-    // Stash one byte drained during the wait (see HeldBytes). poll() establishes room
-    // BEFORE it takes a byte off the wire, so this never has to refuse: a byte the stash
-    // could not hold would already have been consumed, and lost.
-    void stash(uint8_t byte, uint64_t start_us);
-
-    // Whether the reserve slot is taken: the engine has already read a byte it had no room
-    // for, and so knows the wire held more than it could take. Occupancy is len - next, not
-    // len -- bytes already re-fed are free space, reclaimed by stash() when it needs them
-    // (bounding on len alone kept a once-filled stash "full" for its whole re-feed).
-    bool stash_full() const;
-
-    // Feed the Deframer one stashed byte, if any is pending, exactly as poll()'s drain loop
-    // feeds a byte from the wire. Returns false when the stash is empty.
-    bool refeed(bool& delivered, FrameView& view, uint64_t& start_us);
+    // One intact frame decoded while a response was pending: appended to held_ if this node
+    // owes an answer to it, discarded and counted if it is not this node's. Never called
+    // with held_ already full -- poll() stops draining at that point.
+    void hold_or_discard(const FrameFields& f, uint64_t request_end_us);
 
     // True while a scheduled response is already outside trunk §9's turnaround window, the
     // FR-014 late-poll path: the one state in which the engine must judge the bus for
@@ -146,11 +143,12 @@ class Responder {
     // iteration of poll()'s drain loop — ahead of every byte, and once more after the last
     // — so a response already due is flushed, and the wire found free again, before the
     // next queued byte is drained (see poll()'s own comment).
-    // belief_stale: poll()'s drain stopped on the stash bound rather than on an empty
-    // wire, so last_activity_us_ is no longer being refreshed and says nothing about the
-    // bus from here on. The two exits are distinguishable where they happen and mean
-    // opposite things, so poll() reports which one it took rather than letting this
-    // function guess from the stash's occupancy (red team @2efcb67).
+    // queue_drained: poll()'s drain loop has stopped, so the late path may now be judged --
+    // never at the top of an iteration with bytes still unread behind it, which is how the
+    // engine used to key down inside another station's frame.
+    // belief_stale: it stopped because a request is held, not because the wire went quiet,
+    // so bytes may remain unread and last_activity_us_ is a partial reading. The two exits
+    // mean opposite things and poll() reports which it took (red team @2efcb67).
     void transmit_if_due(uint64_t now_us, bool queue_drained, bool belief_stale);
 
     ByteWire& wire_;
@@ -191,7 +189,8 @@ class Responder {
     uint64_t defer_origin_us_ = 0;
     bool has_defer_origin_ = false;
 
-    HeldBytes held_ = {};
+    HeldRequest held_[kHeldRequests] = {};
+    size_t held_count_ = 0;
 
     AddrStats stats_ = {};
 };

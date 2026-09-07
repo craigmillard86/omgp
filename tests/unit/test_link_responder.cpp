@@ -637,7 +637,11 @@ TEST_CASE("eight well-spaced requests are all answered whatever the poll cadence
           "[link]") {
     // The red team's own sweep (@e510b29 finding 1): at 400 us and coarser, requests
     // were silently swallowed -- 2 of 8 answered at a 2 ms poll period. Expected by
-    // FR-014: all eight, late ones counted, nothing dropped.
+    // FR-014: all eight, late ones counted, nothing dropped. The property is unchanged; the
+    // window is longer than it was because an answer whose wait absorbed queued requests
+    // falls back to the bounded cap (transmit_if_due: a drain that stopped with requests
+    // held has read only part of the wire, and says so). Latency, not loss -- with the
+    // clock allowed to run, all eight are still answered at every cadence, none discarded.
     const uint8_t p[] = {0x5A};
     for (uint64_t period : {50u, 400u, 1000u, 2000u}) {
         DYNAMIC_SECTION("poll period " << period << " us") {
@@ -652,7 +656,7 @@ TEST_CASE("eight well-spaced requests are all answered whatever the poll cadence
                     request_bytes(kMyAddr, kPeer, false, static_cast<uint8_t>(i), p, sizeof p), t);
                 t = last_end + omgp::TRUNK_T_resp_us + omgp::TRUNK_T_gap_us;
             }
-            for (uint64_t now = period; now <= last_end + 20000; now += period)
+            for (uint64_t now = period; now <= last_end + 200000; now += period)
                 wire.advance_to(now, responder);
             REQUIRE(handler.calls == 8);
             REQUIRE(wire.transcript_size() == 8);
@@ -1050,32 +1054,25 @@ TEST_CASE("requests arriving faster than poll() is called queue up behind the he
         if (wire.transcript(i).dst == kPeer)
             answered_host = true;
 
-    // 7 answers over 21 polls, not one per poll. Two rules compose here, and both are
-    // consequences of the engine refusing to transmit on a belief it cannot support:
-    //   - on the FR-014 late path it drains the whole receive queue before judging the bus
-    //     (red team @71caba0 / @7d31410), so on a bus this busy the last byte drained at a
-    //     poll instant ENDS after that instant and the T_gap rule defers the answer -- this
-    //     alone gave 17, and is Master's own documented behaviour under continuous traffic
-    //     (link/master.cpp:215-235);
-    //   - once the stash is full the drain stops taking bytes at all (it must: a byte it
-    //     cannot hold would already have been consumed, and lost -- red team @b262d46), so
-    //     last_activity_us_ stops being refreshed and says nothing further about the bus.
-    //     The engine then waits out the bounded cap rather than acting on a frozen belief,
-    //     which is what makes this cell 7 rather than 17.
-    // A LATENCY change, not a new starvation: the backlog still grows without bound and the
-    // host is still never reached, which is what this case pins. Previous pins: 20/20/0 at
-    // 71caba0 (stop draining at the first decoded request), 17/17/1 at b262d46 (drain
-    // everything, but a byte lost at the stash bound). The alternative -- transmitting at
-    // last_activity + T_gap while blind -- restores 17 at the cost of keying down inside a
-    // frame the engine has not read, which is the defect this PR was reopened to fix.
-    // docs/OPEN-QUESTIONS.md 2026-09-06 (FR-014 vs FR-017) still governs the desired
-    // behaviour; this is a pin of today's, not a claim about what it should be.
-    CHECK(wire.transcript_size() == 7);
+    // 6 answers over 21 polls, not one per poll. The engine refuses to transmit on a
+    // reading of the bus it knows to be partial, and on a bus this busy every wait absorbs
+    // queued requests and therefore stops early, so each answer falls back to the bounded
+    // cap (transmit_if_due). A LATENCY change, not a new loss: nothing is dropped, the
+    // backlog still grows without bound and the host is still never reached, which is what
+    // this case pins. Pin history, each value the honest observable of its design:
+    // 20 (71caba0, stop draining at the first decoded request and judge from a stale
+    // last_activity_), 17 (b262d46, drain everything into a byte stash), 7 (2efcb67, treat a
+    // full stash as blindness), 6 (here: hold what a wait can absorb, stop rather than drop,
+    // and say the reading is partial). docs/OPEN-QUESTIONS.md 2026-09-06 (FR-014 vs FR-017)
+    // still governs what the behaviour SHOULD be; this pins what it is.
+    CHECK(wire.transcript_size() == 6);
+    // One more handler call than answers on the wire: the seventh request was accepted and
+    // its response encoded, and is still waiting out its cap when the run ends.
     CHECK(handler.calls == 7);
     CHECK_FALSE(answered_host); // 12 ms after host_end, and still queued behind 0x07's frames
-    CHECK(responder.stats().late_responses == 7);
-    // Nothing is discarded: no byte is consumed that cannot be kept, so the backlog is still
-    // entirely invisible in stats() -- which is the open question.
+    CHECK(responder.stats().late_responses == 6);
+    // Still nothing counted: no byte is consumed that cannot be kept, so the backlog itself
+    // remains invisible in stats() -- which is the open question.
     CHECK(responder.stats().discards == 0);
     CHECK(host_end + omgp::TRUNK_T_resp_us < 20 * poll_period); // the host gave up long ago
 }
@@ -1130,16 +1127,14 @@ TEST_CASE("a response already outside its window is not keyed down on top of ano
     // FR-014: transmitted, not dropped, and counted as outside its window.
     REQUIRE(responder.stats().late_responses == 1);
     REQUIRE(responder.stats().transactions == 1);
-    // The other station's bytes were DRAINED while the response waited -- that is how the
-    // engine knew the bus was busy -- but not decoded: they are stashed, so nothing has
-    // been discarded yet (red team @7d31410 finding 1: decoding during the wait is what
-    // froze the belief, so the stash is what replaced it).
-    REQUIRE(responder.stats().discards == 0);
-    // Once the wire is free the stash is re-fed in arrival order and the frame is judged
-    // exactly as it would have been read live: not this node's, so discarded and counted.
-    wire.advance_to(other_end + omgp::TRUNK_T_gap_us + 100 * byte_us(), responder);
+    // The other station's frame was drained AND decoded while the response waited -- that is
+    // how the engine knew the bus was busy -- and, not being this node's, discarded and
+    // counted there and then, exactly as it would have been while Listening. Nothing about
+    // it is held: only a request this node owes an answer to occupies a hold slot.
     REQUIRE(responder.stats().discards == 1);
     REQUIRE(responder.stats().transactions == 1); // and never answered
+    wire.advance_to(other_end + omgp::TRUNK_T_gap_us + 100 * byte_us(), responder);
+    REQUIRE(responder.stats().discards == 1); // and not counted twice
     REQUIRE(wire.transcript_size() == 1);
 }
 
@@ -1475,18 +1470,22 @@ TEST_CASE("a request whose first byte lands exactly on the stash bound is answer
     REQUIRE(responder.stats().transactions == 2);
 }
 
-// --- red team @2efcb67: the drain's two exits mean opposite things -----------------------
+// --- red team @2efcb67 / @7a80ec3: the drain's two exits mean opposite things ------------
+// The drain stops either because the wire's queue is empty (a COMPLETE reading of the bus:
+// T_gap of idle after the last byte is a real gap) or because it is holding all the requests
+// it can (a PARTIAL reading: bytes may remain unread, so the wait falls back to the bounded
+// cap). Every revision that inferred which from a buffer's occupancy had a capacity boundary
+// and reopened the same collision at it, one byte further along each time; the exit itself is
+// now what decides.
 
-TEST_CASE("a late response goes out T_gap after the last byte the engine saw, whether or "
-          "not that byte happened to fill the stash: only an UNREAD wire is blindness",
+TEST_CASE("a late response goes out T_gap after the last byte the engine saw when the wait "
+          "absorbed no request, however much traffic passed",
           "[link][timing:T_gap]") {
-    // The drain stops either because the stash is full (bytes left unread: the belief about
-    // the bus is stale) or because the wire's queue is empty (nothing left to read: the
-    // belief is current and complete). When the byte that fills the stash is also the last
-    // byte on the wire both are true at once, and reading fullness as staleness cost a
-    // further max_frame + T_gap of silence on a bus the engine had just watched go quiet --
-    // 1420 us bought by one byte. GENERATE spans exactly that boundary.
-    const size_t noise_len = GENERATE(kMaxWire - 1, kMaxWire);
+    // Noise spans the stash bounds that earlier revisions had (kMaxWire and kMaxWire + 1):
+    // there is no such bound now, and none of these lengths changes the answer. What decides
+    // is that nothing was HELD, so the drain reached the end of the queue.
+    const size_t noise_len =
+        GENERATE(size_t{40}, kMaxWire - 1, kMaxWire, kMaxWire + 1, size_t{2} * kMaxWire);
     FakeClock clock;
     MockWire wire(clock);
     RecordingHandler handler;
@@ -1496,8 +1495,6 @@ TEST_CASE("a late response goes out T_gap after the last byte the engine saw, wh
     const uint64_t request_end =
         inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, p, sizeof p), 1000);
 
-    // Noise from just past the window, then nothing at all: the bus is idle from its last
-    // byte onward, and the engine drains every byte of it in one late poll.
     const uint64_t noise_start = request_end + omgp::TRUNK_T_turn_max_us + 1;
     std::vector<uint8_t> noise(noise_len, 0x5C);
     REQUIRE(noise[0] != omgp::TRUNK_flag_byte);
@@ -1507,94 +1504,64 @@ TEST_CASE("a late response goes out T_gap after the last byte the engine saw, wh
     for (uint64_t t = noise_end; t <= noise_end + 4 * omgp::TRUNK_T_gap_us; t += byte_us())
         wire.advance_to(t, responder);
 
-    INFO("noise_len=" << noise_len << " noise_end=" << noise_end
-                      << " discards=" << responder.stats().discards);
+    INFO("noise_len=" << noise_len << " noise_end=" << noise_end);
     REQUIRE(wire.transcript_size() == 1);
-    // Exactly one byte-level discard, and it is counted on the RE-FED path: the noise was
-    // stashed undecoded during the wait, so the Deframer only ever sees it (and rejects it)
-    // when poll() feeds it back. Pins that counting, which nothing else reaches.
-    REQUIRE(responder.stats().discards == 1);
-    // T_gap after the last byte actually seen -- not one worst-case frame later.
     REQUIRE(wire.transcript(0).tx_start_us == noise_end + omgp::TRUNK_T_gap_us);
     REQUIRE(responder.stats().late_responses == 1);
+    // Nothing of the noise is held: only a request this node owes an answer to takes a hold
+    // slot, so the drain always reached the end of the queue here.
+    REQUIRE(responder.stats().transactions == 1);
 }
 
-TEST_CASE("a burst that fills the stash is drained and answered at wire speed, not one "
-          "bounded wait per request: re-fed space is reclaimed",
+TEST_CASE("a burst of back-to-back requests is answered in full, none lost, paced by the "
+          "bounded cap rather than dropped",
           "[link]") {
-    // held_.next was never reclaimed, so a stash that filled once stayed "full" for its
-    // whole re-feed: every request re-fed out of it was answered blind, at its own full cap,
-    // with poll() taking no bytes off the wire throughout -- 24.87 ms to clear a queue that
-    // arrived in 1.42 ms (red team @2efcb67, RT2). On the ESP32-S3, whose UART RX FIFO is
-    // 128 bytes (docs/OPEN-QUESTIONS.md 2026-09-06), a non-draining window that long loses
-    // bytes rather than queueing them.
+    // The engine holds what a wait can absorb and STOPS reading rather than destroying a
+    // byte, so everything behind stays in the wire's own receive queue and is answered later
+    // (FR-015/FR-016). The cost is latency, and it is real: a wait that stopped early falls
+    // back to the cap, so a long backlog drains at roughly one cap per absorbed batch rather
+    // than at wire speed. Recorded, with its consequence, in docs/OPEN-QUESTIONS.md
+    // 2026-09-07 ("a Responder that stops reading to avoid dropping").
     FakeClock clock;
     MockWire wire(clock);
     RecordingHandler handler;
     Responder responder(wire, clock, handler, kMyAddr);
 
     const uint8_t p[] = {0x11};
-    const uint64_t request_end =
-        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, p, sizeof p), 1000);
+    inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, p, sizeof p), 1000);
 
-    // Back-to-back requests filling exactly the stash, then an idle bus.
-    const uint64_t burst_start = request_end + omgp::TRUNK_T_turn_max_us + 1;
+    // Back-to-back requests, one worst-case frame of them, then an idle bus.
+    const uint64_t burst_start = 1000 + omgp::TRUNK_T_turn_max_us + 200;
     std::vector<uint8_t> burst;
     uint8_t seq = 2;
+    int frames = 0;
     while (burst.size() < kMaxWire) {
         const std::vector<uint8_t> b = request_bytes(kMyAddr, kPeer, false, seq++, p, sizeof p);
+        if (burst.size() + b.size() > kMaxWire)
+            break;
         burst.insert(burst.end(), b.begin(), b.end());
+        ++frames;
     }
-    burst.resize(kMaxWire);
+    REQUIRE(frames > 4);
     wire.inject_bytes(burst.data(), burst.size(), burst_start);
     const uint64_t burst_end = burst_start + burst.size() * byte_us();
 
-    // ...and one more request arriving while that backlog is still being re-fed. This is
-    // what makes the reclamation load-bearing rather than an optimisation: a new wait begins
-    // with the stash part-consumed, so without reclaiming the spent prefix `len` is already
-    // at the array bound and stash() would silently drop this request's bytes -- the very
-    // loss the reserve slot and the pre-receive check exist to prevent.
-    const uint8_t tail_payload[] = {0x99};
-    const uint64_t tail_at = burst_end + 300;
-    const uint64_t tail_end = inject_request(
-        wire, request_bytes(kMyAddr, 0x07, false, 15, tail_payload, sizeof tail_payload), tail_at);
-    REQUIRE(tail_end > burst_end);
-
-    wire.advance_to(burst_end, responder);
-    for (uint64_t t = burst_end + byte_us(); t <= burst_end + 60000; t += byte_us())
+    for (uint64_t t = burst_end; t <= burst_end + 200000; t += byte_us())
         wire.advance_to(t, responder);
 
-    // The straggler is answered like any other request: nothing was dropped.
-    bool answered_tail = false;
-    for (size_t i = 0; i < wire.transcript_size(); ++i)
-        if (wire.transcript(i).dst == 0x07 && wire.transcript(i).seq == 15)
-            answered_tail = true;
-    REQUIRE(answered_tail);
-
-    REQUIRE(wire.transcript_size() > 1);
-    // The BURST's own answers (all to kPeer); the straggler above came from 0x07 and arrived
-    // after burst_end, so its answer is not part of this drain.
-    uint64_t last_burst_tx = 0;
-    size_t burst_answers = 0;
-    for (size_t i = 0; i < wire.transcript_size(); ++i)
-        if (wire.transcript(i).dst == kPeer) {
-            last_burst_tx = wire.transcript(i).tx_start_us;
-            ++burst_answers;
-        }
-    INFO("answers=" << wire.transcript_size() << " of which burst=" << burst_answers
-                    << " burst_end=" << burst_end << " last=" << last_burst_tx
-                    << " delta=" << (last_burst_tx - burst_end));
-    REQUIRE(burst_answers > 1);
-    // One byte-level discard from the burst's truncated final frame, counted where the
-    // stash is re-fed -- the same path as above, reached here with real frames around it.
-    REQUIRE(responder.stats().discards == 1);
-    // The backlog clears at WIRE SPEED, not one bounded wait per request. The yardstick is
-    // physical: the burst is one worst-case frame of arrivals and its answers are frames of
-    // the same order, so two worst-case frame times is the floor for emitting them all --
-    // the observed drain sits just above one. A wait per request would be
-    // burst_answers * (max_frame + T_gap), an order of magnitude more; before this round's
-    // two fixes this backlog took 24.87 ms to clear 1.42 ms of arrivals.
-    const uint64_t max_frame_us = static_cast<uint64_t>(kMaxWire) * byte_us();
-    REQUIRE(last_burst_tx - burst_end < 2 * max_frame_us);
-    REQUIRE(last_burst_tx - burst_end < burst_answers * (max_frame_us + omgp::TRUNK_T_gap_us) / 4);
+    INFO("frames=" << frames << " answers=" << wire.transcript_size()
+                   << " discards=" << responder.stats().discards);
+    // Every request in the burst is answered, and the first one too: nothing was dropped and
+    // nothing was destroyed at any capacity bound, because there is none.
+    REQUIRE(wire.transcript_size() == static_cast<size_t>(frames) + 1);
+    REQUIRE(handler.calls == frames + 1);
+    REQUIRE(responder.stats().transactions == static_cast<uint32_t>(frames) + 1);
+    REQUIRE(responder.stats().discards == 0);
+    // Sequences come out in arrival order -- the hold is a queue, not a slot that overwrites.
+    // `seq` is 4 bits (link/frame.cpp), so the burst's own numbering wraps within the run.
+    REQUIRE(wire.transcript(0).seq == 1);
+    for (int i = 0; i < frames; ++i) {
+        INFO("burst answer " << i);
+        REQUIRE(wire.transcript(static_cast<size_t>(i) + 1).seq == ((2 + i) & 0x0F));
+    }
 }
