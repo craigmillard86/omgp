@@ -126,16 +126,23 @@ Responder state ∈ { Listening, Scheduled(response at request_end + turnaround_
 - **Late poll** (spec FR-014): if the first `poll(now)` after a request has
   `now > request_end + T_turn_max`, the response is transmitted at `now` and
   `AddrStats.late_responses` is incremented; nothing is dropped. *(Amended in PR #149,
-  red-team @`71caba0` HIGH — "at `now`" is qualified by the same bounded courtesy §4 records
-  for the Master: outside its window the engine owes trunk §3 a bus that is idle, so it
-  transmits at `min(last_activity + T_gap, defer_origin + max_frame + T_gap)` when its reading
-  of the bus is COMPLETE, and at `defer_origin + max_frame + T_gap` — the cap alone, whatever
-  `last_activity` says — when the drain stopped with requests held and the reading is therefore
-  partial, rather than keying down inside another station's frame. (Both corners stated after
-  red team @`aa23fb9`: the earlier wording gave only the `min`, which is not the formula the
-  engine implements on the stale-belief path — and that path is the one the open collision
-  finding is about.) Pending a ruling, see `OPEN-QUESTIONS.md`
-  2026-09-07 "the Responder's late path defers for an idle bus".)*
+  red-team @`71caba0` HIGH — "at `now`" is qualified by a bounded courtesy resembling, but
+  **weaker than**, the one §4 records for the Master: outside its window the engine owes trunk
+  §3 a bus that is idle, so it transmits at
+  `min(last_activity + T_gap, defer_origin + max_frame + T_gap)` when its reading of the bus is
+  COMPLETE, and at `defer_origin + max_frame + T_gap` — the cap alone, whatever `last_activity`
+  says — when the drain stopped with requests held and the reading is therefore partial.
+  Two corrections to earlier wording of this marker, both from review rounds on #149:
+  (a) it is NOT "the same bounded courtesy §4 records for the Master". §4's property rests on
+  a drain that never exits early, so `last_activity` advances with every byte and the engine
+  "never transmits over an arriving frame"; the stale-belief path here has no such
+  precondition — Master's cap without Master's precondition (`link/responder.cpp` says the same
+  in terms). (b) It does **not** follow that the engine never keys down inside another
+  station's frame: on the stale-belief path it demonstrably can, which is an OPEN defect with a
+  reproduced counterexample, not a property. Pending a ruling, see `OPEN-QUESTIONS.md`
+  2026-09-07 "the Responder's late path defers for an idle bus" for the deferral itself, and
+  "the Responder's late path CAN transmit into a frame it has not read" for the open defect in
+  (b) — the entry the ruling should be made from, as `contracts/link-cpp.md` also points out.)*
 
 ## 6. Node health record
 
