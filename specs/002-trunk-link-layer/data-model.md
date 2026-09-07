@@ -111,15 +111,26 @@ ReplayBuffer { bool valid; u8 seq; u16 len; u8 bytes[142] }
 Responder state ∈ { Listening, Scheduled(response at request_end + turnaround_us), Transmitting(until tx_end) }
 ```
 
-- Request acceptance: intact frame, `dst == my_addr`, `response == 0`.
+- Request acceptance: intact frame, `dst == my_addr`, `response == 0`. *(Amended in PR #149,
+  red-team @`6c2fe4b` / @`71caba0` — also refused: `src == my_addr`, `src` outside trunk §5's
+  L2 range, and every request when the node's OWN address is outside it. Pending a ruling,
+  see `docs/OPEN-QUESTIONS.md` 2026-09-07 "the Responder's acceptance screen".)*
 - `retry == 1 && valid && seq == buffer.seq` → retransmit buffer (no handler call).
+  *(Amended in PR #149, red-team @`033182a` — the buffer additionally records the requester
+  (`ReplayBuffer.peer`) and a retry from a DIFFERENT station with a colliding sequence is
+  treated as new. Pending the ruling on file, `OPEN-QUESTIONS.md` 2026-09-06.)*
 - otherwise → `handler.handle(payload, len, out, cap) → resp_len` once; encode response
   (`src = my_addr`, `dst = request.src`, `response = 1`, `retry` echoed, `seq` echoed);
   store in buffer; schedule.
 - `turnaround_us` clamped to `[T_turn_min, T_turn_max]` at construction.
 - **Late poll** (spec FR-014): if the first `poll(now)` after a request has
   `now > request_end + T_turn_max`, the response is transmitted at `now` and
-  `AddrStats.late_responses` is incremented; nothing is dropped.
+  `AddrStats.late_responses` is incremented; nothing is dropped. *(Amended in PR #149,
+  red-team @`71caba0` HIGH — "at `now`" is qualified by the same bounded courtesy §4 records
+  for the Master: outside its window the engine owes trunk §3 a bus that is idle, so it
+  transmits at `min(last_activity + T_gap, defer_origin + max_frame + T_gap)` rather than
+  keying down inside another station's frame. Pending a ruling, see `OPEN-QUESTIONS.md`
+  2026-09-07 "the Responder's late path defers for an idle bus".)*
 
 ## 6. Node health record
 

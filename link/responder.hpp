@@ -90,11 +90,17 @@ class Responder {
     struct HeldBytes {
         uint16_t len = 0;  // bytes stashed
         uint16_t next = 0; // re-feed cursor; next == len means "drained, nothing pending"
-        uint8_t bytes[kMaxWire] = {};
+        // kMaxWire + 1: the extra slot is the RESERVE. A byte that finds the stash otherwise
+        // full is still stored -- never dropped -- and its arrival is itself the evidence
+        // that there was more on the wire than the engine has read, which is what makes the
+        // belief stale. Without it the drain broke on fullness before ever discovering
+        // whether the wire still had anything, so a bus that had just gone quiet was read as
+        // unread and the response held a further max_frame + T_gap (red team @2efcb67).
+        uint8_t bytes[kMaxWire + 1] = {};
         // Each byte's own START instant, kept verbatim rather than re-derived from a cadence
         // assumption: the gaps between frames are real, and this is the value a re-fed
         // request's request_end_us is computed from.
-        uint64_t start_us[kMaxWire] = {};
+        uint64_t start_us[kMaxWire + 1] = {};
     };
 
     // Decides new-vs-replay for one intact frame addressed to my_addr, or counts a
@@ -115,6 +121,12 @@ class Responder {
     // could not hold would already have been consumed, and lost.
     void stash(uint8_t byte, uint64_t start_us);
 
+    // Whether the reserve slot is taken: the engine has already read a byte it had no room
+    // for, and so knows the wire held more than it could take. Occupancy is len - next, not
+    // len -- bytes already re-fed are free space, reclaimed by stash() when it needs them
+    // (bounding on len alone kept a once-filled stash "full" for its whole re-feed).
+    bool stash_full() const;
+
     // Feed the Deframer one stashed byte, if any is pending, exactly as poll()'s drain loop
     // feeds a byte from the wire. Returns false when the stash is empty.
     bool refeed(bool& delivered, FrameView& view, uint64_t& start_us);
@@ -134,7 +146,12 @@ class Responder {
     // iteration of poll()'s drain loop — ahead of every byte, and once more after the last
     // — so a response already due is flushed, and the wire found free again, before the
     // next queued byte is drained (see poll()'s own comment).
-    void transmit_if_due(uint64_t now_us, bool queue_drained);
+    // belief_stale: poll()'s drain stopped on the stash bound rather than on an empty
+    // wire, so last_activity_us_ is no longer being refreshed and says nothing about the
+    // bus from here on. The two exits are distinguishable where they happen and mean
+    // opposite things, so poll() reports which one it took rather than letting this
+    // function guess from the stash's occupancy (red team @2efcb67).
+    void transmit_if_due(uint64_t now_us, bool queue_drained, bool belief_stale);
 
     ByteWire& wire_;
     // Stored for the constructor-signature parity with Master/Health (link-cpp.md

@@ -2647,3 +2647,46 @@ on #149: CLAUDE.md, "when a spec ambiguity blocks you, implement nothing specula
 **Amends:** none. **Supersedes:** none — distinct from the 2026-09-06 `{peer, seq}` entry,
 which is about a FOREIGN `src` evicting an entry; this is the same peer served the wrong
 answer, and that entry's recommended `f.src == ADDR_host` screen does not address it.
+
+## 2026-09-07 — the Responder's late path defers for an idle bus, which FR-014 and data-model §5 do not describe
+
+**Context:** review @`2efcb67` (#149), MEDIUM. FR-014 (`spec.md`) says a late poll "MUST still
+transmit — at once", and `data-model.md` §5 says "transmitted at `now`". Since @`71caba0`'s
+red-team HIGH the engine instead transmits at
+`min(last_activity + T_gap, defer_origin + max_frame_us + T_gap)` — up to ~1.47 ms later —
+because "at once" on a bus another station is occupying means keying down inside that
+station's frame, corrupting a frame addressed to a THIRD node and driving it toward SUSPECT
+under trunk §7. Both documents outrank the code (CLAUDE.md), so the divergence is recorded
+rather than argued away. It is exactly the courtesy §4 already records for the Master, where
+PR #137 carries the same "(Amended …)" marker and the 2026-09-05 "bounded courtesy" entry;
+§5 had no such note until this entry.
+**Recommendation:** read FR-014's "at once" as "on the first poll that reaches it, subject to
+trunk §3's half-duplex media access", i.e. adopt the Master's bounded courtesy verbatim for
+the Responder, and amend FR-014 and §5 to say so. The alternative — transmit unconditionally
+at `now` — makes FR-014 override FR-017 ("never transmit outside a response window") and
+trunk §3 for the one case where the engine can see the conflict, which is the reading the
+red team falsified three rounds running.
+**Ruling:** PENDING — human. Related and separate: the FR-014-vs-FR-017 starvation question
+(2026-09-06) is about the AGE of a queued request; this is about the INSTANT a due response
+may key down.
+**Amends:** `specs/002-trunk-link-layer/data-model.md` §5 (marker added in PR #149).
+**Supersedes:** none.
+
+## 2026-09-07 — the Responder's acceptance screen refuses more than data-model §5 lists
+
+**Context:** review @`2efcb67` (#149), MEDIUM. §5 lists acceptance as "intact frame,
+`dst == my_addr`, `response == 0`". The engine also refuses `src == my_addr` (a station is
+never its own peer), `src` outside trunk §5's `ADDR_host..ADDR_backplane_max`, and — since
+red team @`71caba0` finding 3 — every request when the node's own `my_addr_` is outside that
+range, so a misconfigured node never originates a non-L2 source address. Each came from a
+red-team finding and each is demonstrated by a named test; none is in §5. `ReplayBuffer` in
+§5 is likewise specified as `{valid, seq, len, bytes}` while the engine keys on `peer` too
+(red team @`033182a` finding 3, on file 2026-09-06).
+**Recommendation:** amend §5's acceptance list and `ReplayBuffer` to match, since trunk §5's
+address range is the higher-authority document and the screens follow from it —
+`link/master.cpp:85-88` and `link/health.cpp` already bound the same wire-derived class the
+same way. No code change either way; this is a documentation debt, recorded so the next
+reader of §5 is not misled.
+**Ruling:** PENDING — human.
+**Amends:** `specs/002-trunk-link-layer/data-model.md` §5 (marker added in PR #149).
+**Supersedes:** none.
