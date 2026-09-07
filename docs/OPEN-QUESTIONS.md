@@ -1961,6 +1961,71 @@ files — the 2026-08-28 entry above). Each is listed so it is not mistaken for 
 
 ---
 
+## 2026-09-06 — T034's SC-004 loop bridges MockWire by hand instead of driving it through Kind::Duplicate/CrcError/Silence
+
+**Context:** PR #145 review @ `9e28db5` (MEDIUM) flagged that
+`tests/unit/test_link_loop.cpp` (T034, spec 002 issue #52) does not exercise SC-004's
+fault matrix through `MockWire`'s own `Kind::Duplicate`, `Kind::CrcError` or a `Respond`
+with `delay_us >= TRUNK_T_resp_us` — the mechanisms #52's own task text names ("the
+mock's handler for node *n* is `Responder` *n*"). It instead builds a hand-rolled
+bidirectional bridge (`host_wire`/`node_wire`, `run_transaction()`) from `MockWire`'s
+public surface (`inject_bytes`/`transcript`/`advance_to`) and shapes each attempt's fault
+by hand. The reason is real, not an oversight: `MockWire::schedule_respond()`
+(`tests/support/mock_wire.cpp`) always fabricates the answer itself — it echoes the
+request's own payload rather than invoking a node's `RequestHandler` — so it cannot
+exercise a real `Responder`'s replay buffer, which is exactly the property SC-004 exists
+to prove (`stats().replays_served`, "handler invocations == 1 per new sequence"). Wiring
+`MockWire` itself to call through to a real `RequestHandler` is out of scope for #52
+(named as such in the file's own header comment and in tasks.md), and is the same gap
+`specs/002-trunk-link-layer/contracts/mock-wire.md:16` already documents as unmet.
+**Recommended:** read #52's "each node's `MockWire` handler being that node's `Responder`"
+as satisfied by the hand-built bridge (it still runs a real `Master` and a real
+`Responder`, over `MockWire`'s existing byte-level RX/TX/transcript surface, with no new
+`Kind` and no change to `MockWire`'s step semantics — the bridge supplies only what
+`Kind::Respond` cannot yet do), rather than blocking #52 on a `MockWire` rewrite. File the
+follow-up named in the PR #145 review/red-team ("make `MockWire::Kind::Respond` answer
+via the node's `RequestHandler`, per `contracts/mock-wire.md:16`") as its own issue so
+T039 (#57) and T042 (#60) can extend one shared loop instead of each hand-building their
+own bridge.
+**Ruling:** pending — human (accept the bridge as meeting #52's criterion, or amend the
+criterion/file a blocking prerequisite issue instead).
+**Supersedes:** none.
+
+---
+
+## 2026-09-06 — SC-004's "retry 1"/"retry 2" columns collapse to one case for Drop/CrcError at TRUNK_retries == 2
+
+**Context:** PR #145 review @ `9e28db5` (MEDIUM) found that
+`tests/unit/test_link_loop.cpp`'s "drop through retry 2" and "CRC-corrupted response
+through retry 2" cases scripted the identical fault sequence as their "through retry 1"
+siblings ({Drop,Drop,Clean} and {Corrupt,Corrupt,Clean} respectively) and asserted
+nothing their sibling did not. This is not a copy-paste slip: with `TRUNK_retries == 2`
+there are only 3 transmissions per transaction (attempts 0, 1, 2), so for a fault that
+must clear before Master can succeed (Drop, CrcError — as opposed to Duplicate/
+DelayPastTResp, where the *stale* copy is what "retry 2" delivers, genuinely
+distinguishing it from "retry 1"), there are only three distinguishable outcomes:
+recovers at attempt 1 ("at attempt 0"), recovers only at attempt 2 (the full retry
+budget — labelled "through retry 1" in the file, since the fault persists through that
+retry), or never recovers ("after give-up"). A fourth, distinct "through retry 2"
+still-recovers case cannot exist for these two fault kinds: recovering after attempt 2
+would require a 4th transmission, which `TRUNK_retries == 2` does not allow. #52's task
+text (`specs/002-trunk-link-layer/tasks.md` T034) nonetheless states the matrix as
+{drop, duplicate, delay-past-T_resp, corrupt} × {attempt 0, retry 1, retry 2, after
+give-up} — 16 cells — naming 4 positions per fault uniformly.
+**Recommended:** the safe default applied in PR #145: drop the two non-distinguishable
+cells (14 SC-004 cases, not 16, for this reason alone — Duplicate and DelayPastTResp keep
+all 4 positions, since their "retry 2" case is genuinely distinct) rather than keep
+verbatim-duplicate tests solely to match a literal cell count, and record why here rather
+than in a code comment. If a maintainer instead wants 16 always-distinct cells, that
+requires either raising `TRUNK_retries` for this suite alone (not proposed — it is a
+protocol constant, golden rule 1) or redefining what "retry 2" asserts for a
+non-terminal-recovery fault when only 3 attempts exist.
+**Ruling:** pending — human (accept 14 SC-004 cases for the Drop/CrcError rows, or amend
+tasks.md's T034 matrix description).
+**Supersedes:** none.
+
+---
+
 ## 2026-09-06 — an idle-time discard is charged to the frame's CLAIMED in-range src; nothing authenticates it (amends the out-of-range entry above)
 
 **Context:** review at `1a55116` (#137, LOW). The out-of-range entry above records that a
@@ -2262,3 +2327,617 @@ them" (FR-012) gets one sentence in `docs/protocol-l3.md` §3 (#155).
 **Ruling:** ADOPTED — human, 2026-09-06 (via #110): "add docs/THREAT-MODEL.md". #156
 (T3; CLAUDE.md is a ground-truth artefact).
 **Amends:** none. **Supersedes:** none.
+
+---
+
+## 2026-09-06 — Responder replay buffer: keyed on sequence alone, `data-model.md` §5 is silent on the requester
+
+**Context:** red-team on #149 (Responder engine, T033/T035) at `033182a`, escalated to
+BLOCKING (an earlier pass at `907dfbe` had classified the same finding a FOLLOW-UP,
+reasoning that closing it needed a spec change). `data-model.md` §5 states the replay
+condition as `retry == 1 && valid && seq == buffer.seq -> retransmit buffer` — silent on
+whether the retrying frame's `src` must match the station the buffered response was
+actually encoded for. As written, a second station that happens to send `retry=1` with a
+sequence colliding with another station's most-recently-buffered sequence is served that
+other station's response, addressed to that other station (the replying frame's `dst` is
+read back out of the buffer, not recomputed from the current request's `src`) — the
+requester that actually asked gets no answer at all, and an uninvolved third party
+receives an unsolicited frame in what looks like its own response window. Trunk §5
+reserves only `0xFF`; `src` is otherwise wire-derived and unauthenticated, the same
+forgeability class as the two `claimed-src` entries above, and, per the red-team pass, the
+same class of hazard this PR already hardens against for `src == 0xFF` (`link/responder.cpp`
+"Request acceptance") — rejecting one wire-forgeable `src` misuse while accepting another
+in code added by the same PR was judged inconsistent enough to be blocking rather than
+deferred.
+**Impact today:** `sim/`/`core/` do not yet drive `Responder` (F4 wiring is a later
+story), so nothing downstream observes the misdirected frame yet; it becomes load-bearing
+the moment a virtual backplane or scenario puts more than one station on a trunk segment
+sharing a `Responder`.
+**Options:** (a) key the replay strictly on `{peer, seq}` — store the requester's `src`
+alongside the buffered response and require it match before treating a retry as a replay;
+any mismatch falls through to the "otherwise -> new" branch (handler invoked, buffer
+replaced, addressed to whoever actually asked) rather than being discarded outright. (b)
+same, but discard-and-count a colliding-sequence retry from a different station instead of
+answering it as new. (c) leave `data-model.md` §5 exactly as written and accept the
+cross-station replay as spec-literal.
+**Recommendation:** (a) — it never withholds an answer from a station that legitimately
+asked, never sends a stale answer to the wrong address, and degrades to exactly the
+documented behaviour whenever there is only one station retrying (the case §5 was written
+for). Safe default per CLAUDE.md ("implement nothing speculative … proceed only if a safe
+default exists"): stricter than the literal §5 text, never contradicts it (identical
+behaviour whenever `f.src == buffer.peer`, which is every single-master trunk case the
+existing test suite exercises), and needs no `protocol/omgp-protocol.yaml` or golden-vector
+change.
+**Ruling:** adopted as the safe default per CLAUDE.md, pending a human look at whether
+`data-model.md` §5 should be reworded to state the `{peer, seq}` key explicitly (a
+documentation clarification only, no further behaviour change). Implemented in
+`link/responder.hpp` (`ReplayBuffer::peer`) and `link/responder.cpp` (`on_request`'s
+`is_replay` condition), with `tests/unit/test_link_responder.cpp` ("a retry-flagged
+request from a different station is treated as new rather than replaying the previous
+requester's buffered answer") written first and confirmed red before the fix.
+**Supersedes:** none.
+
+---
+
+## 2026-09-06 — Responder: a request arriving while a response is Scheduled or Transmitting is held, not discarded; `data-model.md` §5 is silent on arrival while busy
+
+**Raised by:** red team @e510b29 on PR #149 (finding 1, BLOCKING), confirmed by the review
+at the same head (finding 1). **Affects:** `link/responder.cpp` (`Responder::poll`,
+`Responder::on_request`), `specs/002-trunk-link-layer/data-model.md` §5, FR-014/FR-015/FR-016.
+**Question:** `data-model.md` §5 gives the Responder three states (Listening, Scheduled,
+Transmitting) and an acceptance rule for an intact request addressed to the node, but says
+nothing about a request whose bytes arrive while a previous response is Scheduled (encoded,
+not yet due) or Transmitting (occupying the half-duplex wire). The implementation at
+`e510b29` discarded and counted such a request. The red team showed two consequences with
+runnable reproducers: (1) two requests queued ahead of one late `poll()` — the second is
+swallowed (at a 2 ms poll period, 2 of 8 well-spaced requests were answered), against
+FR-014's "transmitted at once … counted, not dropped"; (2) a trunk §7 retry queued behind
+its own original in the same batch is discarded rather than replayed, against FR-015's
+unconditional MUST ("retry=1 with the same seq MUST be answered from the replay buffer").
+Neither is a rogue station: both are one master obeying the spec, and one Responder polled
+infrequently — the FR-014 situation by definition.
+**Options:** (a) stop draining the wire while `state_ != Listening`: bytes already arrived
+stay in the wire's receive queue (a UART's RX FIFO does the same) and are decoded, intact,
+by the first `poll()` after the wire is free; the queued request then takes the ordinary
+path — replay, new, late-counted — with the single replay buffer untouched. (b) keep
+draining and keep the discard-and-count (the `e510b29` behaviour). (c) a second replay
+buffer / queue of pending responses.
+**Recommendation:** (a). It needs no new state or storage (rule 5: no allocation after
+init), never overwrites a pending response, never transmits outside a window (FR-017), and
+makes FR-014/015/016 hold uniformly for queued requests. The observable cost: a request
+that arrives while a response is pending is answered after that response, from the wire's
+own queue — its own turnaround window may then be missed, in which case it is counted
+late exactly as FR-014 prescribes for any late poll. (b) violates FR-015 as shown. (c) is
+speculative storage for a case the spec does not describe.
+**Ruling:** (a) adopted as the safe default per CLAUDE.md (stricter than the literal §5
+text, contradicts nothing in it; identical behaviour whenever no request arrives while
+busy, which is every case the pre-`e510b29` suite exercised). Implemented in
+`link/responder.cpp` (`poll()` breaks out of its drain loop while `state_ != Listening`;
+the `on_request` busy-discard branch is removed), with four cases in
+`tests/unit/test_link_responder.cpp` written first and red at `94f6424`. Pending a human
+look at whether `data-model.md` §5 should state the "held in the receive queue" rule
+explicitly (a documentation clarification only).
+**Supersedes:** none.
+
+---
+
+## 2026-09-06 — Responder "held, not discarded" rests on the `ByteWire` receive-queue depth; no minimum depth is stated anywhere
+
+**Context:** the 2026-09-06 entry above ("held, not discarded") adopts option (a): while a
+response is Scheduled or Transmitting the Responder does not drain the wire, and bytes that
+arrive meanwhile wait in the wire's receive queue. Both the red team and the review at
+`70d7660` (PR #149) point out what that assumption depends on and that nothing pins it:
+the engine declines to drain for up to `T_turn_max` plus one full response transmission,
+so the queue must hold whatever a conformant peer can send in that interval. `MockWire`
+holds `4 * kMaxWire` (568 B) and fails loudly on overflow — the native suite can never
+lose a held request silently (six max-payload requests, 432 B, were queued behind a busy
+Responder with `discards == 0`, red team @`70d7660`). The ESP32-S3 hardware UART FIFO is
+128 B, smaller than one worst-case stuffed frame (`kMaxWire == 142`); on the target the
+rule would rest on the IDF driver's ring buffer, not on the hardware FIFO. Unverified:
+the target was not instrumented (both jobs state this).
+**Options:** (a) state a minimum receive-queue depth in the `ByteWire` contract
+(`contracts/link-cpp.md`) that any implementation must provide, e.g. at least
+`2 * kMaxWire`, with an overrun counter the Responder's `stats()` can surface; (b) leave
+the depth to each `ByteWire` implementation and re-open when the F4 hardware transport is
+written; (c) have the Responder drain into a second buffer while busy (option (c) of the
+2026-09-06 entry — rejected there as speculative storage).
+**Recommendation:** (a), as a contract line only, at the point the hardware `ByteWire` is
+specified; no code change in #149. Under a strict-poll master (trunk §3) nothing arrives
+while the Responder is busy, so the depth only matters for the coarse-poll case the rule
+exists for; a stated minimum makes the FR-015 claim "held, not discarded" checkable
+against an implementation rather than assumed. Material to the human ruling the
+2026-09-06 entry awaits (whether `data-model.md` §5 should state the held-in-queue rule).
+**Ruling:** pending human. No code change; the Responder's behaviour and its tests are as
+in the 2026-09-06 entry.
+**Supersedes:** none (adds a dependency note to the 2026-09-06 entry; does not change it).
+
+---
+
+## 2026-09-06 — Responder `{peer, seq}` replay key (adopted above) lets one forged frame evict a pending station's replay entry and defeat FR-015 for that station's own retry
+
+**Raised by:** red team on PR #145 @ `d0cc3bf` (finding 1, BLOCKING). **Affects:**
+`link/responder.cpp` (`on_request`'s `is_replay` condition and its `buffer_` overwrite on
+the "new" path), `link/responder.hpp` (`ReplayBuffer::peer`), the entry immediately above
+this one ("Responder replay buffer: keyed on sequence alone..."), and
+`tests/unit/test_link_responder.cpp:793` ("a retry-flagged request from a different
+station is treated as new...").
+**Question:** the entry above closed one hazard (a colliding-sequence retry from a
+different station stealing another station's buffered answer) by keying replay on
+`{peer, seq}` and, when the incoming frame's `src` does not match `buffer_.peer`, falling
+through to "treated as new" — re-invoking the handler and overwriting `buffer_` with the
+new frame's own `peer`. Trunk §3 states "the host is the only initiator", but `on_request`
+does not check `f.src` against `ADDR_host` for either path (replay or new); nothing stops
+an impostor frame with an arbitrary `src` from taking the "new" branch. Demonstrated
+(`d0cc3bf`, finding 1): after the host's request seq 5 is answered (`buffer_.peer ==
+ADDR_host`), a single retry-flagged frame `{src: 0x02, seq: 5}` is accepted as new
+(`buffer_.peer` becomes `0x02`), so the host's own subsequent genuine retry of seq 5 no
+longer matches `buffer_.peer` either — it is *also* treated as new, re-invoking the
+handler a second time and violating FR-015's unconditional "retry MUST NOT invoke the
+application" for the station that actually asked. One forged frame, from any address,
+timed between a request and its own retry, defeats replay for that request.
+**Options:** (a) validate `f.src == ADDR_host` for every accepted request (replay or new)
+and discard-and-count anything else, per trunk §3's "the host is the only initiator" —
+closes the hole outright, since an impostor's frame can then never reach either branch.
+(b) leave `{peer, seq}` keying as the sole guard (today's code) and accept that any
+station able to place one well-timed frame on the trunk can evict another station's
+in-flight replay entry.
+**Why not implemented directly as a safe default:** (a) is the FR-conformant fix, but it
+requires reversing `tests/unit/test_link_responder.cpp:793-820`'s assertions (that test
+currently REQUIREs a frame from a non-host `src` (`0x07`) to be treated as new, answered,
+and counted — exactly the acceptance (a) would remove); that test itself resulted from an
+explicit prior ruling (the entry above). CLAUDE.md and `docs/OPERATING-POLICY.md` both
+prohibit an agent weakening, skipping or reversing an existing test's assertions without
+an explicit human instruction naming it, so no code or test change is made here despite
+(a) being the recommendation.
+**Recommendation:** (a): add the `f.src == ADDR_host` check (mirroring the existing
+`f.src == 0xFF` reserved-address discard already in `on_request`) and update
+`tests/unit/test_link_responder.cpp:793` to assert the frame from `0x07` is discarded
+(`stats().discards` increments, no transmission, no handler call) rather than answered as
+a new station — a human decision, since it reverses that test's current, deliberately-set
+expectation.
+**Ruling:** pending — human (reverses an existing test's assertions; not a decision an
+agent makes unilaterally per CLAUDE.md/OPERATING-POLICY §2).
+**Amends:** none. **Supersedes:** none — narrows the entry above pending the ruling.
+
+---
+
+## 2026-09-06 — `RequestHandler`'s "called at most once per NEW sequence" doc claim overclaims: a request duplicated with the retry bit CLEAR re-invokes it
+
+**Raised by:** red team on PR #145 @ `d0cc3bf` (finding 2, BLOCKING as a CLAUDE.md rule 11
+unlabelled-claim violation); the same underlying gap was raised as a non-blocking spec
+question ("FU-3") by an earlier red-team pass on this branch but was never recorded here.
+**Affects:** `link/responder.hpp` (`RequestHandler`'s doc comment), `link/responder.cpp`
+(`on_request`'s `is_replay` condition, `f.retry && ...`), spec 002 SC-004 ("the
+application runs exactly once per new sequence"), trunk §7 line 70 ("a retry of a
+sequence it already answered" — silent on a duplicate with the retry bit clear).
+**Question:** `data-model.md` §5 and trunk §7 gate replay on the retry bit; `link/
+responder.hpp`'s `RequestHandler` comment claims unconditionally "Called at most once per
+NEW sequence ... a retried sequence is replayed from the buffer, never re-invoking this"
+— true only for `f.retry == true`. A request-shaped frame duplicated on the wire with
+`retry == 0` and a colliding `seq` (a reflection, a repeater, or `Kind::Duplicate` applied
+to the request direction rather than the response) satisfies data-model.md §5's literal
+replay condition being false, so `on_request` takes the "new" branch: the handler runs
+again and a second response is transmitted. This is the same code path SC-004 pins for
+the *response* direction (drop/duplicate/delay/corrupt); no cell in
+`tests/unit/test_link_loop.cpp`'s matrix duplicates a *request*.
+**Options:** (a) treat any frame matching `{seq == buffer_.seq, valid}` as a replay
+regardless of the retry bit — closes the SC-004 gap but contradicts data-model.md §5's
+literal condition and trunk §7's wording, and would also suppress a legitimately new
+request that coincidentally reuses a sequence value 16 transactions later (the wrap case
+already on file above). (b) leave the code as-is (matches the ratified design) and correct
+only the doc comment's claim to state its actual, narrower scope. (c) both a comment fix
+and a new pinning test recording today's behaviour, without changing it.
+**Recommendation:** (c) as the immediate, safe-default step (no behaviour change, so
+nothing this repo currently depends on can regress): reworded the `RequestHandler` comment
+in `link/responder.hpp` to state the guarantee only holds when the repeat carries the
+retry bit, and added a case to `tests/unit/test_link_responder.cpp` pinning the current
+(gap) behaviour for a retry-bit-clear duplicate. Whether (a) should also be adopted — i.e.
+whether SC-004's "exactly once per new sequence" or data-model.md §5's retry-bit-gated
+replay condition governs — is a spec conflict for a human to resolve, same class as the
+entry immediately above.
+**Ruling:** pending — human (spec conflict between SC-004 and data-model.md §5 / trunk
+§7). Comment relabelled and pinning test added as the non-behaviour-changing part.
+**Amends:** none. **Supersedes:** none.
+
+---
+
+## 2026-09-06 — Responder "held, not discarded" makes the held-request queue unbounded and uncounted: one answer per `poll()`, oldest first; FR-014 and FR-017 conflict on a stale queued request
+
+**Raised by:** red team @17554c8 on PR #149 (finding 1, MEDIUM; finding 2, LOW), confirmed
+by the review at the same head (finding 1, MEDIUM, mechanism by construction from the diff).
+**Affects:** `link/responder.cpp` (`Responder::poll`), `specs/002-trunk-link-layer/spec.md`
+FR-014 / FR-017, the two 2026-09-06 entries above ("held, not discarded"; "rests on the
+`ByteWire` receive-queue depth").
+**Context:** the "held, not discarded" ruling above (option (a)) stops draining the wire
+while a response is Scheduled or Transmitting. Independently, one accepted request sets
+`state_ = Scheduled` and ends the drain loop, and simulated time does not advance inside a
+`poll()`. Together: **one `poll()` answers exactly one queued request, oldest first**, and
+nothing bounds how old a queued request may be, how deep the backlog grows, or counts a
+request while it waits. Reproducer (now `tests/unit/test_link_responder.cpp`, "requests
+arriving faster than poll() is called queue up …", CHECK-pinned as an open question, not
+asserted as desired): a station at 0x07 sends one request to the node every 300 µs, the
+engine is polled every 1 ms, the host sends its own request at t = 8 ms. At `17554c8` and at
+this head: 21 polls, 20 answers, all 20 counted `late_responses`, the host **never answered**
+12 ms after its request (host `T_resp` = 200 µs), `discards == 0`. Same run against the
+pre-`70d7660` rule (drain always; discard-and-count a request decoded while busy; red team's
+counterfactual): the host answered at the very next poll, `discards == 48`. On MockWire the
+backlog eventually overflows the receive queue loudly (`RX queue capacity exceeded`, red
+team finding 2); on the ESP32-S3 UART FIFO it would overflow silently, and no `AddrStats`
+field moves either way — the Responder cannot observe an overrun through `ByteWire`.
+**Two spec requirements pull opposite ways on a stale queued request.** FR-014: "If the
+engine is not given control until after that window has closed … it MUST still transmit —
+at once — and MUST count the occurrence as a late response"; the suite pins this at +1000 µs
+after `T_turn_max` (three cases: the single late poll, the queued pair, the queued retry).
+FR-017: the engine "MUST never transmit outside a response window". The spec's own Edge
+Cases resolve the pair for a *single* late poll ("the late poll is the simulator's defect,
+not the protocol's, and the counter is how a scenario notices") — not for a steady state in
+which every answer is late and the freshest request is unreachable. Both red teams cited
+the spec: @e510b29 asked for hold (FR-014/FR-015, "none dropped", which the ruling above
+adopted and the case "eight well-spaced requests … whatever the poll cadence" pins);
+@17554c8 asks for a bound (FR-017, and visibility). The traffic that reaches the state is
+either out-of-spec (only the host originates requests, trunk §3; a second station's
+requests are hostile or a bus fault) or a conformant host plus a poll cadence coarser than
+`T_resp` — the simulator's defect FR-014 is written for, but continuous rather than one-off.
+**Options:** (a) keep the rule (this head): unbounded, uncounted; FR-014 literal. (b) revert
+to drain-always with discard-and-count while busy (`e510b29`): bounded by the poll cadence
+and counted, but drops a queued trunk §7 retry against FR-015 (red team @e510b29 finding 1)
+and drops a fresh request behind a stale pending response. (c) **bound the hold by
+staleness**: a request decoded at `now_us > request_end_us + TRUNK_T_resp_us` is dropped and
+counted — the host's own exclusive timeout is the one point the spec gives at which the
+master has *provably* abandoned the transaction (spec.md Edge Cases: "a start bit at or
+after `T_resp` is late"; "the host discards the late response"), so nothing the host could
+still accept is ever dropped, and the backlog can never exceed one `T_resp` of arrivals per
+poll. FR-014's late-transmit survives for lateness in `(T_turn_max, T_resp]`; beyond it the
+counter, not the transmission, is what the scenario notices. Counter: a new `AddrStats`
+field (`stale_requests`) — a `contracts/link-cpp.md` and `data-model.md` §5 change — or
+reuse `discards` (no interface change, but conflates a stale request with a corrupt frame).
+(d) cap the queue depth instead (e.g. answer at most N per poll, drop-and-count the rest):
+bounds depth but not age, and N is a number the spec does not have.
+**Recommendation:** (c), with a distinct counter. It is the smallest rule that answers every
+request the host can still accept, never transmits a response the host is guaranteed to
+discard (which on a shared half-duplex bus can land inside the *next* transaction's window
+— the babble Edge Case — and fail another node's poll), and keeps the loss visible. It
+bounds a queued retry the same way: a retry decoded within `T_resp` of its *own* stop bit
+is replayed (FR-015); a staler one is dropped and counted like any stale request — the host
+that sent it has already timed it out too. It is a **spec change**: FR-014's "MUST still
+transmit" and FR-015's "MUST retransmit" as written have no upper bound, and three existing
+cases pin +1000 µs (the single late poll, the queued pair, the queued retry); under (c)
+those cases move to lateness ≤ `T_resp` and a fourth asserts drop-and-count beyond it.
+Not implemented here: CLAUDE.md "documents win; implement nothing speculative" — a MUST is
+being narrowed, and the two entries above already await the same human's look at
+`data-model.md` §5. What lands in #149 is the pinning test, this entry, and a comment in
+`Responder::poll` stating the consequence.
+**Corrects two sentences in the "held, not discarded" entry above** (review @17554c8
+finding 2): its recommendation says option (a) "never transmits outside a window (FR-017)"
+and "makes FR-014/015/016 hold uniformly for queued requests". Neither is unconditionally
+true: every held response answered after its window transmits outside it (that is what
+`late_responses` counts — 20 of 20 in the reproducer), and FR-014's late-transmit clause
+is what (a) leans on, not FR-017. The accurate form: (a) never transmits *over* another
+transmission (trunk §3 half-duplex, by construction of the Transmitting state) and never
+drops a request or a retry; it does transmit outside the window whenever the poll is late,
+counted. The entry's Impact/Options text stands; only those two absolutes are withdrawn.
+**Ruling:** pending — human. Options (a)–(d) above; the recommendation is (c) with a
+`stale_requests` counter. Until ruled, behaviour is (a) and the pinning test records it.
+**Amends:** the 2026-09-06 "held, not discarded" entry (two sentences of its recommendation,
+as stated). **Supersedes:** none.
+
+## 2026-09-07 — the Responder's replay entry has no age bound: after a seq wrap a retry can be answered from a stale buffer
+
+**Context:** red team @`71caba0` finding 2 (#149). `link/responder.cpp`'s replay key is
+`f.retry && buffer_.valid && f.seq == buffer_.seq && f.src == buffer_.peer`: no comparison
+against the request bytes, and `buffer_.valid` is set once and never cleared. `seq` is 4 bits
+(`link/frame.cpp:129`), so it wraps every 16 transactions. Reachable by a *conformant* host,
+not only a forger: if this node accepts nothing for 16 of the host's transactions (a noise
+burst, SUSPECT-rate polling, a deaf window), the buffer still holds `seq = 5` when the host's
+counter comes round to 5 again — and if the host's first attempt at that new request is lost
+and it retries, the responder replays the ancient answer. L3 then receives a stale reply: a
+stale parameter value, or an ACK for a SET that was never executed. Reproducers A2 and A3 on
+#149 (A3: still replayed 10 s on, 10× the §7 OFFLINE bound). CLAUDE.md rule 2 does not cover
+it — idempotency makes *re-execution* safe; it does not make *not executing, and answering
+from a stale buffer*, safe. trunk §7 scopes a replay to "a retry of a sequence **it already
+answered**", which this is not.
+**Recommendation:** invalidate the entry once the answered request's own response window has
+passed (`request_end + T_resp`): a retry arriving after that is treated as new and re-invokes
+the handler, which rule 2 makes safe. The alternative — keep the entry but compare the
+buffered request's bytes — closes the same case without inventing a lifetime, at the cost of
+storing the request alongside the response (fixed buffer, embedded-path budget to check).
+Neither trunk §7 nor `data-model.md` §5 bounds a replay's lifetime, so no code was written
+on #149: CLAUDE.md, "when a spec ambiguity blocks you, implement nothing speculative".
+**Ruling:** PENDING — human. (Maintainer's direction 2026-09-07: record it, do not implement.)
+**Amends:** none. **Supersedes:** none — distinct from the 2026-09-06 `{peer, seq}` entry,
+which is about a FOREIGN `src` evicting an entry; this is the same peer served the wrong
+answer, and that entry's recommended `f.src == ADDR_host` screen does not address it.
+
+## 2026-09-07 — the Responder's late path defers for an idle bus, which FR-014 and data-model §5 do not describe
+
+**Context:** review @`2efcb67` (#149), MEDIUM. FR-014 (`spec.md`) says a late poll "MUST still
+transmit — at once", and `data-model.md` §5 says "transmitted at `now`". Since @`71caba0`'s
+red-team HIGH the engine instead transmits at
+`min(last_activity + T_gap, defer_origin + max_frame_us + T_gap)` — up to ~1.47 ms at `TRUNK_bit_rate`, ~12.3 ms at the fallback rate (the wait is rate-dependent: `max_frame_us()` recomputes from the wire's current rate, and `HealthTracker` re-probes at the fallback under `bus_fault()`) later —
+because "at once" on a bus another station is occupying means keying down inside that
+station's frame, corrupting a frame addressed to a THIRD node and driving it toward SUSPECT
+under trunk §7. Both documents outrank the code (CLAUDE.md), so the divergence is recorded
+rather than argued away. It is exactly the courtesy §4 already records for the Master, where
+PR #137 carries the same "(Amended …)" marker and the 2026-09-05 "bounded courtesy" entry;
+§5 had no such note until this entry.
+**Recommendation:** read FR-014's "at once" as "on the first poll that reaches it, subject to
+trunk §3's half-duplex media access", i.e. adopt the Master's bounded courtesy verbatim for
+the Responder, and amend FR-014 and §5 to say so. The alternative — transmit unconditionally
+at `now` — makes FR-014 override FR-017 ("never transmit outside a response window") and
+trunk §3 for the one case where the engine can see the conflict, which is the reading the
+red team falsified three rounds running.
+**Ruling:** PENDING — human. Related and separate: the FR-014-vs-FR-017 starvation question
+(2026-09-06) is about the AGE of a queued request; this is about the INSTANT a due response
+may key down.
+**Amends:** `specs/002-trunk-link-layer/data-model.md` §5 (marker added in PR #149).
+**Supersedes:** none.
+
+## 2026-09-07 — the Responder's acceptance screen refuses more than data-model §5 lists
+
+**Context:** review @`2efcb67` (#149), MEDIUM. §5 lists acceptance as "intact frame,
+`dst == my_addr`, `response == 0`". The engine also refuses `src == my_addr` (a station is
+never its own peer), `src` outside trunk §5's `ADDR_host..ADDR_backplane_max`, and — since
+red team @`71caba0` finding 3 — every request when the node's own `my_addr_` is outside that
+range, so a misconfigured node never originates a non-L2 source address. Each came from a
+red-team finding and each is demonstrated by a named test; none is in §5. `ReplayBuffer` in
+§5 is likewise specified as `{valid, seq, len, bytes}` while the engine keys on `peer` too
+(red team @`033182a` finding 3, on file 2026-09-06).
+**Recommendation:** amend §5's acceptance list and `ReplayBuffer` to match, since trunk §5's
+address range is the higher-authority document and the screens follow from it —
+`link/master.cpp:85-88` and `link/health.cpp` already bound the same wire-derived class the
+same way. No code change either way; this is a documentation debt, recorded so the next
+reader of §5 is not misled.
+**Ruling:** PENDING — human.
+**Amends:** `specs/002-trunk-link-layer/data-model.md` §5 (marker added in PR #149).
+**Supersedes:** none.
+
+## 2026-09-07 — a Responder that stops reading to avoid dropping: latency, and the ESP32-S3 RX FIFO
+
+**Context:** maintainer's ruling 2026-09-07 on #149, after red team @`b262d46` / @`2efcb67` /
+@`7a80ec3` found the same defect three rounds running at successively relocated boundaries.
+A late response must not key down on a bus the engine has not read, and the engine must not
+destroy a byte it has taken off the wire. With any fixed buffer those two duties collide at
+its capacity, so the engine now **decodes as it drains** and holds up to `kHeldRequests` (2)
+completed requests; on the next one it **stops reading**, leaving everything behind it in the
+wire's own receive queue, and reports its reading of the bus as partial — which makes the
+wait fall back to the bounded cap rather than to a `last_activity` it knows is incomplete.
+Nothing is dropped and nothing is destroyed; the cost is latency, and it is not small: a
+backlog drains at roughly one cap (`max_frame + T_gap`, ~1.47 ms at `TRUNK_bit_rate`, ~12.3 ms at the fallback rate (the wait is rate-dependent: `max_frame_us()` recomputes from the wire's current rate, and `HealthTracker` re-probes at the fallback under `bus_fault()`)) per absorbed batch rather
+than at wire speed. Measured on the suite's own cases: a 142-byte burst of back-to-back
+requests, all answered, takes ~23 ms to clear; the starvation cell at `test_link_responder`
+`:998` moves from 7 answers per 21 polls to 6.
+**Consequence worth stating plainly:** while the engine is stopped it is not draining, and
+the ESP32-S3's UART RX FIFO is 128 bytes — smaller than `kMaxWire` (142), already on file
+2026-09-06. On target, a long enough stop overflows that FIFO and the hardware drops bytes
+the model says are safely queued. The model's "nothing is lost" is therefore a statement
+about this engine, **not** about the node it runs on.
+**Recommendation:** accept the trade for now (it is the only one of the four considered that
+loses no request and never transmits on a partial reading), and treat the FIFO bound as the
+real limit: on target, size the poll cadence so a stop cannot outlast 128 bytes of arrivals,
+or drain into a driver-level ring larger than `kMaxWire`. Both are firmware-side, outside
+this PR. The alternative rulings, each rejected and why: transmit on a partial reading
+(the collision this PR was reopened to fix, three times); destroy the byte at a buffer bound
+(silently loses a request straddling it); discard-and-count the third request during a wait
+(counted, but re-opens the defect @`e510b29`'s "eight well-spaced requests ... none
+discarded" was written to close — measured at 6/8, 4/8 and 3/8 answered at 400 µs, 1 ms and
+2 ms cadences).
+**Ruling:** PENDING — human. The design is the maintainer's 2026-09-07 direction; what is
+open is whether the latency is acceptable and how the target's FIFO bound is to be met.
+**Amends:** the 2026-09-07 entry "the Responder's late path defers for an idle bus" — same
+mechanism, this records what the deferral now costs. **Supersedes:** none.
+
+## 2026-09-07 — does trunk §4's T_gap bind every station, or only the host between its own transactions?
+
+**Context:** red team @`5830fc4` finding 3 (#149), reported by the red team itself as unsure
+rather than as a certain divergence — correctly, in my reading. When a Responder answers a
+request it held through a wait, that answer's deadline is already past, so it is transmitted
+the instant the previous response leaves the wire: measured `resp0 [2000, 2110)`,
+`resp1 start = 2110` — **zero idle** between two frames belonging to two different
+transactions. `docs/trunk-link-layer.md:27`/`:88` requires "≥ T_gap = 50 µs of bus idle
+between transactions", but names the **host** as the party that leaves it, and says nothing
+about a responder's own back-to-back frames. The engine enforces `T_gap` against bytes it
+RECEIVES (`transmit_if_due`) and never against bytes it SENDS. The existing case "two
+requests queued before one late poll ... the second the instant the wire is free" currently
+asserts the zero-gap behaviour, so this cannot be changed without a human instruction naming
+that test (GOVERNANCE §1).
+**Recommendation:** read §4's gap as binding **every** station, and have the Responder owe
+`T_gap` after its own transmission as well as after received bytes — a receiver cannot tell
+which station's frame preceded it, and the gap exists for the physical settling of an RS-485
+line, not for the host's bookkeeping. That is one line (fold `transmit_until_us_` into
+`last_activity_us_` on transmit) plus an update to the case above. The alternative, if the
+gap is deliberately the host's obligation alone, is to say so in trunk §4 so this engine is
+not read as violating it.
+**Ruling:** PENDING — human.
+**Amends:** none. **Supersedes:** none.
+
+## 2026-09-07 — the Responder's late path CAN transmit into a frame it has not read: the trade, both corners measured, and a correction
+
+**Supersedes** the Recommendation of the 2026-09-07 entry "a Responder that stops reading to
+avoid dropping: latency, and the ESP32-S3 RX FIFO". That entry says the adopted option "never
+transmits on a partial reading". **That is false**, and this entry exists because a ruling made
+from it would be made on a wrong premise (review @`a2157ff`, MEDIUM). It is also the entry the
+code comments in `link/responder.{hpp,cpp}` point at for "the open ruling on which corner of
+that trade to take" — until now no entry posed that ruling at all, so the escalation lived only
+in PR #149's thread. This is the record.
+
+**The defect, reproduced (red team @`6440074` finding 1; I reproduced it independently).** When
+`kHeldRequests` (2) requests have been decoded during one late wait, `poll()` stops draining
+before `wire_.receive()` and reads **nothing** for the rest of the deferral — up to
+`max_frame_us + T_gap` (1470 µs at `TRUNK_bit_rate`). At the cap `transmit_if_due()` fires
+unconditionally, against a bus the engine has not looked at since it stopped. Measured: a
+third station's frame occupying `[2631, 2721)` is transmitted over at `tx = 2661`. The
+consequence is trunk §7's: the corrupted frame was addressed to a THIRD node, which does not
+answer, and the host escalates that innocent node toward SUSPECT.
+
+**Why it keeps coming back.** Rounds 8–12 of #149 each moved this boundary — 142 bytes of a
+byte stash, then 143 with a reserve slot, then one held request, then two — and the same
+collision reappeared at the new boundary every time. It is not an oversight but a trilemma: on
+a bounded engine, FR-014 ("MUST still transmit"), FR-015/FR-016 ("nothing dropped") and FR-017
+("never outside a response window") cannot all hold. Any bounded holding capacity forces the
+engine to either stop reading (a blind window, hence this collision) or discard.
+
+**Both corners are built and measured, with the same probe:**
+
+| | the round-11 collision | requests lost | first answer in the probe |
+|---|---|---|---|
+| stop reading, hold 2 (**adopted**, current head) | **reproduces**: `tx = 2661`, inside the frame | none | 2661 (the full cap) |
+| ...the same stop, on a bus that is **silent** | n/a | none | **1331 µs late** — with the hold full the engine cannot tell a busy bus from a quiet one, because it stops before `wire_.receive()`. Both rows are one property, which is why moving the boundary never helped (red team @`80df7af` finding 2) |
+| never stop, hold 2, discard-and-count the excess | **closed**: `tx = 1341`, well before that frame | **regresses**: 7/8, 5/8, 4/8 answered at 400 µs / 1 ms / 2 ms poll periods — the defect the case "eight well-spaced requests … none discarded" was written to close (red team @`e510b29`), counted rather than silent | 1341 |
+
+The second is better on the collision *and* on latency, worse on loss. There is no third column
+in which both are green; four rounds of looking did not find one.
+
+**What the cap is not.** An earlier revision of `link/responder.hpp` claimed the bounded wait
+gives "the protection level Master documents and accepts". Retracted (review @`6440074`): the
+Master's cap argument rests on a drain loop that never exits early — `link/master.cpp:224-227`
+records that when it once did, "the argument was false for exactly the bytes left behind it" —
+and this path is precisely that excluded case. On the late path a frame beginning after
+`defer_origin + T_gap` is not necessarily a §3 violator either, because the host has already
+timed this node out and may legitimately open a new transaction.
+
+**Decisive update (red team @`bab7378` finding 2), which weakens the adopted corner in the one
+dimension it was chosen for.** "Nothing is dropped" holds for the engine's bookkeeping, not end
+to end. The blind window RECURS every cap cycle while the hold is full, so the cumulative
+exposure is unbounded rather than one worst-case frame — and it fires in the native harness,
+not only on target: one station offering this node a request every 300 µs (~37 % occupancy,
+conformant) against a 1 ms poll gives **74 requests offered, 7 answered**, with MockWire's own
+568-byte queue overflowing at t = 23 ms. `stats().discards` stays **0** throughout, because the
+engine never sees the bytes the wire destroyed. Pre-@`e510b29` this same branch counted them
+(48 discards). So the choice is not "lose nothing" versus "lose some, counted"; it is **lose
+some, uncounted, at the wire** versus **lose some, counted, in the engine** — and FR-016's
+`stats().discards` channel exists for exactly the second.
+
+**Recommendation:** rule the trade, not the mechanism. If FR-017 and trunk §3 outrank
+FR-015/FR-016 when they conflict, take the second corner (never stop reading; discard and
+COUNT beyond the hold, making the loss visible in `stats()` where today the backlog is
+invisible) and amend the "none discarded" case to assert counted drops. If FR-015/FR-016 wins,
+keep the current corner and record the collision as an accepted, bounded risk in
+`docs/THREAT-MODEL.md`, with the bound stated: only reachable when two requests to this node
+complete inside one late wait, and confined to `max_frame_us + T_gap`. Either way, the losing
+side's cost should be written into the spec rather than left in a test comment. A third option
+— widen the hold — only moves the boundary again, as four rounds have shown.
+**Ruling:** PENDING — human. This is the entry to rule from; the earlier one's Recommendation
+clause is corrected here.
+**Amends:** the 2026-09-07 entry "a Responder that stops reading to avoid dropping" — its
+"never transmits on a partial reading" clause is false and is corrected here; the rest of that
+entry (the latency figures, the RX FIFO bound) stands. **Supersedes:** none.
+
+## 2026-09-07 — retraction: the Responder's late-path deferral is NOT "exactly" the Master's courtesy, and not to be adopted "verbatim"
+
+**Amends** the 2026-09-07 entry "the Responder's late path defers for an idle bus, which
+FR-014 and data-model §5 do not describe". That entry calls the deferral "exactly the courtesy
+§4 already records for the Master" and recommends adopting it "verbatim". **Both words are
+wrong**, and this PR says so in three other places — `link/responder.cpp` ("Master's cap
+without Master's precondition"), `data-model.md` §5 as amended, and the 2026-09-07 entry
+"…CAN transmit into a frame it has not read". The entry whose *title* names the deferral was
+the one place still asserting the equivalence, so a maintainer opening it by title would rule
+on a mechanism the engine does not implement — the wrong-premise failure the other retraction
+exists to prevent for its neighbour (review @`18ef2a8`).
+
+**What is actually true.** §4's Master property rests on a drain loop that **never exits
+early**: `last_activity` advances with every byte received during the deferral, so the engine
+"never transmits over an arriving frame". The Responder's late path *does* exit early — that
+is what `belief_stale` reports — so it has the Master's cap without the Master's precondition,
+and on that path it can key down inside a frame it has not read.
+
+**Correspondingly, the recommendation is narrowed:** adopt the Master's bounded courtesy for
+the Responder's *complete-reading* case, where the precondition does hold, and rule the
+stale-reading case as part of the trilemma in "…CAN transmit into a frame it has not read" —
+which remains **the entry to rule from**. The wait's magnitude is rate-dependent: `~1.47 ms`
+at `TRUNK_bit_rate` and `~12.3 ms` at `TRUNK_bit_rate_fallback` (142 × 86 µs + 50), the larger
+figure being the operative one when the trunk is degraded.
+**Ruling:** PENDING — human, as part of the trilemma entry.
+**Amends:** the 2026-09-07 "…defers for an idle bus" entry — its "exactly" and "verbatim" are
+retracted here. **Supersedes:** none.
+
+## 2026-09-07 — a CRC-corrupt frame arriving with no transaction open moves no counter at all
+
+**Context:** found while adding the CrcError row's missing "after give-up" cell to
+`tests/unit/test_link_loop.cpp` (#145; review @`ef1ec22` MEDIUM). The cell was written
+expecting the bad CRC to be charged to the node and measured otherwise: with no window open,
+`stats(node).crc_failures` is unmoved, `stats(node).discards` is 0 and `bus_stats().bus_faults`
+is 0 — the frame is invisible in `stats()` entirely. The mechanism is not a bug in this PR:
+a corrupt frame never decodes, so there is no `f.src` to attribute it to, and
+`link/master.cpp`'s discard accounting charges `dst_` only while awaiting a response. The
+Duplicate row's late copy is counted precisely because it decodes cleanly and has a source.
+**Why it may matter:** trunk §4 makes discards the bus's own health signal, and §7 escalates
+on failure accounting. Corruption occurring *between* transactions — a marginal transceiver,
+a babbling station whose bytes happen to form a bad frame — is exactly the condition that
+signal exists for, and today it is unobservable: a rig could be visibly corrupting frames
+with every counter reading zero.
+**Recommendation:** count a frame-level discard with no window open against a bus-level
+counter rather than a node one (`BusStats.bus_faults`, or a new `BusStats.orphan_discards`
+if `bus_faults` is reserved for the §7 all-nodes-failing condition). It cannot be charged to
+a node, and that is the point: it is bus-level evidence. Not implemented here — the code is
+`link/master.cpp` (T031/#49, closed), outside #52's diff, and #145 has pinned today's
+observable rather than changed it.
+**Ruling:** PENDING — human. If adopted, it wants its own issue against T031.
+**Amends:** none. **Supersedes:** none.
+
+## 2026-09-07 — SC-004's collapsed cells: only the Drop row's is collapsed now, so the earlier entry's proposal is no longer what #145 does
+
+**Context:** review @`410ce9f` (#145), LOW. The 2026-09-06 entry "SC-004's 'retry 1'/'retry 2'
+columns collapse to one case for Drop/CrcError at `TRUNK_retries == 2`" recommends dropping
+*two* non-distinguishable cells and asks for a ruling on "14 SC-004 cases … for the
+Drop/CrcError rows". That is no longer the tree it describes: at `049abac` the **CrcError**
+row regained a real fourth cell — a corrupt frame arriving with **no transaction open**,
+which is a distinct scenario rather than a verbatim duplicate (the Duplicate and Delay rows
+test the same no-window shape). Only the **Drop** row's cell is collapsed at this head, so
+the matrix is **15 of the 16** cells #52 enumerates, not 14. A maintainer reading the earlier
+entry would be ruling on a proposal this PR no longer makes, and that entry is where two of
+the review's findings route their decision — hence this one, appended rather than edited
+(CLAUDE.md: supersede by appending, never by editing history).
+**Recommendation:** unchanged in substance for the Drop row, and narrowed to it: accept
+**15** SC-004 cells, the missing one being Drop's "retry 2", which at `TRUNK_retries == 2`
+scripts `{Drop, Drop, Drop}` — byte-identical to its own "after give-up" cell, so a
+sixteenth case could only be a verbatim duplicate. The alternatives named in the earlier
+entry (raise `TRUNK_retries` for this suite; redefine what "retry 2" asserts for a
+non-terminal-recovery fault) stand, and both remain worse than accepting 15.
+**Ruling:** PENDING — human. Rule on THIS entry; the 2026-09-06 one describes a tree that no
+longer exists.
+**Amends:** none. **Supersedes:** the 2026-09-06 entry "SC-004's 'retry 1'/'retry 2' columns
+collapse to one case for Drop/CrcError at TRUNK_retries == 2" — same question, corrected
+scope (Drop only) and corrected count (15, not 14).
+
+## 2026-09-07 — SC-004: all 16 positions ARE exercised, by 15 cases, because two rows share one script across two columns
+
+**Supersedes** the 2026-09-07 entry "SC-004's collapsed cells: only the Drop row's is collapsed
+now…", which is **false** and which itself superseded the 2026-09-06 entry. Review @`47d481f`
+demonstrated the error by reading the four delay plans, and its framing is better than either
+of mine — the count was never the interesting question.
+
+**What the matrix actually does.** At `TRUNK_retries == 2` there is no fourth attempt, so a
+fault at retry 2 that prevents recovery *always* ends `Failed` with the answer (if any)
+arriving after give-up. "Retry 2" and "after give-up" are therefore the same script for such a
+fault, and the file scripts each once:
+
+Cited by **fault plan and case name**, not by line number: the previous version of this table
+gave line numbers that were already 7 short when it was written, because the same commit
+inserted lines above them (review @`2348d2a`). A table whose only job is saying which cell is
+which must not carry references that rot on the next edit.
+
+| row | "retry 2" | "after give-up" |
+|---|---|---|
+| Drop | — | `{Drop, Drop, Drop}` — "drop after give-up"; this IS the drop-at-retry-2 cell, filed under the later name |
+| delay-past-`T_resp` | — | `{Drop, Drop, Delay}` — "delay-past-T_resp after give-up"; the delay IS at retry 2 |
+| CRC-corrupt | `{Corrupt, Corrupt, Corrupt}` — "CRC-corrupted response through retry 2" | `{Corrupt, Corrupt, Corrupt}` + a corrupt frame with **no window open** — "CRC-corrupted frame after give-up"; genuinely distinct |
+| duplicate | `{Drop, Drop, Duplicate}` — "duplicate through retry 2" | `{Drop, Drop, Drop}` + two late duplicates — "duplicate after give-up"; genuinely distinct |
+
+So **all 16 positions are exercised by 15 `TEST_CASE`s**, two rows sharing one script across
+two columns — not "15 of 16 with one missing", which is what both earlier entries claimed and
+what a maintainer would otherwise have been asked to accept.
+
+The `{Delay, Delay, Clean}` cell was mislabelled "through retry 2": its delays are at attempts
+0 and 1, making it the **two-strays** cell (`discards == 2`, against the one-stray cell's `1`).
+Renamed to "delay-past-T_resp at attempts 0 AND 1"; it was mislabelled, not vacuous, and is not
+being removed.
+
+**Recommendation:** amend T034's matrix description to say that at `TRUNK_retries == 2` the
+"retry 2" and "after give-up" columns coincide for any fault that prevents recovery, and that
+the criterion is met by 15 cases covering 16 positions. The alternatives previously offered
+(raise `TRUNK_retries` for this suite; add a verbatim-duplicate case) are both worse and
+neither is needed, since no position is actually uncovered.
+**Ruling:** PENDING — human. Rule on THIS entry: the two earlier ones state a coverage gap
+that does not exist.
+**Amends:** none. **Supersedes:** the 2026-09-07 entry "SC-004's collapsed cells: only the
+Drop row's is collapsed now…" and, transitively, the 2026-09-06 entry it superseded.

@@ -26,6 +26,8 @@ constexpr bool needs_stuffing(uint8_t b) {
 // silently change the corrupted frame's wire length relative to the real response's and
 // break every timing assertion built on that length (tests/unit/test_link_master.cpp
 // computes expected instants from the UNCORRUPTED response's own encode_frame length).
+// File-local: only encode_crc_corrupted() below (declared in mock_wire.hpp for reuse by
+// tests/unit/test_link_loop.cpp) needs to call this.
 uint8_t corrupt_crc_hi(uint8_t real_hi) {
     const uint8_t naive = static_cast<uint8_t>(real_hi ^ 0xFF);
     if (needs_stuffing(naive) == needs_stuffing(real_hi))
@@ -38,20 +40,37 @@ uint8_t corrupt_crc_hi(uint8_t real_hi) {
     // still a different, still non-stuffing byte.
     return static_cast<uint8_t>(real_hi ^ 0x01);
 }
+} // namespace
 
 // Kind::CrcError (contracts/mock-wire.md): "the real response with its last CRC byte
 // XOR 0xFF" (approximately - see corrupt_crc_hi() above for the wire-length-preserving
 // exception). Duplicates encode_frame's unstuffed-build-then-stuff steps (link/frame.cpp)
 // rather than post-processing its output, so every byte other than the corrupted CRC high
-// byte is stuffed exactly as a real response's would be. encode_frame's own refusals
-// (PayloadTooLong/ReservedAddress) do not apply here: `request` is a frame this same
-// MockWire just decoded, so `f.dst == request.src` is already a real trunk address.
+// byte is stuffed exactly as a real response's would be.
+//
+// This used to say encode_frame's refusals "do not apply here: `request` is a frame this same
+// MockWire just decoded". That premise died when the symbol gained external linkage and a
+// caller that builds FrameFields by hand (review @ef1ec22): PayloadTooLong is now enforced
+// below, and the surviving divergence is ReservedAddress -- a `dst` of 0xFF is accepted here
+// and refused by encode_frame. That is deliberate for a fault injector, which must be able to
+// put a frame on the wire that the codec would not produce, and it is stated rather than
+// resting on the retired premise.
 size_t encode_crc_corrupted(const omgp::link::FrameFields& f, uint8_t* out, size_t cap) {
     using namespace omgp::link;
     // Same worst-case bound as encode_frame (link/frame.cpp), checked up front: this runs
     // on the engine-under-test's call stack (transmit() -> schedule_crc_error()), so a
     // capacity refusal must be a return value here, not a REQUIRE (see fault_'s
     // declaration in mock_wire.hpp for why this file never throws off that stack).
+    // encode_frame's OTHER refusal, which this used to skip on the grounds that `request` was
+    // "a frame this same MockWire just decoded" -- no longer true since the symbol gained
+    // external linkage and gained a caller that builds FrameFields by hand (review @c69679c).
+    // Without it, f.len = 200 with a 512-byte `out` passes the capacity check below (414 <=
+    // 512) and then writes 206 bytes into unstuffed[kMaxUnstuffed], which is 70: a stack
+    // overflow. Every in-repo caller happens to pass cap <= kMaxWire, which bounds f.len to
+    // 64 -- but that is a property of the repo's current contents, a control, not a guarantee
+    // this function may rely on.
+    if (f.len > omgp::LIMIT_max_l3_payload)
+        return 0;
     const size_t needed = 2 + 2 * (kHeaderLen + static_cast<size_t>(f.len) + kCrcLen);
     if (cap < needed)
         return 0;
@@ -86,6 +105,7 @@ size_t encode_crc_corrupted(const omgp::link::FrameFields& f, uint8_t* out, size
     return w;
 }
 
+namespace {
 // The response FrameFields a conforming node (or MockWire's Respond/CrcError/Duplicate
 // echo) sends back to `request` — dst/src swapped, response bit set, seq echoed. Shared
 // by all three Kinds: they differ only in what bytes reach the wire and when, not in

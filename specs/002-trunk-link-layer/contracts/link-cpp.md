@@ -145,6 +145,25 @@ public:
                                                   // reached. If now_us is already past request_end + T_turn_max when the
                                                   // response is due (late poll), transmits immediately and increments
                                                   // stats().late_responses (spec FR-014). No public feed().
+                                                  // (Amended in PR #149, red team @71caba0 HIGH: "immediately" is
+                                                  // qualified by trunk §3's media access -- outside its window the
+                                                  // engine owes an idle bus, so it transmits at
+                                                  // min(last_activity + T_gap, defer_origin + max_frame + T_gap)
+                                                  // when its reading of the bus is COMPLETE, and at
+                                                  // defer_origin + max_frame + T_gap (the cap alone, whatever
+                                                  // last_activity says) when the drain stopped with requests held
+                                                  // and the reading is therefore partial. The wait is RATE-
+                                                  // DEPENDENT, because max_frame_us() recomputes from the wire's
+                                                  // current rate: ~1.47 ms at TRUNK_bit_rate (142*10 + 50 us) but
+                                                  // ~12.3 ms at TRUNK_bit_rate_fallback (142*86 + 50 us, byte_time
+                                                  // 86 us by integer division) -- 8.3x, and operative exactly when
+                                                  // the trunk is degraded, since HealthTracker re-probes at the
+                                                  // fallback rate under bus_fault(). Quoting only the 1 Mb/s figure
+                                                  // would mis-size anything built on this engine by an order of
+                                                  // magnitude on its known weak axis. Pending a ruling, see
+                                                  // docs/OPEN-QUESTIONS.md 2026-09-07 "the Responder's late path
+                                                  // defers for an idle bus" and, for the collision that wait can
+                                                  // still cause, "...CAN transmit into a frame it has not read".)
     const AddrStats& stats() const;               // replays_served, discards, transactions (requests handled), late_responses
 };
 ```
