@@ -1446,17 +1446,25 @@ TEST_CASE("a request arriving when the hold is already full is left on the wire 
     RecordingHandler handler;
     Responder responder(wire, clock, handler, kMyAddr);
 
-    const uint8_t p[] = {0xA1};
+    // Distinct payloads: the handler echoes them, so each answer's payload is what proves a
+    // HELD request's own bytes were carried through the hold. With one payload for all four
+    // this case could not tell one request's body from another's -- and deep-verify @6440074
+    // showed exactly that gap, by skipping the hold's payload copy entirely and passing the
+    // whole suite.
+    const uint8_t pa[] = {0xA1, 0x0A};
+    const uint8_t pb[] = {0xB2, 0x0B};
+    const uint8_t pc[] = {0xC3, 0x0C};
+    const uint8_t pd[] = {0xD4, 0x0D};
     // A is answered late; B and C arrive back-to-back behind it, filling the hold
     // (kHeldRequests); D arrives behind them, with the hold already full.
     const uint64_t end_a =
-        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, p, sizeof p), 1000);
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, pa, sizeof pa), 1000);
     const uint64_t end_b = inject_request(
-        wire, request_bytes(kMyAddr, kPeer, false, 2, p, sizeof p), end_a + byte_us());
+        wire, request_bytes(kMyAddr, kPeer, false, 2, pb, sizeof pb), end_a + byte_us());
     const uint64_t end_c = inject_request(
-        wire, request_bytes(kMyAddr, kPeer, false, 3, p, sizeof p), end_b + byte_us());
+        wire, request_bytes(kMyAddr, kPeer, false, 3, pc, sizeof pc), end_b + byte_us());
     const uint64_t end_d = inject_request(
-        wire, request_bytes(kMyAddr, kPeer, false, 4, p, sizeof p), end_c + byte_us());
+        wire, request_bytes(kMyAddr, kPeer, false, 4, pd, sizeof pd), end_c + byte_us());
 
     for (uint64_t t = end_a + omgp::TRUNK_T_turn_max_us + 1; t <= end_d + 40000; t += byte_us())
         wire.advance_to(t, responder);
@@ -1466,8 +1474,16 @@ TEST_CASE("a request arriving when the hold is already full is left on the wire 
     INFO("answers=" << wire.transcript_size() << " discards=" << responder.stats().discards);
     REQUIRE(wire.transcript_size() == 4);
     REQUIRE(handler.calls == 4);
-    for (size_t i = 0; i < 4; ++i)
+    const uint8_t* expected[4] = {pa, pb, pc, pd};
+    for (size_t i = 0; i < 4; ++i) {
+        INFO("answer " << i);
         REQUIRE(wire.transcript(i).seq == static_cast<uint8_t>(i + 1));
+        // Each answer echoes ITS OWN request's payload. B and C came out of the hold, so
+        // this pins that the hold carried their bytes and not merely their headers.
+        REQUIRE(wire.transcript(i).len == 2);
+        REQUIRE(wire.transcript(i).payload[0] == expected[i][0]);
+        REQUIRE(wire.transcript(i).payload[1] == expected[i][1]);
+    }
     REQUIRE(responder.stats().transactions == 4);
     REQUIRE(responder.stats().discards == 0);
 }

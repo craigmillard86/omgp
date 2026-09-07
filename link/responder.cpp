@@ -175,6 +175,9 @@ void Responder::hold_or_discard(const FrameFields& f, uint64_t request_end_us) {
     // deleted, ASan aborts on exactly this line.
     // mutant-ok(accepted, cxx_ge_to_gt): unreachable by construction of poll()'s own stop.
     if (held_count_ >= kHeldRequests) {
+        // Inside that unreachable branch, so its own mutants are unreachable too; no test can
+        // reach the counter to observe which way it moves.
+        // mutant-ok(accepted, cxx_post_inc_to_post_dec): unreachable, as above.
         stats_.discards++;
         return;
     }
@@ -185,6 +188,11 @@ void Responder::hold_or_discard(const FrameFields& f, uint64_t request_end_us) {
     // (link/frame.cpp), so this copy cannot overrun slot.payload.
     static_assert(omgp::LIMIT_max_l3_payload <= sizeof(HeldRequest::payload),
                   "held_ payloads must hold the longest request the Deframer can deliver");
+    // `f.len >= 0` is true for every uint8_t, and memcpy of 0 bytes is a no-op, so widening
+    // the comparison changes nothing. Narrowing it the other way DOES lose the payload, and
+    // is killed by the distinct-payload assertions in "a request arriving when the hold is
+    // already full ..." (deep-verify @6440074 found the suite blind to exactly that).
+    // mutant-ok(equivalent, cxx_gt_to_ge): the mutation and the original coincide.
     if (f.len > 0)
         std::memcpy(slot.payload, f.payload, f.len);
     slot.request_end_us = request_end_us;
@@ -302,6 +310,9 @@ void Responder::poll(uint64_t now_us) {
     uint8_t byte;
     uint64_t start_us;
     // Set only where the drain stops with a request held; see there and transmit_if_due().
+    // Initialising it to `true` instead is NOT equivalent and is killed (11 cases): every
+    // wait would fall back to the cap. Only the `false`-to-0 rewrite coincides.
+    // mutant-ok(equivalent, cxx_init_const): the mutation and the original coincide.
     bool belief_stale = false;
     // The wire is drained only while Listening. Trunk §3 is half-duplex, one transaction
     // at a time: while a response is Scheduled (encoded, not yet due) or Transmitting
