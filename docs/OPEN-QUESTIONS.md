@@ -2857,3 +2857,40 @@ longer exists.
 **Amends:** none. **Supersedes:** the 2026-09-06 entry "SC-004's 'retry 1'/'retry 2' columns
 collapse to one case for Drop/CrcError at TRUNK_retries == 2" — same question, corrected
 scope (Drop only) and corrected count (15, not 14).
+
+## 2026-09-07 — SC-004: all 16 positions ARE exercised, by 15 cases, because two rows share one script across two columns
+
+**Supersedes** the 2026-09-07 entry "SC-004's collapsed cells: only the Drop row's is collapsed
+now…", which is **false** and which itself superseded the 2026-09-06 entry. Review @`47d481f`
+demonstrated the error by reading the four delay plans, and its framing is better than either
+of mine — the count was never the interesting question.
+
+**What the matrix actually does.** At `TRUNK_retries == 2` there is no fourth attempt, so a
+fault at retry 2 that prevents recovery *always* ends `Failed` with the answer (if any)
+arriving after give-up. "Retry 2" and "after give-up" are therefore the same script for such a
+fault, and the file scripts each once:
+
+| row | "retry 2" | "after give-up" |
+|---|---|---|
+| Drop | — | `{Drop, Drop, Drop}` (`:412`) — this IS the drop-at-retry-2 cell, filed under the later name |
+| delay-past-`T_resp` | — | `{Drop, Drop, Delay}` (`:529`) — the delay IS at retry 2 |
+| CRC-corrupt | `{Corrupt, Corrupt, Corrupt}` (`:671`) | `{Corrupt, Corrupt, Corrupt}` + a corrupt frame with **no window open** (`:702`) — genuinely distinct |
+| duplicate | `{Drop, Drop, Duplicate}` (`:812`) | `{Drop, Drop, Drop}` + two late duplicates (`:834`) — genuinely distinct |
+
+So **all 16 positions are exercised by 15 `TEST_CASE`s**, two rows sharing one script across
+two columns — not "15 of 16 with one missing", which is what both earlier entries claimed and
+what a maintainer would otherwise have been asked to accept.
+
+`:502` (`{Delay, Delay, Clean}`) was mislabelled "through retry 2": its delays are at attempts
+0 and 1, making it the **two-strays** cell (`discards == 2`, against the one-stray cell's `1`).
+Renamed to what it scripts; it is mislabelled, not vacuous, and is not being removed.
+
+**Recommendation:** amend T034's matrix description to say that at `TRUNK_retries == 2` the
+"retry 2" and "after give-up" columns coincide for any fault that prevents recovery, and that
+the criterion is met by 15 cases covering 16 positions. The alternatives previously offered
+(raise `TRUNK_retries` for this suite; add a verbatim-duplicate case) are both worse and
+neither is needed, since no position is actually uncovered.
+**Ruling:** PENDING — human. Rule on THIS entry: the two earlier ones state a coverage gap
+that does not exist.
+**Amends:** none. **Supersedes:** the 2026-09-07 entry "SC-004's collapsed cells: only the
+Drop row's is collapsed now…" and, transitively, the 2026-09-06 entry it superseded.

@@ -494,9 +494,16 @@ TEST_CASE("SC-004 delay-past-T_resp through retry 1: recovers on the second retr
     REQUIRE(loop.master.stats(kNode).discards == 1); // the one stray, observed
 }
 
-TEST_CASE("SC-004 delay-past-T_resp through retry 2: uses the full retry budget and still "
-          "recovers; both stale late answers are ignored once they finally arrive",
+TEST_CASE("SC-004 delay-past-T_resp at attempts 0 AND 1: uses the full retry budget and still "
+          "recovers on retry 2; both stale late answers are ignored once they finally arrive",
           "[link]") {
+    // Named for what it scripts, not for a matrix column it does not occupy (review
+    // @47d481f): the delay faults here sit at attempts 0 and 1, so this is the TWO-STRAYS
+    // cell -- `discards == 2` below, against the one-stray cell above. A delay at retry 2 is
+    // scripted by "delay-past-T_resp after give-up" ({Drop, Drop, Delay}), because at
+    // TRUNK_retries == 2 a delay there has no fourth attempt to recover on and always ends
+    // Failed{Timeout} with the answer arriving after give-up: for this row, as for Drop's,
+    // "retry 2" and "after give-up" are one script occupying two columns.
     Loop loop;
     const uint8_t payload[] = {0x24};
     const Fault plan[3] = {Fault::DelayPastTResp, Fault::DelayPastTResp, Fault::Clean};
