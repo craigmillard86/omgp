@@ -107,19 +107,42 @@ Master state ∈ { Idle, Transmitting(until tx_end), AwaitResponse(until tx_end 
 ## 5. Responder
 
 ```
-ReplayBuffer { bool valid; u8 seq; u16 len; u8 bytes[142] }
+ReplayBuffer { bool valid; u8 seq; u8 peer; u16 len; u8 bytes[142] }
 Responder state ∈ { Listening, Scheduled(response at request_end + turnaround_us), Transmitting(until tx_end) }
 ```
 
-- Request acceptance: intact frame, `dst == my_addr`, `response == 0`.
+- Request acceptance: intact frame, `dst == my_addr`, `response == 0`. *(Amended in PR #149,
+  red-team @`6c2fe4b` / @`71caba0` — also refused: `src == my_addr`, `src` outside trunk §5's
+  L2 range, and every request when the node's OWN address is outside it. Pending a ruling,
+  see `docs/OPEN-QUESTIONS.md` 2026-09-07 "the Responder's acceptance screen".)*
 - `retry == 1 && valid && seq == buffer.seq` → retransmit buffer (no handler call).
+  *(Amended in PR #149, red-team @`033182a` — the buffer additionally records the requester
+  (`ReplayBuffer.peer`) and a retry from a DIFFERENT station with a colliding sequence is
+  treated as new. Pending the ruling on file, `OPEN-QUESTIONS.md` 2026-09-06.)*
 - otherwise → `handler.handle(payload, len, out, cap) → resp_len` once; encode response
   (`src = my_addr`, `dst = request.src`, `response = 1`, `retry` echoed, `seq` echoed);
   store in buffer; schedule.
 - `turnaround_us` clamped to `[T_turn_min, T_turn_max]` at construction.
 - **Late poll** (spec FR-014): if the first `poll(now)` after a request has
   `now > request_end + T_turn_max`, the response is transmitted at `now` and
-  `AddrStats.late_responses` is incremented; nothing is dropped.
+  `AddrStats.late_responses` is incremented; nothing is dropped. *(Amended in PR #149,
+  red-team @`71caba0` HIGH — "at `now`" is qualified by a bounded courtesy resembling, but
+  **weaker than**, the one §4 records for the Master: outside its window the engine owes trunk
+  §3 a bus that is idle, so it transmits at
+  `min(last_activity + T_gap, defer_origin + max_frame + T_gap)` when its reading of the bus is
+  COMPLETE, and at `defer_origin + max_frame + T_gap` — the cap alone, whatever `last_activity`
+  says — when the drain stopped with requests held and the reading is therefore partial.
+  Two corrections to earlier wording of this marker, both from review rounds on #149:
+  (a) it is NOT "the same bounded courtesy §4 records for the Master". §4's property rests on
+  a drain that never exits early, so `last_activity` advances with every byte and the engine
+  "never transmits over an arriving frame"; the stale-belief path here has no such
+  precondition — Master's cap without Master's precondition (`link/responder.cpp` says the same
+  in terms). (b) It does **not** follow that the engine never keys down inside another
+  station's frame: on the stale-belief path it demonstrably can, which is an OPEN defect with a
+  reproduced counterexample, not a property. Pending a ruling, see `OPEN-QUESTIONS.md`
+  2026-09-07 "the Responder's late path defers for an idle bus" for the deferral itself, and
+  "the Responder's late path CAN transmit into a frame it has not read" for the open defect in
+  (b) — the entry the ruling should be made from, as `contracts/link-cpp.md` also points out.)*
 
 ## 6. Node health record
 

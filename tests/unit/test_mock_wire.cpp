@@ -435,3 +435,33 @@ TEST_CASE("Kind::Duplicate answers with the real response, then the identical by
     // end, not after the request's own end.
     REQUIRE(second_copy_start == first_end + 40);
 }
+
+TEST_CASE("encode_crc_corrupted refuses a payload longer than the protocol allows", "[mock]") {
+    // Red team @ef1ec22 [LOW]: the guard added with this function's export was pinned by
+    // nothing, so deleting it would pass the suite -- and what it prevents is a stack
+    // overflow, not a wrong answer. `unstuffed[kMaxUnstuffed]` is 70 bytes; f.len = 200 with
+    // a roomy `cap` clears the capacity check (2 + 2*(4 + 200 + 2) = 414) and then writes 206.
+    static_assert(kMaxUnstuffed < 200, "the case below must exceed the internal buffer");
+    const std::vector<uint8_t> payload(200, 0xAB);
+    const omgp::link::FrameFields f{0x01,
+                                    omgp::ADDR_host,
+                                    /*response=*/true,
+                                    /*retry=*/false,
+                                    /*seq=*/3,
+                                    static_cast<uint8_t>(payload.size()),
+                                    payload.data()};
+    uint8_t out[512];
+    REQUIRE(omgp_test::encode_crc_corrupted(f, out, sizeof out) == 0);
+
+    // ...and still encodes the longest payload the protocol DOES allow, so the guard is a
+    // bound and not a blanket refusal.
+    const std::vector<uint8_t> ok(omgp::LIMIT_max_l3_payload, 0xCD);
+    const omgp::link::FrameFields g{0x01,
+                                    omgp::ADDR_host,
+                                    /*response=*/true,
+                                    /*retry=*/false,
+                                    /*seq=*/3,
+                                    static_cast<uint8_t>(ok.size()),
+                                    ok.data()};
+    REQUIRE(omgp_test::encode_crc_corrupted(g, out, sizeof out) > 0);
+}

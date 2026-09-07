@@ -86,4 +86,6 @@ invalid corpus.
 ```
 
 Raise `UNIT_TEST_FLOOR` in `pipeline.sh` to the new executed count minus slack (never lower
-it). Open the PR with claim-labelled evidence (CLAUDE.md rule 11) and a NOT EXAMINED section.
+it). A new `tests/unit/test_*.cpp` must also be registered in `CMakeLists.txt`
+(`omgp_add_catch_test`): the `unit` stage fails by name for a source that is not compiled,
+registered and executed (`tools/check_test_set.py`, #133). Open the PR with claim-labelled evidence (CLAUDE.md rule 11) and a NOT EXAMINED section.
