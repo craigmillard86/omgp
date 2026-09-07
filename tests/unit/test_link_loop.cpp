@@ -124,11 +124,19 @@ struct CountingHandler : RequestHandler {
 // Responder's answer arriving through the hand-built bridge below). One Silence entry per
 // possible transmission this file's tests ever make to one node (generously above the 3
 // attempts/transaction x 2 transactions any single TEST_CASE below needs).
+// Sized deliberately, and asserted against in bridge_latest_request(): when a wildcard script
+// runs out, MockWire falls back to answering for itself -- so exhausting this one would make
+// the host_wire fabricate responses with no Responder involved, and every cell past that point
+// would pass without testing anything (red team @e4fffd9). No cell reaches it today (the
+// busiest run two transactions), but that is this file's current contents, not a guarantee:
+// the next cell added, or one more retry position, would cross silently. The assertion turns
+// that into "harness budget exceeded" instead of a fabricated pass.
 constexpr Step kAlwaysSilence[] = {
     {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence},
     {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence},
     {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence},
 };
+constexpr size_t kAlwaysSilenceLen = sizeof(kAlwaysSilence) / sizeof(kAlwaysSilence[0]);
 
 // One real Master + one real Responder (behind a counting handler), each on its own MockWire,
 // both sharing a FakeClock, built from MockWire's public surface only (see file comment).
@@ -149,8 +157,7 @@ struct Loop {
 
     Loop()
         : responder(node_wire, clock, handler, kNode), master(host_wire, clock, omgp::ADDR_host) {
-        host_wire.set_script(0xFF, kAlwaysSilence,
-                             sizeof(kAlwaysSilence) / sizeof(kAlwaysSilence[0]));
+        host_wire.set_script(0xFF, kAlwaysSilence, kAlwaysSilenceLen);
     }
 };
 
@@ -218,6 +225,9 @@ BridgedAttempt bridge_latest_request(Loop& loop, uint8_t dst) {
     // injects it as though the node had just answered -- same seq, same payload, so no content
     // assertion can tell. A Responder that counted replays_served and never scheduled the
     // retransmit passed 13 of 18 cells that way (red team @410ce9f finding 2).
+    // The host_wire's silence script must still be covering this transmission; see
+    // kAlwaysSilence. Checked here rather than trusted, because exhausting it fails OPEN.
+    REQUIRE(loop.host_wire.transcript_size() < kAlwaysSilenceLen);
     const size_t node_frames_before = loop.node_wire.transcript_size();
     const size_t idx = loop.host_wire.transcript_size() - 1;
     const auto req = loop.host_wire.transcript(idx); // copy: stable across further calls
