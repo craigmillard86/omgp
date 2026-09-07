@@ -239,8 +239,14 @@ BridgedAttempt bridge_latest_request(Loop& loop, uint8_t dst) {
     loop.node_wire.inject_bytes(req_bytes.data(), req_bytes.size(), req.tx_start_us);
     loop.node_wire.advance_to(req_tx_end, loop.responder); // drains the request
     REQUIRE_FALSE(loop.handler.overflowed);
-    const uint64_t response_start_us = req_tx_end + omgp::TRUNK_T_turn_min_us; // default
-    loop.node_wire.advance_to(response_start_us, loop.responder); // transmits the reply
+    // Poll to the OUTER edge of trunk §9's turnaround, not to T_turn_min. The clock has to
+    // reach T_turn_max for the upper bound below to be able to bind at all: advancing only to
+    // T_turn_min made `resp.tx_start_us <= req_tx_end + T_turn_max` unfailable, and any
+    // Responder conforming to §9 with a turnaround above the minimum failed at the
+    // transcript-grew REQUIRE instead of at the range check the comment advertised (review
+    // @2b34974 -- my own claim about what that check established was false). Both edges are
+    // real now, and a conforming node anywhere in the band passes.
+    loop.node_wire.advance_to(req_tx_end + omgp::TRUNK_T_turn_max_us, loop.responder);
 
     // The node really answered THIS attempt, and the record below is that answer.
     REQUIRE(loop.node_wire.transcript_size() == node_frames_before + 1);
@@ -941,7 +947,7 @@ TEST_CASE("SC-004 a retry whose sequence differs from the node's buffered answer
     REQUIRE_FALSE(attempt0.retry);
     // Not bridged: the node never sees it. Let the Master's own T_resp time it out.
     const uint64_t attempt0_end =
-        attempt0.tx_start_us + static_cast<uint64_t>(attempt0.len + 8) * byte_us();
+        attempt0.tx_start_us + static_cast<uint64_t>(encode_response(attempt0).size()) * byte_us();
     loop.host_wire.advance_to(attempt0_end + omgp::TRUNK_T_resp_us + omgp::TRUNK_T_gap_us,
                               loop.master);
     REQUIRE(loop.master.attempts() == 2); // the retry has gone out
