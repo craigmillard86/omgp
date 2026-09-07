@@ -1046,6 +1046,29 @@ def test_round_budget_inputs_come_from_the_default_branch_not_the_pr():
     assert "base.ref" in co["with"]["ref"], "review must keep checking out the trusted base"
 
 
+def test_round_budget_steps_fail_soft():
+    """A missing or broken counter must never take a verdict job down with it — the budget is
+    an optimisation on top of the review, not a precondition for it. Live failure on the very
+    PR that adds it (#252, run 34094405452/34094405488): claude-review checks out the trusted
+    BASE and red-team reads origin/main, neither of which carried tools/round_budget.py yet,
+    so the step exited 2 / 128 and both gates went red. The fallback is the pre-ruling
+    behaviour (budget off, every in-scope finding blocks) — the same direction as every other
+    failure mode here."""
+    for wfn, job in (("claude-review.yml", "review"), ("red-team.yml", "attack-pr")):
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / wfn).read_text())
+        step = next(s for s in wf["jobs"][job]["steps"] if s.get("id") == "rounds")
+        run = step["run"]
+        assert "budget=0" in run, f"{wfn}: no budget-off fallback"
+        assert "budget_exceeded=false" in run, f"{wfn}: fallback must not claim the budget is spent"
+        assert "|| out=\"\"" in run, f"{wfn}: the counter's failure must not fail the step"
+        assert "set -euo pipefail" not in run, f"{wfn}: -e would abort before the fallback runs"
+    # red-team must still refuse to run the PR's own copy (the guardrail the fallback sits on)
+    rt = yaml.safe_load((ROOT / ".github" / "workflows" / "red-team.yml").read_text())
+    run = next(s for s in rt["jobs"]["attack-pr"]["steps"] if s.get("id") == "rounds")["run"]
+    assert "git cat-file -e origin/main:tools/round_budget.py" in run
+    assert "python3 tools/round_budget.py" not in run
+
+
 def test_round_budget_config_key_is_present_and_sane():
     """The default is the ruling's: 3. Read here so a silent deletion of the key (which the
     script reads as "budget off") is a test failure rather than an invisible policy reversal."""

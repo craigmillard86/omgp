@@ -89,9 +89,23 @@ jobs:
           PR: ${{ github.event.pull_request.number || inputs.pr }}
           HEAD: ${{ steps.head.outputs.sha }}
         run: |
-          gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
-            | python3 tools/round_budget.py --head "$HEAD" >> "$GITHUB_OUTPUT"
-          cat "$GITHUB_OUTPUT"
+          # Fails SOFT, always. This step is an optimisation on top of the review; a counter
+          # that is missing (this checkout is the trusted BASE, which predates the script on
+          # the PR that adds it, and would again after any revert), broken, or rate-limited
+          # must never take the reviewer's verdict down with it. The fallback is the
+          # pre-ruling behaviour: budget off, every in-scope finding blocks.
+          out=""
+          if [ -f tools/round_budget.py ]; then
+            out=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                  | python3 tools/round_budget.py --head "$HEAD") || out=""
+          fi
+          case "$out" in
+            round=*) ;;
+            *) echo "::notice::round budget unavailable — falling back to budget off"
+               out=$'round=1\nbudget=0\nbudget_exceeded=false\nprevious_head=' ;;
+          esac
+          printf '%s\n' "$out" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$out"
 
       - name: Claude Code — focused review
         # Every tier is reviewed (not only T2/T3) since the 2026-08-31 approval ruling:
