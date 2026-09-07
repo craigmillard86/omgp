@@ -112,6 +112,44 @@ the enforcement.
     row so "standing loops are enumerated in OPERATING-POLICY §4" above is
     true of all of them, not just the five named there (review on #96).
 
+- Adversarial round budget (`adversarial_round_budget`, ruled 2026-09-07).
+  The scope ruling (#134/#136) bounded findings by SCOPE. This bounds them
+  by TIME as well, because scope alone does not terminate: the red team's
+  search space is the set of properties the code does NOT check, which is
+  unbounded, and a PR that answers every round faithfully can still be
+  examined forever. Measured: #149 took six adversarial rounds and #145
+  five, each costing a full `deep-verify` + `attack-pr` cycle (~45-50 min
+  of gate time each), and three of #149's six re-raised the same on-file
+  unruled question because an unruled divergence blocks by rule.
+  - **A round is a head, not a comment.** A red-team verdict following a
+    review verdict on the same commit is one round — the rule the
+    review-fix loop already uses for its attempts. Counted mechanically
+    from the verdict comments by `tools/round_budget.py`, in the same shape
+    `agent-approve` parses (claude[bot], last non-blank line, full sha).
+  - **Rounds 1..N are unchanged.** Past N, a finding still BLOCKS only if
+    it is `[HIGH]`, a defect in code the PR changed SINCE the previous
+    verdict head (a regression the fix rounds introduced), or a false claim
+    in the PR body. Every other real finding is routed to `## FOLLOW-UPS`
+    and filed as a `task` issue by `review-followups.yml` — scheduled, not
+    dropped — and the comment must say the budget applied and which
+    findings it moved.
+  - **What this deliberately gives up.** A clean verdict past the budget
+    can now co-exist with known, filed, non-HIGH weaknesses, and
+    `agent-approve`/`agent-merge` act on that verdict. That is the trade:
+    a bounded loop with a visible backlog, instead of an unbounded loop
+    whose cost is paid in gate time and reviewer attention. The `[HIGH]`
+    escape hatch means a genuine severe defect still blocks at any round —
+    #149's round-6 bus-busy finding would have blocked under this rule.
+  - **Never.** The budget never suppresses a finding: everything found is
+    still reported, in full, with its reproducer. It changes routing only.
+    An agent may not raise its own budget — `.github/agent-config.yml` is
+    T3/CODEOWNERS, and both jobs read the value and the counter from the
+    default branch, never from the PR's own checkout.
+  - **Kill switch:** `adversarial_round_budget: 0` restores the unbounded
+    loop. An unreadable value fails closed to the same.
+  - **Not yet in the OPERATING-POLICY §4 table** — same as the loops
+    below; a human adds the row.
+
 - Review-finding auto-resolution (`review-fix` workflow, ruled 2026-09-02).
   `claude-review` and `red-team` are read-only, and the only consumer of
   their verdict (`agent-approve`) merely withholds approval — so an

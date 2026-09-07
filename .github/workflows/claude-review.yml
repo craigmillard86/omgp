@@ -81,6 +81,32 @@ jobs:
         uses: ./.github/actions/risk-tier     # read from the trusted base checkout above
         with: {pr: '${{ github.event.pull_request.number || inputs.pr }}'}
 
+      - name: Adversarial round budget
+        # See red-team.yml's step of the same name (ruling 2026-09-07, GOVERNANCE §4).
+        id: rounds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          HEAD: ${{ steps.head.outputs.sha }}
+        run: |
+          # Fails SOFT, always. This step is an optimisation on top of the review; a counter
+          # that is missing (this checkout is the trusted BASE, which predates the script on
+          # the PR that adds it, and would again after any revert), broken, or rate-limited
+          # must never take the reviewer's verdict down with it. The fallback is the
+          # pre-ruling behaviour: budget off, every in-scope finding blocks.
+          out=""
+          if [ -f tools/round_budget.py ]; then
+            out=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                  | python3 tools/round_budget.py --head "$HEAD") || out=""
+          fi
+          case "$out" in
+            round=*) ;;
+            *) echo "::notice::round budget unavailable — falling back to budget off"
+               out=$'round=1\nbudget=0\nbudget_exceeded=false\nprevious_head=' ;;
+          esac
+          printf '%s\n' "$out" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$out"
+
       - name: Claude Code — focused review
         # Every tier is reviewed (not only T2/T3) since the 2026-08-31 approval ruling:
         # T0/T1 approvals hang off this verdict, so the verdict must always exist.
@@ -136,6 +162,27 @@ jobs:
             NEVER route a defect, security hole, weakened test, spec
             divergence or unmet acceptance criterion to FOLLOW-UP — those
             are BLOCKING at every severity. When unsure, BLOCK.
+            ROUND BUDGET (docs/GOVERNANCE.md §4, ruling 2026-09-07): this is
+            adversarial round ${{ steps.rounds.outputs.round }} of
+            ${{ steps.rounds.outputs.budget }};
+            budget_exceeded=${{ steps.rounds.outputs.budget_exceeded }},
+            previous verdict head
+            `${{ steps.rounds.outputs.previous_head }}`. If that flag is
+            false, classify exactly as above and ignore the rest of this
+            paragraph. If it is TRUE, this PR has already been reviewed to
+            budget and the loop is bounded from here: a finding is BLOCKING
+            only if (a) its severity is `[HIGH]`, or (b) it is a defect in
+            code the PR changed SINCE the previous verdict head (a
+            regression the fix rounds themselves introduced), or (c) the PR
+            body makes a claim that is false at this head. Everything else
+            — including a real defect you would otherwise block on — goes to
+            "## FOLLOW-UPS", where review-followups.yml files it as a `task`
+            issue: it is scheduled, not dropped. In particular, a divergence
+            already recorded in docs/OPEN-QUESTIONS.md and awaiting a human
+            ruling is a FOLLOW-UP past the budget, not a finding to raise
+            again — say it is on file and move on. Review no less carefully;
+            only the routing changes. Say plainly in the comment that the
+            budget applied and name every finding it moved.
             List BLOCKING findings first (severity-ordered, file:line). Then
             a section headed exactly "## FOLLOW-UPS" — one bullet per
             proposed issue as "TITLE — one line of why", or "none".

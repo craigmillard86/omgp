@@ -48,6 +48,17 @@ auto_merge_max_tier: 2
 # edit .github/workflows/*.
 review_fix_max_attempts: 4
 
+# How many adversarial rounds (review + red team at one head = one round) a
+# PR gets before findings are routed by TIME as well as scope (ruling
+# 2026-09-07; GOVERNANCE §4 "Adversarial round budget"). Past it, only a
+# [HIGH], a regression the fix rounds themselves introduced, or a false claim
+# in the PR body still BLOCKS; every other real finding becomes a FOLLOW-UP
+# issue via review-followups.yml. 0 disables the budget and restores the
+# unbounded loop; an unreadable value fails closed the same way (stricter,
+# never wider). Values above 10 are clamped DOWN to 10 — a typo must not make
+# the budget unreachable. Read at RUN time from the default branch.
+adversarial_round_budget: 3
+
 # Backstops that make auto-release safe (do not remove):
 # - ready-gate still validates the enriched story mechanically
 # - risk-score re-rates the ACTUAL diff at PR time; a T2+/T3 outcome from

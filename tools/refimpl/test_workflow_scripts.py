@@ -920,3 +920,170 @@ def test_red_team_deletes_the_restored_binaries_before_the_agent_can_run_them(tm
     clock = idx(lambda s: s.get("id") == "clock")
     assert clock == 0, "the Clock step must be first: timeout-minutes counts from the job start, not from after checkout+toolchain"
     assert "steps.clock.outputs.start" in prompt and "steps.clock.outputs.deadline" in prompt
+
+
+# --- adversarial round budget (tools/round_budget.py, ruling 2026-09-07) -----------------------
+
+ROUND_BUDGET = ROOT / "tools" / "round_budget.py"
+
+
+def _round_budget(comments, head, config="adversarial_round_budget: 3\n", tmp_path=None):
+    """Run the round counter over a mocked comments payload; return its GITHUB_OUTPUT dict."""
+    cfg = tmp_path / "agent-config.yml"
+    cfg.write_text(config)
+    r = subprocess.run(["python3", str(ROUND_BUDGET), "--head", head, "--config", str(cfg)],
+                       input=json.dumps(comments), capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return dict(line.split("=", 1) for line in r.stdout.strip().splitlines() if "=" in line)
+
+
+def _verdict(sha, kind="red-team", state="findings", login="claude[bot]", trailer=""):
+    return {"user": {"login": login},
+            "body": f"## Round\n\nsome findings\n\nNOT EXAMINED: nothing\n\n"
+                    f"VERDICT({kind}): {state} @ {sha}{trailer}"}
+
+
+A = "a" * 40
+B = "b" * 40
+C = "c" * 40
+D = "d" * 40
+
+
+def test_round_budget_counts_distinct_earlier_heads(tmp_path):
+    """The round number is what makes the budget mechanical: how many heads of THIS PR have
+    already been adversarially examined. Distinct earlier heads, not comments — a red-team
+    verdict following a review verdict on the same commit is the same round (the review-fix
+    loop's own "at most one attempt per head" rule, GOVERNANCE §4)."""
+    assert _round_budget([], D, tmp_path=tmp_path)["round"] == "1"
+    assert _round_budget([_verdict(A)], D, tmp_path=tmp_path)["round"] == "2"
+    # Same head twice (review + red team) is one round; three distinct earlier heads is round 4.
+    same_head = [_verdict(A, "review"), _verdict(A, "red-team")]
+    assert _round_budget(same_head, D, tmp_path=tmp_path)["round"] == "2"
+    assert _round_budget([_verdict(A), _verdict(B), _verdict(C)], D, tmp_path=tmp_path)["round"] == "4"
+    # A verdict at the CURRENT head is this round's own earlier pass, never a previous round.
+    assert _round_budget([_verdict(A), _verdict(D, "review")], D, tmp_path=tmp_path)["round"] == "2"
+
+
+def test_round_budget_accepts_gh_paginate_concatenated_arrays(tmp_path):
+    """gh api --paginate prints one JSON array per page; the counter must accept concatenated arrays."""
+    cfg = tmp_path / "agent-config.yml"
+    cfg.write_text("adversarial_round_budget: 3\n")
+    stdin = json.dumps([_verdict(A)]) + "\n" + json.dumps([_verdict(B)])
+    r = subprocess.run(["python3", str(ROUND_BUDGET), "--head", D, "--config", str(cfg)],
+                       input=stdin, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = dict(line.split("=", 1) for line in r.stdout.strip().splitlines() if "=" in line)
+    assert out["round"] == "3"
+
+
+def test_round_budget_exceeded_only_past_the_budget(tmp_path):
+    """Rounds 1..budget are unchanged; the re-routing starts only after."""
+    for prior, expected in (([], "false"), ([_verdict(A)], "false"),
+                            ([_verdict(A), _verdict(B)], "false"),
+                            ([_verdict(A), _verdict(B), _verdict(C)], "true")):
+        out = _round_budget(prior, D, tmp_path=tmp_path)
+        assert out["budget_exceeded"] == expected, out
+
+def test_round_budget_parses_verdicts_exactly_as_the_approval_gate_does(tmp_path):
+    """Same shape agent-approve.yml parses: claude[bot] only, LAST non-blank line, trimmed.
+    A quoted verdict mid-comment must not advance the round — otherwise a PR could spend its
+    own budget by quoting itself (#103's rule, applied here)."""
+    quoted = {"user": {"login": "claude[bot]"},
+              "body": f"I disagree with `VERDICT(review): clean @ {A}`\n\nNOT EXAMINED: none\n"}
+    assert _round_budget([quoted], D, tmp_path=tmp_path)["round"] == "1"
+    # Trailing text after the verdict line is no verdict either.
+    assert _round_budget([_verdict(A, trailer="\n\nps. more")], D, tmp_path=tmp_path)["round"] == "1"
+    # Whitespace around the last line is tolerated, as in the gate's jq.
+    assert _round_budget([_verdict(A, trailer="   ")], D, tmp_path=tmp_path)["round"] == "2"
+    # A human (or another bot) writing a verdict-shaped line does not advance the round.
+    assert _round_budget([_verdict(A, login="someone")], D, tmp_path=tmp_path)["round"] == "1"
+
+
+def test_round_budget_reports_the_previous_verdict_head(tmp_path):
+    """Past the budget the blocking set narrows to what the FIX ROUNDS introduced, so the
+    caller needs the head the last verdict was given at to diff against."""
+    out = _round_budget([_verdict(A), _verdict(B)], D, tmp_path=tmp_path)
+    assert out["previous_head"] == B
+    assert _round_budget([], D, tmp_path=tmp_path)["previous_head"] == ""
+
+
+def test_round_budget_fails_closed_on_an_unreadable_or_disabled_budget(tmp_path):
+    """Fail closed means TODAY's behaviour (every in-scope finding blocks), never a wider
+    licence: an unreadable, absent, zero or negative value leaves the budget off. Mirrors
+    auto_fix_max_attempts' own clamping rules (agent-config.yml)."""
+    many = [_verdict(A), _verdict(B), _verdict(C)]
+    for cfg in ("adversarial_round_budget: 0\n", "adversarial_round_budget: -1\n",
+                "adversarial_round_budget: 4.9\n", "adversarial_round_budget: 0x10\n",
+                "wip_cap: 2\n", ""):
+        out = _round_budget(many, D, config=cfg, tmp_path=tmp_path)
+        assert out["budget_exceeded"] == "false", (cfg, out)
+    # An inline comment after the value is tolerated, as elsewhere in agent-config.yml.
+    out = _round_budget(many, D, config="adversarial_round_budget: 3   # ruling 2026-09-07\n",
+                        tmp_path=tmp_path)
+    assert out["budget_exceeded"] == "true"
+    # Clamped, so a typo cannot switch the loop off by making the budget unreachable.
+    out = _round_budget(many, D, config="adversarial_round_budget: 99\n", tmp_path=tmp_path)
+    assert out["budget"] == "10" and out["budget_exceeded"] == "false"
+
+
+def test_round_budget_is_wired_into_both_verdict_prompts():
+    """The budget only ever LOOSENS what blocks, so its own guardrails are the safety: the
+    [HIGH] escape hatch, the regression clause, the false-claim clause, and "filed, not
+    dropped". Pinned the same way #136's were, after the same lesson."""
+    for wfn, job in (("claude-review.yml", "review"), ("red-team.yml", "attack-pr")):
+        prompt = _verdict_prompt(wfn, job)
+        assert "ROUND BUDGET" in prompt, f"{wfn} dropped the round budget clause"
+        assert "steps.rounds.outputs.budget_exceeded" in prompt, f"{wfn} budget flag unwired"
+        assert "steps.rounds.outputs.previous_head" in prompt, f"{wfn} previous head unwired"
+        assert "`[HIGH]`" in prompt, f"{wfn} dropped the HIGH escape hatch"
+        assert "SINCE the previous verdict head" in prompt, f"{wfn} dropped the regression clause"
+        assert "scheduled, not dropped" in prompt, f"{wfn} must route past-budget findings to issues"
+        assert "## FOLLOW-UPS" in prompt, f"{wfn} needs the section review-followups.yml consumes"
+
+
+def test_round_budget_inputs_come_from_the_default_branch_not_the_pr():
+    """red-team's checkout IS the PR's head (it must build and run the change), and the budget
+    can only loosen — so a PR that edited tools/round_budget.py or agent-config.yml would be
+    granting itself an unbounded budget. Both are read from origin/main there. claude-review
+    checks out the trusted base already (red team F3), so it reads them from the workspace."""
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "red-team.yml").read_text())
+    step = next(s for s in wf["jobs"]["attack-pr"]["steps"] if s.get("id") == "rounds")
+    assert "git show origin/main:tools/round_budget.py" in step["run"]
+    assert "git show origin/main:.github/agent-config.yml" in step["run"]
+    assert "tools/round_budget.py --head" not in step["run"], "must not run the PR's own copy"
+
+    review = yaml.safe_load((ROOT / ".github" / "workflows" / "claude-review.yml").read_text())
+    co = next(s for s in review["jobs"]["review"]["steps"] if "actions/checkout" in s.get("uses", ""))
+    assert "base.ref" in co["with"]["ref"], "review must keep checking out the trusted base"
+
+
+def test_round_budget_steps_fail_soft():
+    """A missing or broken counter must never take a verdict job down with it — the budget is
+    an optimisation on top of the review, not a precondition for it. Live failure on the very
+    PR that adds it (#252, run 34094405452/34094405488): claude-review checks out the trusted
+    BASE and red-team reads origin/main, neither of which carried tools/round_budget.py yet,
+    so the step exited 2 / 128 and both gates went red. The fallback is the pre-ruling
+    behaviour (budget off, every in-scope finding blocks) — the same direction as every other
+    failure mode here."""
+    for wfn, job in (("claude-review.yml", "review"), ("red-team.yml", "attack-pr")):
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / wfn).read_text())
+        step = next(s for s in wf["jobs"][job]["steps"] if s.get("id") == "rounds")
+        run = step["run"]
+        assert "budget=0" in run, f"{wfn}: no budget-off fallback"
+        assert "budget_exceeded=false" in run, f"{wfn}: fallback must not claim the budget is spent"
+        assert "|| out=\"\"" in run, f"{wfn}: the counter's failure must not fail the step"
+        assert "set -euo pipefail" not in run, f"{wfn}: -e would abort before the fallback runs"
+    # red-team must still refuse to run the PR's own copy (the guardrail the fallback sits on)
+    rt = yaml.safe_load((ROOT / ".github" / "workflows" / "red-team.yml").read_text())
+    run = next(s for s in rt["jobs"]["attack-pr"]["steps"] if s.get("id") == "rounds")["run"]
+    assert "git cat-file -e origin/main:tools/round_budget.py" in run
+    assert "python3 tools/round_budget.py" not in run
+
+
+def test_round_budget_config_key_is_present_and_sane():
+    """The default is the ruling's: 3. Read here so a silent deletion of the key (which the
+    script reads as "budget off") is a test failure rather than an invisible policy reversal."""
+    cfg = (ROOT / ".github" / "agent-config.yml").read_text()
+    m = re.search(r"^adversarial_round_budget:\s*(\d+)", cfg, re.MULTILINE)
+    assert m, "agent-config.yml lost adversarial_round_budget — the budget would be off"
+    assert 1 <= int(m.group(1)) <= 10, f"budget {m.group(1)} outside the ruled range"

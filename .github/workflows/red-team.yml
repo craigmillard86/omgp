@@ -71,6 +71,40 @@ jobs:
       - id: tier
         uses: ./.github/actions/risk-tier
         with: {pr: '${{ github.event.pull_request.number }}'}
+      - name: Adversarial round budget
+        # How many heads of this PR have already been judged (tools/round_budget.py; ruling
+        # 2026-09-07, GOVERNANCE §4). Unlike claude-review, THIS job's checkout is the PR's
+        # own head, and the budget can only ever LOOSEN what blocks — so both the counter and
+        # the budget value are read from origin/main, never from the PR. Otherwise a PR could
+        # grant itself an unbounded budget by editing either file. (origin/main is already
+        # relied on in this job's verdict guard below, same checkout.)
+        id: rounds
+        if: steps.tier.outputs.deep == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Fails SOFT, always — see claude-review.yml's step of the same name. Here the
+          # inputs come from origin/main rather than this checkout (which IS the PR's head,
+          # and the budget can only loosen what blocks), so the bootstrap case is real: on
+          # the PR that ADDS the script, main does not carry it yet.
+          out=""
+          if git cat-file -e origin/main:tools/round_budget.py 2>/dev/null; then
+            git show origin/main:tools/round_budget.py > "$RUNNER_TEMP/round_budget.py"
+            git show origin/main:.github/agent-config.yml > "$RUNNER_TEMP/agent-config.yml" \
+              || : > "$RUNNER_TEMP/agent-config.yml"
+            out=$(gh api "repos/${{ github.repository }}/issues/$PR/comments" --paginate \
+                  | python3 "$RUNNER_TEMP/round_budget.py" --head "$HEAD" \
+                      --config "$RUNNER_TEMP/agent-config.yml") || out=""
+          fi
+          case "$out" in
+            round=*) ;;
+            *) echo "::notice::round budget unavailable — falling back to budget off"
+               out=$'round=1\nbudget=0\nbudget_exceeded=false\nprevious_head=' ;;
+          esac
+          printf '%s\n' "$out" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$out"
       - name: Below T2 — no attack pass
         if: steps.tier.outputs.deep != 'true'
         run: |
@@ -174,6 +208,26 @@ jobs:
             NEVER route a weakness the change introduced, a security hole,
             a weakened test or a spec divergence to FOLLOW-UP. When unsure,
             BLOCK. List BLOCKING findings first; then "## FOLLOW-UPS".
+            ROUND BUDGET (docs/GOVERNANCE.md §4, ruling 2026-09-07): this is
+            adversarial round ${{ steps.rounds.outputs.round }} of
+            ${{ steps.rounds.outputs.budget }};
+            budget_exceeded=${{ steps.rounds.outputs.budget_exceeded }},
+            previous verdict head
+            `${{ steps.rounds.outputs.previous_head }}`. If that flag is
+            false, classify exactly as above and ignore the rest of this
+            paragraph. If it is TRUE, this PR has already been attacked to
+            budget and the loop is bounded from here: a finding is BLOCKING
+            only if (a) its severity is `[HIGH]`, or (b) it is a defect in
+            code the PR changed SINCE the previous verdict head
+            (`git diff <previous head>..HEAD` — a regression the fix rounds
+            themselves introduced), or (c) the PR body makes a claim that is
+            false at this head. Everything else — including a real weakness
+            you would otherwise block on — goes to "## FOLLOW-UPS", where
+            review-followups.yml files it as a `task` issue: it is
+            scheduled, not dropped. Attack no less hard; only the routing
+            changes. Say plainly in the comment that the budget applied and
+            name every finding it moved, so the human sees what was
+            deferred and can rule otherwise.
             If everything you tried passed, say exactly what you
             attacked and concede: "attacked N vectors, change held."
             Never file style opinions. Never modify the PR. A finding
