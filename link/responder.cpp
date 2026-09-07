@@ -161,15 +161,38 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
     deadline_us_ = request_end_us + turnaround_us_;
 }
 
+bool Responder::stash_full() const {
+    // Occupancy, not high-water mark: bytes below `next` have been re-fed and stash() will
+    // reclaim them (see there). Strictly greater than kMaxWire: at exactly kMaxWire the
+    // RESERVE slot is still free, so the engine may read one more byte -- and whether one is
+    // there is precisely what tells it whether the wire has gone quiet or it is looking away
+    // from traffic (red team @2efcb67).
+    return static_cast<size_t>(held_.len - held_.next) > kMaxWire;
+}
+
 void Responder::stash(uint8_t byte, uint64_t start_us) {
     // The stash keeps arrival order and each byte's own start instant, so a re-fed byte is
     // indistinguishable to the Deframer (and to the timing computed from it) from one read
     // straight off the wire.
+    // Reclaim what has already been re-fed: bytes below `next` are spent, so shifting the
+    // remainder down makes their space usable again. Without this a stash that filled once
+    // stayed full for its whole re-feed, and every request re-fed out of it was answered
+    // blind, at its own full cap, with the wire undrained throughout -- 24.87 ms to clear a
+    // queue that arrived in 1.42 ms (red team @2efcb67, RT2).
+    if (held_.len > kMaxWire && held_.next > 0) {
+        const uint16_t remaining = static_cast<uint16_t>(held_.len - held_.next);
+        for (uint16_t i = 0; i < remaining; ++i) {
+            held_.bytes[i] = held_.bytes[held_.next + i];
+            held_.start_us[i] = held_.start_us[held_.next + i];
+        }
+        held_.len = remaining;
+        held_.next = 0;
+    }
     // Unreachable: poll() establishes room before it consumes a byte (see there). Kept as
     // defence in depth against an out-of-bounds write, never as the place the bound is
     // enforced; no test can reach it.
-    // mutant-ok(accepted, cxx_ge_to_gt): unreachable by construction of poll()'s own check.
-    if (held_.len >= kMaxWire)
+    // mutant-ok(accepted, cxx_gt_to_ge): unreachable by construction of poll()'s own check.
+    if (held_.len > kMaxWire)
         return;
     held_.bytes[held_.len] = byte;
     // Each byte's own start instant, kept verbatim. It is READ for the request_end_us of a
@@ -213,7 +236,7 @@ uint64_t Responder::max_frame_us() const {
     return static_cast<uint64_t>(kMaxWire) * byte_time_us(wire_.bit_rate());
 }
 
-void Responder::transmit_if_due(uint64_t now_us, bool queue_drained) {
+void Responder::transmit_if_due(uint64_t now_us, bool queue_drained, bool belief_stale) {
     if (state_ == State::Transmitting) {
         // Strict `<`: transmit_until_us_ is "the instant of the final stop bit" (ByteWire),
         // so a poll() at exactly that instant already finds the wire free and drains the
@@ -265,15 +288,18 @@ void Responder::transmit_if_due(uint64_t now_us, bool queue_drained) {
         // no longer; past it, a station still occupying the wire is a §3 violator and the
         // transaction goes out on schedule.
         const uint64_t cap_us = defer_origin_us_ + max_frame_us() + omgp::TRUNK_T_gap_us;
-        // A full stash means the drain has stopped taking bytes (poll(): it must, or it
-        // would destroy them), so last_activity_us_ is no longer being refreshed and says
-        // nothing about the bus from here on. Acting on it would be exactly the frozen
-        // belief of red team @7d31410, just bounded by the stash instead of by one held
-        // request. Blind therefore means "wait out the cap" -- the bounded fallback -- not
-        // "assume idle": the engine transmits on schedule at cap_us and no earlier.
-        const bool blind = held_.len >= kMaxWire;
+        // If poll()'s drain stopped on the stash bound, last_activity_us_ is no longer being
+        // refreshed and says nothing about the bus from here on. Acting on it would be the
+        // frozen belief of red team @7d31410, bounded by the stash instead of by one held
+        // request -- so a stale belief means "wait out the cap", never "assume idle".
+        //
+        // It must be the EXIT that decides, not the stash's occupancy: when the byte that
+        // fills the stash is also the last byte on the wire, both are true at once and
+        // last_activity_us_ is perfectly current. Reading fullness as staleness held the
+        // response for a further max_frame + T_gap on a bus the engine had just watched go
+        // quiet -- 1420 us of extra silence bought by one byte (red team @2efcb67).
         uint64_t want_us = cap_us;
-        if (!blind)
+        if (!belief_stale)
             want_us = has_activity_ ? last_activity_us_ + omgp::TRUNK_T_gap_us : now_us;
         // `a > b ? b : a` and `a >= b ? b : a` both compute min(a, b); they differ only at
         // a == b, where both branches yield the same value (Master's label, :278-281).
@@ -293,6 +319,8 @@ void Responder::transmit_if_due(uint64_t now_us, bool queue_drained) {
 void Responder::poll(uint64_t now_us) {
     uint8_t byte;
     uint64_t start_us;
+    // Set only where the drain stops on the stash bound; see there and transmit_if_due().
+    bool belief_stale = false;
     // The wire is drained only while Listening. Trunk §3 is half-duplex, one transaction
     // at a time: while a response is Scheduled (encoded, not yet due) or Transmitting
     // (physically occupying the wire until transmit_until_us_) any bytes that have already
@@ -315,7 +343,7 @@ void Responder::poll(uint64_t now_us) {
     // bound applies is docs/OPEN-QUESTIONS.md 2026-09-06 ("held-request queue is
     // unbounded"), pending human -- not decided here.
     for (;;) {
-        transmit_if_due(now_us, /*queue_drained=*/false);
+        transmit_if_due(now_us, /*queue_drained=*/false, /*belief_stale=*/false);
         const bool listening = state_ == State::Listening;
         // `held_.len > 0`, not `next < len`: the last re-fed byte leaves the cursor AT len,
         // and it is refeed() that clears both. Entering only while bytes remain would leave
@@ -355,8 +383,16 @@ void Responder::poll(uint64_t now_us) {
         // frame re-fed as headless garbage (red team @b262d46 finding 1). Full, the drain
         // simply stops and everything, including this byte, waits in the wire's receive
         // queue exactly as it did before the stash existed.
-        if (waiting && held_.len >= kMaxWire)
+        //
+        // This exit, and ONLY this one, leaves the engine's picture of the bus incomplete:
+        // there are bytes it has chosen not to look at. The other exit below -- the wire's
+        // queue is empty -- leaves it complete and current. They mean opposite things for
+        // the T_gap judgement, so which one was taken is recorded rather than inferred
+        // (red team @2efcb67).
+        if (waiting && stash_full()) {
+            belief_stale = true;
             break;
+        }
         if (!wire_.receive(byte, start_us))
             break;
         // Every byte drained, whatever becomes of it, is evidence the bus was busy: its END
@@ -388,7 +424,7 @@ void Responder::poll(uint64_t now_us) {
     // The drain loop has stopped: the wire's queue is empty, an accepted request ended it,
     // or the stash is full. Only now -- with last_activity_us_ current for every byte the
     // engine could read -- can a late response be judged against the bus.
-    transmit_if_due(now_us, /*queue_drained=*/true);
+    transmit_if_due(now_us, /*queue_drained=*/true, belief_stale);
 }
 
 } // namespace link

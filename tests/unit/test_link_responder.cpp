@@ -1474,3 +1474,119 @@ TEST_CASE("a request whose first byte lands exactly on the stash bound is answer
     REQUIRE(wire.transcript(1).dst == 0x07);
     REQUIRE(responder.stats().transactions == 2);
 }
+
+// --- red team @2efcb67: the drain's two exits mean opposite things -----------------------
+
+TEST_CASE("a late response goes out T_gap after the last byte the engine saw, whether or "
+          "not that byte happened to fill the stash: only an UNREAD wire is blindness",
+          "[link][timing:T_gap]") {
+    // The drain stops either because the stash is full (bytes left unread: the belief about
+    // the bus is stale) or because the wire's queue is empty (nothing left to read: the
+    // belief is current and complete). When the byte that fills the stash is also the last
+    // byte on the wire both are true at once, and reading fullness as staleness cost a
+    // further max_frame + T_gap of silence on a bus the engine had just watched go quiet --
+    // 1420 us bought by one byte. GENERATE spans exactly that boundary.
+    const size_t noise_len = GENERATE(kMaxWire - 1, kMaxWire);
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t p[] = {0x11};
+    const uint64_t request_end =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, p, sizeof p), 1000);
+
+    // Noise from just past the window, then nothing at all: the bus is idle from its last
+    // byte onward, and the engine drains every byte of it in one late poll.
+    const uint64_t noise_start = request_end + omgp::TRUNK_T_turn_max_us + 1;
+    std::vector<uint8_t> noise(noise_len, 0x5C);
+    REQUIRE(noise[0] != omgp::TRUNK_flag_byte);
+    wire.inject_bytes(noise.data(), noise.size(), noise_start);
+    const uint64_t noise_end = noise_start + noise.size() * byte_us();
+
+    for (uint64_t t = noise_end; t <= noise_end + 4 * omgp::TRUNK_T_gap_us; t += byte_us())
+        wire.advance_to(t, responder);
+
+    INFO("noise_len=" << noise_len << " noise_end=" << noise_end);
+    REQUIRE(wire.transcript_size() == 1);
+    // T_gap after the last byte actually seen -- not one worst-case frame later.
+    REQUIRE(wire.transcript(0).tx_start_us == noise_end + omgp::TRUNK_T_gap_us);
+    REQUIRE(responder.stats().late_responses == 1);
+}
+
+TEST_CASE("a burst that fills the stash is drained and answered at wire speed, not one "
+          "bounded wait per request: re-fed space is reclaimed",
+          "[link]") {
+    // held_.next was never reclaimed, so a stash that filled once stayed "full" for its
+    // whole re-feed: every request re-fed out of it was answered blind, at its own full cap,
+    // with poll() taking no bytes off the wire throughout -- 24.87 ms to clear a queue that
+    // arrived in 1.42 ms (red team @2efcb67, RT2). On the ESP32-S3, whose UART RX FIFO is
+    // 128 bytes (docs/OPEN-QUESTIONS.md 2026-09-06), a non-draining window that long loses
+    // bytes rather than queueing them.
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t p[] = {0x11};
+    const uint64_t request_end =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, p, sizeof p), 1000);
+
+    // Back-to-back requests filling exactly the stash, then an idle bus.
+    const uint64_t burst_start = request_end + omgp::TRUNK_T_turn_max_us + 1;
+    std::vector<uint8_t> burst;
+    uint8_t seq = 2;
+    while (burst.size() < kMaxWire) {
+        const std::vector<uint8_t> b = request_bytes(kMyAddr, kPeer, false, seq++, p, sizeof p);
+        burst.insert(burst.end(), b.begin(), b.end());
+    }
+    burst.resize(kMaxWire);
+    wire.inject_bytes(burst.data(), burst.size(), burst_start);
+    const uint64_t burst_end = burst_start + burst.size() * byte_us();
+
+    // ...and one more request arriving while that backlog is still being re-fed. This is
+    // what makes the reclamation load-bearing rather than an optimisation: a new wait begins
+    // with the stash part-consumed, so without reclaiming the spent prefix `len` is already
+    // at the array bound and stash() would silently drop this request's bytes -- the very
+    // loss the reserve slot and the pre-receive check exist to prevent.
+    const uint8_t tail_payload[] = {0x99};
+    const uint64_t tail_at = burst_end + 300;
+    const uint64_t tail_end = inject_request(
+        wire, request_bytes(kMyAddr, 0x07, false, 15, tail_payload, sizeof tail_payload), tail_at);
+    REQUIRE(tail_end > burst_end);
+
+    wire.advance_to(burst_end, responder);
+    for (uint64_t t = burst_end + byte_us(); t <= burst_end + 60000; t += byte_us())
+        wire.advance_to(t, responder);
+
+    // The straggler is answered like any other request: nothing was dropped.
+    bool answered_tail = false;
+    for (size_t i = 0; i < wire.transcript_size(); ++i)
+        if (wire.transcript(i).dst == 0x07 && wire.transcript(i).seq == 15)
+            answered_tail = true;
+    REQUIRE(answered_tail);
+
+    REQUIRE(wire.transcript_size() > 1);
+    // The BURST's own answers (all to kPeer); the straggler above came from 0x07 and arrived
+    // after burst_end, so its answer is not part of this drain.
+    uint64_t last_burst_tx = 0;
+    size_t burst_answers = 0;
+    for (size_t i = 0; i < wire.transcript_size(); ++i)
+        if (wire.transcript(i).dst == kPeer) {
+            last_burst_tx = wire.transcript(i).tx_start_us;
+            ++burst_answers;
+        }
+    INFO("answers=" << wire.transcript_size() << " of which burst=" << burst_answers
+                    << " burst_end=" << burst_end << " last=" << last_burst_tx
+                    << " delta=" << (last_burst_tx - burst_end));
+    REQUIRE(burst_answers > 1);
+    // The backlog clears at WIRE SPEED, not one bounded wait per request. The yardstick is
+    // physical: the burst is one worst-case frame of arrivals and its answers are frames of
+    // the same order, so two worst-case frame times is the floor for emitting them all --
+    // the observed drain sits just above one. A wait per request would be
+    // burst_answers * (max_frame + T_gap), an order of magnitude more; before this round's
+    // two fixes this backlog took 24.87 ms to clear 1.42 ms of arrivals.
+    const uint64_t max_frame_us = static_cast<uint64_t>(kMaxWire) * byte_us();
+    REQUIRE(last_burst_tx - burst_end < 2 * max_frame_us);
+    REQUIRE(last_burst_tx - burst_end < burst_answers * (max_frame_us + omgp::TRUNK_T_gap_us) / 4);
+}
