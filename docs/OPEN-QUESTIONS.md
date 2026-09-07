@@ -2620,3 +2620,30 @@ counted. The entry's Impact/Options text stands; only those two absolutes are wi
 `stale_requests` counter. Until ruled, behaviour is (a) and the pinning test records it.
 **Amends:** the 2026-09-06 "held, not discarded" entry (two sentences of its recommendation,
 as stated). **Supersedes:** none.
+
+## 2026-09-07 — the Responder's replay entry has no age bound: after a seq wrap a retry can be answered from a stale buffer
+
+**Context:** red team @`71caba0` finding 2 (#149). `link/responder.cpp`'s replay key is
+`f.retry && buffer_.valid && f.seq == buffer_.seq && f.src == buffer_.peer`: no comparison
+against the request bytes, and `buffer_.valid` is set once and never cleared. `seq` is 4 bits
+(`link/frame.cpp:129`), so it wraps every 16 transactions. Reachable by a *conformant* host,
+not only a forger: if this node accepts nothing for 16 of the host's transactions (a noise
+burst, SUSPECT-rate polling, a deaf window), the buffer still holds `seq = 5` when the host's
+counter comes round to 5 again — and if the host's first attempt at that new request is lost
+and it retries, the responder replays the ancient answer. L3 then receives a stale reply: a
+stale parameter value, or an ACK for a SET that was never executed. Reproducers A2 and A3 on
+#149 (A3: still replayed 10 s on, 10× the §7 OFFLINE bound). CLAUDE.md rule 2 does not cover
+it — idempotency makes *re-execution* safe; it does not make *not executing, and answering
+from a stale buffer*, safe. trunk §7 scopes a replay to "a retry of a sequence **it already
+answered**", which this is not.
+**Recommendation:** invalidate the entry once the answered request's own response window has
+passed (`request_end + T_resp`): a retry arriving after that is treated as new and re-invokes
+the handler, which rule 2 makes safe. The alternative — keep the entry but compare the
+buffered request's bytes — closes the same case without inventing a lifetime, at the cost of
+storing the request alongside the response (fixed buffer, embedded-path budget to check).
+Neither trunk §7 nor `data-model.md` §5 bounds a replay's lifetime, so no code was written
+on #149: CLAUDE.md, "when a spec ambiguity blocks you, implement nothing speculative".
+**Ruling:** PENDING — human. (Maintainer's direction 2026-09-07: record it, do not implement.)
+**Amends:** none. **Supersedes:** none — distinct from the 2026-09-06 `{peer, seq}` entry,
+which is about a FOREIGN `src` evicting an entry; this is the same peer served the wrong
+answer, and that entry's recommended `f.src == ADDR_host` screen does not address it.

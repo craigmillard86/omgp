@@ -75,13 +75,43 @@ class Responder {
         uint8_t bytes[kMaxWire] = {};
     };
 
+    // One decoded request that arrived while a late response was still waiting for an idle
+    // bus (see poll()): the wire's own receive queue can no longer hold it, because the
+    // engine must drain those bytes to see the bus at all. At most ONE — a second complete
+    // frame ends the drain and stays in the wire's queue, exactly as before.
+    struct HeldRequest {
+        bool valid = false;
+        FrameFields f = {};
+        uint8_t payload[omgp::LIMIT_max_l3_payload] = {};
+        uint64_t request_end_us = 0;
+    };
+
     // Decides new-vs-replay for one intact frame addressed to my_addr, or counts a
-    // discard: for a frame not addressed to it, or a request whose src is the reserved
-    // 0xFF marker (never answerable — see the .cpp). Only ever called while Listening
-    // (poll() stops draining otherwise), so a pending response is never overwritten.
-    // Schedules an accepted request's response at request_end_us + turnaround_us_
-    // (data-model.md §5).
+    // discard: for a frame this node is not addressed by or could never answer — a
+    // different dst, a RESPONSE-bit frame, a src equal to my_addr, or a src outside trunk
+    // §5's L2 address range (see the .cpp). Only ever called while Listening — poll()
+    // either stops draining or holds what it decodes otherwise — so a pending response is
+    // never overwritten. Schedules an accepted request's response at request_end_us +
+    // turnaround_us_ (data-model.md §5).
     void on_request(const FrameFields& f, uint64_t request_end_us);
+
+    // data-model.md §5 "Request acceptance", plus the two address bounds this engine owes
+    // trunk §5: the claimed source of an accepted request, and this node's own address.
+    bool acceptable(const FrameFields& f) const;
+
+    // The late path's counterpart to on_request(): a frame decoded while a response is
+    // still waiting for an idle bus is either discarded and counted (not this node's) or
+    // held, unanswered, until the wire is free.
+    void hold_or_discard(const FrameFields& f, uint64_t request_end_us);
+
+    // True while a scheduled response is already outside trunk §9's turnaround window, the
+    // FR-014 late-poll path: the one state in which the engine must judge the bus for
+    // itself before transmitting (trunk §3; see transmit_if_due).
+    bool past_window(uint64_t now_us) const;
+
+    // kMaxWire byte times at the wire's current rate — the bound on how long the engine
+    // waits for an idle bus (Master::max_frame_us(), link/master.cpp:173).
+    uint64_t max_frame_us() const;
 
     // Transmits the Scheduled response and moves to Transmitting once `now_us` has
     // reached its deadline; moves Transmitting back to Listening once `now_us` has
@@ -89,7 +119,7 @@ class Responder {
     // iteration of poll()'s drain loop — ahead of every byte, and once more after the last
     // — so a response already due is flushed, and the wire found free again, before the
     // next queued byte is drained (see poll()'s own comment).
-    void transmit_if_due(uint64_t now_us);
+    void transmit_if_due(uint64_t now_us, bool queue_drained);
 
     ByteWire& wire_;
     // Stored for the constructor-signature parity with Master/Health (link-cpp.md
@@ -116,6 +146,20 @@ class Responder {
     // Set to wire_.transmit()'s own return value once State::Transmitting is entered: the
     // instant the wire is free again (data-model.md §5 "until tx_end").
     uint64_t transmit_until_us_ = 0;
+
+    // The END of the last byte drained from the wire, and whether any has been (Master's
+    // last_activity_/has_last_activity_ pair, link/master.cpp): the engine's evidence that
+    // the bus is busy, used only on the late path where trunk §3's window guarantee no
+    // longer covers it.
+    uint64_t last_activity_us_ = 0;
+    bool has_activity_ = false;
+    // The instant a late response first found the bus busy — the origin of the bounded
+    // wait (defer_origin + max_frame + T_gap; Master's defer_origin_us_). Cleared on every
+    // transmit; the flag distinguishes "not deferring" from a legitimate origin of 0.
+    uint64_t defer_origin_us_ = 0;
+    bool has_defer_origin_ = false;
+
+    HeldRequest held_ = {};
 
     AddrStats stats_ = {};
 };

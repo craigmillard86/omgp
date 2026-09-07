@@ -56,7 +56,7 @@ const AddrStats& Responder::stats() const {
     return stats_;
 }
 
-void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
+bool Responder::acceptable(const FrameFields& f) const {
     // `f.src` is wire-derived: the Deframer validates only `dst == 0xFF` (link/frame.cpp:142),
     // never `src`, so this is the one place the claimed source is bounded before it becomes
     // a response's `dst` (below) and the replay key's `peer`. Trunk §5 confines L2 addresses
@@ -67,9 +67,20 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
     // finding 2). The static_assert keeps the reserved marker 0xFF — the earlier, narrower
     // screen: a response to it could never be encoded (link/frame.cpp:17-18) — inside the
     // refused range if kAddrCount is ever edited, rather than letting that lapse silently.
+    // my_addr_ is the symmetric half: it becomes the `src` of every frame this node
+    // originates (below), and was the last address in this engine with no bound at all
+    // (red team @71caba0 finding 3). A Responder configured outside trunk §5's range
+    // answers nothing rather than putting a non-L2 source on the trunk — the constructor
+    // returns no Status, so this is the only place the rule can be enforced, and it is
+    // enforced where every other address is.
     static_assert(kAddrCount <= 0xFF, // literal-ok: trunk §5 reserved address, not an event code
                   "kAddrCount must leave trunk §5's reserved address refused by src >= kAddrCount");
-    if (f.dst != my_addr_ || f.response || f.src == my_addr_ || f.src >= kAddrCount) {
+    return f.dst == my_addr_ && !f.response && f.src != my_addr_ && f.src < kAddrCount &&
+           my_addr_ < kAddrCount;
+}
+
+void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
+    if (!acceptable(f)) {
         // Not a request addressed to this node (data-model.md §5 "Request acceptance"), or
         // one whose claimed source this node could never legitimately answer: silently
         // discarded, counted (trunk §4), and — load-bearing for FR-015 — never allowed to
@@ -150,7 +161,47 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
     deadline_us_ = request_end_us + turnaround_us_;
 }
 
-void Responder::transmit_if_due(uint64_t now_us) {
+void Responder::hold_or_discard(const FrameFields& f, uint64_t request_end_us) {
+    // Reached only from the late path, where the engine drains the wire to see the bus
+    // (poll()). A frame it could not answer anyway is discarded and counted exactly as it
+    // would be while Listening — the same screen, so the only difference from before this
+    // round is WHEN the discard is counted, not whether.
+    if (!acceptable(f)) {
+        stats_.discards++;
+        return;
+    }
+    // Otherwise it is a request this node owes an answer to, and the wire's receive queue
+    // is no longer holding it for us: it moves into the engine, unanswered, until the
+    // pending response has gone out. Nothing is dropped (FR-015/FR-016; red team @e510b29
+    // finding 1). held_.valid is false here by construction — poll() stops draining while
+    // it is set — so no held request can be overwritten by a later one.
+    held_.f = f;
+    held_.f.payload = held_.payload;
+    // f.len is bounded by the Deframer, which refuses anything longer as Discard::BadLength
+    // (link/frame.cpp) — so this copy cannot overrun held_.payload.
+    static_assert(omgp::LIMIT_max_l3_payload <= sizeof(HeldRequest::payload),
+                  "held_.payload must hold the longest request the Deframer can deliver");
+    if (f.len > 0)
+        std::memcpy(held_.payload, f.payload, f.len);
+    held_.request_end_us = request_end_us;
+    held_.valid = true;
+}
+
+bool Responder::past_window(uint64_t now_us) const {
+    // The OUTER bound of trunk §9's turnaround, not this engine's own (possibly shorter)
+    // configured deadline: up to it, FR-017's "never outside a response window" is what
+    // every other station is obeying too, so the bus is this node's by protocol.
+    return state_ == State::Scheduled && now_us > request_end_us_ + omgp::TRUNK_T_turn_max_us;
+}
+
+uint64_t Responder::max_frame_us() const {
+    // kMaxWire byte times — the codec's own worst-case stuffed-frame bound, recomputed on
+    // every call so a set_bit_rate() during the wait is honoured at once (Master's
+    // max_frame_us(), link/master.cpp:173-175, verbatim reasoning).
+    return static_cast<uint64_t>(kMaxWire) * byte_time_us(wire_.bit_rate());
+}
+
+void Responder::transmit_if_due(uint64_t now_us, bool queue_drained) {
     if (state_ == State::Transmitting) {
         // Strict `<`: transmit_until_us_ is "the instant of the final stop bit" (ByteWire),
         // so a poll() at exactly that instant already finds the wire free and drains the
@@ -166,11 +217,55 @@ void Responder::transmit_if_due(uint64_t now_us) {
     // reach it and now_us is already past the OUTER T_turn_max bound (not just this
     // Responder's own, possibly shorter, configured deadline), it is transmitted at once
     // rather than backdated, and counted rather than silently dropped.
-    const uint64_t late_bound_us = request_end_us_ + omgp::TRUNK_T_turn_max_us;
-    const bool late = now_us > late_bound_us;
+    const bool late = past_window(now_us);
+    if (late) {
+        // The belief below is only as good as what the engine has actually seen, so the
+        // late transmit happens once poll()'s drain loop has stopped — never at the top of
+        // an iteration with bytes still unread behind it, which is precisely how the
+        // engine used to key down inside another station's frame.
+        if (!queue_drained)
+            return;
+        // ...at once, but not blind. Inside the window the bus is this node's by protocol
+        // (trunk §3: the host is the only initiator and is waiting out T_resp); outside it
+        // that guarantee is gone, and ByteWire's contract — "the engine never transmits
+        // while it believes the bus is busy" — obliges the engine to form the belief from
+        // what is actually on the wire, as Master::fire_pending does (link/master.cpp:205).
+        // poll() has drained every byte due at now_us before calling this on the late path,
+        // so last_activity_us_ is current (red team @71caba0 finding 1: the engine keyed
+        // down strictly inside another station's frame, corrupting a frame addressed to a
+        // THIRD node, which trunk §7 then escalates to SUSPECT).
+        //
+        // Never transmit with less than T_gap of idle after the last byte received
+        // (data-model.md §4 "Gap"). Within a frame bytes are contiguous, so the last byte
+        // drained at any poll instant ends strictly after now_us — the wait therefore holds
+        // for as long as bytes keep coming, at a constant bit rate (Master's own argument,
+        // link/master.cpp:215-235; the same rate-change caveat applies, docs/OPEN-QUESTIONS
+        // 2026-09-06 "rate change mid-stream").
+        if (!has_defer_origin_) {
+            defer_origin_us_ = now_us;
+            has_defer_origin_ = true;
+        }
+        // ...but bounded, for the reason Master's cap exists (link/master.cpp:241-273): a
+        // station holding the wire without pause would otherwise deny the gap forever and
+        // starve the response, against FR-014's "MUST still transmit". One worst-case frame
+        // plus T_gap past the instant the transmission was first deferred is long enough for
+        // any single frame already on the wire then to finish AND receive its full gap, and
+        // no longer; past it, a station still occupying the wire is a §3 violator and the
+        // transaction goes out on schedule.
+        const uint64_t cap_us = defer_origin_us_ + max_frame_us() + omgp::TRUNK_T_gap_us;
+        uint64_t want_us = has_activity_ ? last_activity_us_ + omgp::TRUNK_T_gap_us : now_us;
+        // `a > b ? b : a` and `a >= b ? b : a` both compute min(a, b); they differ only at
+        // a == b, where both branches yield the same value (Master's label, :278-281).
+        // mutant-ok(equivalent, cxx_gt_to_ge): min(a, b) either way.
+        if (want_us > cap_us)
+            want_us = cap_us;
+        if (now_us < want_us)
+            return; // deferred: still Scheduled, retried on the next poll()
+    }
     transmit_until_us_ = wire_.transmit(buffer_.bytes, buffer_.len, now_us);
     if (late)
         stats_.late_responses++;
+    has_defer_origin_ = false;
     state_ = State::Transmitting;
 }
 
@@ -199,25 +294,53 @@ void Responder::poll(uint64_t now_us) {
     // bound applies is docs/OPEN-QUESTIONS.md 2026-09-06 ("held-request queue is
     // unbounded"), pending human -- not decided here.
     for (;;) {
-        transmit_if_due(now_us);
-        if (state_ != State::Listening)
+        transmit_if_due(now_us, /*queue_drained=*/false);
+        const bool listening = state_ == State::Listening;
+        if (listening && held_.valid) {
+            // The wire is free again: the request decoded during the wait is answered
+            // before any newer byte is drained, so the queue keeps its arrival order.
+            const HeldRequest h = held_;
+            held_.valid = false;
+            FrameFields f = h.f;
+            f.payload = h.payload;
+            on_request(f, h.request_end_us);
+            continue;
+        }
+        // Listening: the normal drain. past_window(): a response whose window has closed
+        // is waiting for an idle bus, and the ONLY way this engine can see the bus is to
+        // read it — so it does, and holds what it decodes (red team @71caba0 finding 1).
+        // While Transmitting, and while Scheduled INSIDE the window, bytes still wait
+        // untouched in the wire's receive queue (red team @e510b29 finding 1).
+        if (!listening && !(past_window(now_us) && !held_.valid))
             break;
         if (!wire_.receive(byte, start_us))
             break;
+        // Every byte drained, whatever becomes of it, is evidence the bus was busy: its
+        // END instant, since within a frame each byte starts where the previous one ended
+        // (Master's identical recording, link/master.cpp:215-227).
+        last_activity_us_ = start_us + byte_time_us(wire_.bit_rate());
+        has_activity_ = true;
 
         const uint32_t discards_before = total_discards(deframer_.stats());
         FrameView view{};
         const bool delivered = deframer_.feed(byte, view);
         if (delivered) {
             const uint64_t request_end_us = start_us + byte_time_us(wire_.bit_rate());
-            on_request(view.f, request_end_us);
+            if (listening) {
+                on_request(view.f, request_end_us);
+            } else {
+                hold_or_discard(view.f, request_end_us);
+            }
             continue;
         }
         if (total_discards(deframer_.stats()) > discards_before)
             stats_.discards++;
     }
-    // No trailing transmit_if_due(): every exit from the loop above is preceded by one,
-    // and a request accepted by on_request() (state_ -> Scheduled) loops back to the top.
+    // The drain loop has stopped: either the wire's queue is empty, or a decoded request
+    // is held behind the response that must go out first. Only now can a late response be
+    // judged against the bus (transmit_if_due's own comment) -- the in-window path already
+    // fired at the top of the loop.
+    transmit_if_due(now_us, /*queue_drained=*/true);
 }
 
 } // namespace link
