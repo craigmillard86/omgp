@@ -964,6 +964,18 @@ def test_round_budget_counts_distinct_earlier_heads(tmp_path):
     assert _round_budget([_verdict(A), _verdict(D, "review")], D, tmp_path=tmp_path)["round"] == "2"
 
 
+def test_round_budget_accepts_gh_paginate_concatenated_arrays(tmp_path):
+    """gh api --paginate prints one JSON array per page; the counter must accept concatenated arrays."""
+    cfg = tmp_path / "agent-config.yml"
+    cfg.write_text("adversarial_round_budget: 3\n")
+    stdin = json.dumps([_verdict(A)]) + "\n" + json.dumps([_verdict(B)])
+    r = subprocess.run(["python3", str(ROUND_BUDGET), "--head", D, "--config", str(cfg)],
+                       input=stdin, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = dict(line.split("=", 1) for line in r.stdout.strip().splitlines() if "=" in line)
+    assert out["round"] == "3"
+
+
 def test_round_budget_exceeded_only_past_the_budget(tmp_path):
     """Rounds 1..budget are unchanged; the re-routing starts only after."""
     for prior, expected in (([], "false"), ([_verdict(A)], "false"),
@@ -971,7 +983,6 @@ def test_round_budget_exceeded_only_past_the_budget(tmp_path):
                             ([_verdict(A), _verdict(B), _verdict(C)], "true")):
         out = _round_budget(prior, D, tmp_path=tmp_path)
         assert out["budget_exceeded"] == expected, out
-
 
 def test_round_budget_parses_verdicts_exactly_as_the_approval_gate_does(tmp_path):
     """Same shape agent-approve.yml parses: claude[bot] only, LAST non-blank line, trimmed.

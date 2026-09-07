@@ -69,13 +69,23 @@ def main() -> int:
     ap.add_argument("--config", default=".github/agent-config.yml")
     args = ap.parse_args()
 
+    data = sys.stdin.read()
+    comments: list[dict] = []
     try:
-        comments = json.load(sys.stdin)
-        if not isinstance(comments, list):
-            comments = []
-    except (json.JSONDecodeError, ValueError):
+        decoder = json.JSONDecoder()
+        pos = 0
+        while True:
+            while pos < len(data) and data[pos].isspace():
+                pos += 1
+            if pos >= len(data):
+                break
+            obj, pos = decoder.raw_decode(data, pos)
+            if isinstance(obj, list):
+                comments.extend(x for x in obj if isinstance(x, dict))
+            elif isinstance(obj, dict):
+                comments.append(obj)
+    except (json.JSONDecodeError, ValueError, TypeError):
         comments = []
-
     seen: list[str] = []
     for c in comments if isinstance(comments, list) else []:
         head = verdict_head(c) if isinstance(c, dict) else None
