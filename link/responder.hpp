@@ -110,9 +110,10 @@ class Responder {
     // trunk §5: the claimed source of an accepted request, and this node's own address.
     bool acceptable(const FrameFields& f) const;
 
-    // Stash one byte drained during the wait (see HeldBytes). False when the stash is full,
-    // which ends the drain — the byte is NOT consumed in that case.
-    bool stash(uint8_t byte, uint64_t start_us);
+    // Stash one byte drained during the wait (see HeldBytes). poll() establishes room
+    // BEFORE it takes a byte off the wire, so this never has to refuse: a byte the stash
+    // could not hold would already have been consumed, and lost.
+    void stash(uint8_t byte, uint64_t start_us);
 
     // Feed the Deframer one stashed byte, if any is pending, exactly as poll()'s drain loop
     // feeds a byte from the wire. Returns false when the stash is empty.
