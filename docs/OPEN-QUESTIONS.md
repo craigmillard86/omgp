@@ -2725,3 +2725,27 @@ discarded" was written to close — measured at 6/8, 4/8 and 3/8 answered at 400
 open is whether the latency is acceptable and how the target's FIFO bound is to be met.
 **Amends:** the 2026-09-07 entry "the Responder's late path defers for an idle bus" — same
 mechanism, this records what the deferral now costs. **Supersedes:** none.
+
+## 2026-09-07 — a CRC-corrupt frame arriving with no transaction open moves no counter at all
+
+**Context:** found while adding the CrcError row's missing "after give-up" cell to
+`tests/unit/test_link_loop.cpp` (#145; review @`ef1ec22` MEDIUM). The cell was written
+expecting the bad CRC to be charged to the node and measured otherwise: with no window open,
+`stats(node).crc_failures` is unmoved, `stats(node).discards` is 0 and `bus_stats().bus_faults`
+is 0 — the frame is invisible in `stats()` entirely. The mechanism is not a bug in this PR:
+a corrupt frame never decodes, so there is no `f.src` to attribute it to, and
+`link/master.cpp`'s discard accounting charges `dst_` only while awaiting a response. The
+Duplicate row's late copy is counted precisely because it decodes cleanly and has a source.
+**Why it may matter:** trunk §4 makes discards the bus's own health signal, and §7 escalates
+on failure accounting. Corruption occurring *between* transactions — a marginal transceiver,
+a babbling station whose bytes happen to form a bad frame — is exactly the condition that
+signal exists for, and today it is unobservable: a rig could be visibly corrupting frames
+with every counter reading zero.
+**Recommendation:** count a frame-level discard with no window open against a bus-level
+counter rather than a node one (`BusStats.bus_faults`, or a new `BusStats.orphan_discards`
+if `bus_faults` is reserved for the §7 all-nodes-failing condition). It cannot be charged to
+a node, and that is the point: it is bus-level evidence. Not implemented here — the code is
+`link/master.cpp` (T031/#49, closed), outside #52's diff, and #145 has pinned today's
+observable rather than changed it.
+**Ruling:** PENDING — human. If adopted, it wants its own issue against T031.
+**Amends:** none. **Supersedes:** none.

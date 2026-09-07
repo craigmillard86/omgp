@@ -46,9 +46,15 @@ uint8_t corrupt_crc_hi(uint8_t real_hi) {
 // XOR 0xFF" (approximately - see corrupt_crc_hi() above for the wire-length-preserving
 // exception). Duplicates encode_frame's unstuffed-build-then-stuff steps (link/frame.cpp)
 // rather than post-processing its output, so every byte other than the corrupted CRC high
-// byte is stuffed exactly as a real response's would be. encode_frame's own refusals
-// (PayloadTooLong/ReservedAddress) do not apply here: `request` is a frame this same
-// MockWire just decoded, so `f.dst == request.src` is already a real trunk address.
+// byte is stuffed exactly as a real response's would be.
+//
+// This used to say encode_frame's refusals "do not apply here: `request` is a frame this same
+// MockWire just decoded". That premise died when the symbol gained external linkage and a
+// caller that builds FrameFields by hand (review @ef1ec22): PayloadTooLong is now enforced
+// below, and the surviving divergence is ReservedAddress -- a `dst` of 0xFF is accepted here
+// and refused by encode_frame. That is deliberate for a fault injector, which must be able to
+// put a frame on the wire that the codec would not produce, and it is stated rather than
+// resting on the retired premise.
 size_t encode_crc_corrupted(const omgp::link::FrameFields& f, uint8_t* out, size_t cap) {
     using namespace omgp::link;
     // Same worst-case bound as encode_frame (link/frame.cpp), checked up front: this runs

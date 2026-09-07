@@ -131,8 +131,14 @@ constexpr Step kAlwaysSilence[] = {
 };
 
 // One real Master + one real Responder (behind a counting handler), each on its own MockWire,
-// both sharing a FakeClock — "one MockWire ... each node's MockWire handler being that node's
-// Responder" (tasks.md T034), built from MockWire's public surface only (see file comment).
+// both sharing a FakeClock, built from MockWire's public surface only (see file comment).
+//
+// This is NOT #52's wiring as written -- that asks for ONE MockWire with each node's MockWire
+// handler being that node's Responder, and no handler here is ever wired to the Responder.
+// The quotation used to sit on this line as though it described the code, which read as a
+// claim of conformance (review @ef1ec22). The divergence and its rationale are on file:
+// docs/OPEN-QUESTIONS.md 2026-09-06, pending a human ruling on whether to accept the bridge
+// or amend the criterion.
 struct Loop {
     FakeClock clock;
     MockWire host_wire{clock};
@@ -254,12 +260,30 @@ MasterEvent run_transaction(Loop& loop, uint8_t dst, const uint8_t* payload, siz
             // host_wire's RX queue until the test ends.
             const uint64_t dup_start = full_end + omgp::TRUNK_T_gap_us;
             loop.host_wire.inject_bytes(resp_bytes.data(), resp_bytes.size(), dup_start);
-            const MasterEvent ev = loop.host_wire.advance_to(full_end, loop.master);
+            MasterEvent ev = loop.host_wire.advance_to(full_end, loop.master);
+            // link/master.hpp: "payload points into Master's own buffer and is valid only
+            // until the next poll() call" -- and the duplicate below IS another poll(). The
+            // bytes are copied into this frame's own storage first, so the caller's later
+            // `ev.response.payload[0]` reads THIS answer rather than whatever the buffer holds
+            // afterwards (review @ef1ec22: the cells were reading outside the documented
+            // window, and reading the right bytes only by an internal detail master.hpp does
+            // not promise -- byte-identical to the duplicate, so no mutation could tell).
+            // Function-local static, not a stack array: the pointer below outlives this
+            // frame, and a stack buffer would dangle the moment run_transaction returns
+            // (ASan stack-use-after-return, caught here before it was committed). The suite
+            // is single-threaded and each cell reads the answer before the next call.
+            static uint8_t answer[omgp::LIMIT_max_l3_payload];
+            const uint8_t answer_len = ev.response.len;
+            REQUIRE(answer_len <= sizeof answer);
+            if (ev.kind == MasterEvent::Answered && answer_len > 0)
+                std::memcpy(answer, ev.response.payload, answer_len);
             const uint64_t dup_end =
                 dup_start + static_cast<uint64_t>(resp_bytes.size()) * byte_us();
             const MasterEvent late = loop.host_wire.advance_to(dup_end, loop.master);
             REQUIRE(late.kind == MasterEvent::None);
             REQUIRE_FALSE(loop.master.busy());
+            if (ev.kind == MasterEvent::Answered)
+                ev.response.payload = answer;
             return ev;
         }
 
@@ -600,7 +624,7 @@ TEST_CASE("SC-004 CRC-corrupted response through retry 1: recovers on the second
     REQUIRE(loop.master.stats(kNode).crc_failures == 2);
 }
 
-TEST_CASE("SC-004 CRC-corrupted response after give-up: Failed{CrcFailed} after exactly 3 "
+TEST_CASE("SC-004 CRC-corrupted response through retry 2: Failed{CrcFailed} after exactly 3 "
           "transmissions, handler invoked once",
           "[link]") {
     Loop loop;
@@ -623,6 +647,60 @@ TEST_CASE("SC-004 CRC-corrupted response after give-up: Failed{CrcFailed} after 
         INFO("attempt " << i);
         REQUIRE(loop.node_wire.transcript(i).seq == 0);
     }
+}
+
+TEST_CASE("SC-004 CRC-corrupted frame after give-up: a corrupt frame arriving with no "
+          "transaction open is discarded, with no event and no re-opened transaction",
+          "[link]") {
+    // Review @ef1ec22 [MEDIUM]: the case above scripts {Corrupt, Corrupt, Corrupt}, which is
+    // the RETRY-2 position -- it was named "after give-up" and so claimed a matrix position it
+    // did not exercise. Unlike the Drop row, whose "after give-up" cell really is degenerate
+    // at TRUNK_retries == 2 (docs/OPEN-QUESTIONS.md 2026-09-06), the CrcError row's is a real
+    // and distinct scenario: a corrupt frame with NO window open, which the Duplicate and
+    // Delay rows both test and nothing here tested for a corrupt one.
+    Loop loop;
+    const uint8_t payload[] = {0x35};
+    const Fault plan[3] = {Fault::Corrupt, Fault::Corrupt, Fault::Corrupt};
+    const MasterEvent ev = run_transaction(loop, kNode, payload, sizeof payload, plan);
+    REQUIRE(ev.kind == MasterEvent::Failed);
+    REQUIRE(ev.reason == MasterEvent::CrcFailed);
+    REQUIRE(loop.master.attempts() == 3);
+    const uint32_t crc_failures_before = loop.master.stats(kNode).crc_failures;
+    REQUIRE(crc_failures_before == 3);
+
+    // The node's last (corrupted) answer arrives again, long after the transaction failed.
+    const auto resp = loop.node_wire.transcript(loop.node_wire.transcript_size() - 1);
+    uint8_t buf[kMaxWire];
+    const size_t n =
+        omgp_test::encode_crc_corrupted(FrameFields{omgp::ADDR_host, kNode, /*response=*/true,
+                                                    resp.retry, resp.seq, resp.len, resp.payload},
+                                        buf, sizeof buf);
+    REQUIRE(n > 0);
+    const uint64_t late_start = kFarFuture;
+    loop.host_wire.inject_bytes(buf, n, late_start);
+    const MasterEvent late =
+        loop.host_wire.advance_to(late_start + static_cast<uint64_t>(n) * byte_us(), loop.master);
+
+    // No event, no transaction re-opened, and the bad CRC counted against the node that
+    // claimed to send it -- the same accounting as inside a window, with no window open.
+    REQUIRE(late.kind == MasterEvent::None);
+    REQUIRE_FALSE(loop.master.busy());
+    REQUIRE(loop.master.attempts() == 3);
+    REQUIRE(loop.handler.invocations == 1);
+    // ...and it is counted NOWHERE. Measured, not assumed -- this cell was written expecting
+    // crc_failures + 1 and found otherwise. A corrupt frame never decodes, so there is no
+    // f.src to charge it to (link/master.cpp's discard accounting charges dst_ while
+    // awaiting, else f.src), and outside a window the Master is awaiting nothing: the bad CRC
+    // moves no counter at all. Contrast the Duplicate row's late copy, which decodes cleanly,
+    // has a source, and IS counted.
+    //
+    // Pinned as today's observable, not asserted as desired: whether trunk §4's discard
+    // accounting should see corruption occurring between transactions is a question about
+    // link/master.cpp (T031/#49, closed, and no part of this PR's diff), recorded in
+    // docs/OPEN-QUESTIONS.md 2026-09-07.
+    CHECK(loop.master.stats(kNode).crc_failures == crc_failures_before);
+    CHECK(loop.master.stats(kNode).discards == 0);
+    CHECK(loop.master.bus_stats().bus_faults == 0);
 }
 
 // --- SC-004: duplicate response -------------------------------------------------------------
