@@ -963,13 +963,16 @@ struct RecordingHealthListener : HealthListener {
     }
 };
 
-// Runs one transaction to completion. THE WIRING (tasks.md T039: "wire ... from the loop")
-// still needs to feed `ev`'s outcome to `tracker` here -- TODO(T039), see PR for the failing
-// run recorded before that line was added.
+// Runs one transaction to completion and feeds its outcome to `tracker` -- the wiring
+// tasks.md T039 asks for: on_result invoked from the loop driver, once, after
+// run_transaction()'s own terminal MasterEvent is already known, at the SAME clock instant
+// the transaction concluded at (loop.clock.now_us(), advanced by run_transaction's own
+// host_wire.advance_to calls -- nothing here reads or sets the clock independently).
 MasterEvent run_health_transaction(Loop& loop, HealthTracker& tracker, uint8_t dst,
                                    const uint8_t* payload, size_t len, const Fault (&plan)[3]) {
-    (void)tracker;
-    return run_transaction(loop, dst, payload, len, plan);
+    const MasterEvent ev = run_transaction(loop, dst, payload, len, plan);
+    tracker.on_result(dst, ev.kind == MasterEvent::Answered, loop.clock.now_us());
+    return ev;
 }
 
 // Enrols kNode (one clean transaction) then drives exactly TRUNK_suspect_after_failures
