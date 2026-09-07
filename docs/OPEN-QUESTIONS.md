@@ -2883,20 +2883,26 @@ fault at retry 2 that prevents recovery *always* ends `Failed` with the answer (
 arriving after give-up. "Retry 2" and "after give-up" are therefore the same script for such a
 fault, and the file scripts each once:
 
+Cited by **fault plan and case name**, not by line number: the previous version of this table
+gave line numbers that were already 7 short when it was written, because the same commit
+inserted lines above them (review @`2348d2a`). A table whose only job is saying which cell is
+which must not carry references that rot on the next edit.
+
 | row | "retry 2" | "after give-up" |
 |---|---|---|
-| Drop | — | `{Drop, Drop, Drop}` (`:412`) — this IS the drop-at-retry-2 cell, filed under the later name |
-| delay-past-`T_resp` | — | `{Drop, Drop, Delay}` (`:529`) — the delay IS at retry 2 |
-| CRC-corrupt | `{Corrupt, Corrupt, Corrupt}` (`:671`) | `{Corrupt, Corrupt, Corrupt}` + a corrupt frame with **no window open** (`:702`) — genuinely distinct |
-| duplicate | `{Drop, Drop, Duplicate}` (`:812`) | `{Drop, Drop, Drop}` + two late duplicates (`:834`) — genuinely distinct |
+| Drop | — | `{Drop, Drop, Drop}` — "drop after give-up"; this IS the drop-at-retry-2 cell, filed under the later name |
+| delay-past-`T_resp` | — | `{Drop, Drop, Delay}` — "delay-past-T_resp after give-up"; the delay IS at retry 2 |
+| CRC-corrupt | `{Corrupt, Corrupt, Corrupt}` — "CRC-corrupted response through retry 2" | `{Corrupt, Corrupt, Corrupt}` + a corrupt frame with **no window open** — "CRC-corrupted frame after give-up"; genuinely distinct |
+| duplicate | `{Drop, Drop, Duplicate}` — "duplicate through retry 2" | `{Drop, Drop, Drop}` + two late duplicates — "duplicate after give-up"; genuinely distinct |
 
 So **all 16 positions are exercised by 15 `TEST_CASE`s**, two rows sharing one script across
 two columns — not "15 of 16 with one missing", which is what both earlier entries claimed and
 what a maintainer would otherwise have been asked to accept.
 
-`:502` (`{Delay, Delay, Clean}`) was mislabelled "through retry 2": its delays are at attempts
+The `{Delay, Delay, Clean}` cell was mislabelled "through retry 2": its delays are at attempts
 0 and 1, making it the **two-strays** cell (`discards == 2`, against the one-stray cell's `1`).
-Renamed to what it scripts; it is mislabelled, not vacuous, and is not being removed.
+Renamed to "delay-past-T_resp at attempts 0 AND 1"; it was mislabelled, not vacuous, and is not
+being removed.
 
 **Recommendation:** amend T034's matrix description to say that at `TRUNK_retries == 2` the
 "retry 2" and "after give-up" columns coincide for any fault that prevents recovery, and that
