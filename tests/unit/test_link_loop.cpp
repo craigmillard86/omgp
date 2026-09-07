@@ -221,8 +221,16 @@ BridgedAttempt bridge_latest_request(Loop& loop, uint8_t dst) {
     const size_t node_frames_before = loop.node_wire.transcript_size();
     const size_t idx = loop.host_wire.transcript_size() - 1;
     const auto req = loop.host_wire.transcript(idx); // copy: stable across further calls
+    // Observe the addressing the Master actually emitted, then forward THAT. The bridge used
+    // to pass `dst`, `ADDR_host` and `false` to encode_expected regardless of what the record
+    // held, silently correcting a Master that addressed the wrong node, claimed the wrong
+    // source, or set the RESPONSE bit -- none of those three fields was read anywhere in this
+    // file, so a Master that swapped them passed all 19 cells (red team @f5544fc).
+    REQUIRE(req.dst == dst);
+    REQUIRE(req.src == omgp::ADDR_host);
+    REQUIRE_FALSE(req.response);
     const auto req_bytes =
-        encode_expected(dst, omgp::ADDR_host, false, req.retry, req.seq, req.payload, req.len);
+        encode_expected(req.dst, req.src, req.response, req.retry, req.seq, req.payload, req.len);
     const uint64_t req_tx_end =
         req.tx_start_us + static_cast<uint64_t>(req_bytes.size()) * byte_us();
 
