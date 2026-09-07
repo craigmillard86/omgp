@@ -1507,8 +1507,13 @@ TEST_CASE("a late response goes out T_gap after the last byte the engine saw, wh
     for (uint64_t t = noise_end; t <= noise_end + 4 * omgp::TRUNK_T_gap_us; t += byte_us())
         wire.advance_to(t, responder);
 
-    INFO("noise_len=" << noise_len << " noise_end=" << noise_end);
+    INFO("noise_len=" << noise_len << " noise_end=" << noise_end
+                      << " discards=" << responder.stats().discards);
     REQUIRE(wire.transcript_size() == 1);
+    // Exactly one byte-level discard, and it is counted on the RE-FED path: the noise was
+    // stashed undecoded during the wait, so the Deframer only ever sees it (and rejects it)
+    // when poll() feeds it back. Pins that counting, which nothing else reaches.
+    REQUIRE(responder.stats().discards == 1);
     // T_gap after the last byte actually seen -- not one worst-case frame later.
     REQUIRE(wire.transcript(0).tx_start_us == noise_end + omgp::TRUNK_T_gap_us);
     REQUIRE(responder.stats().late_responses == 1);
@@ -1580,6 +1585,9 @@ TEST_CASE("a burst that fills the stash is drained and answered at wire speed, n
                     << " burst_end=" << burst_end << " last=" << last_burst_tx
                     << " delta=" << (last_burst_tx - burst_end));
     REQUIRE(burst_answers > 1);
+    // One byte-level discard from the burst's truncated final frame, counted where the
+    // stash is re-fed -- the same path as above, reached here with real frames around it.
+    REQUIRE(responder.stats().discards == 1);
     // The backlog clears at WIRE SPEED, not one bounded wait per request. The yardstick is
     // physical: the burst is one worst-case frame of arrivals and its answers are frames of
     // the same order, so two worst-case frame times is the floor for emitting them all --

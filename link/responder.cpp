@@ -213,6 +213,9 @@ bool Responder::refeed(bool& delivered, FrameView& view, uint64_t& start_us) {
         // the Deframer has already seen, and a stash left looking FULL would make the engine
         // blind for every later response (killing test: "the bounded wait starts afresh").
         held_.len = 0;
+        // Assigning 0 to a field this branch has just established is 0 (next >= len, and
+        // len is set to 0 on the line above) writes the same value.
+        // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
         held_.next = 0;
         return false;
     }
@@ -312,6 +315,8 @@ void Responder::transmit_if_due(uint64_t now_us, bool queue_drained, bool belief
     transmit_until_us_ = wire_.transmit(buffer_.bytes, buffer_.len, now_us);
     if (late)
         stats_.late_responses++;
+    // A bool assigned `false`; the mutation writes 0, which is the same value.
+    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
     has_defer_origin_ = false;
     state_ = State::Transmitting;
 }
@@ -354,13 +359,27 @@ void Responder::poll(uint64_t now_us) {
             // The wire is free again: bytes stashed during the wait are re-fed BEFORE any
             // newer byte is drained, so arrival order is preserved end to end, and an
             // accepted request among them ends this drain exactly as one from the wire does.
+            // Both initialisers below are dead stores: refeed() assigns `delivered` and
+            // `held_start_us` on the only path that returns true, and neither is read when
+            // it returns false (the caller continues immediately).
+            // mutant-ok(equivalent, cxx_init_const): never observed.
             bool delivered = false;
             FrameView view{};
+            // mutant-ok(equivalent, cxx_init_const): dead store, as above.
             uint64_t held_start_us = 0;
             const uint32_t discards_before = total_discards(deframer_.stats());
             if (!refeed(delivered, view, held_start_us))
                 continue;
             if (delivered) {
+                // request_end is the byte's END, as on the live path. Replacing the byte
+                // time with a constant shifts it by one byte time, and no case here
+                // separates the two: every re-fed request's answer is gated by the instant
+                // the wire becomes free (the response it waited behind occupies the wire for
+                // far longer than T_turn_min after it), not by its own deadline. NOT claimed
+                // impossible -- a configuration whose late bound falls within one byte time
+                // of that instant would separate them; it is not constructed here.
+                // mutant-ok(accepted, cxx_replace_scalar_call): dominated by the wire-free
+                // instant in every case this suite reaches; see above.
                 on_request(view.f, held_start_us + byte_time_us(wire_.bit_rate()));
             } else if (total_discards(deframer_.stats()) > discards_before) {
                 stats_.discards++;
