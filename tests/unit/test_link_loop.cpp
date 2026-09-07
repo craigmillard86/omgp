@@ -129,16 +129,20 @@ struct CountingHandler : RequestHandler {
 // Respond with the default delay" — this file's bridge must never let host_wire reach that
 // fallback, since host_wire's own Respond would fabricate an echo instead of the real
 // Responder's answer arriving through the hand-built bridge below). One Silence entry per
-// possible transmission this file's tests ever make to one node (generously above the 3
-// attempts/transaction x 2 transactions any single TEST_CASE below needs).
+// possible transmission this file's tests ever make to one node.
 // Sized deliberately, and asserted against in bridge_latest_request(): when a wildcard script
 // runs out, MockWire falls back to answering for itself -- so exhausting this one would make
 // the host_wire fabricate responses with no Responder involved, and every cell past that point
-// would pass without testing anything (red team @e4fffd9). No cell reaches it today (the
-// busiest run two transactions), but that is this file's current contents, not a guarantee:
-// the next cell added, or one more retry position, would cross silently. The assertion turns
-// that into "harness budget exceeded" instead of a fabricated pass.
+// would pass without testing anything (red team @e4fffd9). The busiest cell today is SC-005
+// RECOVERED: 1 enrolling clean transaction (1 transmission) + 3 failed transactions x 3
+// attempts (9) + 1 recovering clean transaction (1) + 1 further failed transaction proving
+// consecutive_failures reset (3, review @3b1a80e) = 14; the array below holds 16, two
+// transmissions of headroom. That is this file's current contents, not a guarantee: the next
+// cell added (T042/#60 among them), or one more retry position, would cross silently and must
+// have this count re-derived, not assumed still generous. The assertion turns an actual
+// overrun into "harness budget exceeded" instead of a fabricated pass.
 constexpr Step kAlwaysSilence[] = {
+    {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence},
     {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence},
     {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence},
     {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence},
@@ -1073,6 +1077,21 @@ TEST_CASE("SC-005 RECOVERED: a Respond step after OFFLINE drives a real HealthTr
     REQUIRE(listener.entries.size() == 4);
     REQUIRE(listener.entries[3].notice == Notice::RECOVERED);
     REQUIRE(listener.entries[3].addr == kNode);
+
+    // #57 AC3: "the node is ENROLLED again with a zero failure count" -- consecutive_failures
+    // has no accessor, so the only public proxy for "reset to 0" (rather than left at 3) is one
+    // MORE failed transaction: had OFFLINE->ENROLLED left the count at 3, this single failure
+    // would push it to 4 (>= TRUNK_suspect_after_failures) and trip SUSPECT again immediately,
+    // per data-model.md §6 "ENROLLED | fail, failures+1 == 3 | SUSPECT". Staying ENROLLED with
+    // no new notification ("ENROLLED | fail, failures+1 < 3 | ENROLLED | —") is that proxy
+    // (review finding @3b1a80e).
+    const uint8_t post_recovery_payload[] = {0x7A};
+    const Fault drop_all[3] = {Fault::Drop, Fault::Drop, Fault::Drop};
+    const MasterEvent one_more_failure = run_health_transaction(
+        loop, tracker, kNode, post_recovery_payload, sizeof post_recovery_payload, drop_all);
+    REQUIRE(one_more_failure.kind == MasterEvent::Failed);
+    REQUIRE(tracker.state(kNode) == HealthState::ENROLLED);
+    REQUIRE(listener.entries.size() == 4);
 }
 
 // --- FR-015/FR-016: the replay key's SEQUENCE conjunct, exercised end to end --------------
