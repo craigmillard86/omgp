@@ -85,8 +85,11 @@ class Responder {
     // Stopping means the engine has left bytes unread, so from that instant its picture of
     // the bus is INCOMPLETE -- and it says so (poll()'s belief_stale) rather than judging
     // T_gap against a reading it knows to be partial. A stale belief falls back to the
-    // bounded cap, which is the protection level Master documents and accepts
-    // (link/master.cpp:241-273), not a new weakness.
+    // bounded cap, which BOUNDS the wait but does NOT make the transmit safe: the cap fires
+    // against a bus the engine has not read since it stopped, and red team @6440074 finding
+    // 1 demonstrates a frame being transmitted over there. See transmit_if_due() for why
+    // Master's cap argument does not carry across, and the PR / docs/OPEN-QUESTIONS.md
+    // 2026-09-07 for the open ruling on which corner of that trade to take.
     //
     // The alternative, stashing raw bytes to re-feed later, was tried and abandoned across
     // red team @b262d46 / @2efcb67 / @7a80ec3: any fixed buffer has a capacity at which the

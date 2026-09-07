@@ -261,10 +261,23 @@ void Responder::transmit_if_due(uint64_t now_us, bool queue_drained, bool belief
         // the end of the wire's queue: it is a COMPLETE reading, and T_gap of idle after it
         // is a real gap. Stopped because a request is held: bytes may remain unread, so it
         // is a PARTIAL reading and acting on it is the frozen belief of red team @7d31410 --
-        // the wait falls back to the bounded cap instead, which is what Master documents and
-        // accepts (link/master.cpp:241-273). Never inferred from a buffer's occupancy: every
-        // revision that tried had a capacity boundary and reopened the collision at it, one
-        // byte further along each time (@b262d46, @2efcb67, @7a80ec3).
+        // the wait falls back to the bounded cap instead. Never inferred from a buffer's
+        // occupancy: every revision that tried had a capacity boundary and reopened the
+        // collision at it, one byte further along each time (@b262d46, @2efcb67, @7a80ec3).
+        //
+        // What the cap is NOT, corrected here after review @6440074 finding 2 asserted the
+        // opposite of what an earlier revision of this comment claimed: it is NOT "the
+        // protection level Master documents and accepts". Master's cap argument rests on a
+        // drain loop that never exits early (link/master.cpp:224-227, which records that
+        // when it once did, "the argument was false for exactly the bytes left behind it"),
+        // and this path is precisely that excluded case -- Master's cap without Master's
+        // precondition. Master further argues that any frame starting later than
+        // defer_origin + T_gap is a §3 violator "on every path into this state"; on the LATE
+        // path it is not, because the host has already timed this node out after T_resp and
+        // may legitimately open a new transaction T_gap after the bus goes idle. So a frame
+        // beginning inside this wait can be transmitted over, and red team @6440074 finding
+        // 1 demonstrates exactly that. It is an open defect, recorded in the PR and in
+        // docs/OPEN-QUESTIONS.md 2026-09-07, not a bound this comment may claim is safe.
         uint64_t want_us = cap_us;
         if (!belief_stale)
             want_us = has_activity_ ? last_activity_us_ + omgp::TRUNK_T_gap_us : now_us;
