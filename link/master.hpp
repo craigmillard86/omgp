@@ -43,13 +43,19 @@ class Master {
     // transmission to satisfy T_gap (data-model.md §4 "Gap") — busy() is already true
     // when this returns Ok either way.
     //
-    // PRECONDITION (stated, not enforced — #138): poll(now_us) has run immediately before, at
-    // the clock's current instant. begin() does not drain the wire itself, so its "never
-    // transmits into an arriving frame" guarantee is only as fresh as the caller's last
-    // poll(): a begin() issued after clock time has passed with no poll() in between is blind
-    // to every byte that arrived meanwhile and can transmit into a frame already on the wire.
-    // The intended F3 loop — `ev = poll(now); if (ev.kind != None) begin(next, ...)` —
-    // satisfies it (PR #137 review @3a15d29, MEDIUM; contracts/link-cpp.md "Master engine").
+    // ENFORCED, not merely stated (#138): begin() drains the wire itself (drain_wire(), the
+    // same drain poll() runs) before deciding whether/when to transmit, so its "never
+    // transmits into an arriving frame" guarantee no longer depends on the caller having just
+    // called poll(now_us) at this instant. True by construction: drain_wire() updates
+    // last_activity_/last_rx_us_/the Deframer from every byte due at clock_.now_us() exactly as
+    // poll() would, and fire_pending()'s push-out clause (master.cpp) reads only those members
+    // — it cannot tell whether they were last refreshed by a poll() or by this begin() itself.
+    // Demonstrated by "begin() with no poll() immediately before it drains the wire itself..."
+    // and "begin() one microsecond after another station's opening FLAG..."
+    // (tests/unit/test_link_master.cpp, #138). The intended F3 loop — `ev = poll(now);
+    // if (ev.kind != None) begin(next, ...)` — is unaffected: draining an already-drained wire
+    // just finds nothing more due (PR #137 review @3a15d29, MEDIUM; contracts/link-cpp.md
+    // "Master engine").
     //
     // dst == host_addr (the host polling itself) is ACCEPTED — stated, not enforced: the only
     // lower-bound refusal the contract lists is ReservedAddress for 0xFF, and index 0 is in
@@ -78,6 +84,15 @@ class Master {
 
   private:
     enum class SubPhase : uint8_t { AwaitResponse, PendingTransmit };
+
+    // The only receive path (analysis F1), shared by poll() and begin() (#138): drains
+    // ByteWire::receive() into the engine's own Deframer, each byte with its start-bit
+    // instant, to exhaustion, then drives the per-byte accounting/acceptance state machine.
+    // `event` receives an Answered/CrcFailed-triggered end_attempt() outcome exactly as poll()
+    // would report it; begin() passes a local it discards, since open_ is false throughout its
+    // own call (no transaction is AwaitResponse yet), so `awaiting` is false for every byte and
+    // no such outcome can occur there.
+    void drain_wire(MasterEvent& event);
 
     void do_transmit(uint64_t at_us);
     // Ends the current attempt (timeout or CRC-failed response): counts it, updates

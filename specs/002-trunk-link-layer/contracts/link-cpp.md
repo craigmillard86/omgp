@@ -103,10 +103,14 @@ nowhere — an FR-011 tension recorded in `docs/OPEN-QUESTIONS.md` 2026-09-06, b
 tracked in #138) — and a byte-for-byte drain: `poll()` reads every byte due at
 `now_us`, including those behind the byte that concluded an attempt; the next transmission
 starts no earlier than `last_activity + TRUNK_T_gap_us`, where `last_activity` is re-read on
-every `poll()` so a byte arriving during the deferral pushes the instant out. `begin()` does
-not drain the wire itself: its own collision guarantee assumes `poll(now_us)` immediately
-precedes it at the same `now_us` (the intended F3 loop `ev = poll(now); if (ev.kind != None)
-begin(...)`) — stated, not enforced (PR #137; enforcement tracked in #138).
+every `poll()` so a byte arriving during the deferral pushes the instant out. `begin()` drains
+the wire itself before deciding whether/when to transmit — the same drain `poll()` runs, shared
+rather than duplicated — so its own collision guarantee no longer depends on a `poll(now_us)`
+having immediately preceded it at the same `now_us` (#138; true by construction of the shared
+drain, demonstrated by `tests/unit/test_link_master.cpp`'s "begin() with no poll() immediately
+before it..." and "begin() one microsecond after another station's opening FLAG..."). The
+intended F3 loop `ev = poll(now); if (ev.kind != None) begin(...)` remains correct: draining an
+already-drained wire just finds nothing more due.
 That push-out is bounded: deferral for activity that is not the host's own ends at
 `defer_origin + max_frame + TRUNK_T_gap_us` (`defer_origin` = the instant the transmission
 was first deferred to; `max_frame` = `kMaxWire` byte times at the current rate — one
