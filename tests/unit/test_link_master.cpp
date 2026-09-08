@@ -3868,3 +3868,85 @@ TEST_CASE("reset_stats() clears every per-address counter and the bus counters",
     REQUIRE(master.bus_stats().rate_changes == 0);
     REQUIRE(master.bus_stats().bus_faults == 0);
 }
+
+// --- #138: begin() drains the wire itself, so its own "never transmit into an arriving ------
+// --- frame" guarantee holds without relying on a poll(now) at the same clock instant --------
+//
+// link/master.hpp's PRECONDITION paragraph (pre-#138) stated but did not enforce this: begin()
+// called fire_pending() directly, so a caller that let clock time pass with no intervening
+// poll() was blind to every byte that arrived meanwhile and could put a request on the wire
+// inside another station's frame (PR #137 review @3a15d29, MEDIUM; contracts/link-cpp.md
+// "Master engine"). Every case below advances the clock with MockWire::advance_to(t) — the
+// NO-ENGINE overload (mock_wire.hpp:99) — so the Master is polled not once before begin() runs.
+
+TEST_CASE("begin() with no poll() immediately before it drains the wire itself, so it does not "
+          "transmit into a frame already on the wire",
+          "[link][timing:T_gap]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const std::vector<uint8_t> other = foreign_frame();
+    const uint64_t other_start = 1000;
+    const uint64_t other_end = other_start + other.size() * byte_us();
+    wire.inject_bytes(other.data(), other.size(), other_start);
+
+    // Strictly inside the frame: some of it is due, not all.
+    const uint64_t mid = other_start + (other.size() / 2) * byte_us();
+    REQUIRE(mid > other_start);
+    REQUIRE(mid < other_end);
+    wire.advance_to(mid); // clock only — the Master is not polled
+
+    const uint8_t payload[] = {0x77};
+    REQUIRE(master.begin(0x06, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 0); // must not land inside the other station's frame
+
+    require_deferred_past(wire, master, 0, other_end);
+}
+
+TEST_CASE("begin() one microsecond after another station's opening FLAG, with only that FLAG "
+          "byte due, still defers: the FLAG's own byte time is bus activity enough to hold the "
+          "gap off",
+          "[link][timing:T_gap]") {
+    // The narrower edge case of the one above: no discard and nothing delivered yet — only the
+    // single accumulating FLAG byte drained — so the guarantee must rest on every drained byte
+    // pushing last_activity_ to its own end (master.cpp fire_pending()'s protection argument),
+    // not on some later discard/delivery outcome.
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const std::vector<uint8_t> other = foreign_frame();
+    const uint64_t other_start = 1000;
+    wire.inject_bytes(other.data(), other.size(), other_start);
+
+    const uint64_t just_after_flag = other_start + 1;
+    REQUIRE(just_after_flag < other_start + byte_us()); // only the opening FLAG is due
+    // clock only — the Master is not polled
+    wire.advance_to(just_after_flag);
+
+    const uint8_t payload[] = {0x33};
+    REQUIRE(master.begin(0x05, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 0);
+}
+
+TEST_CASE("a frame drained by begin()'s own wire-draining precondition is counted exactly as an "
+          "equivalent poll() would count it: no response window is open, so the frame's own "
+          "claimed source is charged, not begin()'s own destination",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t dst = 0x02;
+    const std::vector<uint8_t> other = foreign_frame(); // dst 0x03, src 0x04: neither host nor dst
+    const uint64_t other_start = 1000;
+    const uint64_t other_end = other_start + other.size() * byte_us();
+    wire.inject_bytes(other.data(), other.size(), other_start);
+    wire.advance_to(other_end); // clock only — the whole frame is due, the Master is not polled
+
+    const uint8_t payload[] = {0x11};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(master.stats(0x04).discards == 1); // the frame's own claimed src (FR-011/FR-011a)
+    REQUIRE(master.stats(dst).discards == 0);  // not begin()'s own destination
+}
