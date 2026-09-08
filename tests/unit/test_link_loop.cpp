@@ -46,14 +46,21 @@
 //   CRC-failed response   -> "SC-004: CRC-corrupted response ..."
 //   duplicate             -> "SC-004: duplicate response ..."
 //   babble                -> "extraneous bus noise (babble) between transactions is discarded"
-//   SUSPECT                -> reserved: T039 (#57) extends this file with the health scripts
-//   OFFLINE                -> reserved: T039 (#57), same script as SUSPECT above
+//   SUSPECT                -> "SC-005 SUSPECT: three consecutive failed transactions drive a
+//                              real HealthTracker from ENROLLED to SUSPECT" (T039/#57)
+//   OFFLINE                -> "SC-005 OFFLINE: SUSPECT persists past the offline threshold via
+//                              a real HealthTracker's tick(), not a fourth failed transaction"
+//                              (T039/#57; RECOVERED, the reverse transition, is not a trunk §7
+//                              mode this table rows on, but is proven the same way immediately
+//                              below: "SC-005 RECOVERED: a Respond step after OFFLINE drives a
+//                              real HealthTracker back to ENROLLED")
 //   BUS_FAULT              -> reserved: T042 (#60) extends this file with the wrong-rate script
 //   wrong-rate probe       -> reserved: T042 (#60), same script as BUS_FAULT above
 #include "catch_amalgamated.hpp"
 #include "fake_clock.hpp"
 #include "link/crc16.hpp"
 #include "link/frame.hpp"
+#include "link/health.hpp"
 #include "link/link_types.hpp"
 #include "link/master.hpp"
 #include "link/responder.hpp"
@@ -122,16 +129,20 @@ struct CountingHandler : RequestHandler {
 // Respond with the default delay" — this file's bridge must never let host_wire reach that
 // fallback, since host_wire's own Respond would fabricate an echo instead of the real
 // Responder's answer arriving through the hand-built bridge below). One Silence entry per
-// possible transmission this file's tests ever make to one node (generously above the 3
-// attempts/transaction x 2 transactions any single TEST_CASE below needs).
+// possible transmission this file's tests ever make to one node.
 // Sized deliberately, and asserted against in bridge_latest_request(): when a wildcard script
 // runs out, MockWire falls back to answering for itself -- so exhausting this one would make
 // the host_wire fabricate responses with no Responder involved, and every cell past that point
-// would pass without testing anything (red team @e4fffd9). No cell reaches it today (the
-// busiest run two transactions), but that is this file's current contents, not a guarantee:
-// the next cell added, or one more retry position, would cross silently. The assertion turns
-// that into "harness budget exceeded" instead of a fabricated pass.
+// would pass without testing anything (red team @e4fffd9). The busiest cell today is SC-005
+// RECOVERED: 1 enrolling clean transaction (1 transmission) + 3 failed transactions x 3
+// attempts (9) + 1 recovering clean transaction (1) + 1 further failed transaction proving
+// consecutive_failures reset (3, review @3b1a80e) = 14; the array below holds 16, two
+// transmissions of headroom. That is this file's current contents, not a guarantee: the next
+// cell added (T042/#60 among them), or one more retry position, would cross silently and must
+// have this count re-derived, not assumed still generous. The assertion turns an actual
+// overrun into "harness budget exceeded" instead of a fabricated pass.
 constexpr Step kAlwaysSilence[] = {
+    {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence},
     {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence},
     {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence},
     {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence},
@@ -926,6 +937,161 @@ TEST_CASE("SC-005 babble: extraneous bus noise between transactions is silently 
     REQUIRE(loop.host_wire.transcript_size() == 2);
     REQUIRE(loop.host_wire.transcript(1).tx_start_us >= babble_end + omgp::TRUNK_T_gap_us);
     REQUIRE(loop.host_wire.transcript(1).tx_start_us < kFarFuture + 10 * omgp::TRUNK_T_resp_us);
+}
+
+// --- SC-005: SUSPECT / OFFLINE / RECOVERED, driven by a REAL Master + REAL HealthTracker ----
+// trunk §6 (ENROLLED/SUSPECT/OFFLINE/RECOVERED lifecycle, data-model.md §6) as consumed by
+// node health; contracts/link-cpp.md "Health tracker": `on_result` is the one thing that
+// connects a transaction's outcome to health state, called from THIS driver once each
+// transaction concludes -- nowhere inside Master, Responder, or HealthTracker itself (T038/
+// #56 and T031/#49 are both closed and unmodified by this file). `tick()` drives the one
+// time-only transition (SUSPECT -> OFFLINE, data-model.md §6) with no transaction outcome at
+// all, so it is called directly against the shared FakeClock rather than through a
+// transaction plan. spec.md US4 Acceptance Scenarios 2 (SUSPECT), 4 (OFFLINE), 5 (RECOVERED).
+//
+// consecutive_failures is private to HealthTracker (link/health.hpp) with no accessor: the
+// only observable proxy for "failures reset to 0" is the public state() the data-model.md §6
+// transition table promises alongside it. Whether that reset holds under further failures is
+// unit-proven by test_link_health.cpp (T037/#55) -- out of scope here (tasks.md T039): this
+// file proves the WIRING between a real engine and a real tracker, not the state machine's
+// own arithmetic a second time.
+
+struct RecordingHealthListener : HealthListener {
+    struct Entry {
+        Notice notice;
+        uint8_t addr;
+    };
+    std::vector<Entry> entries;
+    void on_notice(Notice notice, uint8_t addr) override {
+        entries.push_back({notice, addr});
+    }
+};
+
+// Runs one transaction to completion and feeds its outcome to `tracker` -- the wiring
+// tasks.md T039 asks for: on_result invoked from the loop driver, once, after
+// run_transaction()'s own terminal MasterEvent is already known, at the SAME clock instant
+// the transaction concluded at (loop.clock.now_us(), advanced by run_transaction's own
+// host_wire.advance_to calls -- nothing here reads or sets the clock independently).
+MasterEvent run_health_transaction(Loop& loop, HealthTracker& tracker, uint8_t dst,
+                                   const uint8_t* payload, size_t len, const Fault (&plan)[3]) {
+    const MasterEvent ev = run_transaction(loop, dst, payload, len, plan);
+    tracker.on_result(dst, ev.kind == MasterEvent::Answered, loop.clock.now_us());
+    return ev;
+}
+
+// Enrols kNode (one clean transaction) then drives exactly TRUNK_suspect_after_failures
+// consecutive FAILED transactions (each a real {Drop,Drop,Drop} L2 retry exhaustion) --
+// spec.md US4 AS2 ("three consecutive transactions fail"). Returns the clock instant the
+// third failure concluded at (== suspect_since, since on_result is fed that same instant).
+uint64_t drive_to_suspect(Loop& loop, HealthTracker& tracker) {
+    const uint8_t enroll_payload[] = {0x71};
+    const Fault clean[3] = {Fault::Clean, Fault::Clean, Fault::Clean};
+    const MasterEvent enrolled =
+        run_health_transaction(loop, tracker, kNode, enroll_payload, sizeof enroll_payload, clean);
+    REQUIRE(enrolled.kind == MasterEvent::Answered);
+    REQUIRE(tracker.state(kNode) == HealthState::ENROLLED);
+
+    const Fault drop_all[3] = {Fault::Drop, Fault::Drop, Fault::Drop};
+    uint64_t concluded_at = 0;
+    for (uint32_t i = 0; i < omgp::TRUNK_suspect_after_failures; ++i) {
+        const uint8_t payload[] = {static_cast<uint8_t>(0x72 + i)};
+        const MasterEvent ev =
+            run_health_transaction(loop, tracker, kNode, payload, sizeof payload, drop_all);
+        REQUIRE(ev.kind == MasterEvent::Failed);
+        concluded_at = loop.clock.now_us();
+        if (i + 1 < omgp::TRUNK_suspect_after_failures)
+            REQUIRE(tracker.state(kNode) == HealthState::ENROLLED);
+    }
+    REQUIRE(tracker.state(kNode) == HealthState::SUSPECT);
+    return concluded_at;
+}
+
+// Drives kNode to SUSPECT, then to OFFLINE via tick() alone once TRUNK_offline_after_suspect_ms
+// has elapsed on the shared FakeClock (data-model.md §6 "tick(now) with >=1000ms elapsed (no
+// result needed)") -- never a fourth failed transaction. The real Master is polled across that
+// same span and stays idle throughout, showing the transition is time-only.
+uint64_t drive_to_offline(Loop& loop, HealthTracker& tracker) {
+    const uint64_t suspect_since = drive_to_suspect(loop, tracker);
+    constexpr uint64_t kOfflineThresholdUs = uint64_t{omgp::TRUNK_offline_after_suspect_ms} * 1000;
+    const uint64_t offline_at = suspect_since + kOfflineThresholdUs;
+    const MasterEvent idle = loop.host_wire.advance_to(offline_at, loop.master);
+    REQUIRE(idle.kind == MasterEvent::None);
+    REQUIRE_FALSE(loop.master.busy());
+    tracker.tick(loop.clock.now_us());
+    REQUIRE(tracker.state(kNode) == HealthState::OFFLINE);
+    return suspect_since;
+}
+
+TEST_CASE("SC-005 SUSPECT: three consecutive failed transactions drive a real HealthTracker "
+          "from ENROLLED to SUSPECT",
+          "[link]") {
+    Loop loop;
+    RecordingHealthListener listener;
+    HealthTracker tracker(loop.clock, listener);
+
+    drive_to_suspect(loop, tracker);
+
+    REQUIRE(tracker.state(kNode) == HealthState::SUSPECT);
+    REQUIRE(listener.entries.size() == 2);
+    REQUIRE(listener.entries[0].notice == Notice::ENROLLED);
+    REQUIRE(listener.entries[0].addr == kNode);
+    REQUIRE(listener.entries[1].notice == Notice::SUSPECT);
+    REQUIRE(listener.entries[1].addr == kNode);
+}
+
+TEST_CASE("SC-005 OFFLINE: SUSPECT persists past the offline threshold via a real "
+          "HealthTracker's tick(), not a fourth failed transaction",
+          "[link]") {
+    Loop loop;
+    RecordingHealthListener listener;
+    HealthTracker tracker(loop.clock, listener);
+
+    drive_to_offline(loop, tracker);
+
+    REQUIRE(tracker.state(kNode) == HealthState::OFFLINE);
+    REQUIRE(listener.entries.size() == 3);
+    REQUIRE(listener.entries[2].notice == Notice::OFFLINE);
+    REQUIRE(listener.entries[2].addr == kNode);
+}
+
+TEST_CASE("SC-005 RECOVERED: a Respond step after OFFLINE drives a real HealthTracker back to "
+          "ENROLLED",
+          "[link]") {
+    Loop loop;
+    RecordingHealthListener listener;
+    HealthTracker tracker(loop.clock, listener);
+
+    drive_to_offline(loop, tracker);
+    REQUIRE(tracker.state(kNode) == HealthState::OFFLINE);
+
+    const uint8_t payload[] = {0x79};
+    const Fault clean[3] = {Fault::Clean, Fault::Clean, Fault::Clean};
+    const MasterEvent ev =
+        run_health_transaction(loop, tracker, kNode, payload, sizeof payload, clean);
+    REQUIRE(ev.kind == MasterEvent::Answered);
+
+    // consecutive_failures is private (see file comment above); state() == ENROLLED is the
+    // public proxy for the data-model.md §6 "OFFLINE | ok | ENROLLED (failures = 0) |
+    // RECOVERED" row -- the only one this driver-level test can observe.
+    REQUIRE(tracker.state(kNode) == HealthState::ENROLLED);
+    REQUIRE(listener.entries.size() == 4);
+    REQUIRE(listener.entries[3].notice == Notice::RECOVERED);
+    REQUIRE(listener.entries[3].addr == kNode);
+
+    // #57 AC3: "the node is ENROLLED again with a zero failure count" -- consecutive_failures
+    // has no accessor, so the only public proxy for "reset to 0" (rather than left at 3) is one
+    // MORE failed transaction: had OFFLINE->ENROLLED left the count at 3, this single failure
+    // would push it to 4 (>= TRUNK_suspect_after_failures) and trip SUSPECT again immediately,
+    // per data-model.md §6 "ENROLLED | fail, failures+1 == 3 | SUSPECT". Staying ENROLLED with
+    // no new notification ("ENROLLED | fail, failures+1 < 3 | ENROLLED | —") is that proxy
+    // (review finding @3b1a80e).
+    const uint8_t post_recovery_payload[] = {0x7A};
+    const Fault drop_all[3] = {Fault::Drop, Fault::Drop, Fault::Drop};
+    const MasterEvent one_more_failure = run_health_transaction(
+        loop, tracker, kNode, post_recovery_payload, sizeof post_recovery_payload, drop_all);
+    REQUIRE(one_more_failure.kind == MasterEvent::Failed);
+    REQUIRE(tracker.state(kNode) == HealthState::ENROLLED);
+    REQUIRE(listener.entries.size() == 4);
 }
 
 // --- FR-015/FR-016: the replay key's SEQUENCE conjunct, exercised end to end --------------
