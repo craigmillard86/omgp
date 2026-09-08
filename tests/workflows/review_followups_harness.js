@@ -91,6 +91,67 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
   await run(w, {isPr: false, body: comment('- Something — anything')});
   check('a comment on a plain issue files nothing', w.created.length === 0);
 
+  // --- The NOT EXAMINED disclosure is not a follow-up list (2026-09-08) ------------------------
+  // Verdicts write the marker EMPHASISED (`**NOT EXAMINED:**`) as often as bare, and the section
+  // is separated from the follow-ups by a horizontal rule. Testing only the bare prefix let the
+  // whole disclosure through: eight verdicts on #145/#149 filed ~57 scope-disclosure bullets as
+  // `task` issues (#264-#270, #279-#290, #296-#306, #308-#313, #315-#318, #322-#335). The shape
+  // below is the FOLLOW-UPS region of the red-team verdict on #149 @`18ef2a8a`, verbatim in form.
+  const disclosure =
+    `- The \`deep-verify (T2/T3 only)\` check, which is \`pending\` at this head — not a task\n` +
+    `- Scenario suite, \`diffcheck\`, \`refimpl\`: taken from the green CI checks, not re-run\n` +
+    `- No code from the diff was built, executed or fuzzed in this job.`;
+  const realShape = (marker, lead = 'None. Everything I confirmed is inside the change.') =>
+    `## FOLLOW-UPS\n\n${lead}\n\n---\n\n${marker}\n\n${disclosure}\n\nVERDICT(red-team): findings @ ${HEAD}`;
+
+  for (const marker of ['**NOT EXAMINED:**', '__NOT EXAMINED:__', '*NOT EXAMINED*',
+                        '**NOT EXAMINED**', '### NOT EXAMINED', '## NOT EXAMINED', 'NOT EXAMINED:']) {
+    w = world();
+    await run(w, {body: realShape(marker)});
+    check(`the disclosure under ${marker} files nothing`, w.created.length === 0);
+  }
+
+  // A prose "None." is how a verdict says it proposes nothing; only a bullet was recognised.
+  w = world();
+  await run(w, {body: `## FOLLOW-UPS\n\nNone. Everything I confirmed is inside the change.\n\nVERDICT(review): clean @ ${HEAD}`});
+  check('a prose "None." files nothing', w.created.length === 0);
+  w = world();
+  await run(w, {body: comment('- **None** — nothing outside the change')});
+  check('an emphasised "none" bullet files nothing', w.created.length === 0);
+
+  // The bound that matters: a real proposal BEFORE the marker must still be filed. If the stop
+  // moved too early this case would file 0 and the fix would be silently losing follow-ups.
+  w = world();
+  await run(w, {body: realShape('**NOT EXAMINED:**', '- **Bound the ESP32-S3 UART RX path** — real proposal')});
+  check('a real follow-up before the marker is still filed, the disclosure is not',
+        w.created.length === 1 && /Bound the ESP32-S3 UART RX path/.test(w.created[0].title));
+
+  // --- Dedup survives the reviewer rephrasing between rounds (2026-09-08) ----------------------
+  // Exact-title dedup filed one standing proposal seven times as the wording drifted
+  // ("answer via" / "answer through"): #253, #258, #262, #275, #278, #291, #292.
+  w = world({existing: [{title: "Make `MockWire::Kind::Respond` answer via the node's `RequestHandler`", labels: ['task']}]});
+  await run(w, {body: comment("- **Make `MockWire::Kind::Respond` answer through the node's `RequestHandler`** — round 5")});
+  check('a rephrased duplicate (via/through) is not re-filed', w.created.length === 0);
+
+  w = world({existing: [{title: 'Bound Responder::HeldBytes per-byte timestamps', labels: ['task']}]});
+  await run(w, {body: comment("- **Bound `Responder::HeldBytes`' per-byte timestamps** — 1.1 KB of RAM")});
+  check('a duplicate differing only in markdown and punctuation is not re-filed', w.created.length === 0);
+
+  // The safety bound on that: over-merging would silently drop a genuine follow-up, which is
+  // worse than a duplicate. A different proposal sharing a leading verb must still be filed.
+  w = world({existing: [{title: 'Bound the descriptor TLV loop', labels: ['task']}]});
+  await run(w, {body: comment('- Bound the ESP32-S3 UART RX path against a Responder drain stop — different thing')});
+  check('a genuinely different proposal sharing a verb is still filed', w.created.length === 1);
+  w = world({existing: [{title: 'Count a frame-level discard with no window open', labels: ['task']}]});
+  await run(w, {body: comment('- Count a frame-level discard against a bus-level counter — related but distinct')});
+  check('a related-but-distinct proposal is still filed', w.created.length === 1);
+
+  // Two rephrasings of the same thing inside ONE comment collapse to one issue.
+  w = world();
+  await run(w, {body: comment("- Make `MockWire::Kind::Respond` answer via the node's `RequestHandler`\n" +
+                              "- Make `MockWire::Kind::Respond` answer through the node's `RequestHandler`")});
+  check('two rephrasings in one comment file one issue', w.created.length === 1);
+
   const pass = results.filter(([, ok]) => ok).length;
   for (const [n, ok] of results) console.log(`${ok ? 'ok  ' : 'FAIL'} ${n}`);
   console.log(`${pass}/${results.length} cases passed`);
