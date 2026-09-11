@@ -198,22 +198,28 @@ def _claude_steps(workflow):
     return [s for j in wf["jobs"].values() for s in j.get("steps", []) if "claude-code-action" in s.get("uses", "")]
 
 
-def test_model_tiers_judgement_loops_on_opus_volume_loops_on_default():
-    """Ruling 2026-08-31: the judgement-heavy loops (reviews that back approvals, red team,
-    story planning/enrichment, spec-drift audit, failure triage) run claude-opus-5; the
-    high-volume implementation loops (dispatch, router auto-fix, mentions, review-fix) stay on the
-    action default (claude-sonnet-5) behind their mechanical gates."""
-    OPUS = ["claude-review.yml", "red-team.yml", "story-enrich.yml",
-            "agent-converge-audit.yml", "agent-triage.yml", "continuous-improvement.yml"]
-    DEFAULT = ["agent-dispatch.yml", "ci-failure-router.yml", "claude-mention.yml", "review-fix.yml"]
-    for wfn in OPUS:
-        steps = _claude_steps(wfn)
-        assert steps, wfn
-        for s in steps:
-            assert "--model claude-opus-5" in s["with"].get("claude_args", ""), (wfn, s.get("name"))
-    for wfn in DEFAULT:
-        for s in _claude_steps(wfn):
-            assert "--model" not in s["with"].get("claude_args", ""), (wfn, s.get("name"))
+def test_every_agent_loop_runs_on_opus():
+    """Ruling 2026-09-11 (docs/OPEN-QUESTIONS.md), superseding the 2026-08-31 split: every
+    Claude loop runs claude-opus-5, the implementation loops (dispatch, router auto-fix,
+    mentions, review-fix) as well as the judgement loops. No step may fall back to the action's
+    default model.
+
+    Checked over EVERY workflow file, not only the named list, so a new workflow that adds a
+    Claude step without the flag fails here. The named list is kept as well, so a loop that
+    loses its Claude step (and would pass the sweep vacuously) is noticed too."""
+    LOOPS = ["claude-review.yml", "red-team.yml", "story-enrich.yml", "agent-converge-audit.yml",
+             "agent-triage.yml", "continuous-improvement.yml",
+             "agent-dispatch.yml", "ci-failure-router.yml", "claude-mention.yml", "review-fix.yml"]
+    for wfn in LOOPS:
+        assert _claude_steps(wfn), f"{wfn} no longer has a Claude step"
+    swept = 0
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        for s in _claude_steps(path.name):
+            swept += 1
+            args = s["with"].get("claude_args", "")
+            assert "--model claude-opus-5" in args, (path.name, s.get("name"))
+            assert args.count("--model") == 1, (path.name, s.get("name"), "one --model flag only")
+    assert swept >= len(LOOPS)
 
 
 # --- agent PR approval below T3 (ruling 2026-08-31) --------------------------------------------
