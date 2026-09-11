@@ -161,12 +161,14 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
   check('two rephrasings in one comment file one issue', w.created.length === 1);
 
   // --- The section must not end early (#341 red team, findings 1, 2 and 5) --------------------
-  // Reproducers are fenced, and the brief REQUIRES one per finding. A `# ` line inside a fence is
-  // a shell comment, not a heading; 20 such lines exist across 8 of the 92 corpus comments. A
-  // scan that breaks there drops every later proposal with no signal — `filed N of N` still.
+  // Reproducers are fenced, and the brief REQUIRES one per finding. A `# ` line in one is a shell
+  // comment, not a heading; 20 such lines exist across 8 of the 92 corpus comments. A scan that
+  // broke there would drop every later proposal with no signal. The scan is fence-BLIND, as on
+  // main (#341 round 5, maintainer direction): a `## ` line inside a fence would still end the
+  // section. That is pre-existing, 0 occurrences in the 99-comment corpus, and tracked in #376.
   w = world();
   await run(w, {body: '## FOLLOW-UPS\n- First proposal — worth doing\n\n```bash\n# regenerate the vectors\n' +
-                      'python tools/genvectors.py\n## not a heading either\n```\n\n- Second proposal — also worth doing\n\n' +
+                      'python tools/genvectors.py\n```\n\n- Second proposal — also worth doing\n\n' +
                       `VERDICT(review): findings @ ${HEAD}`});
   check('a fenced `# ` reproducer does not end the section', w.created.length === 2);
   w = world();
@@ -180,7 +182,15 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
   await run(w, {body: `## FOLLOW-UPS\n- First proposal — worth doing\n\n---\n\n- Second proposal — also worth doing\n\nVERDICT(review): findings @ ${HEAD}`});
   check('a `---` rule between proposals does not end the section', w.created.length === 2);
 
-  // A real heading still ends it (this is what the fence tracking must not cost us).
+  // The verdict line ends it too. Nothing bound that half of the stop test until now (#341
+  // round-5 mutation probe): a bullet after the verdict line would have been filed as a task.
+  w = world();
+  await run(w, {body: `## FOLLOW-UPS\n- First proposal — worth doing\n\nVERDICT(review): findings @ ${HEAD}\n` +
+                      `- a bullet after the verdict line, not a proposal`});
+  check('the VERDICT line ends the section', w.created.length === 1 &&
+        !w.created.some(i => /after the verdict line/.test(i.title)));
+
+  // A real heading still ends it.
   w = world();
   await run(w, {body: `## FOLLOW-UPS\n- First proposal — worth doing\n\n## What held\n- not a follow-up\n\nVERDICT(review): findings @ ${HEAD}`});
   check('a real `## ` heading still ends the section', w.created.length === 1);
@@ -206,6 +216,21 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
   await run(w, {body: comment('- Count a frame-level discard with a window open — the other case')});
   check('"with no X" and "with a X" are not merged', w.created.length === 1);
 
+  // A negation inserted into a LONG title (#341 red team round 4, F3 and FU-1). At >= 9 content
+  // tokens a one-token superset clears the 0.9 threshold, so "X" and "X never" merged and the
+  // opposite proposal was silently lost. The short case above passes on a 0.875 margin, not on
+  // the property. A pair whose token sets differ by a negation word is never the same proposal.
+  w = world({existing: [{title: 'The scheduler should retry a lost poll and log the SUSPECT transition', labels: ['task']}]});
+  await run(w, {body: comment('- The scheduler should never retry a lost poll and log the SUSPECT transition — the opposite')});
+  check('a negation inserted into a 9-token title is not merged', w.created.length === 1);
+  w = world({existing: [{title: 'The descriptor parser rejects an oversized TLV before the length check runs', labels: ['task']}]});
+  await run(w, {body: comment('- The descriptor parser never rejects an oversized TLV before the length check runs — the opposite')});
+  check('a negation inserted into a longer title is not merged', w.created.length === 1);
+  // A contraction is the same negation, so "doesn't" and "does not" state one claim.
+  w = world({existing: [{title: 'The engine does not count a discarded request beyond the hold', labels: ['task']}]});
+  await run(w, {body: comment("- The engine doesn't count a discarded request beyond the hold — restated")});
+  check('"doesn\'t" and "does not" are the same claim, so they merge', w.created.length === 0);
+
   // Two distinct boundaries differing in one content word (#341 red team, finding 4): at the old
   // 0.8 these collapsed to one issue. This case fails if the threshold is lowered back.
   w = world({existing: [{title: 'The suite does not cover zero length payload frames', labels: ['task']}]});
@@ -225,6 +250,13 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
   await run(w, {body: comment('- Pin the ESP32 UART receive ring depth against a stalled Responder drain stop — restated')});
   check('a one-token superset of a 10-token title (J = 0.909) is still merged', w.created.length === 0);
 
+  // ...and the same shape BELOW that length must not merge: 6 content tokens vs the same 6 plus one
+  // is J = 6/7 = 0.857. A pin (it passes at 804d49a too), and the case that keeps a lowered
+  // threshold visible now that the negation rule, not the threshold, carries the negation cases.
+  w = world({existing: [{title: 'Count a frame-level discard with a window open', labels: ['task']}]});
+  await run(w, {body: comment('- Count a frame-level discard with a window open on the bus — narrower')});
+  check('a one-token superset of a 6-token title (J = 0.857) is not merged', w.created.length === 1);
+
   // --- Word order carries sense (#341 red team round 2, finding 1) -----------------------------
   // A token SET is order-blind: "A against B" and "B against A" were identical, J = 1.0, and the
   // second proposal was silently never filed. These are opposite proposals; each must file.
@@ -240,9 +272,10 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
 
   // --- An unbalanced fence (#341 red team round 2, finding 2) ----------------------------------
   // GitHub truncates a comment at 65 536 characters, and a verdict carries a fenced reproducer per
-  // finding, so a long verdict can arrive with a fence that never closes. Skipping to end-of-body
-  // dropped every later proposal AND both stop markers while logging `filed 1 of 1`. An opener with
-  // no closer is plain text: later proposals file, the marker still stops, and the job says so.
+  // finding, so a long verdict can arrive with a fence that never closes. The round-2 fence handler
+  // skipped to end-of-body, dropping every later proposal AND both stop markers. The fence-blind
+  // scan cannot do that. These cases stay as guards against a future fence handler (#376)
+  // reintroducing the swallow.
   w = world();
   await run(w, {body: '## FOLLOW-UPS\n- First proposal — worth doing\n\n```bash\n./build/native/scenario_runner tests/scenarios/f04.yaml -v\n\n' +
                       '- Second proposal — also worth doing\n\nNOT EXAMINED: nothing excluded\n- a disclosure bullet, not a task\n\n' +
@@ -250,21 +283,12 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
   check('an unclosed fence does not swallow later proposals', w.created.length === 2 &&
         w.created.some(i => i.title === 'Second proposal'));
   check('an unclosed fence does not swallow the NOT EXAMINED stop', !w.created.some(i => /disclosure bullet/.test(i.title)));
-  check('an unclosed fence is reported, not silent', w.log.some(m => /unclosed fence/i.test(m)));
-
-  // A closer is bare fence characters (CommonMark), so "```bash" never closes a block. Met inside an
-  // open block it means the earlier fence was never closed (round 3, below), and the block it opens
-  // is skipped instead. Either reading keeps the `## ` inside the reproducer from ending the
-  // section. A prefix-matched closer ended the block at "```bash" and lost the later proposal.
-  w = world();
-  await run(w, {body: '## FOLLOW-UPS\n- First proposal — worth doing\n\n```\n```bash\n## inside the fence\n```\n\n' +
-                      `- Second proposal — also worth doing\n\nVERDICT(review): findings @ ${HEAD}`});
-  check('a fence line with an info string does not close the block', w.created.length === 2);
 
   // --- One missing closer must not re-pair every later fence (#341 red team round 3, finding 1) --
-  // An opener that lost its closer paired with the NEXT block's closing fence. The proposal in
-  // between vanished with no warning (R1); one block later the marker itself was swallowed and the
-  // disclosure filed (R2). Both inputs are the red team's, verbatim in shape.
+  // With a fence handler, an opener that lost its closer paired with the NEXT block's closing
+  // fence: the proposal between vanished (R1), and one block later the marker itself was swallowed
+  // (R2). The fence-blind scan is immune to both. The red team's inputs stay, verbatim in shape,
+  // as guards for #376.
   const FENCE = '```';
   w = world();
   await run(w, {body: `## FOLLOW-UPS\n- Bound the descriptor TLV loop — real\n\n${FENCE}bash\n./build/native/scenario_runner f04.yaml -v\n` +
@@ -272,7 +296,6 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
                       `VERDICT(red-team): findings @ ${HEAD}`});
   check('an unclosed fence followed by another block does not swallow the proposal between them',
         w.created.length === 2 && w.created.some(i => i.title === 'Wire quality into CI'));
-  check('an unclosed fence followed by another block is reported', w.log.some(m => /unclosed fence/i.test(m)));
   w = world();
   await run(w, {body: `## FOLLOW-UPS\n- Bound the descriptor TLV loop — real\n\n${FENCE}bash\n./build/native/scenario_runner f04.yaml -v\n` +
                       `\n**NOT EXAMINED:**\n\n- the ESP32-S3 target build, not run\n- the scenario suite, taken from CI:\n\n` +
@@ -280,18 +303,6 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
                       `- no code from the diff was fuzzed\n\nVERDICT(red-team): findings @ ${HEAD}`});
   check('an unclosed fence cannot carry the scan past the NOT EXAMINED marker',
         w.created.length === 1 && w.created[0].title === 'Bound the descriptor TLV loop');
-
-  // The two closer rules round 2 states and nothing pinned (#341 red team round 3, finding 3): a
-  // closer is at least as long as its opener, and made of the same character. Pins, not RED cases
-  // — the behaviour was already correct; these make a regression of either rule visible.
-  w = world();
-  await run(w, {body: '## FOLLOW-UPS\n- First proposal — worth doing\n\n````\n```\n## inside the outer fence\n```\n````\n\n' +
-                      `- Second proposal — also worth doing\n\nVERDICT(review): findings @ ${HEAD}`});
-  check('a shorter fence line does not close a longer block', w.created.length === 2);
-  w = world();
-  await run(w, {body: '## FOLLOW-UPS\n- First proposal — worth doing\n\n```\n~~~\n## inside the fence\n```\n\n' +
-                      `- Second proposal — also worth doing\n\nVERDICT(review): findings @ ${HEAD}`});
-  check('a fence of the other character does not close a block', w.created.length === 2);
 
   // --- Directional prepositions and conjunctions carry sense (#341 red team round 3, finding 2) --
   // With `to`/`from`/`into`/`and`/`or` stopped, each pair below was one token set in one order, so

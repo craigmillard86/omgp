@@ -3022,3 +3022,11 @@ This was measured, not assumed. On the 92-comment corpus of 2026-09-08 (verdicts
 **Ruling:** PENDING — human. Merging #341 as written enacts the recommendation.
 
 **Amends:** #340 AC 1. **Supersedes:** none.
+
+---
+
+## 2026-09-11 — Ruling: #340 AC 1's horizontal-rule clause is dropped
+
+**Ruling:** human, 2026-09-11, in session. The recommendation of the 2026-09-11 entry "#340's AC 1 ('stop at a horizontal rule') conflicts with its AC 2" is adopted: AC 1 no longer includes "and at a horizontal rule", and AC 2 governs. The emphasis- and heading-tolerant NOT EXAMINED test handles the "follow-ups, `---`, marker" shape on its own. Also recorded on #340.
+
+**Supersedes:** none — this rules on that entry.

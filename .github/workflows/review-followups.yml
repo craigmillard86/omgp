@@ -62,44 +62,20 @@ jobs:
             //     a fenced reproducer end the section (20 such lines across 8 of those comments), and
             //     the brief REQUIRES a runnable reproducer per finding. `### NOT EXAMINED` still
             //     stops, via unmark + the marker test.
-            // Fenced blocks are skipped so a `## ` inside one cannot end the section either — but only
-            // up to a real closer (same character, at least as long, nothing else on the line). An
-            // opener with NO closer is read as plain text, with a warning. Skipping to end-of-body
-            // instead dropped every later proposal AND both stop markers while logging `filed 1 of 1`
-            // (#341 red team round 2), and it is reachable without malice: GitHub truncates a comment
-            // at 65 536 characters, and every finding carries a fenced reproducer.
+            // The scan is fence-BLIND, as on origin/main. #341's rounds 2-4 each added a fence rule and
+            // each fix produced the next round's findings; a replay over the 99 real verdict comments
+            // files the identical 57 titles with the fence handling or without it, so it bought nothing
+            // on real data (maintainer direction, 2026-09-11). Two pre-existing consequences stand,
+            // both with 0 occurrences in that corpus and tracked in #376: a `## ` line inside a fenced
+            // block ends the section, and a `- ` line inside one is read as a bullet.
             const unmark = (s) => s.replace(/^#{1,6}\s+/, '').replace(/^[*_]{1,3}\s*/, '').replace(/\s*[*_]{1,3}$/, '').trim();
             const lines = body.split('\n');
             const start = lines.findIndex(l => /^##\s*FOLLOW-UPS\b/i.test(l.trim()));
             if (start < 0) { core.notice('followups: no FOLLOW-UPS section — nothing to file'); return; }
             const items = [];
-            const opener = (t) => { const f = t.match(/^(`{3,}|~{3,})/); return f ? f[1] : null; };
-            const closes = (t, f) => { const g = t.match(/^(`{3,}|~{3,})\s*$/); return !!g && g[1][0] === f[0] && g[1].length >= f.length; };
             const isStop = (t) => /^NOT EXAMINED\b/i.test(unmark(t)) || /^VERDICT\(/.test(t);
-            // An opener counts as UNCLOSED (read as plain text, with a warning) when, before any
-            // closer, the scan meets either another opener of the same kind carrying an info string
-            // (a line that cannot close the block, so the author evidently thought the earlier fence
-            // was closed) or a stop line. Pairing it with the next bare fence instead swallowed the
-            // proposals in between and, one block later, the NOT EXAMINED marker itself, filing the
-            // disclosure (#341 red team round 3). The cost, by design and warned about: a genuine
-            // block that quotes a stop line at the start of a line is re-read as prose, and that
-            // quoted line then ends the scan. A stop too early was chosen over a disclosure filed.
             for (let i = start + 1; i < lines.length; i++) {
               const t = lines[i].trim();
-              const f = opener(t);
-              if (f) {
-                let j = i + 1, why = '';
-                for (; j < lines.length; j++) {
-                  const u = lines[j].trim();
-                  if (closes(u, f)) break;
-                  const g = opener(u);
-                  if (g && g[0] === f[0] && g.length >= f.length) { why = 'another fence opened first'; break; }
-                  if (isStop(u)) { why = 'a stop line came first'; break; }
-                }
-                if (j < lines.length && !why) { i = j; continue; }    // balanced: skip the block
-                core.warning(`followups: unclosed fence at comment line ${i + 1} (${why || 'no closer'}) — read as plain text, not skipped`);
-                continue;                                             // unclosed: the opener line only
-              }
               if (/^##\s/.test(t) || isStop(t)) break;
               const m = t.match(/^[-*]\s+(.*\S)\s*$/);
               // "none" is how a verdict says it proposes nothing. Test the TITLE head exactly, so
@@ -122,7 +98,7 @@ jobs:
             // and the conjunctions `and` and `or` (round 3). With those stopped, "copy X into Y" and
             // "copy X from Y" were one token set in one order, and the second was never filed.
             const STOP = new Set(['a','an','the','of','for','in','on','at','by','its','it','is','be','as','with','via','through','that','this','their','than','then','s']);
-            const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+            const norm = (s) => s.toLowerCase().replace(/n['’]t\b/g, ' not').replace(/[^a-z0-9]+/g, ' ').trim();
             const seq = (s) => norm(s).split(' ').filter(x => x && !STOP.has(x));
             const toks = (s) => new Set(seq(s));
             // Word order carries sense as well: a token SET made "count a frame-level discard
@@ -136,10 +112,17 @@ jobs:
               const ka = A.filter(x => inB.has(x)), kb = B.filter(x => inA.has(x));
               return ka.length === kb.length && ka.every((x, i) => x === kb[i]);
             };
+            // A negation is never absorbed. At >= 9 content tokens a one-token superset clears 0.9 and
+            // sameOrder passes for an insertion, so "X" and "X never" merged and the opposite proposal
+            // was lost (#341 red team round 4, F3/FU-1). If the two token sets differ by a negation
+            // word, they are different proposals whatever the Jaccard says.
+            const NEG = new Set(['not','no','never','without','nor','cannot','none']);
+            const negDiffers = (A, B) => { for (const x of NEG) if (A.has(x) !== B.has(x)) return true; return false; };
             const same = (a, b) => {
               if (norm(a) === norm(b)) return true;
               const A = toks(a), B = toks(b);
               if (!A.size || !B.size) return false;
+              if (negDiffers(A, B)) return false;
               let inter = 0; for (const x of A) if (B.has(x)) inter++;
               // Jaccard over content tokens, >= 0.9. That admits a synonym swap (identical token
               // sets) and a one-token superset only when the shorter title has at least 9 content
