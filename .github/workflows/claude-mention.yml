@@ -39,4 +39,5 @@ jobs:
           # No prompt: the action's mention mode responds to the comment in
           # its thread context. CLAUDE.md + OPERATING-POLICY still bind it.
           claude_args: |
+            --model claude-opus-5
             --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr*),Bash(gh issue*),Bash(g++*),Bash(python3*),Edit,Read,Write,Grep,Glob"
