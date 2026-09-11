@@ -3042,3 +3042,28 @@ half stands unchanged; its implementation-loop half is replaced.
 **Ruling:** PENDING — human. Raised by the round-2 red team and review of #375 (the review's point being that a normative sentence in a ground-truth document must carry a countable pending marker, not live only as prose inside a rulings entry). If ruled otherwise, trunk §3's amended gap bullet and #374 both change.
 
 **Amends:** the 2026-09-11 rulings entry, item 6. **Supersedes:** none.
+## 2026-09-11 — #340's AC 1 ("stop at a horizontal rule") conflicts with its AC 2; the rule stop is not implemented
+
+**Context:** #340 lists the acceptance criteria for the follow-up filer fix (PR #341). Two of them conflict:
+- **AC 1:** the section scan stops at the NOT EXAMINED marker in any spelling "**and at a horizontal rule**".
+- **AC 2:** "a follow-up proposed *before* the marker is still filed (the stop must not move too early)".
+
+Verdicts use `---` as an in-prose separator *between* findings, so a rule stop ends the scan early.
+
+This was measured, not assumed. On the 92-comment corpus of 2026-09-08 (verdicts on #145 and #149), 41 `---` rules sit inside a `## FOLLOW-UPS` section before its marker. The filer at `88691a8`, which had the rule stop, filed 39 issues from that corpus. Without the rule stop it files 45, and the 6 it recovers are real proposals that follow an in-prose `---` (#341 round-1 red team, findings 2 and 3; commit `6574462`). The corpus shape that motivated the rule, "follow-ups, `---`, then `**NOT EXAMINED:**`", is fully handled by the emphasis- and heading-tolerant marker test on its own. `tests/workflows/review_followups_harness.js` pins both halves:
+- "the corpus shape (rule, then an emphasised marker) files nothing";
+- "a `---` rule between proposals does not end the section".
+
+**Recommendation:** amend #340 AC 1 by dropping "and at a horizontal rule". AC 2 wins: a missed stop at a rule costs nothing once the marker stops the scan, and a false stop silently loses proposals. That is the failure #340 exists to prevent. PR #341 implements this answer (review round 3 at `63cc303`: "do not implement the rule stop … the two clauses of #340 conflict, and this PR resolved the conflict the right way; what is missing is the record").
+
+**Ruling:** PENDING — human. Merging #341 as written enacts the recommendation.
+
+**Amends:** #340 AC 1. **Supersedes:** none.
+
+---
+
+## 2026-09-11 — Ruling: #340 AC 1's horizontal-rule clause is dropped
+
+**Ruling:** human, 2026-09-11, in session. The recommendation of the 2026-09-11 entry "#340's AC 1 ('stop at a horizontal rule') conflicts with its AC 2" is adopted: AC 1 no longer includes "and at a horizontal rule", and AC 2 governs. The emphasis- and heading-tolerant NOT EXAMINED test handles the "follow-ups, `---`, marker" shape on its own. Also recorded on #340.
+
+**Supersedes:** none — this rules on that entry.

@@ -67,9 +67,12 @@ Outcome ∈ { Pending, Answered, Failed(Timeout | Crc) }     -- Crc: last attemp
 Master state ∈ { Idle, Transmitting(until tx_end), AwaitResponse(until tx_end + T_resp), Gap(until min(last_activity + T_gap, defer_origin + max_frame + T_gap)) }
 ```
 
-- **Receive path**: `poll(now)` first drains `ByteWire::receive()` into the engine's
-  `Deframer` (each byte with its start-bit instant), then evaluates the state machine. It
-  is the only receive path (analysis F1); the same holds for the Responder.
+- **Receive path**: a shared drain first reads `ByteWire::receive()` into the engine's
+  `Deframer` (each byte with its start-bit instant) to exhaustion; it is the only receive
+  path (analysis F1). `poll(now)` runs it, then evaluates the state machine; `begin()` runs
+  the same drain before deciding whether/when to transmit, so its own "never transmits over
+  an arriving frame" guarantee (see "Gap" below) does not depend on a `poll(now)` having
+  immediately preceded it (#138). The same drain-then-evaluate shape holds for the Responder.
 
 - **Sequence**: per-destination counter `next_seq[16]`; `begin()` uses `next_seq[dst]++ & 0x0F`
   for a new transaction; retries reuse `seq` and set `retry`.
