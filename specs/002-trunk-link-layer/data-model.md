@@ -121,9 +121,10 @@ Responder state ∈ { Listening, Scheduled(response at request_end + turnaround_
   (`ReplayBuffer.peer`) and a retry from a DIFFERENT station with a colliding sequence is
   treated as new. Pending the ruling on file, `OPEN-QUESTIONS.md` 2026-09-06.)*
   *(Ruled 2026-09-11, `OPEN-QUESTIONS.md` 2026-09-07 "the Responder's replay entry has no age
-  bound": a retry is replayed only when its request bytes also equal the request that was
-  answered, so `ReplayBuffer` gains a fixed-size copy of that request. Any other retry is
-  treated as new. A time-based expiry was rejected, because the host retries only after its
+  bound": a retry is replayed only when it repeats the request that was answered, compared over
+  `dst`, `src`, `len` and the L3 payload — `ctrl`, which carries the retry bit, and the CRC are
+  EXCLUDED, since a retry is never byte-identical to the request it retries (trunk §7). So
+  `ReplayBuffer` gains a fixed-size copy of those bytes. Any other retry is treated as new. A time-based expiry was rejected, because the host retries only after its
   `T_resp` window, so expiry would disable replay, and `GET_EVENT` retries depend on replay.
   Implementation: #373.)*
 - otherwise → `handler.handle(payload, len, out, cap) → resp_len` once; encode response
