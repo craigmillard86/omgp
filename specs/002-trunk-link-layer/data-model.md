@@ -113,12 +113,19 @@ Responder state ∈ { Listening, Scheduled(response at request_end + turnaround_
 
 - Request acceptance: intact frame, `dst == my_addr`, `response == 0`. *(Amended in PR #149,
   red-team @`6c2fe4b` / @`71caba0` — also refused: `src == my_addr`, `src` outside trunk §5's
-  L2 range, and every request when the node's OWN address is outside it. Pending a ruling,
-  see `docs/OPEN-QUESTIONS.md` 2026-09-07 "the Responder's acceptance screen".)*
+  L2 range, and every request when the node's OWN address is outside it. Ruled 2026-09-11:
+  adopted, since trunk §5's address range is the higher authority; see `docs/OPEN-QUESTIONS.md`
+  2026-09-07 "the Responder's acceptance screen" and the 2026-09-11 rulings entry.)*
 - `retry == 1 && valid && seq == buffer.seq` → retransmit buffer (no handler call).
   *(Amended in PR #149, red-team @`033182a` — the buffer additionally records the requester
   (`ReplayBuffer.peer`) and a retry from a DIFFERENT station with a colliding sequence is
   treated as new. Pending the ruling on file, `OPEN-QUESTIONS.md` 2026-09-06.)*
+  *(Ruled 2026-09-11, `OPEN-QUESTIONS.md` 2026-09-07 "the Responder's replay entry has no age
+  bound": a retry is replayed only when its request bytes also equal the request that was
+  answered, so `ReplayBuffer` gains a fixed-size copy of that request. Any other retry is
+  treated as new. A time-based expiry was rejected, because the host retries only after its
+  `T_resp` window, so expiry would disable replay, and `GET_EVENT` retries depend on replay.
+  Implementation: #373.)*
 - otherwise → `handler.handle(payload, len, out, cap) → resp_len` once; encode response
   (`src = my_addr`, `dst = request.src`, `response = 1`, `retry` echoed, `seq` echoed);
   store in buffer; schedule.
@@ -143,6 +150,10 @@ Responder state ∈ { Listening, Scheduled(response at request_end + turnaround_
   2026-09-07 "the Responder's late path defers for an idle bus" for the deferral itself, and
   "the Responder's late path CAN transmit into a frame it has not read" for the open defect in
   (b) — the entry the ruling should be made from, as `contracts/link-cpp.md` also points out.)*
+  *(Ruled 2026-09-11: FR-017 and trunk §3 outrank FR-014's "at once" and this bullet's
+  "nothing is dropped". The engine never stops reading during a late wait, and a completed
+  request beyond `kHeldRequests` is discarded and counted in `stats()`. Its reading of the bus
+  therefore stays complete, and the stale-belief path in (b) goes away. Implementation: #372.)*
 
 ## 6. Node health record
 

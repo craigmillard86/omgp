@@ -382,7 +382,13 @@ assert no bus fault.
   engine is not given control until after that window has closed (a late-polling
   simulator), it MUST still transmit — at once — and MUST count the occurrence as a late
   response, so the violation is visible to the layer that caused it rather than hidden
-  by a dropped answer.
+  by a dropped answer. *(Amended 2026-09-11 by maintainer ruling — `docs/OPEN-QUESTIONS.md`
+  2026-09-07 "the Responder's late path CAN transmit into a frame it has not read" and the
+  2026-09-11 rulings entry: FR-017 and trunk §3 outrank "at once". A late response is
+  transmitted on the first poll that reaches it once the engine has read the bus to idle,
+  within the bounded courtesy of data-model §5. The engine never stops reading during that
+  wait, and a completed request beyond its hold is discarded and COUNTED rather than held
+  unread. Implementation: #372.)*
 - **FR-015**: The node-side engine MUST keep exactly one replay buffer holding its most
   recent response (sequence, and the complete frame bytes); on receiving a frame with the
   retry bit set and the same sequence as the buffered response it MUST retransmit the

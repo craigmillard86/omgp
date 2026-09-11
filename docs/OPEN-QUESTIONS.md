@@ -3002,3 +3002,26 @@ needs pulling back, the revert is the four flags and the test's list.
 
 **Supersedes:** the 2026-08-31 "Model tiers for agent workflows" entry — its judgement-loop
 half stands unchanged; its implementation-loop half is replaced.
+
+---
+
+## 2026-09-11 — Maintainer rulings on the pending entries (session of 2026-09-11)
+
+**Context:** this session reviewed every entry on `main` still marked PENDING or carrying no ruling line: 12 entries, 9 decisions once supersede chains collapse. Each ruling is recorded here rather than by editing the entries (this file is append-only). Where an entry's own recommendation was changed or withdrawn, that is stated.
+
+1. **2026-09-07 "adversarial rounds are unbounded in time; scope routing alone does not terminate"** — **Ruling:** adopted as built in #252 (`adversarial_round_budget: 3`). `GOVERNANCE.md` §4 already records it as ruled; this closes the entry's PENDING line.
+2. **2026-09-05 "Route review findings by scope, not severity (#134)"** — this entry has no Ruling line. **Ruling:** adopted as built in #136. `GOVERNANCE.md` already records "ruled 2026-09-05".
+3. **2026-09-07 "SC-004: all 16 positions ARE exercised, by 15 cases…"** — **Ruling:** adopted. T034's matrix description is amended in `specs/002-trunk-link-layer/tasks.md`. The two earlier SC-004 entries it supersedes are closed with it.
+4. **2026-09-07 "the Responder's acceptance screen refuses more than data-model §5 lists"** — **Ruling:** amend §5 to match the code, because trunk §5's address range is the higher authority. Done in `data-model.md` §5.
+5. **2026-09-07 "the Responder's late path CAN transmit into a frame it has not read"**, with "…defers for an idle bus", "…stops reading to avoid dropping" and the "retraction" entry — **Ruling:** FR-017 and trunk §3 outrank FR-014's "MUST still transmit — at once" and data-model §5's "nothing is dropped". The engine never stops reading during a late wait. A completed request beyond `kHeldRequests` is discarded and counted in `stats()`, so a late response keys down only on a bus the engine has read. Implementation: #372. FR-014 and data-model §5 carry ruling markers.
+   - **Why:** the merged hold-and-stop corner lost requests at the wire without counting them. Red team @`bab7378`: 74 requests at ~37% bus occupancy, 7 answered, RX overflow, `discards == 0`. It can also key down inside another station's frame, disrupting traffic to healthy nodes. Counting the excess confines an overloaded node's degradation to that node, and makes it visible.
+   - **Correction:** the question put to the maintainer labelled this "FR-015/016 ('nothing dropped')". FR-015/016 are the replay-buffer requirements. The clause in tension is FR-014's "at once" together with data-model §5's "nothing is dropped". The choice ruled — count the excess rather than hold-and-stop — is unaffected.
+   - **Second correction**, to an explanation given in session: a late answer does **not** always miss the host's window. The host accepts a response whose first byte starts in `[tx_end, tx_end + T_resp)` (data-model §4). A node polled late on an idle bus transmits at once and can still land inside it. The window is missed when the node is later than that, or when the engine defers for a busy bus — the case in which requests accumulate and this trade arises.
+6. **2026-09-07 "does trunk §4's T_gap bind every station, or only the host between its own transactions?"** — the clause is trunk **§3**. **Ruling:** every station, between transactions; within a transaction, `T_turn` governs the request→response turnaround. Trunk §3's bullet and the timing table are amended. Implementation: #374.
+7. **2026-09-07 "the Responder's replay entry has no age bound…"** — **Ruling:** replay a retry only when its request bytes also equal the request that was answered. `ReplayBuffer` gains a fixed-size copy of that request. Implementation: #373; data-model §5 marker.
+   - **The entry's own recommendation is withdrawn.** It proposed expiring the entry at `request_end + T_resp`, but the host retries only after that window has passed (trunk §7), so that would disable replay. `GET_EVENT` (protocol-l3 `0x15`) drains one event per call, so its retry is safe only when replayed.
+8. **2026-09-07 "a CRC-corrupt frame arriving with no transaction open moves no counter at all"** — **Ruling:** count it at bus level. The canonical issue is #144, where the ruling is recorded. #271, #274, #276, #293, #295, #321 and #336 are follow-up-filer duplicates of it.
+
+**Still pending after this session:** 2026-09-11 "#340's AC 1 ('stop at a horizontal rule') conflicts with its AC 2". It is on PR #341's branch, and merging #341 enacts it.
+
+**Supersedes:** none. This entry records rulings on the entries named, and each keeps its history.
