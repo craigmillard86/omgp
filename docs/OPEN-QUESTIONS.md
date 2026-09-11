@@ -3002,3 +3002,23 @@ needs pulling back, the revert is the four flags and the test's list.
 
 **Supersedes:** the 2026-08-31 "Model tiers for agent workflows" entry — its judgement-loop
 half stands unchanged; its implementation-loop half is replaced.
+
+---
+
+## 2026-09-11 — #340's AC 1 ("stop at a horizontal rule") conflicts with its AC 2; the rule stop is not implemented
+
+**Context:** #340 lists the acceptance criteria for the follow-up filer fix (PR #341). Two of them conflict:
+- **AC 1:** the section scan stops at the NOT EXAMINED marker in any spelling "**and at a horizontal rule**".
+- **AC 2:** "a follow-up proposed *before* the marker is still filed (the stop must not move too early)".
+
+Verdicts use `---` as an in-prose separator *between* findings, so a rule stop ends the scan early.
+
+This was measured, not assumed. On the 92-comment corpus of 2026-09-08 (verdicts on #145 and #149), 41 `---` rules sit inside a `## FOLLOW-UPS` section before its marker. The filer at `88691a8`, which had the rule stop, filed 39 issues from that corpus. Without the rule stop it files 45, and the 6 it recovers are real proposals that follow an in-prose `---` (#341 round-1 red team, findings 2 and 3; commit `6574462`). The corpus shape that motivated the rule, "follow-ups, `---`, then `**NOT EXAMINED:**`", is fully handled by the emphasis- and heading-tolerant marker test on its own. `tests/workflows/review_followups_harness.js` pins both halves:
+- "the corpus shape (rule, then an emphasised marker) files nothing";
+- "a `---` rule between proposals does not end the section".
+
+**Recommendation:** amend #340 AC 1 by dropping "and at a horizontal rule". AC 2 wins: a missed stop at a rule costs nothing once the marker stops the scan, and a false stop silently loses proposals. That is the failure #340 exists to prevent. PR #341 implements this answer (review round 3 at `63cc303`: "do not implement the rule stop … the two clauses of #340 conflict, and this PR resolved the conflict the right way; what is missing is the record").
+
+**Ruling:** PENDING — human. Merging #341 as written enacts the recommendation.
+
+**Amends:** #340 AC 1. **Supersedes:** none.

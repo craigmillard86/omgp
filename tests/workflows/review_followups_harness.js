@@ -252,13 +252,57 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
   check('an unclosed fence does not swallow the NOT EXAMINED stop', !w.created.some(i => /disclosure bullet/.test(i.title)));
   check('an unclosed fence is reported, not silent', w.log.some(m => /unclosed fence/i.test(m)));
 
-  // A closer is bare fence characters (CommonMark): "```bash" inside a ``` block is content, not
-  // the end of it. A prefix-matched closer ended the block there and read the rest as prose, so a
-  // `## ` inside the reproducer ended the section and the later proposal was lost.
+  // A closer is bare fence characters (CommonMark), so "```bash" never closes a block. Met inside an
+  // open block it means the earlier fence was never closed (round 3, below), and the block it opens
+  // is skipped instead. Either reading keeps the `## ` inside the reproducer from ending the
+  // section. A prefix-matched closer ended the block at "```bash" and lost the later proposal.
   w = world();
   await run(w, {body: '## FOLLOW-UPS\n- First proposal — worth doing\n\n```\n```bash\n## inside the fence\n```\n\n' +
                       `- Second proposal — also worth doing\n\nVERDICT(review): findings @ ${HEAD}`});
   check('a fence line with an info string does not close the block', w.created.length === 2);
+
+  // --- One missing closer must not re-pair every later fence (#341 red team round 3, finding 1) --
+  // An opener that lost its closer paired with the NEXT block's closing fence. The proposal in
+  // between vanished with no warning (R1); one block later the marker itself was swallowed and the
+  // disclosure filed (R2). Both inputs are the red team's, verbatim in shape.
+  const FENCE = '```';
+  w = world();
+  await run(w, {body: `## FOLLOW-UPS\n- Bound the descriptor TLV loop — real\n\n${FENCE}bash\n./build/native/scenario_runner f04.yaml -v\n` +
+                      `\n- Wire quality into CI — real\n\n${FENCE}bash\n./pipeline.sh unit\n${FENCE}\n\nNOT EXAMINED: nothing excluded\n\n` +
+                      `VERDICT(red-team): findings @ ${HEAD}`});
+  check('an unclosed fence followed by another block does not swallow the proposal between them',
+        w.created.length === 2 && w.created.some(i => i.title === 'Wire quality into CI'));
+  check('an unclosed fence followed by another block is reported', w.log.some(m => /unclosed fence/i.test(m)));
+  w = world();
+  await run(w, {body: `## FOLLOW-UPS\n- Bound the descriptor TLV loop — real\n\n${FENCE}bash\n./build/native/scenario_runner f04.yaml -v\n` +
+                      `\n**NOT EXAMINED:**\n\n- the ESP32-S3 target build, not run\n- the scenario suite, taken from CI:\n\n` +
+                      `${FENCE}\n./pipeline.sh scenarios\n${FENCE}\n\n- refimpl and diffcheck, also taken from CI\n` +
+                      `- no code from the diff was fuzzed\n\nVERDICT(red-team): findings @ ${HEAD}`});
+  check('an unclosed fence cannot carry the scan past the NOT EXAMINED marker',
+        w.created.length === 1 && w.created[0].title === 'Bound the descriptor TLV loop');
+
+  // The two closer rules round 2 states and nothing pinned (#341 red team round 3, finding 3): a
+  // closer is at least as long as its opener, and made of the same character. Pins, not RED cases
+  // — the behaviour was already correct; these make a regression of either rule visible.
+  w = world();
+  await run(w, {body: '## FOLLOW-UPS\n- First proposal — worth doing\n\n````\n```\n## inside the outer fence\n```\n````\n\n' +
+                      `- Second proposal — also worth doing\n\nVERDICT(review): findings @ ${HEAD}`});
+  check('a shorter fence line does not close a longer block', w.created.length === 2);
+  w = world();
+  await run(w, {body: '## FOLLOW-UPS\n- First proposal — worth doing\n\n```\n~~~\n## inside the fence\n```\n\n' +
+                      `- Second proposal — also worth doing\n\nVERDICT(review): findings @ ${HEAD}`});
+  check('a fence of the other character does not close a block', w.created.length === 2);
+
+  // --- Directional prepositions and conjunctions carry sense (#341 red team round 3, finding 2) --
+  // With `to`/`from`/`into`/`and`/`or` stopped, each pair below was one token set in one order, so
+  // sameOrder could not tell them apart and the second proposal was never filed.
+  for (const [open, prop] of [['Copy the descriptor cache into the module', 'Copy the descriptor cache from the module'],
+                              ['Report the queue depth to the host-core', 'Report the queue depth from the host-core'],
+                              ['Reject a zero and a max length payload', 'Reject a zero or a max length payload']]) {
+    w = world({existing: [{title: open, labels: ['task']}]});
+    await run(w, {body: comment(`- ${prop} — the other case`)});
+    check(`"${prop}" is not merged with "${open}"`, w.created.length === 1);
+  }
 
   const pass = results.filter(([, ok]) => ok).length;
   for (const [n, ok] of results) console.log(`${ok ? 'ok  ' : 'FAIL'} ${n}`);

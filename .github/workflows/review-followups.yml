@@ -55,11 +55,11 @@ jobs:
             // markdown emphasis and heading marks before testing the line.
             //
             // Two things are deliberately NOT stop conditions, both learned from #341's red team:
-            //   - a `---` rule. Verdicts use one as an in-prose separator BETWEEN findings (22 of 92
-            //     corpus comments), so stopping there drops later proposals. The corpus shape
+            //   - a `---` rule. Verdicts use one as an in-prose separator BETWEEN findings (22 of the 92
+            //     comments in the 2026-09-08 corpus), so stopping there drops later proposals. The corpus shape
             //     "rule, then marker" is handled by the marker test, which is the load-bearing one.
             //   - `###`..`######`. Widening the heading test to `^#{1,6}\s` makes a shell comment in
-            //     a fenced reproducer end the section (20 such lines across 8 corpus comments), and
+            //     a fenced reproducer end the section (20 such lines across 8 of those comments), and
             //     the brief REQUIRES a runnable reproducer per finding. `### NOT EXAMINED` still
             //     stops, via unmark + the marker test.
             // Fenced blocks are skipped so a `## ` inside one cannot end the section either — but only
@@ -75,17 +75,32 @@ jobs:
             const items = [];
             const opener = (t) => { const f = t.match(/^(`{3,}|~{3,})/); return f ? f[1] : null; };
             const closes = (t, f) => { const g = t.match(/^(`{3,}|~{3,})\s*$/); return !!g && g[1][0] === f[0] && g[1].length >= f.length; };
+            const isStop = (t) => /^NOT EXAMINED\b/i.test(unmark(t)) || /^VERDICT\(/.test(t);
+            // An opener counts as UNCLOSED (read as plain text, with a warning) when, before any
+            // closer, the scan meets either another opener of the same kind carrying an info string
+            // (a line that cannot close the block, so the author evidently thought the earlier fence
+            // was closed) or a stop line. Pairing it with the next bare fence instead swallowed the
+            // proposals in between and, one block later, the NOT EXAMINED marker itself, filing the
+            // disclosure (#341 red team round 3). The cost, by design and warned about: a genuine
+            // block that quotes a stop line at the start of a line is re-read as prose, and that
+            // quoted line then ends the scan. A stop too early was chosen over a disclosure filed.
             for (let i = start + 1; i < lines.length; i++) {
               const t = lines[i].trim();
               const f = opener(t);
               if (f) {
-                let j = i + 1;
-                while (j < lines.length && !closes(lines[j].trim(), f)) j++;
-                if (j < lines.length) { i = j; continue; }            // balanced: skip the block
-                core.warning(`followups: unclosed fence at comment line ${i + 1} — read as plain text, not skipped`);
-                continue;                                             // unbalanced: the opener line only
+                let j = i + 1, why = '';
+                for (; j < lines.length; j++) {
+                  const u = lines[j].trim();
+                  if (closes(u, f)) break;
+                  const g = opener(u);
+                  if (g && g[0] === f[0] && g.length >= f.length) { why = 'another fence opened first'; break; }
+                  if (isStop(u)) { why = 'a stop line came first'; break; }
+                }
+                if (j < lines.length && !why) { i = j; continue; }    // balanced: skip the block
+                core.warning(`followups: unclosed fence at comment line ${i + 1} (${why || 'no closer'}) — read as plain text, not skipped`);
+                continue;                                             // unclosed: the opener line only
               }
-              if (/^##\s/.test(t) || /^NOT EXAMINED\b/i.test(unmark(t)) || /^VERDICT\(/.test(t)) break;
+              if (/^##\s/.test(t) || isStop(t)) break;
               const m = t.match(/^[-*]\s+(.*\S)\s*$/);
               // "none" is how a verdict says it proposes nothing. Test the TITLE head exactly, so
               // "- **None** — nothing outside the change" is still recognised while a proposal
@@ -100,11 +115,13 @@ jobs:
             // #278, #291, #292). Compare normalised token sets instead, and treat a near-identical
             // set as the same proposal. The threshold is deliberately high: over-merging drops a
             // genuine follow-up silently, which is worse than a duplicate the maintainer can close.
-            // Every entry here is an article or a preposition whose removal preserves meaning.
-            // `not`, `no` and `against` were in this list and are NOT: they carry sense, so
-            // dropping them made a claim and its negation identical token sets, and any
-            // "X does not Y" unfileable while "X does Y" was open (#341 red team, finding 3).
-            const STOP = new Set(['a','an','the','of','to','for','in','on','at','by','and','or','its','it','is','be','as','with','via','through','from','into','that','this','their','than','then','s']);
+            // Articles, and prepositions whose removal does not flip a title's sense. `via` and
+            // `through` are here on purpose: they are treated as synonyms (the #253 family was one
+            // proposal rephrased "via" -> "through"). Words that DO carry sense are content words:
+            // `not`, `no` and `against` (#341 round 1), and the directional `to`, `from` and `into`
+            // and the conjunctions `and` and `or` (round 3). With those stopped, "copy X into Y" and
+            // "copy X from Y" were one token set in one order, and the second was never filed.
+            const STOP = new Set(['a','an','the','of','for','in','on','at','by','its','it','is','be','as','with','via','through','that','this','their','than','then','s']);
             const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
             const seq = (s) => norm(s).split(' ').filter(x => x && !STOP.has(x));
             const toks = (s) => new Set(seq(s));
