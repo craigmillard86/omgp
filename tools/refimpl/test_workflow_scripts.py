@@ -446,7 +446,9 @@ def test_review_followups_wiring():
     # being emphasised or given its own heading, which is how ~57 scope bullets were filed as
     # tasks on 2026-09-07. Behaviour is proved by the harness; this pins that the guard is here.
     assert "NOT EXAMINED\\b" in script and "unmark(" in script, "the NOT EXAMINED stop must tolerate markdown"
-    assert "Jaccard" in script or ">= 0.8" in script, "dedup must survive a rephrasing between rounds"
+    # Presence pins only; behaviour (both threshold directions, word order) is the harness's job.
+    assert ">= 0.9" in script, "dedup threshold must be the calibrated 0.9"
+    assert "sameOrder(" in script, "dedup must respect word order (#341 red team round 2)"
 
 
 def test_both_workflows_declare_the_same_seven_sections():

@@ -217,6 +217,49 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
   await run(w, {body: comment('- Bound the ESP32-S3 UART RX path against the Responder drain stop — restated')});
   check('a restatement differing only in an article is still merged', w.created.length === 0);
 
+  // The threshold pinned from ABOVE (#341 review, round 2): every merge case above is Jaccard 1.0,
+  // so `>= 1` passed them all. This pair is 10 content tokens vs the same 10 plus one appended —
+  // 10/11 = 0.909 — so it merges at 0.9 and fails at 1.0 or 0.95. With the 0.857 and 0.875 cases
+  // above, the calibrated value is pinned to (0.875, 0.909].
+  w = world({existing: [{title: 'Pin the ESP32 UART receive ring depth against a stalled Responder drain', labels: ['task']}]});
+  await run(w, {body: comment('- Pin the ESP32 UART receive ring depth against a stalled Responder drain stop — restated')});
+  check('a one-token superset of a 10-token title (J = 0.909) is still merged', w.created.length === 0);
+
+  // --- Word order carries sense (#341 red team round 2, finding 1) -----------------------------
+  // A token SET is order-blind: "A against B" and "B against A" were identical, J = 1.0, and the
+  // second proposal was silently never filed. These are opposite proposals; each must file.
+  w = world({existing: [{title: 'Count a frame-level discard against the bus-level counter', labels: ['task']}]});
+  await run(w, {body: comment('- Count a bus-level discard against the frame-level counter — the other direction')});
+  check('a permuted proposal (frame/bus swapped) is not merged', w.created.length === 1);
+  w = world({existing: [{title: 'Reject a TLV whose length exceeds the frame', labels: ['task']}]});
+  await run(w, {body: comment('- Reject a frame whose length exceeds the TLV — the converse check')});
+  check('a converse proposal is not merged', w.created.length === 1);
+  w = world({existing: [{title: 'Dedup closed issues against filed tasks', labels: ['task']}]});
+  await run(w, {body: comment('- Dedup filed tasks against closed issues — the reverse direction')});
+  check('a reversed proposal is not merged', w.created.length === 1);
+
+  // --- An unbalanced fence (#341 red team round 2, finding 2) ----------------------------------
+  // GitHub truncates a comment at 65 536 characters, and a verdict carries a fenced reproducer per
+  // finding, so a long verdict can arrive with a fence that never closes. Skipping to end-of-body
+  // dropped every later proposal AND both stop markers while logging `filed 1 of 1`. An opener with
+  // no closer is plain text: later proposals file, the marker still stops, and the job says so.
+  w = world();
+  await run(w, {body: '## FOLLOW-UPS\n- First proposal — worth doing\n\n```bash\n./build/native/scenario_runner tests/scenarios/f04.yaml -v\n\n' +
+                      '- Second proposal — also worth doing\n\nNOT EXAMINED: nothing excluded\n- a disclosure bullet, not a task\n\n' +
+                      `VERDICT(review): findings @ ${HEAD}`});
+  check('an unclosed fence does not swallow later proposals', w.created.length === 2 &&
+        w.created.some(i => i.title === 'Second proposal'));
+  check('an unclosed fence does not swallow the NOT EXAMINED stop', !w.created.some(i => /disclosure bullet/.test(i.title)));
+  check('an unclosed fence is reported, not silent', w.log.some(m => /unclosed fence/i.test(m)));
+
+  // A closer is bare fence characters (CommonMark): "```bash" inside a ``` block is content, not
+  // the end of it. A prefix-matched closer ended the block there and read the rest as prose, so a
+  // `## ` inside the reproducer ended the section and the later proposal was lost.
+  w = world();
+  await run(w, {body: '## FOLLOW-UPS\n- First proposal — worth doing\n\n```\n```bash\n## inside the fence\n```\n\n' +
+                      `- Second proposal — also worth doing\n\nVERDICT(review): findings @ ${HEAD}`});
+  check('a fence line with an info string does not close the block', w.created.length === 2);
+
   const pass = results.filter(([, ok]) => ok).length;
   for (const [n, ok] of results) console.log(`${ok ? 'ok  ' : 'FAIL'} ${n}`);
   console.log(`${pass}/${results.length} cases passed`);
