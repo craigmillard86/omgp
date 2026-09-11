@@ -3868,3 +3868,158 @@ TEST_CASE("reset_stats() clears every per-address counter and the bus counters",
     REQUIRE(master.bus_stats().rate_changes == 0);
     REQUIRE(master.bus_stats().bus_faults == 0);
 }
+
+// --- #138: begin() drains the wire itself, so its own "never transmit into an arriving ------
+// --- frame" guarantee holds without relying on a poll(now) at the same clock instant --------
+//
+// link/master.hpp's PRECONDITION paragraph (pre-#138) stated but did not enforce this: begin()
+// called fire_pending() directly, so a caller that let clock time pass with no intervening
+// poll() was blind to every byte that arrived meanwhile and could put a request on the wire
+// inside another station's frame (PR #137 review @3a15d29, MEDIUM; contracts/link-cpp.md
+// "Master engine"). Every case below advances the clock with MockWire::advance_to(t) — the
+// NO-ENGINE overload (mock_wire.hpp:99) — so the Master is polled not once before begin() runs.
+
+TEST_CASE("begin() with no poll() immediately before it drains the wire itself, so it does not "
+          "transmit into a frame already on the wire",
+          "[link][timing:T_gap]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const std::vector<uint8_t> other = foreign_frame();
+    const uint64_t other_start = 1000;
+    const uint64_t other_end = other_start + other.size() * byte_us();
+    wire.inject_bytes(other.data(), other.size(), other_start);
+
+    // Strictly inside the frame: some of it is due, not all.
+    const uint64_t mid = other_start + (other.size() / 2) * byte_us();
+    REQUIRE(mid > other_start);
+    REQUIRE(mid < other_end);
+    wire.advance_to(mid); // clock only — the Master is not polled
+
+    const uint8_t payload[] = {0x77};
+    REQUIRE(master.begin(0x06, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 0); // must not land inside the other station's frame
+
+    require_deferred_past(wire, master, 0, other_end);
+}
+
+TEST_CASE("begin() one microsecond after another station's opening FLAG, with only that FLAG "
+          "byte due, still defers: the FLAG's own byte time is bus activity enough to hold the "
+          "gap off",
+          "[link][timing:T_gap]") {
+    // The narrower edge case of the one above: no discard and nothing delivered yet — only the
+    // single accumulating FLAG byte drained — so the guarantee must rest on every drained byte
+    // pushing last_activity_ to its own end (master.cpp fire_pending()'s protection argument),
+    // not on some later discard/delivery outcome.
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const std::vector<uint8_t> other = foreign_frame();
+    const uint64_t other_start = 1000;
+    wire.inject_bytes(other.data(), other.size(), other_start);
+
+    const uint64_t just_after_flag = other_start + 1;
+    REQUIRE(just_after_flag < other_start + byte_us()); // only the opening FLAG is due
+    // clock only — the Master is not polled
+    wire.advance_to(just_after_flag);
+
+    const uint8_t payload[] = {0x33};
+    REQUIRE(master.begin(0x05, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 0);
+}
+
+TEST_CASE("a frame drained by begin()'s own wire-draining precondition is counted exactly as an "
+          "equivalent poll() would count it: no response window is open, so the frame's own "
+          "claimed source is charged, not begin()'s own destination",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t dst = 0x02;
+    const std::vector<uint8_t> other = foreign_frame(); // dst 0x03, src 0x04: neither host nor dst
+    const uint64_t other_start = 1000;
+    const uint64_t other_end = other_start + other.size() * byte_us();
+    wire.inject_bytes(other.data(), other.size(), other_start);
+    wire.advance_to(other_end); // clock only — the whole frame is due, the Master is not polled
+
+    const uint8_t payload[] = {0x11};
+    // begin() with a whole frame already queued reaches drain_wire()'s Deframer::feed()/memcpy
+    // paths that the suite's only other HEAP_FREE_SCOPE-guarded begin() (line ~135, quiet wire,
+    // nothing queued) never exercises — issue #138 rule 5: "the new test wraps a
+    // begin()-with-pending-bytes sequence in HEAP_FREE_SCOPE" (review @1c6fd7b, MEDIUM).
+    Status st{};
+    HEAP_FREE_SCOPE({ st = master.begin(dst, payload, sizeof payload); });
+    REQUIRE(st == Status::Ok);
+    REQUIRE(master.stats(0x04).discards == 1); // the frame's own claimed src (FR-011/FR-011a)
+    REQUIRE(master.stats(dst).discards == 0);  // not begin()'s own destination
+}
+
+// The three cases above pin that begin()'s drain runs; none pins WHERE it runs relative to
+// the `if (open_) return Status::Busy;` refusal at the top of begin() — the ordering
+// master.hpp's own new comment and master.cpp:93's "open_ is still false here (the Busy
+// check above already returned otherwise)" both rest their safety argument on (#342
+// red-team, MEDIUM). Moving the drain block above the Busy check compiles and passes every
+// other test in this file, because a Busy refusal is not itself observable as a discard —
+// but it is observably wrong: a begin() that arrives while a transaction is already
+// AwaitResponse would then drain with `open_ == true`, so a genuine in-window answer lands
+// in the Busy call's own throwaway `discard_event` and is gone before the caller's next
+// poll() ever sees it. The two cases below pin the ordering directly, so this survives
+// getting misplaced back to the top of begin() the way it is deliberately proved not to be.
+
+TEST_CASE("begin() refused with Busy does not drain the wire: a pending foreign frame is left "
+          "for the next poll(), not discarded here",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t payload[] = {0x11};
+    REQUIRE(master.begin(0x02, payload, sizeof payload) == Status::Ok);
+    REQUIRE(master.busy());
+
+    const std::vector<uint8_t> other = foreign_frame(); // dst 0x03, src 0x04
+    const uint64_t other_start = 1000;
+    const uint64_t other_end = other_start + other.size() * byte_us();
+    wire.inject_bytes(other.data(), other.size(), other_start);
+    wire.advance_to(other_end); // clock only — the whole frame is due, Master not polled
+
+    const uint8_t payload2[] = {0x22};
+    REQUIRE(master.begin(0x06, payload2, sizeof payload2) == Status::Busy);
+    REQUIRE(wire.transcript_size() == 1); // nothing additional reached the wire
+
+    uint32_t total = 0;
+    for (uint8_t a = 0; a < kAddrCount; ++a)
+        total += master.stats(a).discards;
+    REQUIRE(total == 0); // a Busy refusal must not have drained/discarded anything
+}
+
+TEST_CASE("begin() refused with Busy while a genuine in-window response is already due does "
+          "not consume it: the next poll() still delivers Answered",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x02;
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t payload[] = {0x42};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    REQUIRE(wire.transcript_size() == 1);
+    const uint64_t tx_end =
+        wire.transcript(0).tx_start_us +
+        request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us();
+    const uint64_t full_end = response_full_end(tx_end, dst, 0, payload, sizeof payload);
+
+    wire.advance_to(full_end); // clock only — the whole response is due, Master not polled yet
+
+    const uint8_t payload2[] = {0x99};
+    REQUIRE(master.begin(0x07, payload2, sizeof payload2) == Status::Busy);
+    REQUIRE(wire.transcript_size() == 1); // still just the original request
+
+    MasterEvent ev = master.poll(full_end);
+    REQUIRE(ev.kind == MasterEvent::Answered); // not lost to the Busy call's own drain
+    REQUIRE(ev.response.len == sizeof payload);
+    REQUIRE(std::memcmp(ev.response.payload, payload, sizeof payload) == 0);
+}

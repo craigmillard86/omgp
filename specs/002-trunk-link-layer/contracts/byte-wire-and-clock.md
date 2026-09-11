@@ -70,7 +70,10 @@ protected: ~ByteWire() = default;
   unconditional and an engine→wire guarantee the engine no longer holds.)*
 - The Responder calls `transmit()` only inside `[request_end + T_turn_min, request_end +
   T_turn_max]` and only once per accepted request (or replay).
-- `receive()` is the only receive path: each engine drains it at the start of every
-  `poll(now)` until it returns false, and consumes every byte in that same `poll()`. An
-  implementation must return only bytes whose start instant is ≤ the caller's `now`
-  (a virtual wire that knows the future keeps later bytes queued).
+- `receive()` is the only receive path: each engine drains it until it returns false,
+  consuming every byte due in that same drain — for the Responder and for Master's own
+  `poll(now)`, at the start of every call; for Master's `begin()`, which shares the same
+  drain rather than requiring a `poll(now)` to have just run (#138), before it decides
+  whether/when to transmit. An implementation must return only bytes whose start instant is
+  ≤ the draining call's own reference instant — `now` for `poll(now)`, the clock's current
+  instant for `begin()` — (a virtual wire that knows the future keeps later bytes queued).

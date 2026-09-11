@@ -165,8 +165,8 @@ safety in every position (SC-004) and the §7-mode → script mapping (SC-005).
 
 ### Tests for User Story 3 (write first, must fail — one dispatch unit with their implementation, ruling 2026-08-30)
 
-- [ ] T033 [P] [US3] Write `tests/unit/test_link_responder.cpp`: response first byte exactly at `request_end + T_turn_min` by default `[timing:T_turn_min]`; a constructor `turnaround_us` above the maximum is clamped to `T_turn_max` and one below the minimum to `T_turn_min` `[timing:T_turn_max]`; handler invoked once per new seq; retry of the buffered seq → identical bytes retransmitted, handler not invoked, `replays_served == 1`; different seq with retry set → treated as new; retry before any answer → new; frames for other addresses and corrupt frames → nothing transmitted, `discards` counted; never transmits outside a window (no bytes when nothing was addressed to it); first `poll()` after `request_end + T_turn_max` → transmits at once and `late_responses == 1` (spec FR-014); `HEAP_FREE_SCOPE` around handle+respond
-- [ ] T034 [P] [US3] Write `tests/unit/test_link_loop.cpp` (needs T031): real `Master` and real `Responder`s on one `MockWire` (the mock's handler for node *n* is `Responder` *n*); the SC-004 matrix — {drop, duplicate, delay-past-T_resp, corrupt} × {attempt 0, retry 1, retry 2, after give-up} — asserting `handler invocations == 1` per new sequence, `transmissions ≤ 3`, accepted `seq == transaction seq`; plus a comment block mapping each §7 mode (response timeout, CRC-failed response, SUSPECT, OFFLINE, BUS_FAULT, babble, duplicate, wrong-rate probe) to the script that produces it (SC-005; the health rows reference T039/T042 scripts)
+- [x] T033 [P] [US3] Write `tests/unit/test_link_responder.cpp`: response first byte exactly at `request_end + T_turn_min` by default `[timing:T_turn_min]`; a constructor `turnaround_us` above the maximum is clamped to `T_turn_max` and one below the minimum to `T_turn_min` `[timing:T_turn_max]`; handler invoked once per new seq; retry of the buffered seq → identical bytes retransmitted, handler not invoked, `replays_served == 1`; different seq with retry set → treated as new; retry before any answer → new; frames for other addresses and corrupt frames → nothing transmitted, `discards` counted; never transmits outside a window (no bytes when nothing was addressed to it); first `poll()` after `request_end + T_turn_max` → transmits at once and `late_responses == 1` (spec FR-014); `HEAP_FREE_SCOPE` around handle+respond
+- [x] T034 [P] [US3] Write `tests/unit/test_link_loop.cpp` (needs T031): real `Master` and real `Responder`s on one `MockWire` (the mock's handler for node *n* is `Responder` *n*); the SC-004 matrix — {drop, duplicate, delay-past-T_resp, corrupt} × {attempt 0, retry 1, retry 2, after give-up} — asserting `handler invocations == 1` per new sequence, `transmissions ≤ 3`, accepted `seq == transaction seq`; plus a comment block mapping each §7 mode (response timeout, CRC-failed response, SUSPECT, OFFLINE, BUS_FAULT, babble, duplicate, wrong-rate probe) to the script that produces it (SC-005; the health rows reference T039/T042 scripts)
   - FR-007/FR-011's "response bit clear" acceptance sub-case is now covered in
     `tests/unit/test_link_master.cpp` (T029) via `MockWire::inject_bytes()` raw injection
     (PR #137 review MEDIUM + red-team: an earlier note deferred it here on the grounds that
@@ -178,8 +178,8 @@ safety in every position (SC-004) and the §7-mode → script mapping (SC-005).
 
 ### Implementation for User Story 3
 
-- [ ] T035 [US3] Write `link/responder.hpp` / `link/responder.cpp` per contracts/link-cpp.md "Responder engine" and data-model.md §5, citing `trunk §3` and `§7` — make T033 and T034 pass; add to `link/CMakeLists.txt`
-- [ ] T036 [US3] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; local mutation run; PR body lists any labels
+- [x] T035 [US3] Write `link/responder.hpp` / `link/responder.cpp` per contracts/link-cpp.md "Responder engine" and data-model.md §5, citing `trunk §3` and `§7` — make T033 and T034 pass; add to `link/CMakeLists.txt`
+- [x] T036 [US3] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; local mutation run; PR body lists any labels
 
 **Checkpoint**: SC-004 demonstrated end-to-end; the replay buffer is proven to never re-invoke the handler.
 

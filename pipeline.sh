@@ -89,9 +89,19 @@ unit_sources_plain() {
 # 16 together stay BELOW the floor, so dropping test_link_master fires the gate —
 # demonstrated by that arithmetic, assuming those 16 have not grown by 304731 (slack over
 # the floor is 6013; over the 16-binary sum it is 304731). Was 200580.
+# 582296 = 582301 executed (19 binaries) minus 5 slack — T033-T035 added test_link_responder
+# (61784 checks) and test_link_loop (3066); raised 2026-09-11 at the T036/#54 checkpoint
+# (contracts/tooling.md "pipeline.sh": "raised to the new total minus 5, never lowered").
+# Was 509360. Measured on the ctest path at this commit; the two engine binaries are the ones
+# US3 adds, and the remaining 17 sum to 517451.
+# At total-5 the gate fires if ANY ONE of the 19 binaries stops reporting: the smallest
+# (test_link_interfaces, 6 checks) leaves 582295, below the floor — demonstrated by that
+# arithmetic over this run's per-binary EXECUTED lines, and only while no binary shrinks to
+# 5 checks or fewer. The wider margin the older entries above describe (dropping the single
+# biggest binary, test_link_master at 312820, leaves 269481) still holds a fortiori.
 # The floor is the COUNT gate. The SET gate — every tests/{unit,property}/test_*.cpp compiled,
 # registered and executed, by name — is tools/check_test_set.py in stage_unit (#133).
-UNIT_TEST_FLOOR=509360
+UNIT_TEST_FLOOR=582296
 
 stage_codegen() {
   # Constants + vectors header from the YAML, then prove the human-authored docs tables
