@@ -45,34 +45,107 @@ jobs:
             if (!issue || !issue.pull_request) { core.notice('followups: comment is not on a PR — untouched'); return; }
             const pr = issue.number;
 
-            // Extract the "## FOLLOW-UPS" section: bullets until the next heading, NOT EXAMINED,
-            // or the verdict line. Nothing after those is a follow-up.
+            // Extract the "## FOLLOW-UPS" section: bullets until the next heading, the NOT EXAMINED
+            // disclosure, or the verdict line. Nothing after those is a follow-up.
+            //
+            // The marker is written emphasised as often as bare (`**NOT EXAMINED:**`, and under its
+            // own `###`). Testing only `^NOT EXAMINED:` and `^##\s` let the whole disclosure through:
+            // eight verdicts on #145/#149 filed ~57 scope-disclosure bullets as `task` issues on
+            // 2026-09-07 (#264-#270, #279-#290, #296-#306, #308-#313, #315-#318, #322-#335). Strip
+            // markdown emphasis and heading marks before testing the line.
+            //
+            // Two things are deliberately NOT stop conditions, both learned from #341's red team:
+            //   - a `---` rule. Verdicts use one as an in-prose separator BETWEEN findings (22 of the 92
+            //     comments in the 2026-09-08 corpus), so stopping there drops later proposals. The corpus shape
+            //     "rule, then marker" is handled by the marker test, which is the load-bearing one.
+            //   - `###`..`######`. Widening the heading test to `^#{1,6}\s` makes a shell comment in
+            //     a fenced reproducer end the section (20 such lines across 8 of those comments), and
+            //     the brief REQUIRES a runnable reproducer per finding. `### NOT EXAMINED` still
+            //     stops, via unmark + the marker test.
+            // The scan is fence-BLIND, as on origin/main. #341's rounds 2-4 each added a fence rule and
+            // each fix produced the next round's findings; a replay over the 99 real verdict comments
+            // files the identical 57 titles with the fence handling or without it, so it bought nothing
+            // on real data (maintainer direction, 2026-09-11). Two pre-existing consequences stand,
+            // both with 0 occurrences in that corpus and tracked in #376: a `## ` line inside a fenced
+            // block ends the section, and a `- ` line inside one is read as a bullet.
+            const unmark = (s) => s.replace(/^#{1,6}\s+/, '').replace(/^[*_]{1,3}\s*/, '').replace(/\s*[*_]{1,3}$/, '').trim();
             const lines = body.split('\n');
             const start = lines.findIndex(l => /^##\s*FOLLOW-UPS\b/i.test(l.trim()));
             if (start < 0) { core.notice('followups: no FOLLOW-UPS section — nothing to file'); return; }
             const items = [];
+            const isStop = (t) => /^NOT EXAMINED\b/i.test(unmark(t)) || /^VERDICT\(/.test(t);
             for (let i = start + 1; i < lines.length; i++) {
               const t = lines[i].trim();
-              if (/^##\s/.test(t) || /^NOT EXAMINED:/i.test(t) || /^VERDICT\(/.test(t)) break;
+              if (/^##\s/.test(t) || isStop(t)) break;
               const m = t.match(/^[-*]\s+(.*\S)\s*$/);
-              if (m && m[1].toLowerCase() !== 'none') items.push(m[1].trim());
+              // "none" is how a verdict says it proposes nothing. Test the TITLE head exactly, so
+              // "- **None** — nothing outside the change" is still recognised while a proposal
+              // whose first word happens to be "None" survives as the real follow-up it is.
+              if (m && !/^none[.!]?$/i.test(unmark(m[1].split(' — ')[0]))) items.push(m[1].trim());
             }
             if (!items.length) { core.notice('followups: none proposed — nothing to file'); return; }
 
-            // Dedup against open `task` issues by title.
+            // Dedup against open `task` issues. Exact titles are not enough: a standing proposal
+            // is rephrased between rounds ("answer via" -> "answer through", backticks added or
+            // dropped), which filed ONE proposal seven times on #149 (#253, #258, #262, #275,
+            // #278, #291, #292). Compare normalised token sets instead, and treat a near-identical
+            // set as the same proposal. The threshold is deliberately high: over-merging drops a
+            // genuine follow-up silently, which is worse than a duplicate the maintainer can close.
+            // Articles, and prepositions whose removal does not flip a title's sense. `via` and
+            // `through` are here on purpose: they are treated as synonyms (the #253 family was one
+            // proposal rephrased "via" -> "through"). Words that DO carry sense are content words:
+            // `not`, `no` and `against` (#341 round 1), and the directional `to`, `from` and `into`
+            // and the conjunctions `and` and `or` (round 3). With those stopped, "copy X into Y" and
+            // "copy X from Y" were one token set in one order, and the second was never filed.
+            const STOP = new Set(['a','an','the','of','for','in','on','at','by','its','it','is','be','as','with','via','through','that','this','their','than','then','s']);
+            const norm = (s) => s.toLowerCase().replace(/n['’]t\b/g, ' not').replace(/[^a-z0-9]+/g, ' ').trim();
+            const seq = (s) => norm(s).split(' ').filter(x => x && !STOP.has(x));
+            const toks = (s) => new Set(seq(s));
+            // Word order carries sense as well: a token SET made "count a frame-level discard
+            // against the bus-level counter" and its reversal identical (J = 1.0), so the second,
+            // opposite proposal was silently never filed (#341 red team round 2). The content words
+            // two titles share must appear in the same order in both. A synonym swap or an appended
+            // word keeps that order; a reversal or converse does not. A repeated word that makes the
+            // shared sequences differ in length also fails — the conservative direction (file).
+            const sameOrder = (a, b) => {
+              const A = seq(a), B = seq(b), inA = new Set(A), inB = new Set(B);
+              const ka = A.filter(x => inB.has(x)), kb = B.filter(x => inA.has(x));
+              return ka.length === kb.length && ka.every((x, i) => x === kb[i]);
+            };
+            // A negation is never absorbed. At >= 9 content tokens a one-token superset clears 0.9 and
+            // sameOrder passes for an insertion, so "X" and "X never" merged and the opposite proposal
+            // was lost (#341 red team round 4, F3/FU-1). If the two token sets differ by a negation
+            // word, they are different proposals whatever the Jaccard says.
+            const NEG = new Set(['not','no','never','without','nor','cannot','none']);
+            const negDiffers = (A, B) => { for (const x of NEG) if (A.has(x) !== B.has(x)) return true; return false; };
+            const same = (a, b) => {
+              if (norm(a) === norm(b)) return true;
+              const A = toks(a), B = toks(b);
+              if (!A.size || !B.size) return false;
+              if (negDiffers(A, B)) return false;
+              let inter = 0; for (const x of A) if (B.has(x)) inter++;
+              // Jaccard over content tokens, >= 0.9. That admits a synonym swap (identical token
+              // sets) and a one-token superset only when the shorter title has at least 9 content
+              // tokens (n/(n+1) >= 0.9); shorter titles must match their token sets exactly. It
+              // rejects one differing content word out of nine (0.8) and "with no window" vs "with
+              // a window" (0.857), both of which 0.8 merged.
+              return inter / (A.size + B.size - inter) >= 0.9 && sameOrder(a, b);
+            };
             const open = await github.paginate(github.rest.issues.listForRepo, {owner, repo, state: 'open', labels: 'task', per_page: 100});
-            const seen = new Set(open.filter(i => !i.pull_request).map(i => i.title));
+            const seen = open.filter(i => !i.pull_request).map(i => i.title);
 
             let filed = 0;
             for (const item of items.slice(0, CAP)) {
               let title = item.replace(/^\[(HIGH|MEDIUM|LOW)\]\s*/i, '');   // drop a leading severity tag
               title = (title.split(' — ')[0] || title).slice(0, 120).trim(); // the "TITLE — why" head
+              title = unmark(title);                                         // drop wrapping ** or *
               if (!title) continue;
-              if (seen.has(title)) { core.notice(`followups: '${title}' already an open task — skipped`); continue; }
+              const dup = seen.find(t => same(t, title));
+              if (dup) { core.notice(`followups: '${title}' duplicates open task '${dup}' — skipped`); continue; }
               const r = await github.rest.issues.create({owner, repo, title, labels: ['task'],
                 body: `Proposed by the review of #${pr} (scope ruling #134, docs/OPEN-QUESTIONS.md): ${item}\n\n` +
                       'Labelled `task` only — release (`ready`/`queued`) and enrichment stay a maintainer/auto-release decision (GOVERNANCE.md §1). Close if not worth doing.'});
-              seen.add(title); filed++;
+              seen.push(title); filed++;
               core.notice(`followups: filed ${r.data.html_url}`);
             }
             core.notice(`followups: filed ${filed} of ${items.length} proposed for #${pr}` + (items.length > CAP ? ` (capped at ${CAP})` : ''));

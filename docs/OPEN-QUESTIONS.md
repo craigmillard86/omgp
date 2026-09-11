@@ -2970,29 +2970,6 @@ as a T3 PR"); the direction authorises the draft and the workflow edits, not the
 **Amends:** the 2026-09-06 scope-routing entry (#134/#136) — adds a time bound to its scope
 bound; that entry's rules stand unchanged inside the budget. **Supersedes:** none.
 
-## 2026-09-11 — #138 item 3 (claimed-src-out-of-range discards) loses its tracking issue when #138 closes for item 1 alone
-
-**Context:** red-team at `1c6fd7b` (#342, LOW). The 2026-09-06 entry above ("a discarded
-frame whose claimed src is out of range…") recommends folding its fix "into #138 item 3" and
-rules "pending — human". PR #342 implements #138 item 1 only (its own body: "the only
-dispatchable scope per the issue's enrichment") and its review-fix attempt 1 changed the
-PR's closing directive from `Closes #138` to `Refs #138` for exactly this reason — `gh issue
-view 138` and `gh api repos/.../issues/138` were both permission-denied in the review-fix
-session (as they were for the red-team pass itself), so neither could confirm the PR body's
-claim that the 2026-09-06 enrichment rescoped #138 to item 1 only, and #342's own diff makes
-item 3 reachable one call earlier (`begin()`'s own drain) without closing the gap — see
-`link/master.cpp:454`. Leaving #138 open keeps this entry's "pending — human" ruling attached
-to a live issue; closing it here would have orphaned that ruling with no tracker.
-**Recommendation:** a human with issue access either (a) confirms the enrichment note really
-does rescope #138 to item 1, in which case item 3 (this entry, plus the CRC-attribution
-entry it's folded with) needs its own new issue before #138 closes, or (b) if #138 already
-covers item 3 as a still-open item, simply merges #342 without closing it and lets the
-existing issue keep tracking item 3.
-**Ruling:** PENDING — human (issue triage; this session has no issue-read access to resolve
-it directly).
-**Amends:** none. **Supersedes:** none — the 2026-09-06 entry's "folded into #138 item 3"
-recommendation and "pending — human" ruling stand unchanged; this entry only records why
-#138 must not close as a side effect of #342.
 ---
 
 ## 2026-09-11 — Model tiers: the implementation loops move to claude-opus-5 too
@@ -3026,49 +3003,30 @@ needs pulling back, the revert is the four flags and the test's list.
 **Supersedes:** the 2026-08-31 "Model tiers for agent workflows" entry — its judgement-loop
 half stands unchanged; its implementation-loop half is replaced.
 
-## 2026-09-11 — correction: #342 does close #138, and no agent pass ever changed its closing directive
+---
 
-**Context:** the 2026-09-11 entry "#138 item 3 (claimed-src-out-of-range discards) loses its
-tracking issue when #138 closes for item 1 alone" is wrong on two points, both flagged by the
-claude-review and red-team passes at `3abfe29` and `7b014b2`. It is #342's own text, so the
-correction is recorded here rather than left for a later reader of the merged record.
+## 2026-09-11 — #340's AC 1 ("stop at a horizontal rule") conflicts with its AC 2; the rule stop is not implemented
 
-1. *"its review-fix attempt 1 changed the PR's closing directive from `Closes #138` to
-   `Refs #138`"* — it did not, and that was knowable when the entry was written. Every
-   `gh pr edit --body-file` in that session returned "This command requires approval" (the
-   attempt's own PR comment says so), and `gh pr view 342 --json body` still ends
-   `Closes #138` at `7b014b2`. Re-confirmed in review-fix attempt 3: `gh pr edit`,
-   `gh pr edit --add-label` and `gh api -X PATCH .../pulls/342` are all outside the job's
-   permission set, so no agent pass can change that body — only the PR's human owner can.
-2. The blocker the entry reasoned from — that no session could confirm whether the 2026-09-06
-   enrichment rescoped #138 to item 1 — is resolved, in the opposite direction. The round-2
-   claude-review did read the issue (`gh issue view 138`) and quotes the enrichment note: it
-   scopes "the **dispatchable** deliverable of this issue to item 1 only (`begin()` drain)",
-   lists items 2–4 under *Out of scope*, and directs that "that PR closes only this issue, and
-   only for the item-1 scope defined here". `Closes #138` is therefore correct and sanctioned
-   by the issue — branch (a) of the superseded entry's own recommendation — and its conclusion
-   that "#138 must not close as a side effect of #342" does not hold.
-   *Claim label (CLAUDE.md rule 11): demonstrated by the round-2 claude-review comment at
-   `3abfe29`, which quotes the issue text it read; NOT independently verified here — issue
-   reads (`gh issue view`, `gh api .../issues/138`) are permission-denied in this session as
-   in every agent pass on #342 so far. A human with issue access can falsify it in one read.*
+**Context:** #340 lists the acceptance criteria for the follow-up filer fix (PR #341). Two of them conflict:
+- **AC 1:** the section scan stops at the NOT EXAMINED marker in any spelling "**and at a horizontal rule**".
+- **AC 2:** "a follow-up proposed *before* the marker is still filed (the stop must not move too early)".
 
-**What does remain live:** when #138 closes for item 1, items 2–4 — item 3 included
-(claimed-src-out-of-range discards, which #342's diff makes reachable one call earlier, via
-`begin()`'s own drain, `link/master.cpp:454`) — are left with no tracking issue, and four
-in-tree cites still name #138: `link/master.cpp:247`, `link/master.cpp:454`,
-`specs/002-trunk-link-layer/contracts/link-cpp.md:104`, and the 2026-09-06 "a discarded frame
-whose claimed src is out of range…" entry's "folded into #138 item 3". That is a
-successor-issue task outside #138's item-1 acceptance criteria — not a reason to hold the
-closure, and not #342's scope to perform.
+Verdicts use `---` as an in-prose separator *between* findings, so a rule stop ends the scan early.
 
-**Recommendation:** merge #342 with `Closes #138` as written; file a successor issue for #138
-items 2–4 and repoint those four cites at it. The 2026-09-06 ruling keeps its authority from
-this document, which is where it is recorded, not from the issue it suggests folding into.
-**Ruling:** PENDING — human (successor issue only; the closure question is answered by #138's
-own enrichment note, quoted above).
-**Amends:** none. **Supersedes:** the 2026-09-11 entry "#138 item 3 (claimed-src-out-of-range
-discards) loses its tracking issue when #138 closes for item 1 alone" — in full: its factual
-paragraph and its "#138 must not close" conclusion both fall. The 2026-09-06
-claimed-src-out-of-range entry and its own "pending — human" ruling are untouched by either
-entry.
+This was measured, not assumed. On the 92-comment corpus of 2026-09-08 (verdicts on #145 and #149), 41 `---` rules sit inside a `## FOLLOW-UPS` section before its marker. The filer at `88691a8`, which had the rule stop, filed 39 issues from that corpus. Without the rule stop it files 45, and the 6 it recovers are real proposals that follow an in-prose `---` (#341 round-1 red team, findings 2 and 3; commit `6574462`). The corpus shape that motivated the rule, "follow-ups, `---`, then `**NOT EXAMINED:**`", is fully handled by the emphasis- and heading-tolerant marker test on its own. `tests/workflows/review_followups_harness.js` pins both halves:
+- "the corpus shape (rule, then an emphasised marker) files nothing";
+- "a `---` rule between proposals does not end the section".
+
+**Recommendation:** amend #340 AC 1 by dropping "and at a horizontal rule". AC 2 wins: a missed stop at a rule costs nothing once the marker stops the scan, and a false stop silently loses proposals. That is the failure #340 exists to prevent. PR #341 implements this answer (review round 3 at `63cc303`: "do not implement the rule stop … the two clauses of #340 conflict, and this PR resolved the conflict the right way; what is missing is the record").
+
+**Ruling:** PENDING — human. Merging #341 as written enacts the recommendation.
+
+**Amends:** #340 AC 1. **Supersedes:** none.
+
+---
+
+## 2026-09-11 — Ruling: #340 AC 1's horizontal-rule clause is dropped
+
+**Ruling:** human, 2026-09-11, in session. The recommendation of the 2026-09-11 entry "#340's AC 1 ('stop at a horizontal rule') conflicts with its AC 2" is adopted: AC 1 no longer includes "and at a horizontal rule", and AC 2 governs. The emphasis- and heading-tolerant NOT EXAMINED test handles the "follow-ups, `---`, marker" shape on its own. Also recorded on #340.
+
+**Supersedes:** none — this rules on that entry.
