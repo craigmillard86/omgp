@@ -2993,3 +2993,35 @@ it directly).
 **Amends:** none. **Supersedes:** none — the 2026-09-06 entry's "folded into #138 item 3"
 recommendation and "pending — human" ruling stand unchanged; this entry only records why
 #138 must not close as a side effect of #342.
+---
+
+## 2026-09-11 — Model tiers: the implementation loops move to claude-opus-5 too
+
+**Context:** the 2026-08-31 entry split the agent workflows in two. The judgement loops
+(claude-review, red-team, story-enrich, agent-converge-audit, agent-triage,
+continuous-improvement) got claude-opus-5; the high-volume implementation loops
+(agent-dispatch `implement`, ci-failure-router auto-fix, claude-mention, review-fix) stayed on
+the action default, claude-sonnet-5. The argument was that their output passes the full
+mechanical gate stack plus the Opus reviews, so extra model cost buys less there.
+
+Since then, two implementation-loop runs exited `success` having produced nothing:
+- agent-dispatch run 34165186276 for #54: 33 turns, 7 permission denials, no branch or PR.
+- review-fix run 34255866575 for #342: 85 turns, 18 permission denials, no push.
+
+Their transcripts were not kept, so the cause is **unknown**. This entry does **not** claim
+Opus would have prevented them; #361 covers retry and loud failure for that. The review
+rounds on #145/#149/#341 also show the implementation side sets the round count: each round
+answers findings the review loop raised, so a weaker implementation step costs whole review
+rounds, and each of those is an Opus review plus an Opus red team.
+
+**Ruling:** human, 2026-09-11 ("can we also update to use opus for the agents", this session).
+Every Claude loop runs claude-opus-5: `--model claude-opus-5` is added to the four
+implementation workflows. Pinned by `test_every_agent_loop_runs_on_opus`. That test sweeps
+every workflow file, so a new Claude step without the flag fails the suite rather than
+silently getting the default. Accepted trade-off: the implementation loops are the
+high-volume ones, so this is the larger share of model cost. Model access is demonstrated
+already, since the six judgement loops have run on claude-opus-5 since 2026-08-31. If cost
+needs pulling back, the revert is the four flags and the test's list.
+
+**Supersedes:** the 2026-08-31 "Model tiers for agent workflows" entry — its judgement-loop
+half stands unchanged; its implementation-loop half is replaced.

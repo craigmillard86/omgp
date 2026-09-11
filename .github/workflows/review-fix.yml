@@ -267,11 +267,11 @@ jobs:
             Do not approve the PR, do not merge it, and do not change any
             file under .github/workflows/ — this loop's own bounds are not
             yours to edit.
-          # No --model: this is an implementation loop behind a mechanical gate, so it stays
-          # on the action default like agent-dispatch and the router's auto-fix (model-tier
-          # ruling 2026-08-31). The judgement that produced the findings was already made on
-          # opus by claude-review/red-team.
+          # claude-opus-5, like every agent loop (model-tier ruling 2026-09-11, superseding the
+          # 2026-08-31 split that left the implementation loops on the action default). Pinned
+          # by test_every_agent_loop_runs_on_opus.
           claude_args: |
+            --model claude-opus-5
             --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Edit,Read,Write,Grep,Glob"
 
       - name: Record an attempt that did not complete
