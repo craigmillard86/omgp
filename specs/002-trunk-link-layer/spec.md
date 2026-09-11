@@ -400,8 +400,10 @@ assert no bus fault.
   maintainer ruling — `OPEN-QUESTIONS.md` 2026-09-07 "the Responder's replay entry has no age
   bound" and the 2026-09-11 rulings entry. The test gains two further terms: the requester
   (`ReplayBuffer.peer`, merged in PR #149) and the request itself, compared over `dst`, `src`,
-  `len` and the L3 payload with `ctrl` and the CRC excluded. A frame matching the sequence but
-  not those bytes is treated as new. Implementation: #373.)*
+  `len` and the L3 payload with `ctrl` and the CRC excluded. A frame whose sequence and peer
+  match but whose compared bytes do not is **discarded and counted**: the application is not
+  invoked and the buffer is left intact, so a spoofed frame cannot evict it or force a second
+  `GET_EVENT` drain. Implementation: #373.)*
 - **FR-016**: Any request whose sequence differs from the buffered one — retry bit set or
   not — MUST be treated as new: the application is invoked once and its response replaces
   the buffer.
