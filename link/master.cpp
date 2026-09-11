@@ -87,6 +87,18 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     if (dst >= kAddrCount)
         return Status::ReservedAddress;
 
+    // #138: enforce the precondition rather than merely stating it — drain whatever is
+    // already on the wire before computing the gap/transmit decision below, so this begin()'s
+    // view of bus activity is as fresh as a poll(now) immediately before it would have been.
+    // open_ is still false here (the Busy check above already returned otherwise), so this
+    // drain runs with no transaction awaiting a response: any delivered/discarded frame is
+    // accounted exactly as an equivalent poll() with nothing open would (data-model.md §4
+    // "Receive path"), charged to the frame's own claimed source, not to the dst_/seq_ this
+    // call is about to assign.
+    MasterEvent discard_event{}; // unused: no transaction is AwaitResponse yet, so this drain
+                                 // can only discard/deliver-as-unsolicited, never conclude one
+    drain_wire(discard_event);
+
     dst_ = dst;
     seq_ = next_seq_[dst];
     next_seq_[dst] = static_cast<uint8_t>((next_seq_[dst] + 1) & 0x0F);
@@ -225,9 +237,10 @@ void Master::fire_pending(uint64_t now_us) {
     // of EVERY byte due at `now` (the loop never exits early — it did once, on the attempt-
     // ending byte, and the argument was false for exactly the bytes left behind it: PR #137
     // red-team @3a15d29, HIGH) plus that contiguity — not merely by the tests that exercise
-    // it. Two things it does NOT cover: a begin() with no poll(now) immediately before it sees
-    // no bytes at all (master.hpp begin(); #138), and a rate change mid-frame. The constancy
-    // matters: each byte's end is computed at DRAIN time from the rate then in force, so a
+    // it. begin() now runs this same drain before reaching here (master.hpp begin(); #138), so
+    // the argument holds for both callers. One thing it does NOT cover: a rate change
+    // mid-frame. The constancy matters: each byte's end is computed at DRAIN time from the
+    // rate then in force, so a
     // set_bit_rate() upwards while a frame put on the wire at the old rate is still arriving makes
     // those bytes appear to end early, and the perceived holes can let this transmit out inside
     // that frame (PR #137 red-team @40355cf, LOW — a byte's own duration is not something ByteWire
@@ -326,9 +339,7 @@ void Master::end_attempt(uint64_t last_activity_us, MasterEvent::Reason reason,
     }
 }
 
-MasterEvent Master::poll(uint64_t now_us) {
-    MasterEvent event{};
-
+void Master::drain_wire(MasterEvent& event) {
     uint8_t byte;
     uint64_t start_us;
     // FR-011: drained unconditionally, not just while AwaitResponse — a frame arriving
@@ -347,6 +358,11 @@ MasterEvent Master::poll(uint64_t now_us) {
     // attempt-ending byte's outcome survives the rest of the drain because every acceptance
     // check below is gated on `awaiting`, re-evaluated per byte and false once the attempt
     // has ended: later bytes can only be recorded as activity and discarded/counted.
+    //
+    // Called from both poll() and begin() (#138): `awaiting` and `in_window` below read
+    // open_/sub_phase_/dst_/seq_/window_start_us_/deadline_ exactly as they stand at the
+    // call site, so a begin()-time drain (open_ still false; see begin()) always takes the
+    // "no transaction open" accounting path, never the AwaitResponse one.
     while (wire_.receive(byte, start_us)) {
         const bool is_flag = (byte == omgp::TRUNK_flag_byte);
         // The instant that opened the accumulation now forming, captured BEFORE this
@@ -451,6 +467,12 @@ MasterEvent Master::poll(uint64_t now_us) {
         // covers every received byte rather than only the outcomes that used to have their own
         // recording (PR #137 review/red-team, MEDIUM).
     }
+}
+
+MasterEvent Master::poll(uint64_t now_us) {
+    MasterEvent event{};
+
+    drain_wire(event);
 
     // trunk §3: the timeout gates the START BIT, not full delivery — "if the host sees no
     // start bit within T_resp, the request has failed". A frame that opened inside the
