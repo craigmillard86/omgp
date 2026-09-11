@@ -81,7 +81,8 @@ public:
                                                                      // refuses dst >= kAddrCount".)
     MasterEvent poll(uint64_t now_us);            // drains ByteWire::receive() into the deframer, then drives the
                                                   // state machine; at most one terminal event per transaction.
-                                                  // The ONLY receive path — there is no public feed() (analysis F1).
+                                                  // Shares that drain with begin() (#138) — there is no public
+                                                  // feed() and no other entry point bypasses it (analysis F1).
     bool busy() const;
     uint8_t attempts() const;                     // 0..3 for the open/last transaction
     void set_bit_rate(uint32_t bps);              // pass-through to the wire + BusStats.rate_changes;

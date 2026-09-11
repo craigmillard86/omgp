@@ -65,8 +65,8 @@ class Master {
     // == ADDR_host) is accepted"; PR #137 red-team @9547634 and @87b6686, LOW).
     Status begin(uint8_t dst, const uint8_t* payload, size_t len);
 
-    // The only receive path (analysis F1): drains ByteWire::receive() into the engine's
-    // own Deframer, each byte with its start-bit instant, then drives the state machine.
+    // Drains the shared receive path (analysis F1; drain_wire() below — also run by begin(),
+    // #138), then drives the timeout/fire_pending tail.
     MasterEvent poll(uint64_t now_us);
 
     bool busy() const;

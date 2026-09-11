@@ -2969,3 +2969,27 @@ to `0`; the counter and the budget are read from the default branch, never the P
 as a T3 PR"); the direction authorises the draft and the workflow edits, not the ruling.
 **Amends:** the 2026-09-06 scope-routing entry (#134/#136) — adds a time bound to its scope
 bound; that entry's rules stand unchanged inside the budget. **Supersedes:** none.
+
+## 2026-09-11 — #138 item 3 (claimed-src-out-of-range discards) loses its tracking issue when #138 closes for item 1 alone
+
+**Context:** red-team at `1c6fd7b` (#342, LOW). The 2026-09-06 entry above ("a discarded
+frame whose claimed src is out of range…") recommends folding its fix "into #138 item 3" and
+rules "pending — human". PR #342 implements #138 item 1 only (its own body: "the only
+dispatchable scope per the issue's enrichment") and its review-fix attempt 1 changed the
+PR's closing directive from `Closes #138` to `Refs #138` for exactly this reason — `gh issue
+view 138` and `gh api repos/.../issues/138` were both permission-denied in the review-fix
+session (as they were for the red-team pass itself), so neither could confirm the PR body's
+claim that the 2026-09-06 enrichment rescoped #138 to item 1 only, and #342's own diff makes
+item 3 reachable one call earlier (`begin()`'s own drain) without closing the gap — see
+`link/master.cpp:454`. Leaving #138 open keeps this entry's "pending — human" ruling attached
+to a live issue; closing it here would have orphaned that ruling with no tracker.
+**Recommendation:** a human with issue access either (a) confirms the enrichment note really
+does rescope #138 to item 1, in which case item 3 (this entry, plus the CRC-attribution
+entry it's folded with) needs its own new issue before #138 closes, or (b) if #138 already
+covers item 3 as a still-open item, simply merges #342 without closing it and lets the
+existing issue keep tracking item 3.
+**Ruling:** PENDING — human (issue triage; this session has no issue-read access to resolve
+it directly).
+**Amends:** none. **Supersedes:** none — the 2026-09-06 entry's "folded into #138 item 3"
+recommendation and "pending — human" ruling stand unchanged; this entry only records why
+#138 must not close as a side effect of #342.
