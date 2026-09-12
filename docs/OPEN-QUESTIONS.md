@@ -3070,6 +3070,24 @@ This was measured, not assumed. On the 92-comment corpus of 2026-09-08 (verdicts
 
 ---
 
+## 2026-09-12 — T040's "local mutation run": an empty diff scope discharges it, and the criterion is the defect
+
+**Context:** T040 (#58) requires a "local mutation run" as its fourth acceptance criterion. The dispatch agent could not run one — `tools/mutate.sh` is outside the dispatch allow-list and `pipeline.sh` has no mutation stage (tracked as #402) — and said so rather than working around the denial. It then found the more interesting reason, which stands even with the tooling unblocked: **the branch changes no file inside `tools/mutate.cfg`'s `scope_dirs` (`l3 link core`)**. `tools/mutate.sh:105-108` short-circuits on an empty scope, printing "nothing in scope" and exiting 0 *before* the Mull presence check. A run there would have produced a vacuous pass — a green tick attesting nothing about `link/health.cpp`.
+
+The real evidence exists where those lines actually changed: #124 → #56, where `deep-verify` ran `mutate.sh --diff origin/main --require` against installed Mull. Its triage survives in-tree: `link/health.cpp:18` carries `mutant-ok(equivalent, cxx_ge_to_gt)`, with commit `55b5500` showing it was produced against a live run, and the residual wrap comparison at `health.cpp:31-33` is documented as demonstrated-killed by the bad-address cases in `test_link_health.cpp`. Zero `accepted` labels; PR #401 adds none.
+
+**Ruling:** human, 2026-09-12. **AC4 is discharged for T040** on that evidence. The defect is in the criterion, not the PR: a checkpoint task must not demand diff-scoped mutation evidence from a diff that contains no in-scope source, because the only run it can produce is vacuous. Checkpoint criteria should require the mutation gate *where the scoped source changed*, and otherwise cite it.
+
+**Consequences, recorded so they are not lost:**
+- PR #401 is the instance. Its `tasks.md` text already states the mechanism and points here; this entry is the ruling it defers to.
+- #402 (a `mutate` stage in `pipeline.sh`) remains worth doing so the gate is reachable at all — but it would NOT have changed this outcome, and that is the part my own earlier advice got wrong: I told the maintainer not to re-release #58 until that stage existed.
+- #146 covers the general case (mutation attestation for a PR that changes no scoped source) and now has a concrete instance.
+- **#58 must not close silently.** `agent-merge` derives close targets from the branch name as well as the body (`agent-merge.yml:178-180`), and #401's head is `task/58`, so #58 closes on merge whichever keyword the body uses. If it closes before this ruling is recorded, reopen it.
+
+**Supersedes:** none. **Amends:** T040's fourth acceptance criterion, as stated in `specs/002-trunk-link-layer/tasks.md` (whose own wording PR #401 corrects).
+
+---
+
 ## 2026-09-12 — #134 guardrail 2 was never implemented: the filer filed every follow-up bullet
 
 **Context:** the 2026-09-05 scope ruling (#134) carries a second guardrail, in its own words: *"Threshold: only file issues for MEDIUM+ substance genuinely out of scope. Pure-style LOWs are noted, not issued (no backlog spam)."* `review-followups.yml` never implemented it. It filed **every** bullet in a `## FOLLOW-UPS` section, on every review round, on every PR.
