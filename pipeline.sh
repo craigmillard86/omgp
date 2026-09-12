@@ -99,9 +99,20 @@ unit_sources_plain() {
 # arithmetic over this run's per-binary EXECUTED lines, and only while no binary shrinks to
 # 5 checks or fewer. The wider margin the older entries above describe (dropping the single
 # biggest binary, test_link_master at 312820, leaves 269481) still holds a fortiori.
+# 582360 = 582365 executed (19 binaries) minus 5 slack — raised 2026-09-12 at the T040/#58
+# US4 checkpoint (contracts/tooling.md "pipeline.sh": "raised to the new total minus 5, never
+# lowered"). Was 582296. The US4 binaries are NOT what moved it: test_link_health (T037) and
+# test_link_loop's three US4 scripts (T039) were already on main when T036 measured 582301
+# (e230c65 is an ancestor of 09dabd5 — `git merge-base --is-ancestor`), so they are inside
+# the old floor already. The +64 since then is test_link_master (312884 here, 312820 at the
+# #137 review). The raise is the ratchet catching up to the measured total, not new US4 checks.
+# At total-5 the gate still fires if ANY ONE of the 19 binaries stops reporting: the smallest
+# (test_link_interfaces, 6 checks) leaves 582359, below the floor — demonstrated by that
+# arithmetic over this run's per-binary EXECUTED lines, and only while no binary shrinks to
+# 5 checks or fewer.
 # The floor is the COUNT gate. The SET gate — every tests/{unit,property}/test_*.cpp compiled,
 # registered and executed, by name — is tools/check_test_set.py in stage_unit (#133).
-UNIT_TEST_FLOOR=582296
+UNIT_TEST_FLOOR=582360
 
 stage_codegen() {
   # Constants + vectors header from the YAML, then prove the human-authored docs tables

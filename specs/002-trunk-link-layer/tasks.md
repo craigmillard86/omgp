@@ -208,8 +208,44 @@ enrolment rotation and one notification per transition.
 ### Implementation for User Story 4
 
 - [x] T038 [US4] Write `link/health.hpp` / `link/health.cpp` per contracts/link-cpp.md "Health tracker" and data-model.md §6 (16-entry table, `on_result`, `tick`, `state`, `poll_due`, `mark_polled`, `next_probe` rotation — bus-fault parts stubbed to "never fault" until US5), citing `trunk §6` and `§7` — make T037 pass; add to `link/CMakeLists.txt`
-- [ ] T039 [US4] Extend `tests/unit/test_link_loop.cpp` with the SUSPECT and OFFLINE scripts (three `Silence` steps → SUSPECT; silence for 1 s of simulated time → OFFLINE; a `Respond` after that → RECOVERED) driving `Master` + `HealthTracker` together — write first, then wire `HealthTracker::on_result` from the loop
+- [x] T039 [US4] Extend `tests/unit/test_link_loop.cpp` with the SUSPECT and OFFLINE scripts (three `Silence` steps → SUSPECT; silence for 1 s of simulated time → OFFLINE; a `Respond` after that → RECOVERED) driving `Master` + `HealthTracker` together — write first, then wire `HealthTracker::on_result` from the loop
 - [ ] T040 [US4] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; local mutation run
+  - Two of the three clauses are discharged on PR #401 (#58): `./pipeline.sh` and
+    `./pipeline.sh esp32` are green at that head, and `UNIT_TEST_FLOOR` is raised
+    582296 → 582360. The **local mutation run** is not, and cannot be made meaningful on
+    that branch: it changes no source under `tools/mutate.cfg`'s `scope_dirs`
+    (`l3 link core`), so `tools/mutate.sh --diff origin/main` prints "nothing in scope"
+    and exits 0 at `tools/mutate.sh:105-108`, *before* the Mull presence check — a pass
+    there attests nothing about `link/health.cpp`. The box therefore stays unticked while
+    the floor raise lands. Tracked by #146 (mutation attestation for a PR that changes no
+    scoped source); the question of whether an empty scope discharges this clause is
+    recorded in `docs/OPEN-QUESTIONS.md` (2026-09-12) and is a human ruling.
+  - Scope of the `./pipeline.sh` clause, stated rather than left implicit: every run cited
+    on #401 took the **CMake/ctest** path — `unit: executed … (ctest path)`. The bootstrap
+    g++ fallback was **not** exercised at any head, by construction from its two guards:
+    `stage_build` takes it only when `cmake` is absent (`pipeline.sh:181`) and `stage_unit`
+    only when `ctest` or `build/native/CTestTestfile.cmake` is absent (`:219`), and both
+    CI's `native` job and the authoring host have cmake. That matters here because the same
+    `UNIT_TEST_FLOOR` also gates a separately summed bootstrap total (`:348`) with 5 checks
+    of slack; the two sums are believed equal (19 sources ↔ 19 registered binaries, same
+    flags) but that equality is **assumed**, not demonstrated. `tests/unit/
+    test_pipeline_link_bootstrap.sh` would demonstrate it; nothing invokes it today.
+  - Claim release, recorded here because the merge path never reads this file: T040 is the
+    one clause-incomplete box in Phase 6, so **#58 must stay open** when #401 merges. A
+    PR-body edit does not achieve that. `agent-merge` derives its close targets from the
+    body's `Closes`/`Fixes`/`Resolves` references *and*, independently, from the branch
+    name (`.github/workflows/agent-merge.yml:178-180`: `pr.head.ref.match(/^task\/(\d+)$/)`
+    unioned with the body matches), and #401's head is `task/58` — so #58 closes on merge
+    whether the body reads `Closes #58` or `Refs #58`. `agent-merge` has four mechanical
+    holds, not one: a non-`open` or `draft` PR (`agent-merge.yml:108`), a `needs-human` or
+    `blocked` label (`:112`), a `VERDICT(review)` that is not `clean` at the merge head
+    (`:145`) and — at `risk:t2` and above — a `VERDICT(red-team)` that is not `clean` there
+    either (`:147-150`). Only the first two are durable: the verdict holds lapse the moment
+    a later round reports `clean` at a head. Both durable holds need a PR-mutating verb
+    (`gh pr edit --add-label`, `gh pr ready --undo`) that the review-fix dispatch's
+    allow-list denies — attempted and refused, not routed around — so they are requested of
+    a human on #401. Should #58 close before the `docs/OPEN-QUESTIONS.md` (2026-09-12)
+    ruling lands, reopen it: that ruling is about this box.
 
 **Checkpoint**: SC-006 demonstrated; F3 has `poll_due`/`next_probe`/`on_result`/`tick` to build the superframe on.
 

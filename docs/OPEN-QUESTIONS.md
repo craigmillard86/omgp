@@ -3070,6 +3070,50 @@ This was measured, not assumed. On the 92-comment corpus of 2026-09-08 (verdicts
 
 ---
 
+## 2026-09-12 — Does an empty mutation scope discharge a checkpoint task's "local mutation run" clause?
+
+**Context:** the US2/US3/US4 checkpoint tasks of `specs/002-trunk-link-layer/tasks.md`
+(T032, T036, T040) each require a "local mutation run" alongside the full `./pipeline.sh`
+and `./pipeline.sh esp32` runs and the `UNIT_TEST_FLOOR` raise. A checkpoint PR that adds
+no source — T040/#58 (PR #401) is one: its diff is `pipeline.sh`, `tasks.md` and this file
+— changes nothing under `tools/mutate.cfg`'s `scope_dirs` (`l3 link core`).
+`tools/mutate.sh:105-108` then prints `mutation: nothing in scope (origin/main) — no
+changed sources under: l3 link core` and exits 0 *before* the Mull presence check
+(`:105` `if [ -z "$SCOPE" ]; then`, `:106` the echo, `:107` `exit 0`), so the command
+"passes" without
+building, mutating or executing anything. The clause is therefore unsatisfiable in
+substance on such a PR, while being trivially satisfiable in letter. Nothing in
+`tasks.md`, `docs/GOVERNANCE.md` or `docs/OPERATING-POLICY.md` says which reading binds.
+
+The same shape recurs: it is issue #146 (mutation attestation for PRs that change no
+scoped source), and it is what made the T040 red-team finding blocking — the box had been
+ticked with the clause admittedly not run.
+
+**Recommendation:** the clause is discharged **only by an explicit, checkable
+attestation**, not by a green vacuous exit and not by silence. Concretely: a checkpoint PR
+whose `scope_dirs` diff is empty states that fact, names the commit where the mutation
+evidence for the certified sources actually lives (for US4: PR #124 / issue #56, whose CI
+`deep-verify` ran `./tools/mutate.sh --diff origin/main --require`), and labels that
+evidence *assumed* rather than re-demonstrated, per CLAUDE.md rule 11. Until #146 makes
+that attestation mechanical, an agent does not tick the checkpoint box on an empty scope;
+a human ticks it, or rules the clause discharged here. The conservative default is chosen
+because the opposite reading lets "mutation run: pass" mean "no mutant was ever built",
+which is the blind spot `mutate.sh`'s own no-oracle and no-body rules exist to close.
+
+Not recommended: dropping the clause from the checkpoint tasks (it is load-bearing when
+the checkpoint PR *does* carry source), or adding a mutation stage to `pipeline.sh` on
+this branch (that is #146's design decision and outside T040's scope).
+
+**Ruling:** ANSWERED — see the entry immediately below, appended on merge of #409
+(2026-09-12): an empty diff scope discharges the clause, and the defect is in the criterion.
+This question was raised by the round-1 red team on PR #401 (finding 1, at `3ad363c`) and is
+recorded as asked; only this ruling line is updated, so the pending count does not carry a
+question that has been answered.
+
+**Supersedes:** none.
+
+---
+
 ## 2026-09-12 — T040's "local mutation run": an empty diff scope discharges it, and the criterion is the defect
 
 **Context:** T040 (#58) requires a "local mutation run" as its fourth acceptance criterion. The dispatch agent could not run one — `tools/mutate.sh` is outside the dispatch allow-list and `pipeline.sh` has no mutation stage (tracked as #402) — and said so rather than working around the denial. It then found the more interesting reason, which stands even with the tooling unblocked: **the branch changes no file inside `tools/mutate.cfg`'s `scope_dirs` (`l3 link core`)**. `tools/mutate.sh:105-108` short-circuits on an empty scope, printing "nothing in scope" and exiting 0 *before* the Mull presence check. A run there would have produced a vacuous pass — a green tick attesting nothing about `link/health.cpp`.
