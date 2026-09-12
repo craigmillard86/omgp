@@ -59,6 +59,25 @@ review_fix_max_attempts: 4
 # the budget unreachable. Read at RUN time from the default branch.
 adversarial_round_budget: 3
 
+# How many times a no-op agent run is retried IN-JOB before the claim is released and the job
+# fails loudly (#361). A run that exits `success` having produced no branch, no PR and no comment
+# is detected by tools/ci/agent-noop.js on SUCCESS — the guards that used to sit here were
+# `if: failure()` and could not fire for that case.
+#
+# 1 is #361's stated default. The first version of this shipped 0, arguing that a retry step would
+# have to duplicate the primary step's prompt verbatim (Actions has no YAML anchors) and that the
+# observed no-ops died on permission denials, so the same prompt would hit the same wall. The
+# round-1 review on #416 was right that this is a directive with explicit parameters, not a spec
+# ambiguity with a safe default — and the duplication objection is answerable: both Claude steps
+# now read ONE prompt from a file, so there is no second copy to drift.
+#
+# Unreadable, absent, negative or non-numeric fails closed to 0 (no retry); values above 2 are
+# clamped DOWN, so a typo cannot buy an agent more attempts than this ruling allows — the same
+# shape as auto_fix_max_attempts. Read at RUN time from the default branch, so retuning it needs
+# no workflow-scope push. Pinned by test_agent_retry_max_is_configured_and_spent and the
+# retryBudget cases in agent_noop_harness.js.
+agent_retry_max: 1
+
 # Backstops that make auto-release safe (do not remove):
 # - ready-gate still validates the enriched story mechanically
 # - risk-score re-rates the ACTUAL diff at PR time; a T2+/T3 outcome from

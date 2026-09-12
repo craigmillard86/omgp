@@ -190,7 +190,37 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y cmake ninja-build
           pip install -r tools/requirements.txt   # includes the clang-format pin: a bare ./pipeline.sh reaches stage_quality, which FAILS on CI without it (#135; #167 review)
+      - name: Mark the start of the run
+        id: t0
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      # ONE prompt for both the first pass and the retry: two inline copies would drift, and a
+      # drifted retry prompt silently changes the agent's instructions on the second pass.
+      # It comes from the DEFAULT branch and is written to RUNNER_TEMP, never the workspace. This
+      # job checks out the PR's BRANCH, which may predate this change and not contain the file at
+      # all; and the Claude step runs there with Edit/Write and `git*`, so an untracked directory
+      # in that tree could be swept into the agent's own commit.
+      - name: Load the agent prompt (from the default branch)
+        id: prompt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          PR: ${{ needs.gate.outputs.pr }}
+          BRANCH: ${{ needs.gate.outputs.branch }}
+          HEAD_SHA: ${{ needs.gate.outputs.head }}
+          ATTEMPT: ${{ needs.gate.outputs.attempt }}
+          KINDS: ${{ needs.gate.outputs.kinds }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/contents/.github/agent-prompts/review-fix.md?ref=${DEFAULT_BRANCH}" \
+            --jq .content | base64 -d > "$RUNNER_TEMP/prompt.md"
+          {
+            echo "text<<PROMPT_EOF_${GITHUB_RUN_ID}"
+            sed -e "s|{{PR}}|${PR}|g" -e "s|{{BRANCH}}|${BRANCH}|g" -e "s|{{HEAD}}|${HEAD_SHA}|g" \
+                -e "s|{{ATTEMPT}}|${ATTEMPT}|g" -e "s|{{KINDS}}|${KINDS}|g" "$RUNNER_TEMP/prompt.md"
+            echo "PROMPT_EOF_${GITHUB_RUN_ID}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Claude Code — address the review findings on the agent's branch
+        id: agent                       # the execution file (turns, denials, is_error) is a step output; an id-less step has none
         # Pinned to the commit v1 resolved to on 2026-09-02, not the moving `v1` tag:
         # CodeQL's actions/unpinned-tag flagged this file (alert 187 on #113) and the
         # `CodeQL` results check is a required check (GOVERNANCE.md §2, ruled 2026-08-28).
@@ -200,73 +230,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: claude,github-actions   # the triggering comment is claude[bot]'s verdict; a github-actions dispatch is the manual path
-          prompt: |
-            You are the review-fix agent. Read CLAUDE.md and
-            docs/OPERATING-POLICY.md first and stay strictly within agent
-            permissions. You are on branch ${{ needs.gate.outputs.branch }}
-            of PR #${{ needs.gate.outputs.pr }} at head
-            ${{ needs.gate.outputs.head }} (review-fix attempt
-            ${{ needs.gate.outputs.attempt }}). The
-            ${{ needs.gate.outputs.kinds }} pass reported findings.
-            1. Read the findings: `gh pr view ${{ needs.gate.outputs.pr }} --comments`.
-               The authoritative set is the LATEST claude[bot] comment for
-               each of ${{ needs.gate.outputs.kinds }} whose final line is
-               `VERDICT(<kind>): findings @ ${{ needs.gate.outputs.head }}`.
-               Ignore older comments from earlier heads — they may already
-               be fixed. Also read `gh pr diff ${{ needs.gate.outputs.pr }}`.
-            2. SCOPE POLICY (#134) — this is the rule, not a preference:
-               - Fix every BLOCKING finding: a defect in the CHANGED code,
-                 a security hole, a weakened/narrowed test, a spec
-                 divergence, an unmet acceptance criterion of the linked
-                 issue (read it: `gh issue view <n>`), or a false claim the
-                 PR makes. Dropping a false or out-of-scope claim — and the
-                 machinery behind it — is a valid fix: you MAY SHRINK the
-                 diff, not only add to it.
-               - A FOLLOW-UP finding — a real improvement, hardening or
-                 pre-existing gap OUTSIDE the acceptance criteria (the
-                 reviewer lists these under "## FOLLOW-UPS") — is NOT fixed
-                 here. Do not grow this PR to satisfy it; if the reviewer
-                 did not already name it as an issue, name the proposed
-                 issue in your step-5 comment and leave the code.
-               - Apply this to red-team findings too: a red-team finding
-                 outside the acceptance criteria is a FOLLOW-UP, not a
-                 reason to expand the change.
-               - A defect, security hole, weakened test, spec divergence or
-                 unmet criterion is ALWAYS blocking, whatever its label;
-                 when unsure, treat it as blocking.
-               A `findings` verdict means a reviewer found BLOCKING issues,
-               so there is always something to fix — both claude-review and
-               red-team emit `findings` only for blocking findings. If you
-               genuinely believe a finding the reviewer marked blocking is
-               actually out of scope, do not silently stop: rebut it with
-               evidence (step 3) and say the PR needs human triage, so it is
-               not left stalled.
-            3. Fix ON THIS BRANCH only — never main, never another branch.
-               Where a finding reveals a missing test, work TDD: add the
-               failing test first, then the fix. Never weaken, skip or
-               delete a test, assertion, scenario, gate threshold or policy
-               constant; never touch tests/vectors/ or
-               protocol/omgp-protocol.yaml — if a fix needs any of those,
-               change nothing, explain why in a PR comment, and stop.
-               A finding you believe is WRONG is not fixed by silencing it:
-               rebut it in the comment with evidence and leave the code.
-               Spec ambiguity is recorded in docs/OPEN-QUESTIONS.md, never
-               resolved in a code comment.
-            4. Run ./pipeline.sh (the stages your change touches, then the
-               full local set) until green BEFORE pushing. Commit with
-               `Refs #<task issue>` and push to this branch — the push
-               re-runs review and CI.
-            5. Comment on the PR with `gh pr comment`, containing exactly:
-               (a) each finding you FIXED, with file:line and what changed;
-               (b) each finding you judged a FOLLOW-UP (out of scope), with
-               the proposed issue title so a human can file it — the
-               "## FOLLOW-UPS" record; (c) each finding you REBUTTED, with
-               the evidence; (d) evidence for every claim,
-               labelled (demonstrated by <named test/stage>, assumed, or
-               NOT EXAMINED) per CLAUDE.md rule 11.
-            Do not approve the PR, do not merge it, and do not change any
-            file under .github/workflows/ — this loop's own bounds are not
-            yours to edit.
+          prompt: ${{ steps.prompt.outputs.text }}
           # claude-opus-5, like every agent loop (model-tier ruling 2026-09-11, superseding the
           # 2026-08-31 split that left the implementation loops on the action default). Pinned
           # by test_every_agent_loop_runs_on_opus.
@@ -274,11 +238,106 @@ jobs:
             --model claude-opus-5
             --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Edit,Read,Write,Grep,Glob"
 
-      - name: Record an attempt that did not complete
-        if: failure()
+      # The checkout at the top of this job is the PR's BRANCH, which may predate this workflow
+      # and not contain tools/ci/agent-noop.js — requiring it from there would turn a clean run
+      # into a MODULE_NOT_FOUND failure on every older PR. Take the shared module from the DEFAULT
+      # branch instead, the way ready-gate.yml and promote-queued.yml take dep-refs.js. It lands
+      # AFTER the agent has finished, so the tree the agent commits from never sees this path.
+      - name: Fetch the shared no-op detector from the default branch
+        if: always()
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch || 'main' }}
+          sparse-checkout: |
+            tools/ci
+            .github/agent-config.yml
+          sparse-checkout-cone-mode: false
+          path: .agent-ci
+          persist-credentials: false
+
+      # #361. This step used to be `if: failure()`, so it never fired for the runs that mattered:
+      # #342's fix produced nothing TWICE while exiting success, each time having already spent an
+      # attempt (the gate applies `review-fix-<n>` before this job runs, :161). Detection now runs
+      # whatever the outcome, and a run that did nothing hands its attempt back.
+      - name: Did the agent produce anything?
+        id: detect
+        if: always()
         uses: actions/github-script@v7
+        env:
+          KIND: fix
+          PR: ${{ needs.gate.outputs.pr }}
+          HEAD_BEFORE: ${{ needs.gate.outputs.head }}
+          SINCE: ${{ steps.t0.outputs.at }}
+          EXEC_FILE: ${{ steps.agent.outputs.execution_file }}
         with:
           script: |
-            const pr = Number('${{ needs.gate.outputs.pr }}');
-            await github.rest.issues.createComment({...context.repo, issue_number: pr,
-              body: `⚠️ Review-fix attempt ${{ needs.gate.outputs.attempt }} did not complete (run ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). It still counts toward the configured bound.`});
+            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
+            await m.detect({github, context, core, env: process.env});
+
+      - name: How many retries may this run spend?
+        id: budget
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          CONFIG: ${{ github.workspace }}/.agent-ci/.github/agent-config.yml
+        with:
+          script: |
+            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
+            core.setOutput('n', String(m.retryBudget(process.env, core)));
+
+      # #361 AC2. A run that produced nothing is retried once (agent_retry_max, default 1) before
+      # the attempt is returned and the PR escalated. Same pinned action and same prompt as above.
+      - name: Claude Code — retry the fix
+        id: agent_retry
+        if: always() && steps.detect.outputs.noop == 'true' && steps.budget.outputs.n != '0'
+        uses: anthropics/claude-code-action@8251c103ac8c1d761882c86aba1412c7f583c844   # v1, pinned as above
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: claude,github-actions
+          prompt: ${{ steps.prompt.outputs.text }}
+          claude_args: |
+            --model claude-opus-5
+            --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Edit,Read,Write,Grep,Glob"
+
+      - name: Did the retry produce anything?
+        id: detect_retry
+        if: always() && steps.agent_retry.conclusion != 'skipped'
+        uses: actions/github-script@v7
+        env:
+          KIND: fix
+          PR: ${{ needs.gate.outputs.pr }}
+          HEAD_BEFORE: ${{ needs.gate.outputs.head }}
+          SINCE: ${{ steps.t0.outputs.at }}
+          EXEC_FILE: ${{ steps.agent_retry.outputs.execution_file }}
+        with:
+          script: |
+            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
+            await m.detect({github, context, core, env: process.env});
+
+      - name: Return the attempt and escalate if it produced nothing
+        id: finalize
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          KIND: fix
+          PR: ${{ needs.gate.outputs.pr }}
+          ATTEMPT: ${{ needs.gate.outputs.attempt }}
+          NOOP: ${{ steps.detect_retry.outputs.noop != '' && steps.detect_retry.outputs.noop || steps.detect.outputs.noop }}
+          REASON: ${{ steps.detect_retry.outputs.reason != '' && steps.detect_retry.outputs.reason || steps.detect.outputs.reason }}
+          ATTEMPTS: ${{ steps.detect_retry.outputs.noop != '' && '2' || '1' }}
+          TURNS: ${{ steps.detect_retry.outputs.turns != '' && steps.detect_retry.outputs.turns || steps.detect.outputs.turns }}
+          DENIALS: ${{ steps.detect_retry.outputs.denials != '' && steps.detect_retry.outputs.denials || steps.detect.outputs.denials }}
+        with:
+          script: |
+            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
+            // An EMPTY noop means `detect` itself failed (missing module, API 403/500, failed
+            // checkout). The `if: failure()` step this replaced released on any job failure, so
+            // returning here would hold the spent attempt silently — a regression (round-1).
+            if (process.env.NOOP === 'false') return;   // it pushed or it explained itself — the attempt stands
+            await m.finalize({github, context, core, env: process.env});
+
+      # NO transcript artifact. GOVERNANCE §4b: "This repository is public" — an artifact is
+      # downloadable by anyone, and secret masking covers step logs, not bytes inside a file.
+      # `execution_file` is arbitrary tool output from a job holding CLAUDE_CODE_OAUTH_TOKEN, and
+      # calling the upload "private to the repo" was false (round-1 review on #416). The figures
+      # that diagnose a stall are in the job log and in the comment finalize posts.
