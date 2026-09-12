@@ -449,6 +449,10 @@ def test_review_followups_wiring():
     # Presence pins only; behaviour (both threshold directions, word order) is the harness's job.
     assert ">= 0.9" in script, "dedup threshold must be the calibrated 0.9"
     assert "sameOrder(" in script, "dedup must respect word order (#341 red team round 2)"
+    # #134 guardrail 2, implemented 2026-09-12: MEDIUM+ only, and the tag is recognised backticked
+    # as well as bare — the old bare-only strip never fired on real verdicts. Behaviour is the
+    # harness's job; this pins that the guard exists at all.
+    assert "severityOf(" in script and "SEVERITY" in script, "the filer must apply #134's MEDIUM+ threshold"
 
 
 def test_both_workflows_declare_the_same_seven_sections():

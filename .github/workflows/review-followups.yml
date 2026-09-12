@@ -69,6 +69,11 @@ jobs:
             // both with 0 occurrences in that corpus and tracked in #376: a `## ` line inside a fenced
             // block ends the section, and a `- ` line inside one is read as a bullet.
             const unmark = (s) => s.replace(/^#{1,6}\s+/, '').replace(/^[*_]{1,3}\s*/, '').replace(/\s*[*_]{1,3}$/, '').trim();
+            // Verdicts tag follow-up bullets with a severity and write the tag BACKTICKED as often as
+            // bare — `[LOW]`, **[MEDIUM]**, [HIGH]. The old strip matched only the bare form, so on
+            // real traffic it never fired and titles kept their tag (#341 round-2 review, #343).
+            const SEVERITY = /^\s*[`*_]*\[(HIGH|MEDIUM|LOW)\][`*_]*\s*:?\s*/i;
+            const severityOf = (s) => { const m = SEVERITY.exec(s); return m ? m[1].toUpperCase() : ''; };
             const lines = body.split('\n');
             const start = lines.findIndex(l => /^##\s*FOLLOW-UPS\b/i.test(l.trim()));
             if (start < 0) { core.notice('followups: no FOLLOW-UPS section — nothing to file'); return; }
@@ -81,7 +86,15 @@ jobs:
               // "none" is how a verdict says it proposes nothing. Test the TITLE head exactly, so
               // "- **None** — nothing outside the change" is still recognised while a proposal
               // whose first word happens to be "None" survives as the real follow-up it is.
-              if (m && !/^none[.!]?$/i.test(unmark(m[1].split(' — ')[0]))) items.push(m[1].trim());
+              if (m && !/^none[.!]?$/i.test(unmark(m[1].split(' — ')[0]))) {
+                // #134 guardrail 2: "only file issues for MEDIUM+ substance genuinely out of scope.
+                // Pure-style LOWs are noted, not issued (no backlog spam)." Ruled 2026-09-05 and
+                // never implemented: the filer filed EVERY bullet, every round, on every PR — 152 of
+                // 190 open issues came from it, 35 from #172 alone. An UNTAGGED bullet counts as
+                // MEDIUM: failing toward filing, so a reviewer omitting a tag loses no proposal.
+                if (severityOf(m[1]) === 'LOW') core.notice(`followups: '${m[1].slice(0, 60)}' is [LOW] — noted, not filed (#134 guardrail 2)`);
+                else items.push(m[1].trim());
+              }
             }
             if (!items.length) { core.notice('followups: none proposed — nothing to file'); return; }
 
@@ -136,7 +149,7 @@ jobs:
 
             let filed = 0;
             for (const item of items.slice(0, CAP)) {
-              let title = item.replace(/^\[(HIGH|MEDIUM|LOW)\]\s*/i, '');   // drop a leading severity tag
+              let title = item.replace(SEVERITY, '');   // drop the severity tag, backticked, bolded or bare
               title = (title.split(' — ')[0] || title).slice(0, 120).trim(); // the "TITLE — why" head
               title = unmark(title);                                         // drop wrapping ** or *
               if (!title) continue;

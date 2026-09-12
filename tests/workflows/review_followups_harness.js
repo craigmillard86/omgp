@@ -52,7 +52,8 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
   await run(w, {body: comment('- [MEDIUM] Bound the descriptor TLV loop — outside #45\'s criteria\n- Wire quality into CI — pre-existing gap')});
   check('two follow-ups -> two task issues filed', w.created.length === 2);
   check('title strips the [SEVERITY] tag and the " — why" tail',
-        w.created[0].title === 'Bound the descriptor TLV loop' && w.created[1].title === 'Wire quality into CI');
+        w.created.length === 2 && w.created[0].title === 'Bound the descriptor TLV loop' &&
+        w.created[1].title === 'Wire quality into CI');
   check('every filed issue is labelled task and NOTHING else that releases it',
         w.created.every(i => i.labels.length === 1 && i.labels[0] === 'task'));
   check('the bullet after NOT EXAMINED is not filed', !w.created.some(i => /must be ignored/.test(i.title)));
@@ -314,6 +315,35 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
     await run(w, {body: comment(`- ${prop} — the other case`)});
     check(`"${prop}" is not merged with "${open}"`, w.created.length === 1);
   }
+
+  // --- #134 guardrail 2: MEDIUM+ only, "no backlog spam" (2026-09-12) ------------------------
+  // #134 ruled it and the filer never implemented it: every bullet became an issue, every round,
+  // on every PR. 152 of 190 open issues came from this filer; #172 alone produced 35. Verdicts
+  // DO tag severity, so the threshold is mechanical. Note the tag is written BACKTICKED in real
+  // verdicts (`[LOW]`), which is why both forms are tested — matching only the bare form would
+  // leave the guard silently dead.
+  w = world();
+  await run(w, {body: comment('- `[LOW]` Rename the helper for clarity — cosmetic')});
+  check('a backticked [LOW] follow-up is not filed', w.created.length === 0);
+  w = world();
+  await run(w, {body: comment('- [LOW] Rename the helper for clarity — cosmetic')});
+  check('a bare [LOW] follow-up is not filed', w.created.length === 0);
+  w = world();
+  await run(w, {body: comment('- `[MEDIUM]` Bound the descriptor TLV loop — real hardening')});
+  check('a [MEDIUM] follow-up is still filed', w.created.length === 1);
+  w = world();
+  await run(w, {body: comment('- `[HIGH]` Bound the descriptor TLV loop — real hardening')});
+  check('a [HIGH] follow-up is still filed', w.created.length === 1);
+  // Untagged bullets fail TOWARD filing: the reviewer omitting a tag must not silently drop a
+  // real proposal. Recorded as a judgement in docs/OPEN-QUESTIONS.md, since #134 does not say.
+  w = world();
+  await run(w, {body: comment('- Make `MockWire::Kind::Respond` answer via the handler — untagged')});
+  check('an untagged follow-up is still filed', w.created.length === 1);
+  // The tag is stripped from the title either way, so a filed issue never carries it.
+  w = world();
+  await run(w, {body: comment('- `[MEDIUM]` Bound the descriptor TLV loop — real hardening')});
+  check('the severity tag is stripped from the filed title',
+        w.created.length === 1 && !/MEDIUM/.test(w.created[0].title));
 
   const pass = results.filter(([, ok]) => ok).length;
   for (const [n, ok] of results) console.log(`${ok ? 'ok  ' : 'FAIL'} ${n}`);
