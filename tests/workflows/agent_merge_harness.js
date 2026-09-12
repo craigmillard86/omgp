@@ -166,6 +166,32 @@ const said = (w, re) => w.log.some(l => re.test(l));
   check('A6 renaming the record does not walk the guard', !mergedIt(w) && said(w, /rename|append-only|ruling/i));
 
   // The pending form the repo actually writes must still merge, or the guard blocks normal work.
+  // --- round 2: the marker is a FORMAT, and the format has variants -------------------------
+  // `**Ruling**: adopted` renders identically to `**Ruling:** adopted`; a heading form and the
+  // word "Decision" record a decision just as plainly. Keying on one literal spelling caught the
+  // one shape the author happened to use (round-2 red team).
+  for (const [shape, line] of [
+    ['colon outside the bold span', '+**Ruling**: adopted — human, 2026-09-12. Done.'],
+    ['heading form', '+### Ruling: adopted — human, 2026-09-12.'],
+    ['the word Decision', '+**Decision:** adopted — human, 2026-09-12.'],
+    ['bolded Decision, colon outside', '+**Decision**: ratified by the maintainer, 2026-09-12.'],
+    ['underscore emphasis', '+_Ruling:_ discharged — human, 2026-09-12.'],
+  ]) {
+    w = oqPR([oq('@@\n' + line + '\n')]);
+    await run(w);
+    check(`a recorded decision (${shape}) is held`, !mergedIt(w) && said(w, /ruling|decision/i));
+  }
+
+  // The pending forms of those same variants must still merge, or the guard blocks normal work.
+  for (const [shape, line] of [
+    ['colon outside the bold span', '+**Ruling**: PENDING — human. Recommended: keep it at 0.'],
+    ['the word Decision', '+**Decision:** PENDING — human.'],
+  ]) {
+    w = oqPR([oq('@@\n' + line + '\n')]);
+    await run(w);
+    check(`a PENDING entry (${shape}) still merges`, mergedIt(w));
+  }
+
   w = oqPR([oq('@@\n+**Ruling:** PENDING — human. Recommended: keep `agent_retry_max` at 0.\n')]);
   await run(w);
   check('a PENDING entry with a recommendation still merges', mergedIt(w));

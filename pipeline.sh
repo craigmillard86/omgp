@@ -192,7 +192,14 @@ stage_unit() {
   # the ratchet, comparing first-to-first, stayed green (round-1 red team on #420, finding 5).
   # Blanks are stripped so this agrees with test_floor_datum.parse_floor on an indented datum,
   # which previously parsed there and stopped the build here (finding 6).
-  _floor=$(sed 's/#.*//' tests/unit-test-floor.txt 2>/dev/null | tr -d '[:blank:]' | grep -E '^[0-9]+$' || true)
+  # Trim only LEADING/TRAILING whitespace (CR included), never internal: `tr -d '[:blank:]'`
+  # squeezed "1 0 0" into the integer 100 while the ratchet's parse_floor rejected it, and it left
+  # a trailing CR that grep then refused while parse_floor's .strip() accepted it. Compose the two
+  # and each reader saw exactly one integer - a DIFFERENT one - so the gate could run at 100 with
+  # the never-lowered ratchet reporting green (round-2 red team on #420). The rules here and in
+  # parse_floor are now identical, and test_both_readers_take_the_SAME_value compares the values
+  # rather than merely asking whether each refuses.
+  _floor=$(sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' tests/unit-test-floor.txt 2>/dev/null | grep -E '^[0-9]+$' || true)
   _floor_n=$(printf '%s\n' "$_floor" | grep -c '^[0-9]' || true)
   if [ "$_floor_n" != "1" ]; then
     echo "unit: floor datum unreadable — tests/unit-test-floor.txt must carry EXACTLY one bare integer line (found $_floor_n); refusing to gate on nothing" >&2

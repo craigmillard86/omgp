@@ -54,6 +54,52 @@ def test_the_floor_datum_exists_and_parses():
     assert value > 0
 
 
+def _pipeline_floor(tmp_path, text: str):
+    """The value stage_unit's OWN reader takes, or None if it refuses.
+
+    Round-2 red team: asking only WHETHER pipeline.sh refuses cannot detect the two readers
+    disagreeing, which is the whole invariant. `tr -d '[:blank:]'` deletes INTERNAL blanks, so the
+    shell reads "1 0 0" as 100 while parse_floor rejects it; `.strip()` drops a trailing CR while
+    `tr` does not, so "582360\r" is invisible to the gate and visible to the ratchet. Each reader
+    then sees exactly one integer — a different one — and every per-reader check stays green."""
+    tree = tmp_path / f"val{abs(hash(text)) % 100000}"
+    (tree / "tests").mkdir(parents=True)
+    shutil.copy(PIPELINE, tree / "pipeline.sh")
+    (tree / "tests" / "unit-test-floor.txt").write_text(text, newline="")
+    probe = tree / "probe.sh"
+    # Run the reader exactly as stage_unit has it, lifted from the script itself rather than
+    # retyped: a copy here could drift from the gate and vouch for nothing.
+    body = PIPELINE.read_text()
+    start = body.index("  _floor=$(")
+    end = body.index("UNIT_TEST_FLOOR=$_floor") + len("UNIT_TEST_FLOOR=$_floor")
+    probe.write_text("set -uo pipefail\n" + body[start:end].replace("return 1", "exit 1") + '\necho "FLOOR=$UNIT_TEST_FLOOR"\n')
+    r = subprocess.run(["bash", str(probe)], cwd=tree, capture_output=True, text=True, timeout=60)
+    for line in r.stdout.splitlines():
+        if line.startswith("FLOOR="):
+            return int(line[6:])
+    return None
+
+
+def test_both_readers_take_the_SAME_value(tmp_path):
+    """Not "do both refuse" — do both read the same number. The gate and the ratchet reading
+    different integers is the failure this PR's whole argument rests on not happening."""
+    hostile = "582360\r\n# 100 = the real floor, obviously\n1 0 0\n"
+    gate = _pipeline_floor(tmp_path, hostile)
+    ratchet = parse_floor(hostile)
+    assert gate == ratchet, (
+        f"the gate read {gate} and the ratchet read {ratchet} from the same file: "
+        "a PR could drop the floor to the gate's value with the ratchet reporting green")
+
+
+@pytest.mark.parametrize("text,why", [
+    ("1 0 0\n", "internal blanks must not be squeezed into an integer"),
+    ("582360\r\n", "a CR-terminated datum must read the same on both sides"),
+    ("582360\r\n# note\n1 0 0\n", "the composite: each reader sees a different single integer"),
+])
+def test_readers_agree_on_hostile_shapes(tmp_path, text, why):
+    assert _pipeline_floor(tmp_path, text) == parse_floor(text), why
+
+
 def _pipeline_refuses(tmp_path, text: str) -> bool:
     """Does the REAL stage_unit refuse this datum? Re-implementing the shell reader here would
     prove nothing if the two drifted, so this runs pipeline.sh itself in a scratch tree: it either

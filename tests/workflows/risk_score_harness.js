@@ -82,6 +82,30 @@ const tierOf = w => (w.applied.find(l => /^risk:t[0-3]$/.test(l)) || '').replace
   w = world([F('tools/refimpl/test_new_thing.py', 80, 0, 'added')]); await run(w);
   check('adding a Python test is not escalated', Number(tierOf(w)) <= 1);
 
+  // --- round 2: a rename removes a test from the suite exactly as much as `git rm` does -------
+  // `removedTests` matches f.filename and requires deletions > 0. GitHub reports a pure rename as
+  // status 'renamed', additions 0, deletions 0, with the old path in previous_filename — the very
+  // field this PR added to the agent-merge guard three files away. pytest collects test_*.py, so
+  // renaming the ratchet out of that glob deletes it from the suite with no deletion anywhere.
+  const R = (filename, previous_filename) => ({filename, previous_filename, additions: 0, deletions: 0, status: 'renamed'});
+
+  w = world([R('tools/refimpl/floor_datum_check.py', 'tools/refimpl/test_floor_datum.py')]); await run(w);
+  check('renaming the ratchet out of pytest\'s glob -> T3', tierOf(w) === '3');
+
+  w = world([R('tools/refimpl/floor_datum_check.py', 'tools/refimpl/test_floor_datum.py'),
+             F('tests/unit-test-floor.txt', 1, 1)]); await run(w);
+  check('rename the ratchet AND lower the floor in one PR -> T3, never an autonomous T2', tierOf(w) === '3');
+
+  w = world([R('tests/unit/disabled_link_master.cpp', 'tests/unit/test_link_master.cpp')]); await run(w);
+  check('renaming a C++ test out of the glob -> T3', tierOf(w) === '3');
+
+  // ...but a rename that KEEPS the file in the suite is ordinary refactoring, not a reduction.
+  w = world([R('tools/refimpl/test_floor_ratchet.py', 'tools/refimpl/test_floor_datum.py')]); await run(w);
+  check('renaming a test that stays a test is not escalated', Number(tierOf(w)) <= 1);
+
+  w = world([R('tests/unit/test_link_loop2.cpp', 'tests/unit/test_link_loop.cpp')]); await run(w);
+  check('renaming a C++ test that stays a test is not escalated', Number(tierOf(w)) <= 1);
+
   for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
   console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);
 })();

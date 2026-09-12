@@ -31,9 +31,21 @@ jobs:
             // auto_merge_max_tier, i.e. an agent could delete its own gate's tests and merge that
             // autonomously (round-1 red team on #420, finding 1). Pinned by risk_score_harness.js.
             // Note the rule still cannot punish ADDING tests: it requires deletions > 0.
+            // A file is IN THE SUITE if a collector picks it up: pytest collects
+            // tools/refimpl/test_*.py, ctest/pipeline.sh collect tests/**/test_*.cpp. Renaming a
+            // file OUT of that glob removes it from the suite exactly as much as `git rm` does,
+            // and GitHub reports a pure rename as additions 0 / deletions 0 with the old path in
+            // previous_filename — so the deletion rule below could never see it. Renaming the
+            // floor ratchet away scored T1, and doing that WHILE lowering the floor scored T2:
+            // inside auto_merge_max_tier, past needs-human, past CODEOWNERS (round-2 red team on
+            // #420). The broad `^tests/` deletion rule is KEPT as it was: narrowing it to test_*
+            // would stop counting deletions of scenarios and vectors under tests/.
+            const inSuite = p => /^tools\/refimpl\/test_[^/]*\.py$/.test(p || '') ||
+                                 /^tests\/.*\/test_[^/]*\.(cpp|py)$/.test(p || '');
             const removedTests = files.some(f =>
-              /^(tests\/|tools\/refimpl\/test_)/.test(f.filename) && f.deletions > 0 &&
-              (f.status === 'removed' || f.deletions > f.additions));
+              (f.status === 'renamed' && inSuite(f.previous_filename) && !inSuite(f.filename)) ||
+              (/^(tests\/|tools\/refimpl\/test_)/.test(f.filename) && f.deletions > 0 &&
+               (f.status === 'removed' || f.deletions > f.additions)));
 
             // Added lines only (patch text starting with '+', excluding the
             // '+++' file header). Workflow `uses:` additions are already T3

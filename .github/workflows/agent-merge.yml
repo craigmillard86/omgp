@@ -158,8 +158,20 @@ jobs:
                 }
                 const lines = oqf.patch.split('\n');
                 const DECISION = /\b(ratified|adopted|discharged|human,\s*\d{4})/i;
+                // The marker is a FORMAT, and formats have variants: `**Ruling**: adopted`
+                // renders identically to `**Ruling:** adopted`, and a heading form or the word
+                // "Decision" records a decision just as plainly. Keying on one literal spelling
+                // caught only the shape the author happened to use (round-2 red team on #420).
+                // Strip heading and emphasis characters first, then read the field name.
+                //
+                // CONTROL, NOT GUARANTEE (rule 11): prose that records a decision with no marker
+                // at all — "the maintainer approved this in session; treat it as ruled" — is not
+                // detectable by any pattern, and this guard does not claim to catch it. What it
+                // catches is the recorded FORM a ruling takes in this file, which is what the
+                // file's own conventions and every entry in it use.
+                const bare = l => l.slice(1).replace(/^[#>\s]*/, '').replace(/[*_`]/g, '').trim();
                 const ruling = lines.filter(l => l.startsWith('+')).find(l => {
-                  const m = /\*\*Ruling:\*\*\s*(.*)$/i.exec(l);
+                  const m = /^(?:Ruling|Decision)\s*:\s*(.*)$/i.exec(bare(l));
                   if (!m) return false;                       // not a ruling line at all
                   return !(/^PENDING\b/i.test(m[1].trim()) && !DECISION.test(l));
                 });
