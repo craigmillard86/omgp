@@ -3067,3 +3067,25 @@ This was measured, not assumed. On the 92-comment corpus of 2026-09-08 (verdicts
 **Ruling:** human, 2026-09-11, in session. The recommendation of the 2026-09-11 entry "#340's AC 1 ('stop at a horizontal rule') conflicts with its AC 2" is adopted: AC 1 no longer includes "and at a horizontal rule", and AC 2 governs. The emphasis- and heading-tolerant NOT EXAMINED test handles the "follow-ups, `---`, marker" shape on its own. Also recorded on #340.
 
 **Supersedes:** none — this rules on that entry.
+
+---
+
+## 2026-09-12 — #361: a no-op agent run is detected on SUCCESS; in-job retry is NOT built, and `agent_retry_max` is 0
+
+**Context:** a `claude-code-action` run can exit `success`, with `is_error: false`, having pushed no branch, opened no PR and posted no comment. It happened five times: #54 twice, #342's fix twice, and #58 after 156 turns, 26 permission denials and $9.07. Each run left its claim in place — `in-progress` on the issue, or a spent `review-fix-<n>` label on the PR — so the WIP cap stayed held and the loop stalled until a human looked, in one case for three days. Both workflows already carried a step written to catch exactly this, and neither could ever run: `agent-dispatch.yml:134` and `review-fix.yml:278` were `if: failure()`, and a silent no-op is not a failure.
+
+**What lands:** detection in `tools/ci/agent-noop.js`, required by both workflows on steps that run whatever the outcome. A no-op releases the dispatch claim, or hands back the review-fix attempt the gate had already spent (`review-fix.yml:161` applies the label *before* the job runs), applies `needs-human` on the review-fix side, comments the per-attempt figures, and **fails the job** — the silence was the defect. The transcript is uploaded as an artifact.
+
+**The judgement this records, because the task asked for something else.** #361 asks for a bounded in-job retry, `agent_retry_max` defaulting to 1. It is not built, and the key ships at **0**:
+- A retry step must repeat the primary step's prompt verbatim — GitHub Actions has no YAML anchors — giving two copies (25 lines in dispatch, 65 in review-fix) that will drift. A drifted retry prompt is worse than no retry, because it silently changes the agent's instructions on the second pass.
+- There is no evidence a retry helps. The observed no-ops ended with high permission-denial counts; re-running the same prompt in the same job, under the same allow-list, re-hits the same wall. What actually recovered #58 was the *next* dispatch re-picking the freed issue (PR #401) — the path that releasing the claim restores automatically.
+
+`agent_retry_max` is nonetheless present and read by a test: `test_agent_retry_max_matches_the_retry_steps_that_exist` fails if the value is raised without adding the matching step, so the config can never promise a retry the workflow cannot perform.
+
+**Two further judgements, stated rather than buried:**
+- *What counts as production* is deliberately generous: for dispatch, an open PR on `task/<issue>`; for review-fix, a moved head **or** a `claude[bot]` comment made during the run, because the fixer is explicitly allowed to rebut a finding and change no code. `VERDICT(...)` comments are excluded — claude-review and red-team post on the same PR, and one landing mid-run must not be mistaken for the fixer's work. A false no-op (a real PR abandoned, a claim released under a working agent) is worse than a missed one, which is merely today's behaviour.
+- *The transcript artifact* is arbitrary tool output. Freedom from secrets in it is **assumed, not established** (rule 11), so retention is 7 days and the artifact is repo-private.
+
+**Ruling:** PENDING — human. Recommended: keep `agent_retry_max` at 0, and revisit only if the figures now being reported show no-ops a retry would plausibly have cleared — low denial count, `is_error: false`, no output.
+
+**Supersedes:** none.

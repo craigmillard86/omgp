@@ -22,10 +22,21 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 HARNESS = ROOT / "tests" / "workflows" / "story_gate_harness.js"
 
 
-def _script(workflow: str, job: str) -> str:
+def _script(workflow: str, job: str, step_id: str | None = None) -> str:
+    """The github-script body of a job, or of one step in it.
+
+    Without `step_id` this returns the FIRST github-script step, which is what every caller
+    predating 2026-09-12 expects. That default is also why a job's later steps were never
+    tested: agent-dispatch and review-fix each carry a second github-script step whose
+    `if: failure()` guard could not fire for a run that exits success having produced nothing,
+    and no test could see it. Select by `id` to reach those.
+    """
     wf = yaml.safe_load((ROOT / ".github" / "workflows" / workflow).read_text())
     steps = wf["jobs"][job]["steps"]
-    return next(s["with"]["script"] for s in steps if "actions/github-script" in s.get("uses", ""))
+    scripts = [s for s in steps if "actions/github-script" in s.get("uses", "")]
+    if step_id is None:
+        return next(s["with"]["script"] for s in scripts)
+    return next(s["with"]["script"] for s in scripts if s.get("id") == step_id)
 
 
 @pytest.mark.skipif(shutil.which("node") is None,
@@ -449,6 +460,58 @@ def test_review_followups_wiring():
     # Presence pins only; behaviour (both threshold directions, word order) is the harness's job.
     assert ">= 0.9" in script, "dedup threshold must be the calibrated 0.9"
     assert "sameOrder(" in script, "dedup must respect word order (#341 red team round 2)"
+
+
+NOOP_WORKFLOWS = (("agent-dispatch.yml", "implement", "ISSUE"), ("review-fix.yml", "fix", "PR"))
+
+
+def test_noop_guards_run_on_success_and_use_the_shared_module():
+    """The guard must run when the job SUCCEEDS — that is the whole defect (#361).
+
+    Five runs on 2026-09-07/08 and 2026-09-11 exited `success` having produced no branch, no PR
+    and no comment, one of them after 156 turns and $9.07. Both workflows already had a
+    release/report step; both were `if: failure()`, so neither could fire. Behaviour lives in
+    tools/ci/agent-noop.js and is proved by agent_noop_harness.js; these are wiring pins."""
+    for wf_name, job, _ in NOOP_WORKFLOWS:
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / wf_name).read_text())
+        steps = wf["jobs"][job]["steps"]
+        by_id = {s.get("id"): s for s in steps if s.get("id")}
+        for sid in ("detect", "finalize"):
+            assert sid in by_id, (wf_name, job, f"a `{sid}` step must exist")
+            cond = str(by_id[sid].get("if", ""))
+            assert "failure()" not in cond, (wf_name, sid, "must not be gated on failure() — a no-op succeeds")
+        assert "always()" in str(by_id["finalize"].get("if", "")), (wf_name, "finalize must run even when a step failed")
+        for sid in ("detect", "finalize"):
+            body = _script(wf_name, job, sid)
+            assert "tools/ci/agent-noop.js" in body, (wf_name, sid, "must use the shared module, not an inline copy")
+        # The transcript is the only evidence of what a no-op run actually did.
+        assert any("upload-artifact" in s.get("uses", "") for s in steps), (wf_name, "the transcript must be uploaded")
+
+
+def test_every_claude_step_has_an_id_so_its_execution_file_is_readable():
+    """`execution_file` (turns, denials, is_error) is a step output; an id-less step has none."""
+    for wf_name, job, _ in NOOP_WORKFLOWS:
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / wf_name).read_text())
+        claude = [s for s in wf["jobs"][job]["steps"] if "claude-code-action" in s.get("uses", "")]
+        assert claude, (wf_name, job, "expected a claude-code-action step")
+        assert all(s.get("id") for s in claude), (wf_name, job, "every Claude step needs an id")
+
+
+def test_agent_retry_max_matches_the_retry_steps_that_exist():
+    """The config may not promise more retries than the workflow can perform.
+
+    A retry is a second claude-code-action step in the job, not a loop: the gate's
+    `<!-- review-fix sha=<head> -->` marker (review-fix.yml:133-136) blocks a fresh run at the
+    same head, so the retry has to happen in-job. N retry steps => at most N retries."""
+    cfg = (ROOT / ".github" / "agent-config.yml").read_text()
+    m = re.search(r"^agent_retry_max: *(\d+)", cfg, re.M)
+    assert m, "agent_retry_max must exist in agent-config.yml"
+    configured = int(m.group(1))
+    for wf_name, job, _ in NOOP_WORKFLOWS:
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / wf_name).read_text())
+        claude = [s for s in wf["jobs"][job]["steps"] if "claude-code-action" in s.get("uses", "")]
+        assert len(claude) == configured + 1, (
+            wf_name, job, f"agent_retry_max={configured} needs {configured + 1} Claude steps, found {len(claude)}")
 
 
 def test_both_workflows_declare_the_same_seven_sections():

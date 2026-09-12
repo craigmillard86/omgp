@@ -100,6 +100,7 @@ jobs:
           sudo apt-get update && sudo apt-get install -y cmake ninja-build
           pip install -r tools/requirements.txt   # includes the clang-format pin: a bare ./pipeline.sh reaches stage_quality, which FAILS on CI without it (#135; #167 review)
       - name: Claude Code — implement task
+        id: agent                       # the execution file (turns, denials, is_error) is a step output; an id-less step has none
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -130,12 +131,49 @@ jobs:
             --model claude-opus-5
             --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr create*),Bash(gh issue*),Edit,Read,Write,Grep,Glob"
 
-      - name: Release claim if no PR was opened
-        if: failure()
+      # #361. This step used to be `if: failure()`, which is why it never once fired: the five
+      # observed no-ops (#54 twice, #342's fix twice, #58 after 156 turns / 26 denials / $9.07)
+      # all exited SUCCESS having produced nothing, and left `in-progress` holding the WIP cap
+      # until a human noticed days later. Detection now runs whatever the outcome.
+      - name: Did the agent produce anything?
+        id: detect
+        if: always()
         uses: actions/github-script@v7
+        env:
+          KIND: implement
+          ISSUE: ${{ needs.pick.outputs.issue }}
+          EXEC_FILE: ${{ steps.agent.outputs.execution_file }}
         with:
           script: |
-            const n = Number('${{ needs.pick.outputs.issue }}');
-            await github.rest.issues.removeLabel({...context.repo, issue_number: n, name: 'in-progress'}).catch(()=>{});
-            await github.rest.issues.createComment({...context.repo, issue_number: n,
-              body: `🤖 Dispatch run failed before completing — claim released. See run ${context.runId}.`});
+            const m = require(`${process.env.GITHUB_WORKSPACE}/tools/ci/agent-noop.js`);
+            await m.detect({github, context, core, env: process.env});
+
+      - name: Release the claim and fail loudly if it produced nothing
+        id: finalize
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          KIND: implement
+          ISSUE: ${{ needs.pick.outputs.issue }}
+          NOOP: ${{ steps.detect.outputs.noop }}
+          ATTEMPTS: '1'
+          TURNS: ${{ steps.detect.outputs.turns }}
+          DENIALS: ${{ steps.detect.outputs.denials }}
+        with:
+          script: |
+            const m = require(`${process.env.GITHUB_WORKSPACE}/tools/ci/agent-noop.js`);
+            if (process.env.NOOP !== 'true') return;   // it produced a PR — nothing to release
+            await m.finalize({github, context, core, env: process.env});
+
+      # The transcript is the only evidence of what a no-op run actually did — which tool calls
+      # were denied, and where it gave up. Retention is short and the artifact is private to the
+      # repo: this is arbitrary tool output, and freedom from secrets in it is NOT established
+      # (assumed, per CLAUDE.md rule 11), so it is kept only long enough to diagnose a stall.
+      - name: Upload the agent transcript
+        if: always() && steps.agent.outputs.execution_file != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: agent-transcript-${{ needs.pick.outputs.issue }}-${{ github.run_id }}
+          path: ${{ steps.agent.outputs.execution_file }}
+          retention-days: 7
+          if-no-files-found: warn
