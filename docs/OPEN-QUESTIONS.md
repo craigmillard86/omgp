@@ -3067,3 +3067,21 @@ This was measured, not assumed. On the 92-comment corpus of 2026-09-08 (verdicts
 **Ruling:** human, 2026-09-11, in session. The recommendation of the 2026-09-11 entry "#340's AC 1 ('stop at a horizontal rule') conflicts with its AC 2" is adopted: AC 1 no longer includes "and at a horizontal rule", and AC 2 governs. The emphasis- and heading-tolerant NOT EXAMINED test handles the "follow-ups, `---`, marker" shape on its own. Also recorded on #340.
 
 **Supersedes:** none — this rules on that entry.
+
+---
+
+## 2026-09-12 — #134 guardrail 2 was never implemented: the filer filed every follow-up bullet
+
+**Context:** the 2026-09-05 scope ruling (#134) carries a second guardrail, in its own words: *"Threshold: only file issues for MEDIUM+ substance genuinely out of scope. Pure-style LOWs are noted, not issued (no backlog spam)."* `review-followups.yml` never implemented it. It filed **every** bullet in a `## FOLLOW-UPS` section, on every review round, on every PR.
+
+Measured on 2026-09-12: **190 open issues, 183 labelled `task`, 152 of them filed by this workflow** — 80% of the backlog from one mechanism. By source PR: #172 produced 35, #145 31, #149 22, #341 16, #375 13, #342 12. A PR that survives six adversarial rounds emits follow-ups six times, so the harder the review, the larger the backlog. Creation outran closure roughly 3:1 over the week (243 created, 84 closed, and 70 of those closures were two hand sweeps).
+
+Two related defects found while implementing the threshold:
+- The severity tag is written **backticked** in real verdicts (`` `[LOW]` ``), and the existing "drop a leading severity tag" strip matched only a bare `[LOW]`. It therefore never fired on real traffic, which is why filed titles kept their tags (seen on #343, noted by #341's round-2 review).
+- Because the tag survived into the title, it also polluted dedup: the same proposal tagged and untagged compares as two different titles.
+
+**Ruling:** none needed — this enforces a ruling already made (#134, adopted 2026-09-05, recorded in the 2026-09-11 rulings entry). Implemented 2026-09-12: a bullet tagged `[LOW]` is noted in the job log and not filed; `[MEDIUM]` and `[HIGH]` are filed as before; the tag is stripped from the title in all three wrappings (backticked, bolded, bare).
+
+**The one judgement this adds, recorded because #134 does not state it:** an **untagged** bullet is treated as MEDIUM and filed. The alternative — treat untagged as LOW and drop it — fails toward silence, and a reviewer omitting a tag would then lose a real proposal without a trace. Failing toward filing keeps the loss visible as a closeable issue, which is the same direction every other choice in this workflow takes. If the maintainer prefers the stricter reading, it is a one-word change and this entry is the place to record it.
+
+**Supersedes:** none. **Amends:** nothing — it implements #134 as written.
