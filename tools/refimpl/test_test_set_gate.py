@@ -96,6 +96,12 @@ def make_tree(
     build = root / "build" / "native"
     build.mkdir(parents=True)
     shutil.copy(ROOT / "pipeline.sh", root / "pipeline.sh")
+    # stage_unit reads the floor from tests/unit-test-floor.txt (moved out of pipeline.sh on
+    # 2026-09-12 so a floor raise no longer touches a CODEOWNERS-owned file). The REAL datum is
+    # copied rather than a value invented here, so these trees gate on exactly the floor the repo
+    # does and the floor-breach scenarios below keep their existing arithmetic.
+    (root / "tests").mkdir(parents=True, exist_ok=True)
+    shutil.copy(ROOT / "tests" / "unit-test-floor.txt", root / "tests" / "unit-test-floor.txt")
     shutil.copy(ROOT / "CMakePresets.json", root / "CMakePresets.json")
     (root / "tools").mkdir()
     if TOOL.exists():

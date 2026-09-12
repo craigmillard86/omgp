@@ -129,6 +129,25 @@ jobs:
               const owned = changed.map(f => f.filename).filter(f => ownedPatterns.some(p => ownedBy(p, f)));
               if (owned.length) { skip(number, `CODEOWNERS-owned path(s) need the owner: ${owned.join(', ')}`); continue; }
 
+              // docs/OPEN-QUESTIONS.md left CODEOWNERS on 2026-09-12 so the merge GOVERNANCE §1
+              // sanctions can actually happen (#342 died on `405 Waiting on code owner review`).
+              // An agent may APPEND a question or a recommendation; recording a DECISION as the
+              // maintainer's, or editing the append-only history, still stops here. The ruling
+              // test runs FIRST: an edit that turns a PENDING line into a decision is both a
+              // removal and a ruling, and "you recorded a ruling" is the useful reason to give.
+              const oqf = changed.find(f => f.filename === 'docs/OPEN-QUESTIONS.md');
+              if (oqf) {
+                if (typeof oqf.patch !== 'string') {
+                  skip(number, 'docs/OPEN-QUESTIONS.md changed but GitHub returned no patch (too large) — cannot tell an appended question from a recorded ruling, so this is the maintainer\'s call');
+                  continue;
+                }
+                const lines = oqf.patch.split('\n');
+                const ruling = lines.filter(l => l.startsWith('+')).find(l => /\*\*Ruling:\*\*/i.test(l) && !/PENDING/i.test(l));
+                if (ruling) { skip(number, `records a ruling in docs/OPEN-QUESTIONS.md (${ruling.slice(1).trim().slice(0, 60)}) — a decision is the maintainer's, never an autonomous merge`); continue; }
+                const removed = lines.filter(l => l.startsWith('-') && !l.startsWith('---'));
+                if (removed.length) { skip(number, `docs/OPEN-QUESTIONS.md is append-only and this diff removes ${removed.length} line(s) — supersede by appending, or let the maintainer merge it`); continue; }
+              }
+
               // Verdicts: claude[bot] only, FINAL line only, THIS head only (agent-approve's rule).
               const comments = await github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: number, per_page: 100});
               const verdictOf = kind => {

@@ -117,7 +117,12 @@ Runs in the `quality` stage on every path (pure Python, no build needed).
 - `unit`: run every test binary; the `EXECUTED: <n>` lines are summed (ctest path via
   `LastTest.log`, bootstrap via stdout); `UNIT_TEST_FLOOR` raised to the new total −
   small slack (documented in the commit that raises it: "raise when tests are added;
-  NEVER lower"). (Amended by #133: the floor is the COUNT gate only. The ctest path also
+  NEVER lower"). (Amended 2026-09-12, autonomy gates: the value and its raise
+  history live in `tests/unit-test-floor.txt`, not in `pipeline.sh` — which stays
+  CODEOWNERS-owned as the gate definition, reads the datum, enforces it on both paths and
+  refuses a datum it cannot parse. `tools/refimpl/test_floor_datum.py` fails any decrease
+  against origin/main, so "NEVER lower" is mechanical now, not only a review convention.)
+  (Amended by #133: the floor is the COUNT gate only. The ctest path also
   runs `tools/check_test_set.py`, which proves from `compile_commands.json`, the object
   files, `ctest --show-only` and the run's `ctest --output-junit` record
   (`build/native/Testing/junit.xml`, deleted before ctest runs and refused if older than

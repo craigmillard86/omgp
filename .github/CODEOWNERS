@@ -19,12 +19,16 @@
 /.specify/memory/constitution.md @craigmillard86
 /tools/mutate.cfg               @craigmillard86
 
-# Owner review (not auto-T3): rulings land in OPEN-QUESTIONS.md and task
-# ordering in specs/*/tasks.md, but agents are ALSO sanctioned to append
-# recommendations / produce these via Spec Kit (OPERATING-POLICY §2), so
-# they gate on review rather than tripping the T3 breach signal.
-/docs/OPEN-QUESTIONS.md         @craigmillard86
-/specs/**/tasks.md              @craigmillard86
+# DELIBERATELY NOT OWNED (2026-09-12): docs/OPEN-QUESTIONS.md and specs/**/tasks.md.
+# GOVERNANCE.md §1 sanctions agents to append recommendations and to produce Spec Kit task
+# ordering, and agent-merge excepts exactly these two paths. Listing them here made branch
+# protection demand the owner's review anyway and REFUSE that sanctioned merge: PR #342 had
+# clean verdicts and every check green, and died on `405 Waiting on code owner review`.
+# Branch protection now matches the written policy instead of silently overriding it.
+#
+# The ruling RECORD is still gated, mechanically rather than by ownership: agent-merge refuses
+# any PR whose OPEN-QUESTIONS diff records a decision (a `**Ruling:**` line that is not PENDING)
+# or removes a line from the append-only history. Cases in tests/workflows/agent_merge_harness.js.
 
 # Tier 2 — toolchain pinning & pipeline definition
 /IDF_VERSION                    @craigmillard86

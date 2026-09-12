@@ -146,12 +146,26 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
   // --- CODEOWNERS fail-closed (live finding 2026-08-31: a github-actions[bot] approval on
   // PR #104 SATISFIED the require_code_owner_reviews branch protection — demonstrated, not
   // theoretical. The gate must therefore never approve a PR touching an owned path.) ---
-  w = world({comments: [clean('review')], files: ['docs/OPEN-QUESTIONS.md', 'tools/x.py']});
+  w = world({comments: [clean('review')], files: ['docs/GOVERNANCE.md', 'tools/x.py']});
   await approve(w, {tier: 'risk:t0'});
-  check('a changed CODEOWNERS-listed file (exact pattern) -> not approved, file named', !approved(w) && w.log.some(l => /notice.*OPEN-QUESTIONS/.test(l)));
+  check('a changed CODEOWNERS-listed file (exact pattern) -> not approved, file named', !approved(w) && w.log.some(l => /notice.*GOVERNANCE/.test(l)));
+  // The ** branch of ownedBy(), against a SYNTHETIC CODEOWNERS. On 2026-09-12 the real file's
+  // only ** pattern (/specs/**/tasks.md) was removed: branch protection was using it to refuse
+  // the very merge GOVERNANCE §1 sanctions (#342 died on `405 Waiting on code owner review`).
+  // The matcher still supports **, and both agent-approve and agent-merge still depend on it, so
+  // the branch keeps real coverage here instead of being silently lost with the pattern.
+  const synthWs = fs.mkdtempSync(require('path').join(require('os').tmpdir(), 'codeowners-'));
+  fs.mkdirSync(require('path').join(synthWs, '.github'), {recursive: true});
+  fs.writeFileSync(require('path').join(synthWs, '.github', 'CODEOWNERS'), '/specs/**/tasks.md  @owner\n');
   w = world({comments: [clean('review')], files: ['specs/002-trunk-link-layer/tasks.md']});
+  await approve(w, {tier: 'risk:t0', workspace: synthWs});
+  check('a ** CODEOWNERS pattern (synthetic /specs/**/tasks.md) -> not approved', !approved(w));
+  // The other direction, and the point of the change: against the REAL CODEOWNERS those two
+  // paths are no longer owned, so a clean T0 PR touching them is approvable. agent-merge's own
+  // ruling guard is what now protects the record (agent_merge_harness.js).
+  w = world({comments: [clean('review')], files: ['docs/OPEN-QUESTIONS.md', 'specs/002-trunk-link-layer/tasks.md']});
   await approve(w, {tier: 'risk:t0'});
-  check('a ** CODEOWNERS pattern (specs/**/tasks.md) -> not approved', !approved(w));
+  check('the agent-sanctioned paths are no longer CODEOWNERS-owned -> approved (2026-09-12)', approved(w));
   w = world({comments: [clean('review')], files: ['.github/workflows/ci.yml']});
   await approve(w, {tier: 'risk:t0'});
   check('a directory CODEOWNERS pattern (/.github/) -> not approved', !approved(w));

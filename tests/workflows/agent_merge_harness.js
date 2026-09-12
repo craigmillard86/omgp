@@ -27,7 +27,7 @@ function world({prs = [], issues = [], comments = {}, files = {}, checks = null,
       pulls: {
         list: async () => ({data: [...prState.values()].filter(p => p.state === 'open')}),
         get: async ({pull_number}) => { const p = prState.get(pull_number); if (!p) throw Object.assign(new Error('Not Found'), {status: 404}); return {data: p}; },
-        listFiles: async ({pull_number}) => ({data: (files[pull_number] || ['core/link.cpp']).map(filename => ({filename}))}),
+        listFiles: async ({pull_number}) => ({data: (files[pull_number] || ['core/link.cpp']).map(f => typeof f === 'string' ? {filename: f} : f)}),
         merge: async ({pull_number, sha, merge_method, commit_message}) => {
           if (mergeFails) throw Object.assign(new Error(mergeFails.message), {status: mergeFails.status});
           log.push(`merge@${pull_number} sha=${sha.slice(0, 7)} method=${merge_method} msg=${commit_message.replace(/\n+/g, ' | ').slice(0, 300)}`);
@@ -92,9 +92,48 @@ const said = (w, re) => w.log.some(l => re.test(l));
   await run(w);
   check('T2 with a clean red-team verdict too -> merged', mergedIt(w) && said(w, /VERDICT\(red-team\): clean/));
 
-  w = world({prs: [PR(['agent-authored', 'risk:t0'])], comments: {94: clean(HEAD)}, files: {94: ['docs/OPEN-QUESTIONS.md', 'specs/001-x/tasks.md', 'sim/x.cpp']}});
+  // The OPEN-QUESTIONS file carries a real patch here: the ruling guard below inspects it, and
+  // GitHub returns `patch` for ordinary text diffs. A file with NO patch is the fail-closed case
+  // and is tested on its own — this case is about the PATHS not blocking, which is unchanged.
+  w = world({prs: [PR(['agent-authored', 'risk:t0'])], comments: {94: clean(HEAD)},
+             files: {94: [{filename: 'docs/OPEN-QUESTIONS.md', patch: '@@\n+## 2026-09-12 — a question the agent raises\n+**Ruling:** PENDING — human\n'},
+                          'specs/001-x/tasks.md', 'sim/x.cpp']}});
   await run(w);
   check('the agent-sanctioned owner paths (OPEN-QUESTIONS, tasks.md) do not block the merge', mergedIt(w));
+
+  // --- the ruling guard ---------------------------------------------------------------------
+  // docs/OPEN-QUESTIONS.md and specs/**/tasks.md were removed from CODEOWNERS on 2026-09-12:
+  // branch protection was demanding the owner's review on them and so refusing the merge
+  // GOVERNANCE.md §1 explicitly sanctions (#342 died on `405 Waiting on code owner review`).
+  // Removing them, though, also removed the only gate on the ruling RECORD. An agent may append
+  // a question or a recommendation; recording a DECISION as the maintainer's, or editing the
+  // append-only history, is not something an autonomous merge may carry.
+  const oq = patch => ({filename: 'docs/OPEN-QUESTIONS.md', patch});
+  const oqPR = files => world({prs: [PR(['agent-authored', 'risk:t0'])], comments: {94: clean(HEAD)}, files: {94: files}});
+
+  w = oqPR([oq('@@\n+## 2026-09-12 — a question the agent raises\n+**Ruling:** PENDING — human\n')]);
+  await run(w);
+  check('an appended PENDING question still merges autonomously', mergedIt(w));
+
+  w = oqPR([oq('@@\n+**Ruling:** human, 2026-09-12. AC4 is discharged for T040.\n')]);
+  await run(w);
+  check('a recorded HUMAN ruling is never auto-merged', !mergedIt(w) && said(w, /ruling/i));
+
+  w = oqPR([oq('@@\n-**Ruling:** PENDING — human\n+**Ruling:** human, 2026-09-12. Adopted.\n')]);
+  await run(w);
+  check('editing a PENDING line into a decision is caught', !mergedIt(w) && said(w, /ruling/i));
+
+  w = oqPR([oq('@@\n-## 2026-09-05 — an entry that was already published\n')]);
+  await run(w);
+  check('removing a line from the append-only record is never auto-merged', !mergedIt(w) && said(w, /append-only/i));
+
+  w = oqPR([{filename: 'docs/OPEN-QUESTIONS.md'}]);   // GitHub omits `patch` on very large diffs
+  await run(w);
+  check('no patch to inspect -> fail closed', !mergedIt(w) && said(w, /patch/i));
+
+  w = oqPR([oq('@@\n+Recommended answer: keep the bound at 0.\n')]);
+  await run(w);
+  check('an appended recommendation with no ruling line still merges', mergedIt(w));
 
   w = world({prs: [PR(['agent-authored', 'risk:t1'], {number: 94}), PR(['agent-authored', 'risk:t1'], {number: 95})],
              comments: {94: clean(HEAD), 95: clean(HEAD)}});
