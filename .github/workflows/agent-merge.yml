@@ -54,7 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7   # issue_comment/schedule: this is the DEFAULT branch — never PR content
       - name: Merge every agent PR that is complete at its current head
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           DISPATCH_PR: ${{ inputs.pr }}
         with:

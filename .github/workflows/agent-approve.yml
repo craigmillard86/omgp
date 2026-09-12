@@ -34,7 +34,7 @@ jobs:
         run: |
           echo "max=$(sed -n 's/^auto_approve_max_tier: *//p' .github/agent-config.yml)" >> "$GITHUB_OUTPUT"
       - name: Approve when every required verdict is clean at this head
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           TIER_LABEL: ${{ steps.tier.outputs.label }}
           MAX_TIER: ${{ steps.cfg.outputs.max }}
