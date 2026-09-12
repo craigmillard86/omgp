@@ -208,8 +208,8 @@ enrolment rotation and one notification per transition.
 ### Implementation for User Story 4
 
 - [x] T038 [US4] Write `link/health.hpp` / `link/health.cpp` per contracts/link-cpp.md "Health tracker" and data-model.md §6 (16-entry table, `on_result`, `tick`, `state`, `poll_due`, `mark_polled`, `next_probe` rotation — bus-fault parts stubbed to "never fault" until US5), citing `trunk §6` and `§7` — make T037 pass; add to `link/CMakeLists.txt`
-- [ ] T039 [US4] Extend `tests/unit/test_link_loop.cpp` with the SUSPECT and OFFLINE scripts (three `Silence` steps → SUSPECT; silence for 1 s of simulated time → OFFLINE; a `Respond` after that → RECOVERED) driving `Master` + `HealthTracker` together — write first, then wire `HealthTracker::on_result` from the loop
-- [ ] T040 [US4] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; local mutation run
+- [x] T039 [US4] Extend `tests/unit/test_link_loop.cpp` with the SUSPECT and OFFLINE scripts (three `Silence` steps → SUSPECT; silence for 1 s of simulated time → OFFLINE; a `Respond` after that → RECOVERED) driving `Master` + `HealthTracker` together — write first, then wire `HealthTracker::on_result` from the loop
+- [x] T040 [US4] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; local mutation run
 
 **Checkpoint**: SC-006 demonstrated; F3 has `poll_due`/`next_probe`/`on_result`/`tick` to build the superframe on.
 
