@@ -71,9 +71,10 @@ adversarial_round_budget: 3
 # ambiguity with a safe default — and the duplication objection is answerable: both Claude steps
 # now read ONE prompt from a file, so there is no second copy to drift.
 #
-# Unreadable, absent, negative or non-numeric fails closed to 0 (no retry); values above 2 are
-# clamped DOWN, so a typo cannot buy an agent more attempts than this ruling allows — the same
-# shape as auto_fix_max_attempts. Read at RUN time from the default branch, so retuning it needs
+# Unreadable, absent, negative or non-numeric fails closed to 0 (no retry); values above 1 are
+# clamped DOWN to the number of retry steps that exist, so a typo cannot buy an agent more
+# attempts than this ruling allows, and the config cannot promise a retry the job cannot
+# spend — the same shape as auto_fix_max_attempts. Read at RUN time from the default branch, so retuning it needs
 # no workflow-scope push. Pinned by test_agent_retry_max_is_configured_and_spent and the
 # retryBudget cases in agent_noop_harness.js.
 agent_retry_max: 1

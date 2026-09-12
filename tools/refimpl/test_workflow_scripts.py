@@ -514,16 +514,33 @@ def test_noop_guards_run_on_success_and_use_the_shared_module():
         for sid in ("detect", "finalize"):
             body = _script(wf_name, job, sid) + str(by_id[sid].get("env", ""))
             assert "ready" not in body and "queued" not in body, (wf_name, sid, "must never touch a release label")
-        # The module must come from the DEFAULT branch, never the job's workspace: the Claude step
-        # runs first, holding Edit/Write on that workspace, so requiring it from there lets the
-        # monitored agent rewrite its own no-op check and have github-script execute the edit with
-        # write scopes. review-fix already did this; dispatch did not (round-1 review, #416).
+        # The detector must come from the default branch AND live somewhere the monitored agent
+        # cannot write. Round 1 established the first half; round 2 showed the pin only asserted
+        # that a checkout EXISTED — a mutant moving it back above the Claude step reintroduced the
+        # vulnerability verbatim and the whole suite stayed green (66 passed). Worse, my own AC2
+        # retry step then ran AFTER that checkout holding Edit/Write/Bash(git*), so the agent could
+        # rewrite .agent-ci/tools/ci/agent-noop.js and have github-script execute it with
+        # issues:write — and .agent-ci is untracked and not in .gitignore, the exact hazard
+        # review-fix.yml's own comment gives for writing the prompt to RUNNER_TEMP instead.
+        #
+        # So the PROPERTY, not the mechanism: whatever path the detector is loaded from must not be
+        # inside the workspace any Claude step can write. RUNNER_TEMP satisfies it by construction;
+        # a workspace checkout only satisfies it if no Claude step runs after it, which the retry
+        # makes impossible. Pinned so a future restructure cannot quietly lose it.
         for sid in ("detect", "finalize"):
             body = _script(wf_name, job, sid)
-            assert ".agent-ci/tools/ci/agent-noop.js" in body, (
-                wf_name, sid, "must load the detector from the default-branch checkout")
-        assert any(("checkout" in st.get("uses", "")) and str(st.get("with", {}).get("path", "")) == ".agent-ci"
-                   for st in steps), (wf_name, "needs the default-branch sparse checkout of tools/ci")
+            assert "agent-noop.js" in body, (wf_name, sid, "must load the shared detector")
+            assert "GITHUB_WORKSPACE" not in body, (
+                wf_name, sid,
+                "the detector must not be loaded from the job workspace: every Claude step in this "
+                "job holds Edit/Write there, so the monitored agent could rewrite its own gate")
+        claude_idx = [i for i, st in enumerate(steps) if "claude-code-action" in st.get("uses", "")]
+        fetch_idx = [i for i, st in enumerate(steps)
+                     if "agent-noop.js" in str(st.get("run", "")) or
+                        str(st.get("with", {}).get("path", "")) == ".agent-ci"]
+        for f in fetch_idx:
+            assert all(c < f for c in claude_idx) or "RUNNER_TEMP" in str(steps[f].get("run", "")), (
+                wf_name, f"step {f} puts the detector in the workspace with a Claude step after it")
         # The RAW transcript must NOT be uploaded. GOVERNANCE §4b: "This repository is public",
         # so an artifact is downloadable by anyone, and secret masking covers step logs, not bytes
         # inside an uploaded file. The execution file is arbitrary tool output — `git remote -v`,
@@ -569,11 +586,30 @@ def test_agent_retry_max_is_configured_and_spent():
         # The retry runs only when the first pass produced nothing, and only while budget remains.
         retry = claude[-1]
         cond = str(retry.get("if", ""))
-        assert "noop" in cond, (wf_name, "the retry must be gated on the detected no-op")
+        # Keyed on `produced`, not `noop`: AC2 says an attempt that produced output is never
+        # retried, while also naming is_error as a no-op trigger — so a review-fix run that pushed
+        # and then errored was a no-op that must NOT be retried (round-2 review). The two questions
+        # are answered by two outputs, and the retry asks the one about production.
+        assert "produced" in cond, (wf_name, "the retry must be gated on whether anything was produced")
+        # ...and it must fail CLOSED on a budget it could not read: `n != '0'` alone is TRUE for the
+        # empty string a failed `budget` step leaves behind, and every later step is always().
+        assert "steps.budget.outputs.n != ''" in cond, (
+            wf_name, "the retry must not be spent on an unreadable budget (AC2 fail-closed)")
         assert "retry" in str(retry.get("id", "")), (wf_name, "the retry step needs its own id")
         # One prompt, read from a file — not a second inline copy that can drift from the first.
         prompts = {st.get("with", {}).get("prompt", "") for st in claude}
         assert len(prompts) == 1, (wf_name, "both Claude steps must use the SAME prompt text")
+        # AC2's fourth clause: a delay between attempts. #361 describes the observed no-ops as
+        # "probably a transient problem on the Claude side at the time", so an immediate retry
+        # re-enters the window that caused them. Nothing pinned this and nothing implemented it
+        # (round-2 review) — a scan of the whole diff for sleep/delay/wait found only `await`.
+        ids_in_order = [st.get("id") for st in steps]
+        pause = [i for i, st in enumerate(steps) if "sleep" in str(st.get("run", ""))]
+        assert pause, (wf_name, "AC2 requires a delay between attempts; no step sleeps")
+        d, rr = ids_in_order.index("detect"), ids_in_order.index("agent_retry")
+        assert any(d < i < rr for i in pause), (
+            wf_name, "the delay must sit between the detection and the retry, not elsewhere")
+
         # Detection must run again after the retry, or the retry's outcome is never judged.
         ids = [st.get("id") for st in steps]
         assert ids.count("detect") + ids.count("detect_retry") >= 2, (

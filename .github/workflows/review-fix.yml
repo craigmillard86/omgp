@@ -199,6 +199,29 @@ jobs:
       # job checks out the PR's BRANCH, which may predate this change and not contain the file at
       # all; and the Claude step runs there with Edit/Write and `git*`, so an untracked directory
       # in that tree could be swept into the agent's own commit.
+      # The detector and the budget config come from the DEFAULT branch and land OUTSIDE the
+      # workspace. The previous `.agent-ci` checkout was not enough: the AC2 retry step runs after
+      # it, holding Edit/Write/Bash(git*) in the PR's own tree, so the monitored agent could
+      # rewrite its own no-op check and have github-script execute it with issues:write — and
+      # `.agent-ci` is untracked and not in .gitignore, the very hazard the prompt loader below
+      # already avoids by writing to RUNNER_TEMP (round-2 red team on #416).
+      #
+      # CONTROL, NOT GUARANTEE (rule 11): `Write` is not path-restricted, so this does not make the
+      # file unwritable. It removes it from the tree the agent works in and commits from.
+      - name: Fetch the shared detector and config (default branch, outside the workspace)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+        run: |
+          set -euo pipefail
+          for f in tools/ci/agent-noop.js .github/agent-config.yml; do
+            out="$RUNNER_TEMP/$(basename "$f")"
+            gh api "repos/${GITHUB_REPOSITORY}/contents/${f}?ref=${DEFAULT_BRANCH}" --jq .content \
+              | base64 -d > "$out"
+            [ -s "$out" ] || { echo "agent-noop: fetched an empty $f from ${DEFAULT_BRANCH}" >&2; exit 1; }
+          done
+
       - name: Load the agent prompt (from the default branch)
         id: prompt
         env:
@@ -210,12 +233,24 @@ jobs:
           ATTEMPT: ${{ needs.gate.outputs.attempt }}
           KINDS: ${{ needs.gate.outputs.kinds }}
         run: |
+          set -euo pipefail
           gh api "repos/${GITHUB_REPOSITORY}/contents/.github/agent-prompts/review-fix.md?ref=${DEFAULT_BRANCH}" \
-            --jq .content | base64 -d > "$RUNNER_TEMP/prompt.md"
+            --jq .content | base64 -d > "$RUNNER_TEMP/prompt.raw"
+          [ -s "$RUNNER_TEMP/prompt.raw" ] || { echo "prompt fetch returned nothing — refusing to run the agent with no instructions" >&2; exit 1; }
+          # Substituted in python, not sed: a branch name may legally contain `|` or `&`, which
+          # would break or re-aim an `s|...|...|` expression (round-2 review).
+          python3 - <<'PY' > "$RUNNER_TEMP/prompt.md"
+          import os, pathlib
+          t = pathlib.Path(os.environ['RUNNER_TEMP'] + '/prompt.raw').read_text()
+          for k, v in (('{{PR}}', 'PR'), ('{{BRANCH}}', 'BRANCH'), ('{{HEAD}}', 'HEAD_SHA'),
+                       ('{{ATTEMPT}}', 'ATTEMPT'), ('{{KINDS}}', 'KINDS')):
+              t = t.replace(k, os.environ[v])
+          print(t, end='')
+          PY
+          [ -s "$RUNNER_TEMP/prompt.md" ] || { echo "prompt is empty after substitution" >&2; exit 1; }
           {
             echo "text<<PROMPT_EOF_${GITHUB_RUN_ID}"
-            sed -e "s|{{PR}}|${PR}|g" -e "s|{{BRANCH}}|${BRANCH}|g" -e "s|{{HEAD}}|${HEAD_SHA}|g" \
-                -e "s|{{ATTEMPT}}|${ATTEMPT}|g" -e "s|{{KINDS}}|${KINDS}|g" "$RUNNER_TEMP/prompt.md"
+            cat "$RUNNER_TEMP/prompt.md"
             echo "PROMPT_EOF_${GITHUB_RUN_ID}"
           } >> "$GITHUB_OUTPUT"
 
@@ -238,23 +273,6 @@ jobs:
             --model claude-opus-5
             --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Edit,Read,Write,Grep,Glob"
 
-      # The checkout at the top of this job is the PR's BRANCH, which may predate this workflow
-      # and not contain tools/ci/agent-noop.js — requiring it from there would turn a clean run
-      # into a MODULE_NOT_FOUND failure on every older PR. Take the shared module from the DEFAULT
-      # branch instead, the way ready-gate.yml and promote-queued.yml take dep-refs.js. It lands
-      # AFTER the agent has finished, so the tree the agent commits from never sees this path.
-      - name: Fetch the shared no-op detector from the default branch
-        if: always()
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.repository.default_branch || 'main' }}
-          sparse-checkout: |
-            tools/ci
-            .github/agent-config.yml
-          sparse-checkout-cone-mode: false
-          path: .agent-ci
-          persist-credentials: false
-
       # #361. This step used to be `if: failure()`, so it never fired for the runs that mattered:
       # #342's fix produced nothing TWICE while exiting success, each time having already spent an
       # attempt (the gate applies `review-fix-<n>` before this job runs, :161). Detection now runs
@@ -271,7 +289,7 @@ jobs:
           EXEC_FILE: ${{ steps.agent.outputs.execution_file }}
         with:
           script: |
-            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
+            const m = require(`${process.env.RUNNER_TEMP}/agent-noop.js`);
             await m.detect({github, context, core, env: process.env});
 
       - name: How many retries may this run spend?
@@ -279,17 +297,25 @@ jobs:
         if: always()
         uses: actions/github-script@v7
         env:
-          CONFIG: ${{ github.workspace }}/.agent-ci/.github/agent-config.yml
+          CONFIG: ${{ runner.temp }}/agent-config.yml
         with:
           script: |
-            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
+            const m = require(`${process.env.RUNNER_TEMP}/agent-noop.js`);
             core.setOutput('n', String(m.retryBudget(process.env, core)));
+
+      # AC2's delay. #361 reads the observed no-ops as "probably a transient problem on the
+      # Claude side at the time", so retrying immediately re-enters the window that caused them.
+      # 60s is deliberately short: it is a settle, not a backoff, and the job's own
+      # timeout-minutes still bounds the whole run.
+      - name: Settle before retrying
+        if: always() && steps.detect.outputs.produced == 'false' && steps.budget.outputs.n != '' && steps.budget.outputs.n != '0'
+        run: sleep 60
 
       # #361 AC2. A run that produced nothing is retried once (agent_retry_max, default 1) before
       # the attempt is returned and the PR escalated. Same pinned action and same prompt as above.
       - name: Claude Code — retry the fix
         id: agent_retry
-        if: always() && steps.detect.outputs.noop == 'true' && steps.budget.outputs.n != '0'
+        if: always() && steps.detect.outputs.produced == 'false' && steps.budget.outputs.n != '' && steps.budget.outputs.n != '0'
         uses: anthropics/claude-code-action@8251c103ac8c1d761882c86aba1412c7f583c844   # v1, pinned as above
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -311,7 +337,7 @@ jobs:
           EXEC_FILE: ${{ steps.agent_retry.outputs.execution_file }}
         with:
           script: |
-            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
+            const m = require(`${process.env.RUNNER_TEMP}/agent-noop.js`);
             await m.detect({github, context, core, env: process.env});
 
       - name: Return the attempt and escalate if it produced nothing
@@ -324,12 +350,14 @@ jobs:
           ATTEMPT: ${{ needs.gate.outputs.attempt }}
           NOOP: ${{ steps.detect_retry.outputs.noop != '' && steps.detect_retry.outputs.noop || steps.detect.outputs.noop }}
           REASON: ${{ steps.detect_retry.outputs.reason != '' && steps.detect_retry.outputs.reason || steps.detect.outputs.reason }}
-          ATTEMPTS: ${{ steps.detect_retry.outputs.noop != '' && '2' || '1' }}
+          ATTEMPTS: ${{ steps.agent_retry.conclusion != 'skipped' && '2' || '1' }}
+          FIGURES_1: turns=${{ steps.detect.outputs.turns }}, denials=${{ steps.detect.outputs.denials }}
+          FIGURES_2: ${{ steps.agent_retry.conclusion != 'skipped' && format('turns={0}, denials={1}', steps.detect_retry.outputs.turns, steps.detect_retry.outputs.denials) || '' }}
           TURNS: ${{ steps.detect_retry.outputs.turns != '' && steps.detect_retry.outputs.turns || steps.detect.outputs.turns }}
           DENIALS: ${{ steps.detect_retry.outputs.denials != '' && steps.detect_retry.outputs.denials || steps.detect.outputs.denials }}
         with:
           script: |
-            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
+            const m = require(`${process.env.RUNNER_TEMP}/agent-noop.js`);
             // An EMPTY noop means `detect` itself failed (missing module, API 403/500, failed
             // checkout). The `if: failure()` step this replaced released on any job failure, so
             // returning here would hold the spent attempt silently — a regression (round-1).

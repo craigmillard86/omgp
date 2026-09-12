@@ -3106,11 +3106,11 @@ Two related defects found while implementing the threshold:
 
 ---
 
-## 2026-09-12 — #361: a no-op agent run is detected on SUCCESS; in-job retry is NOT built, and `agent_retry_max` is 0
+## 2026-09-12 — #361: a no-op agent run is detected on SUCCESS, and retried once before the claim is released
 
 **Context:** a `claude-code-action` run can exit `success`, with `is_error: false`, having pushed no branch, opened no PR and posted no comment. It happened five times: #54 twice, #342's fix twice, and #58 after 156 turns, 26 permission denials and $9.07. Each run left its claim in place — `in-progress` on the issue, or a spent `review-fix-<n>` label on the PR — so the WIP cap stayed held and the loop stalled until a human looked, in one case for three days. Both workflows already carried a step written to catch exactly this, and neither could ever run: `agent-dispatch.yml:134` and `review-fix.yml:278` were `if: failure()`, and a silent no-op is not a failure.
 
-**What lands:** detection in `tools/ci/agent-noop.js`, required by both workflows on steps that run whatever the outcome. A no-op releases the dispatch claim, or hands back the review-fix attempt the gate had already spent (`review-fix.yml:161` applies the label *before* the job runs), applies `needs-human` on the review-fix side, comments the per-attempt figures, and **fails the job** — the silence was the defect. The transcript is uploaded as an artifact.
+**What lands:** detection in `tools/ci/agent-noop.js`, required by both workflows on steps that run whatever the outcome. A no-op releases the dispatch claim, or hands back the review-fix attempt the gate had already spent (`review-fix.yml:161` applies the label *before* the job runs), applies `needs-human` on the review-fix side, comments the per-attempt figures, and **fails the job** — the silence was the defect. No transcript artifact is uploaded — this repository is public (`GOVERNANCE.md` §4b); the figures go to the job log and the comment `finalize` posts.
 
 **AC2, the bounded retry, is built.** `agent_retry_max` is **1**, #361's stated default: a run that produced nothing is retried once in-job before the claim is released or the attempt returned. Unreadable, absent, negative or non-numeric fails closed to 0; values above 2 are clamped down, the same shape as `auto_fix_max_attempts`.
 

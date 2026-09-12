@@ -55,15 +55,28 @@ function readFigures(env, core) {
 // So: any line, unwrapped from backticks/emphasis. This errs toward EXCLUDING a comment — a fixer
 // comment that merely quotes a verdict stops counting as output — which errs toward declaring a
 // no-op. That direction is loud (needs-human, a comment, a failed job), never silent.
-const unwrap = line => (line || '').trim().replace(/^[`*_>\s]+/, '').replace(/[`*_\s]+$/, '');
-const isVerdict = body => (body || '').split('\n').some(l => /^VERDICT\([^)]*\):/.test(unwrap(l)));
+const unwrap = line => (line || '').trim().replace(/^[`*_\s]+/, '').replace(/[`*_\s]+$/, '');
+const isQuoted = line => /^\s*>/.test(line || '');
+// Round 1 was right to stop matching only the LAST line; stripping `>` as well was the
+// over-correction. review-fix's prompt tells the fixer to rebut a wrong finding and leave the
+// code, and findings are identified BY their `VERDICT(...)` line — so a compliant rebuttal quotes
+// it. Treating that as "this is a verdict comment" declared the workflow's own documented happy
+// path a no-op: attempt returned, needs-human applied, job failed, on a run that did exactly what
+// it was told (round-2 red team). A quoted line is someone being quoted; an unquoted one is the
+// comment's own verdict.
+const isVerdict = body => (body || '').split('\n').some(l => !isQuoted(l) && /^VERDICT\([^)]*\):/.test(unwrap(l)));
 
 // How many times a no-op run may be retried in-job before the claim is released (#361 AC2).
 // Read at RUN time from the DEFAULT-branch config, like every other knob here, so retuning it
 // needs no workflow-scope push. Fail closed to 0 on anything unreadable, absent, negative or
 // non-numeric, and clamp above: a typo must never buy an agent more attempts than the ruling
 // allows. The clamp mirrors auto_fix_max_attempts' "values above 10 are clamped DOWN".
-const RETRY_CLAMP = 2;
+// Clamped to the number of retry steps the workflows actually contain — ONE. A clamp of 2
+// let `agent_retry_max: 2` be configured and returned, while only one retry step existed:
+// the extra retry was silently unspendable AND the wiring test (which pins
+// len(claude) == budget + 1) turned red, so the documented run-time retune required a
+// workflow-scope push after all. Raising it means adding a retry step in the same change.
+const RETRY_CLAMP = 1;
 
 function retryBudget(env, core) {
   let text;
@@ -92,17 +105,43 @@ async function detect({ github, context, core, env }) {
     const since = Date.parse(env.SINCE || '');
     const prs = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', per_page: 100 });
     const mine = prs.filter(p => p && p.state !== 'closed' && p.head && p.head.ref === `task/${issue}`);
-    // "Is there a PR now?" is not "did THIS run produce one". #58's claim was released and the
-    // issue re-picked while PR #401 was still open on task/58 — a second silent run would then be
-    // vouched for by the first run's PR, which is the stall #361 exists to catch (round-1 red
-    // team). A PR counts only if it was opened or pushed to after this run started. With no
-    // SINCE (nothing recorded the start) it counts, because a false no-op is the worse error.
-    const fresh = p => !Number.isFinite(since) ||
-      Date.parse(p.created_at || '') > since || Date.parse(p.updated_at || '') > since;
-    produced = mine.some(fresh);
-    reason = produced ? `an open PR on task/${issue} was created or updated by this run`
+
+    // `updated_at` is NOT a push signal: GitHub bumps it on any issue-level event — a comment, a
+    // label, a title edit. So a single claude-review comment on a still-open PR from an EARLIER
+    // dispatch vouched for a silent run, reopening the #58 -> #401 hole through a different field
+    // (round-2 red team). The PR's last commit date only moves when something is pushed.
+    const lastPush = async (p) => {
+      try {
+        const commits = await github.paginate(github.rest.pulls.listCommits,
+          { owner, repo, pull_number: p.number, per_page: 100 });
+        const last = commits[commits.length - 1];
+        return Date.parse((((last || {}).commit || {}).committer || {}).date || '');
+      } catch (e) { return NaN; }
+    };
+    for (const p of mine) {
+      if (!Number.isFinite(since) || Date.parse(p.created_at || '') > since) { produced = true; break; }
+      const pushed = await lastPush(p);
+      if (Number.isFinite(pushed) && pushed > since) { produced = true; break; }
+    }
+    reason = produced ? `an open PR on task/${issue} was created or pushed to by this run`
       : mine.length ? `the only open PR on task/${issue} predates this run`
         : `no open PR on task/${issue}`;
+
+    // A run that COMMITTED and PUSHED task/<n> but was denied `gh pr create` produced real work.
+    // #58 died on 26 permission denials — this is that shape — and calling it a no-op releases
+    // the claim while a branch with commits sits on it, so the next dispatch starts from a tree
+    // that already has them (round-2 red team). Counting it follows this module's own policy:
+    // a false no-op costs more than a missed one.
+    if (!produced) {
+      try {
+        const br = (await github.rest.repos.getBranch({ owner, repo, branch: `task/${issue}` })).data;
+        const when = Date.parse(((((br || {}).commit || {}).commit || {}).committer || {}).date || '');
+        if (!Number.isFinite(since) || (Number.isFinite(when) && when > since)) {
+          produced = true;
+          reason = `commits were pushed to task/${issue} during this run, though no PR was opened — check whether \`gh pr create\` was denied`;
+        }
+      } catch (e) { /* 404: no such branch, so nothing was pushed */ }
+    }
   } else {
     const number = Number(env.PR);
     const before = String(env.HEAD_BEFORE || '').trim();
@@ -128,10 +167,16 @@ async function detect({ github, context, core, env }) {
   const noop = !produced || f.isError === true;
   if (noop) core.notice(`agent-noop: NO-OP — ${reason}${f.isError ? ' (is_error)' : ''}${f.ok ? '' : ' (figures unavailable)'}`);
   core.setOutput('noop', String(noop));
+  // `noop` and `produced` answer DIFFERENT questions, and conflating them retried a run that had
+  // already pushed: AC2 says an attempt that produced output is never retried, while also naming
+  // is_error as a no-op trigger. So `noop` decides escalate-or-release, and `produced` decides
+  // retry-or-not (round-2 review). A review-fix run that pushed and then errored is a no-op that
+  // must NOT be retried — re-fixing fixed code is its own hazard.
+  core.setOutput('produced', String(produced));
   core.setOutput('reason', reason);   // finalize reports THIS, not a hard-coded sentence
   core.setOutput('turns', String(f.turns));
   core.setOutput('denials', String(f.denials));
-  return { noop, turns: f.turns, denials: f.denials, reason };
+  return { noop, produced, turns: f.turns, denials: f.denials, reason };
 }
 
 // A label that is already absent is a non-event (404), the same rule review-fix's exhaustion path
@@ -152,7 +197,11 @@ async function finalize({ github, context, core, env }) {
   const { owner, repo } = context.repo;
   const kind = env.KIND;
   const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-  const spent = `${env.ATTEMPTS} attempt(s), last run: turns=${env.TURNS}, permission denials=${env.DENIALS}`;
+  // AC3 asks for the per-attempt figures, and the env used to carry only the LAST attempt's while
+  // the comment said "per-attempt" (round-2 review). Report each attempt that ran.
+  const perAttempt = [env.FIGURES_1 && `attempt 1: ${env.FIGURES_1}`, env.FIGURES_2 && `attempt 2: ${env.FIGURES_2}`]
+    .filter(Boolean).join('; ') || `turns=${env.TURNS}, permission denials=${env.DENIALS}`;
+  const spent = `${env.ATTEMPTS} attempt(s) — ${perAttempt}`;
   // detect computed an accurate reason; hard-coding "no branch, no PR, no comment" here made the
   // comment contradict it on the is_error path (round-1 review).
   const why = env.REASON ? `Detected: ${env.REASON}.` : 'It produced no branch, no PR and no comment.';

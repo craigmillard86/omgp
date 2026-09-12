@@ -22,14 +22,22 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
 
 // A mock of the slice of the API these two functions touch. Label removal 404s when the label is
 // absent, as the real API does — finalize must treat that as a non-event.
-function world({ prs = [], labels = [], comments = [], head = 'a'.repeat(40), labelFails = null } = {}) {
+function world({ prs = [], labels = [], comments = [], head = 'a'.repeat(40), labelFails = null, branch = undefined } = {}) {
   const log = [], outputs = {};
   const state = { labels: [...labels], comments: [...comments], head };
   const github = {
     paginate: async (fn, args) => (await fn(args)).data,
+    // The branch behind task/<n>: present with a push during the run, present-but-stale, or absent.
     rest: {
+      repos: {
+        getBranch: async () => {
+          if (!branch) throw Object.assign(new Error('Branch not found'), { status: 404 });
+          return { data: { commit: { commit: { committer: { date: branch.pushed_during ? during : before } } } } };
+        },
+      },
       pulls: {
         list: async () => ({ data: prs }),
+        listCommits: async () => ({ data: (prs[0] && prs[0].commits) || [] }),
         get: async () => ({ data: { head: { sha: state.head } } }),
       },
       issues: {
@@ -178,9 +186,20 @@ const during = '2026-09-12T10:00:30Z';
     EXEC_FILE: execFile({ num_turns: 156, permission_denials_count: 26, is_error: false }) } });
   check('implement: a PR from a PREVIOUS run does not mask this run\'s no-op', r.noop === true);
 
-  w = world({ prs: [{ head: { ref: 'task/58' }, created_at: before, updated_at: during }] });
+  // INVERTED after round 2. I wrote this case asserting that `updated_at` moving means the run
+  // pushed — it does not. GitHub bumps updated_at on ANY issue-level event: a comment, a label,
+  // a title edit. So a single claude-review comment on the still-open PR #401 vouched for a
+  // silent dispatch on #58, reopening the very hole the case above exists to close. The suite
+  // enshrined it rather than catching it, which is worse than not having tested it at all.
+  w = world({ prs: [{ head: { ref: 'task/58' }, created_at: before, updated_at: during,
+                      commits: [{ commit: { committer: { date: before } } }] }] });
   r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: execFile({ num_turns: 40 }) } });
-  check('implement: an older PR the run PUSHED to does count', r.noop === false);
+  check('implement: a comment bumping updated_at does NOT vouch for this run', r.noop === true);
+
+  w = world({ prs: [{ head: { ref: 'task/58' }, created_at: before, updated_at: during,
+                      commits: [{ commit: { committer: { date: during } } }] }] });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: execFile({ num_turns: 40 }) } });
+  check('implement: an older PR this run actually PUSHED to does count', r.noop === false);
 
   // [RT-4] The verdict exclusion is load-bearing on a concurrent claude[bot] run. The repo writes
   // verdicts backticked, and review comments end with the standard attribution footer.
@@ -241,12 +260,60 @@ const during = '2026-09-12T10:00:30Z';
   check('an absent key fails closed to 0', budget('wip_cap: 2\n') === 0);
   check('a garbage value fails closed to 0', budget('agent_retry_max: banana\n') === 0);
   check('a negative value fails closed to 0', budget('agent_retry_max: -3\n') === 0);
-  check('an oversized value is clamped, not obeyed', budget('agent_retry_max: 99\n') <= 2);
+  // Clamped to what the workflows can spend (one retry step), not to an aspirational 2:
+  // a returnable-but-unspendable budget turned the wiring test red instead of retrying.
+  check('an oversized value is clamped to the retries that exist', budget('agent_retry_max: 99\n') === 1);
+  check('an in-clamp value is returned unchanged', budget('agent_retry_max: 1\n') === 1);
   check('an unreadable config fails closed to 0', retryBudget({ CONFIG: '/nonexistent/agent-config.yml' }, { notice: () => {}, warning: () => {} }) === 0);
   check('an inline comment after the value is tolerated (house style)', budget('agent_retry_max: 1   # one retry\n') === 1);
   let noticed = [];
   budget('agent_retry_max: nonsense\n', { notice: m => noticed.push(m), warning: m => noticed.push(m) });
   check('a rejected value says so rather than failing silently', noticed.some(m => /agent_retry_max/.test(m)));
+
+  // === round-2 findings (@c76c6ac) =============================================================
+
+  // [RT-6] A run that committed and PUSHED task/<n> but was denied `gh pr create` produced real
+  // work. #58 itself died on 26 permission denials — this is that shape — and declaring it a
+  // no-op releases the claim while a branch with commits sits on it, so the next dispatch starts
+  // from a tree that already has them.
+  w = world({ prs: [], branch: { ref: 'task/58', pushed_during: true } });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0,
+    EXEC_FILE: execFile({ num_turns: 156, permission_denials_count: 26 }) } });
+  check('implement: commits pushed to task/<n> count even when `gh pr create` was denied', r.noop === false);
+
+  w = world({ prs: [], branch: null });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: execFile({ num_turns: 9 }) } });
+  check('implement: no branch and no PR is still a no-op', r.noop === true);
+
+  // [RT-5] review-fix's prompt tells the fixer to rebut a wrong finding and leave the code, and
+  // findings are identified BY their `VERDICT(...)` line — so a compliant rebuttal quotes it.
+  // Round 1 was right to stop matching only the last line; excluding a QUOTED verdict is the
+  // over-correction. A false escalation on the workflow's own documented happy path.
+  w = world({ head: 'a'.repeat(40), comments: [{ user: { login: 'claude[bot]' }, created_at: during,
+    body: 'I rebut finding 2. The reviewer wrote:\n> `VERDICT(red-team): findings @ abc`\nThat is wrong: link/frame.cpp:88 already rejects it. No code change.' }] });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '342', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, EXEC_FILE: execFile({ num_turns: 26 }) } });
+  check('fix: a rebuttal QUOTING the verdict it rebuts is production, not a no-op', r.noop === false);
+
+  // ...while an actual verdict comment, unquoted, is still excluded.
+  w = world({ head: 'a'.repeat(40), comments: [{ user: { login: 'claude[bot]' }, created_at: during,
+    body: 'attack notes\nVERDICT(red-team): findings @ abc' }] });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '342', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, EXEC_FILE: execFile({ num_turns: 26 }) } });
+  check('fix: an unquoted verdict comment is still not the fixer\'s output', r.noop === true);
+
+  // [review round 2] AC2: "an attempt that produced output is never retried" — but AC2 also names
+  // is_error as a trigger, and `noop = !produced || isError` conflated two different questions.
+  // A review-fix run that PUSHED and then errored was retried, re-fixing already-fixed code.
+  // Separate them: `noop` decides escalate-or-release, `produced` decides retry-or-not.
+  w = world({ head: 'b'.repeat(40) });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '342', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0,
+    EXEC_FILE: execFile({ num_turns: 85, permission_denials_count: 2, is_error: true }) } });
+  check('fix: is_error with a pushed commit is still a no-op (it failed)', r.noop === true);
+  check('fix: ...but it is NOT retried — it produced output', r.produced === true);
+
+  w = world({ head: 'a'.repeat(40) });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '342', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0,
+    EXEC_FILE: execFile({ num_turns: 26, permission_denials_count: 4 }) } });
+  check('fix: a run that produced nothing IS eligible for the retry', r.produced === false);
 
   for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
   console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);

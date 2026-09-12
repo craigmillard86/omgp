@@ -106,14 +106,47 @@ jobs:
       # ONE prompt, read from a file, used by both the first pass and the retry. Two inline
       # copies would drift, and a drifted retry prompt silently changes the agent's instructions
       # on the second pass — the objection that made the first version of #361 ship no retry.
+      # The detector and the budget config come from the DEFAULT branch and land OUTSIDE the
+      # workspace. Round 2 showed why the previous `.agent-ci` checkout was not enough: the AC2
+      # retry step runs after it, holding Edit/Write/Bash(git*) in that same tree, so the monitored
+      # agent could rewrite its own no-op check and have github-script execute it with issues:write
+      # — and `.agent-ci` is untracked and not in .gitignore, so `git add -A` could sweep it into
+      # the agent's commit.
+      #
+      # CONTROL, NOT GUARANTEE (rule 11): `Write` is not path-restricted, so this does not make the
+      # file unwritable. What it changes is that the detector no longer sits inside the tree the
+      # agent works in and commits from, which is where both failure modes came from.
+      - name: Fetch the shared detector and config (default branch, outside the workspace)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+        run: |
+          set -euo pipefail
+          for f in tools/ci/agent-noop.js .github/agent-config.yml; do
+            out="$RUNNER_TEMP/$(basename "$f")"
+            gh api "repos/${GITHUB_REPOSITORY}/contents/${f}?ref=${DEFAULT_BRANCH}" --jq .content \
+              | base64 -d > "$out"
+            [ -s "$out" ] || { echo "agent-noop: fetched an empty $f from ${DEFAULT_BRANCH}" >&2; exit 1; }
+          done
+
       - name: Load the agent prompt
         id: prompt
         env:
           ISSUE: ${{ needs.pick.outputs.issue }}
         run: |
+          set -euo pipefail
+          # Substituted in python, not sed: a branch name may contain `|` or `&`, which would
+          # break or re-aim an `s|...|...|` expression (round-2 review).
+          python3 - <<'PY' > "$RUNNER_TEMP/prompt.md"
+          import os, pathlib
+          text = pathlib.Path('.github/agent-prompts/implement.md').read_text()
+          print(text.replace('{{ISSUE}}', os.environ['ISSUE']), end='')
+          PY
+          [ -s "$RUNNER_TEMP/prompt.md" ] || { echo "prompt is empty — refusing to run the agent with no instructions" >&2; exit 1; }
           {
             echo "text<<PROMPT_EOF_${GITHUB_RUN_ID}"
-            sed -e "s|{{ISSUE}}|${ISSUE}|g" .github/agent-prompts/implement.md
+            cat "$RUNNER_TEMP/prompt.md"
             echo "PROMPT_EOF_${GITHUB_RUN_ID}"
           } >> "$GITHUB_OUTPUT"
 
@@ -127,24 +160,6 @@ jobs:
           claude_args: |
             --model claude-opus-5
             --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr create*),Bash(gh issue*),Edit,Read,Write,Grep,Glob"
-
-      # The checkout above is this job's workspace, and the Claude step ran first holding Edit and
-      # Write on it: requiring the detector from there let the monitored agent rewrite its own
-      # no-op check and have github-script execute that edit with write scopes. GOVERNANCE §2 heads
-      # the gate table "all mechanical, none trust-based". review-fix already took the module from
-      # the default branch; dispatch did not (round-1 review on #416). Placed AFTER the agent step,
-      # so the tree it commits from never sees this path.
-      - name: Fetch the shared no-op detector from the default branch
-        if: always()
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.repository.default_branch || 'main' }}
-          sparse-checkout: |
-            tools/ci
-            .github/agent-config.yml
-          sparse-checkout-cone-mode: false
-          path: .agent-ci
-          persist-credentials: false
 
       # #361. This step used to be `if: failure()`, which is why it never once fired: the five
       # observed no-ops (#54 twice, #342's fix twice, #58 after 156 turns / 26 denials / $9.07)
@@ -161,7 +176,7 @@ jobs:
           EXEC_FILE: ${{ steps.agent.outputs.execution_file }}
         with:
           script: |
-            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
+            const m = require(`${process.env.RUNNER_TEMP}/agent-noop.js`);
             await m.detect({github, context, core, env: process.env});
 
       - name: How many retries may this run spend?
@@ -169,18 +184,26 @@ jobs:
         if: always()
         uses: actions/github-script@v7
         env:
-          CONFIG: ${{ github.workspace }}/.agent-ci/.github/agent-config.yml
+          CONFIG: ${{ runner.temp }}/agent-config.yml
         with:
           script: |
-            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
+            const m = require(`${process.env.RUNNER_TEMP}/agent-noop.js`);
             core.setOutput('n', String(m.retryBudget(process.env, core)));
+
+      # AC2's delay. #361 reads the observed no-ops as "probably a transient problem on the
+      # Claude side at the time", so retrying immediately re-enters the window that caused them.
+      # 60s is deliberately short: it is a settle, not a backoff, and the job's own
+      # timeout-minutes still bounds the whole run.
+      - name: Settle before retrying
+        if: always() && steps.detect.outputs.produced == 'false' && steps.budget.outputs.n != '' && steps.budget.outputs.n != '0'
+        run: sleep 60
 
       # #361 AC2. A no-op is retried once (agent_retry_max, default 1) before the claim is
       # released. The retry is a SECOND STEP rather than a loop because Actions has no loop — and
       # it reads the same prompt, so the two passes cannot diverge.
       - name: Claude Code — retry the task
         id: agent_retry
-        if: always() && steps.detect.outputs.noop == 'true' && steps.budget.outputs.n != '0'
+        if: always() && steps.detect.outputs.produced == 'false' && steps.budget.outputs.n != '' && steps.budget.outputs.n != '0'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -201,7 +224,7 @@ jobs:
           EXEC_FILE: ${{ steps.agent_retry.outputs.execution_file }}
         with:
           script: |
-            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
+            const m = require(`${process.env.RUNNER_TEMP}/agent-noop.js`);
             await m.detect({github, context, core, env: process.env});
 
       - name: Release the claim and fail loudly if it produced nothing
@@ -213,12 +236,14 @@ jobs:
           ISSUE: ${{ needs.pick.outputs.issue }}
           NOOP: ${{ steps.detect_retry.outputs.noop != '' && steps.detect_retry.outputs.noop || steps.detect.outputs.noop }}
           REASON: ${{ steps.detect_retry.outputs.reason != '' && steps.detect_retry.outputs.reason || steps.detect.outputs.reason }}
-          ATTEMPTS: ${{ steps.detect_retry.outputs.noop != '' && '2' || '1' }}
+          ATTEMPTS: ${{ steps.agent_retry.conclusion != 'skipped' && '2' || '1' }}
+          FIGURES_1: turns=${{ steps.detect.outputs.turns }}, denials=${{ steps.detect.outputs.denials }}
+          FIGURES_2: ${{ steps.agent_retry.conclusion != 'skipped' && format('turns={0}, denials={1}', steps.detect_retry.outputs.turns, steps.detect_retry.outputs.denials) || '' }}
           TURNS: ${{ steps.detect_retry.outputs.turns != '' && steps.detect_retry.outputs.turns || steps.detect.outputs.turns }}
           DENIALS: ${{ steps.detect_retry.outputs.denials != '' && steps.detect_retry.outputs.denials || steps.detect.outputs.denials }}
         with:
           script: |
-            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
+            const m = require(`${process.env.RUNNER_TEMP}/agent-noop.js`);
             // An EMPTY noop means `detect` itself failed — a missing module, an API 403/500, a failed
             // checkout. The step this replaced was `if: failure()` and released the claim on any
             // job failure, so returning here would be a REGRESSION: the claim would sit held with
