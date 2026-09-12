@@ -3075,10 +3075,12 @@ This was measured, not assumed. On the 92-comment corpus of 2026-09-08 (verdicts
 **Context:** the US2/US3/US4 checkpoint tasks of `specs/002-trunk-link-layer/tasks.md`
 (T032, T036, T040) each require a "local mutation run" alongside the full `./pipeline.sh`
 and `./pipeline.sh esp32` runs and the `UNIT_TEST_FLOOR` raise. A checkpoint PR that adds
-no source — T040/#58 (PR #401) is one: its diff is `pipeline.sh` and `tasks.md` — changes
-nothing under `tools/mutate.cfg`'s `scope_dirs` (`l3 link core`). `tools/mutate.sh:104-107`
-then prints `mutation: nothing in scope (origin/main) — no changed sources under: l3 link
-core` and exits 0 *before* the Mull presence check, so the command "passes" without
+no source — T040/#58 (PR #401) is one: its diff is `pipeline.sh`, `tasks.md` and this file
+— changes nothing under `tools/mutate.cfg`'s `scope_dirs` (`l3 link core`).
+`tools/mutate.sh:105-108` then prints `mutation: nothing in scope (origin/main) — no
+changed sources under: l3 link core` and exits 0 *before* the Mull presence check
+(`:105` `if [ -z "$SCOPE" ]; then`, `:106` the echo, `:107` `exit 0`), so the command
+"passes" without
 building, mutating or executing anything. The clause is therefore unsatisfiable in
 substance on such a PR, while being trivially satisfiable in letter. Nothing in
 `tasks.md`, `docs/GOVERNANCE.md` or `docs/OPERATING-POLICY.md` says which reading binds.

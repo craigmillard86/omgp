@@ -215,11 +215,21 @@ enrolment rotation and one notification per transition.
     582296 → 582360. The **local mutation run** is not, and cannot be made meaningful on
     that branch: it changes no source under `tools/mutate.cfg`'s `scope_dirs`
     (`l3 link core`), so `tools/mutate.sh --diff origin/main` prints "nothing in scope"
-    and exits 0 at `tools/mutate.sh:104-107`, *before* the Mull presence check — a pass
+    and exits 0 at `tools/mutate.sh:105-108`, *before* the Mull presence check — a pass
     there attests nothing about `link/health.cpp`. The box therefore stays unticked while
     the floor raise lands. Tracked by #146 (mutation attestation for a PR that changes no
     scoped source); the question of whether an empty scope discharges this clause is
     recorded in `docs/OPEN-QUESTIONS.md` (2026-09-12) and is a human ruling.
+  - Scope of the `./pipeline.sh` clause, stated rather than left implicit: every run cited
+    on #401 took the **CMake/ctest** path — `unit: executed … (ctest path)`. The bootstrap
+    g++ fallback was **not** exercised at any head, by construction from its two guards:
+    `stage_build` takes it only when `cmake` is absent (`pipeline.sh:181`) and `stage_unit`
+    only when `ctest` or `build/native/CTestTestfile.cmake` is absent (`:219`), and both
+    CI's `native` job and the authoring host have cmake. That matters here because the same
+    `UNIT_TEST_FLOOR` also gates a separately summed bootstrap total (`:348`) with 5 checks
+    of slack; the two sums are believed equal (19 sources ↔ 19 registered binaries, same
+    flags) but that equality is **assumed**, not demonstrated. `tests/unit/
+    test_pipeline_link_bootstrap.sh` would demonstrate it; nothing invokes it today.
 
 **Checkpoint**: SC-006 demonstrated; F3 has `poll_due`/`next_probe`/`on_result`/`tick` to build the superframe on.
 
