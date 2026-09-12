@@ -159,7 +159,12 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
   fs.writeFileSync(require('path').join(synthWs, '.github', 'CODEOWNERS'), '/specs/**/tasks.md  @owner\n');
   w = world({comments: [clean('review')], files: ['specs/002-trunk-link-layer/tasks.md']});
   await approve(w, {tier: 'risk:t0', workspace: synthWs});
-  check('a ** CODEOWNERS pattern (synthetic /specs/**/tasks.md) -> not approved', !approved(w));
+  // Assert the NOTICE names the file, not merely that approval was withheld: agent-approve.yml:72
+  // fails closed on an unreadable CODEOWNERS too, so `!approved(w)` alone would look identical if
+  // the ** branch of ownedBy() were broken — evidence that supports nothing (round-1 review, #420).
+  check('a ** CODEOWNERS pattern (synthetic /specs/**/tasks.md) -> not approved, file named',
+    !approved(w) && w.log.some(l => /notice.*tasks\.md/.test(l)));
+  try { (fs.rmSync || fs.rmdirSync)(synthWs, {recursive: true}); } catch (e) { /* scratch dir: cleanup is best-effort, and fs.rmSync predates the Node this may run on */ }
   // The other direction, and the point of the change: against the REAL CODEOWNERS those two
   // paths are no longer owned, so a clean T0 PR touching them is approvable. agent-merge's own
   // ruling guard is what now protects the record (agent_merge_harness.js).

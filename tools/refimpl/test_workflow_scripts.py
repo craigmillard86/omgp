@@ -1104,3 +1104,25 @@ def test_round_budget_config_key_is_present_and_sane():
     m = re.search(r"^adversarial_round_budget:\s*(\d+)", cfg, re.MULTILINE)
     assert m, "agent-config.yml lost adversarial_round_budget — the budget would be off"
     assert 1 <= int(m.group(1)) <= 10, f"budget {m.group(1)} outside the ruled range"
+
+
+RISK_HARNESS = ROOT / "tests" / "workflows" / "risk_score_harness.js"
+
+
+@pytest.mark.skipif(shutil.which("node") is None,
+                    reason="node not present (blind spot: the tiering regexes are not exercised here)")
+def test_risk_score_tiering(tmp_path):
+    """risk-score decides the tier every autonomy gate reads, and had no tests at all (#420 round 1).
+
+    The hole that mattered: `removedTests` is anchored at `^tests/`, so deleting anything under
+    tools/refimpl/ — the 441-test Python suite, including the floor ratchet — scored T1, inside
+    auto_merge_max_tier, i.e. autonomously mergeable."""
+    f = tmp_path / "scripts.json"
+    f.write_text(json.dumps({"score": _script("risk-score.yml", "score")}))
+    r = subprocess.run(["node", str(RISK_HARNESS), str(f)],
+                       capture_output=True, text=True, cwd=ROOT, timeout=120)
+    print(r.stdout)
+    failed = [l for l in r.stdout.splitlines() if l.startswith("FAIL")]
+    assert not failed, "\n".join(failed) + "\n" + r.stdout
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "cases passed" in r.stdout

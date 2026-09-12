@@ -135,6 +135,41 @@ const said = (w, re) => w.log.some(l => re.test(l));
   await run(w);
   check('an appended recommendation with no ruling line still merges', mergedIt(w));
 
+  // --- the six bypasses the round-1 red team demonstrated (@67d42e8) --------------------------
+  // Every one of these merged a recorded decision or an edit to the append-only record. The
+  // shapes are the file's OWN conventions, not invented: :147/:357/:418/:731/:1004 quote the
+  // superseded pending text on the ruling line, and :1109 records a decision whose value BEGINS
+  // "pending — ratified by the human merge".
+  w = oqPR([oq('@@\n+**Ruling:** human, 2026-09-12 (open-questions session): ratified as recommended. The superseded pending text read, verbatim: "rule inline on the Phase 1 PR."\n')]);
+  await run(w);
+  check('A1 a ruling that QUOTES the superseded pending text is held', !mergedIt(w) && said(w, /ruling/i));
+
+  w = oqPR([oq('@@\n+**Ruling:** pending — ratified by the human merge of PR #120, which lands this entry.\n')]);
+  await run(w);
+  check('A2 "pending — ratified by the human merge" is a decision, not a pending entry', !mergedIt(w) && said(w, /ruling/i));
+
+  w = oqPR([oq('@@\n+**Ruling:** human, 2026-09-12. AC4 is discharged for T040. (No longer pending.)\n')]);
+  await run(w);
+  check('A3 the word "pending" anywhere no longer exempts a decision', !mergedIt(w) && said(w, /ruling/i));
+
+  w = oqPR([oq('@@\n context\n----\n context\n')]);
+  await run(w);
+  check('A4 removing a `---` entry separator is a removal from the append-only record', !mergedIt(w) && said(w, /append-only/i));
+
+  w = oqPR([oq('@@\n---- the maintainer asked for this to be struck\n')]);
+  await run(w);
+  check('A5 removing a content line that begins "--" is still a removal', !mergedIt(w) && said(w, /append-only/i));
+
+  w = oqPR([{filename: 'docs/OPEN-QUESTIONS-2026H1.md', previous_filename: 'docs/OPEN-QUESTIONS.md', status: 'renamed',
+             patch: '@@\n+**Ruling:** human, 2026-09-12. Adopted.\n-## 2026-09-05 — a published entry\n'}]);
+  await run(w);
+  check('A6 renaming the record does not walk the guard', !mergedIt(w) && said(w, /rename|append-only|ruling/i));
+
+  // The pending form the repo actually writes must still merge, or the guard blocks normal work.
+  w = oqPR([oq('@@\n+**Ruling:** PENDING — human. Recommended: keep `agent_retry_max` at 0.\n')]);
+  await run(w);
+  check('a PENDING entry with a recommendation still merges', mergedIt(w));
+
   w = world({prs: [PR(['agent-authored', 'risk:t1'], {number: 94}), PR(['agent-authored', 'risk:t1'], {number: 95})],
              comments: {94: clean(HEAD), 95: clean(HEAD)}});
   await run(w, {sweep: true});

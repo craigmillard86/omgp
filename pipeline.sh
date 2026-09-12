@@ -186,12 +186,19 @@ stage_unit() {
   # The floor's value and its raise history live in tests/unit-test-floor.txt (see the comment
   # above). Read it here, not at top level: only this stage gates on it. A datum that cannot be
   # parsed stops the stage rather than defaulting to 0 and passing every filtered-out suite.
-  UNIT_TEST_FLOOR=$(sed 's/#.*//' tests/unit-test-floor.txt 2>/dev/null | grep -m1 -E '^[0-9]+$' || true)
-  case "${UNIT_TEST_FLOOR:-}" in
-    ''|*[!0-9]*)
-      echo "unit: floor datum unreadable — tests/unit-test-floor.txt must carry one bare integer line; refusing to gate on nothing" >&2
-      return 1;;
-  esac
+  # EXACTLY one bare integer, or refuse. `grep -m1` took the FIRST, while the datum file tells
+  # raisers to append their arithmetic and documents the value as the last line — so a raise
+  # written the way the file's own instructions describe silently kept the OLD, lower floor and
+  # the ratchet, comparing first-to-first, stayed green (round-1 red team on #420, finding 5).
+  # Blanks are stripped so this agrees with test_floor_datum.parse_floor on an indented datum,
+  # which previously parsed there and stopped the build here (finding 6).
+  _floor=$(sed 's/#.*//' tests/unit-test-floor.txt 2>/dev/null | tr -d '[:blank:]' | grep -E '^[0-9]+$' || true)
+  _floor_n=$(printf '%s\n' "$_floor" | grep -c '^[0-9]' || true)
+  if [ "$_floor_n" != "1" ]; then
+    echo "unit: floor datum unreadable — tests/unit-test-floor.txt must carry EXACTLY one bare integer line (found $_floor_n); refusing to gate on nothing" >&2
+    return 1
+  fi
+  UNIT_TEST_FLOOR=$_floor
   if command -v ctest >/dev/null 2>&1 && [ -f build/native/CTestTestfile.cmake ]; then
     # Two paths, one predicate each. This one runs whatever cmake registered (ctest sees
     # add_test lines only, so check_test_set.py has to prove every source is in that set);
