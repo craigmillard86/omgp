@@ -236,11 +236,16 @@ enrolment rotation and one notification per transition.
     body's `Closes`/`Fixes`/`Resolves` references *and*, independently, from the branch
     name (`.github/workflows/agent-merge.yml:178-180`: `pr.head.ref.match(/^task\/(\d+)$/)`
     unioned with the body matches), and #401's head is `task/58` — so #58 closes on merge
-    whether the body reads `Closes #58` or `Refs #58`. The only mechanical hold is the
-    `needs-human` or `blocked` label on the PR (`agent-merge.yml:112` skips those);
-    labelling a PR is outside the review-fix dispatch's allow-list, so it is requested of a
-    human on #401. Should #58 close before the `docs/OPEN-QUESTIONS.md` (2026-09-12) ruling
-    lands, reopen it: that ruling is about this box.
+    whether the body reads `Closes #58` or `Refs #58`. `agent-merge` has four mechanical
+    holds, not one: a non-`open` or `draft` PR (`agent-merge.yml:108`), a `needs-human` or
+    `blocked` label (`:112`), a `VERDICT(review)` that is not `clean` at the merge head
+    (`:145`) and — at `risk:t2` and above — a `VERDICT(red-team)` that is not `clean` there
+    either (`:147-150`). Only the first two are durable: the verdict holds lapse the moment
+    a later round reports `clean` at a head. Both durable holds need a PR-mutating verb
+    (`gh pr edit --add-label`, `gh pr ready --undo`) that the review-fix dispatch's
+    allow-list denies — attempted and refused, not routed around — so they are requested of
+    a human on #401. Should #58 close before the `docs/OPEN-QUESTIONS.md` (2026-09-12)
+    ruling lands, reopen it: that ruling is about this box.
 
 **Checkpoint**: SC-006 demonstrated; F3 has `poll_due`/`next_probe`/`on_result`/`tick` to build the superframe on.
 
