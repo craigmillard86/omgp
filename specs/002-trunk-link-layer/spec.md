@@ -382,11 +382,28 @@ assert no bus fault.
   engine is not given control until after that window has closed (a late-polling
   simulator), it MUST still transmit — at once — and MUST count the occurrence as a late
   response, so the violation is visible to the layer that caused it rather than hidden
-  by a dropped answer.
+  by a dropped answer. *(Amended 2026-09-11 by maintainer ruling — `docs/OPEN-QUESTIONS.md`
+  2026-09-07 "the Responder's late path CAN transmit into a frame it has not read" and the
+  2026-09-11 rulings entry: the property "never key down onto a bus the engine has not read, nor
+  over another station's arriving frame" outranks "at once". That property is NOT FR-017: a late
+  response is by construction outside its response window, which is what `late_responses` counts,
+  so FR-017 and trunk §3's absolute bullet remain in tension with this clause and are not amended
+  here — see the still-open 2026-09-06 entry on the held-request queue. A late response is
+  transmitted on the first poll that reaches it once the engine has read the bus to idle,
+  within the bounded courtesy of data-model §5. The engine never stops reading during that
+  wait, and a completed request beyond its hold is discarded and COUNTED rather than held
+  unread. Implementation: #372.)*
 - **FR-015**: The node-side engine MUST keep exactly one replay buffer holding its most
   recent response (sequence, and the complete frame bytes); on receiving a frame with the
   retry bit set and the same sequence as the buffered response it MUST retransmit the
-  buffered frame unchanged and MUST NOT invoke the application.
+  buffered frame unchanged and MUST NOT invoke the application. *(Amended 2026-09-11 by
+  maintainer ruling — `OPEN-QUESTIONS.md` 2026-09-07 "the Responder's replay entry has no age
+  bound" and the 2026-09-11 rulings entry. The test gains two further terms: the requester
+  (`ReplayBuffer.peer`, merged in PR #149) and the request itself, compared over `dst`, `src`,
+  `len` and the L3 payload with `ctrl` and the CRC excluded. A frame whose sequence and peer
+  match but whose compared bytes do not is **discarded and counted**: the application is not
+  invoked and the buffer is left intact, so a spoofed frame cannot evict it or force a second
+  `GET_EVENT` drain. Implementation: #373.)*
 - **FR-016**: Any request whose sequence differs from the buffered one — retry bit set or
   not — MUST be treated as new: the application is invoked once and its response replaces
   the buffer.

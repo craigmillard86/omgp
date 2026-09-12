@@ -24,7 +24,7 @@ The host is the only initiator. A node transmits only in the response window imm
 
 - **Turnaround**: a polled node must assert its driver and begin its response within **T_turn = 20 µs to 100 µs** of the final stop bit of the request. The host releases its driver within 10 µs of its final stop bit.
 - **Response timeout**: if the host sees no start bit within **T_resp = 200 µs**, the request has failed (see §7).
-- **Inter-frame gap**: the host leaves ≥ **T_gap = 50 µs** of bus idle between transactions.
+- **Inter-frame gap**: ≥ **T_gap = 50 µs** of bus idle separates any two transactions, and the gap binds every station, not the host alone. The host leaves it before each new request. A node leaves it before any transmission that follows other bus activity rather than answering, within its own turnaround, the frame just received — in particular its own back-to-back transmissions, and the late response FR-014 requires when a poll reaches the engine after the window has closed. Within a transaction, **T_turn** above governs the request→response turnaround. This clause bounds *when* such a transmission may key down; it does **not** license one: the bullet below and FR-017 forbid a node transmitting outside its response window, FR-014 requires the late transmit, and that conflict is unresolved and on file in `docs/OPEN-QUESTIONS.md`. Where the host's gap and a node's expire at the same instant, **the node yields**: the host is the sole initiator and this bus has no arbitration. *(Amended 2026-09-11 by maintainer ruling; previously "the host leaves ≥ T_gap … between transactions". The yield rule and the no-licence sentence were added after review, and the yield rule is the conservative reading rather than an explicit ruling. See `docs/OPEN-QUESTIONS.md` 2026-09-07 "does trunk §4's T_gap bind every station", the 2026-09-11 rulings entry, and #374.)*
 - A node must never transmit outside its response window. A node that detects itself transmitting erroneously (readback mismatch on its own driver, where hardware allows) must release the bus and raise a local fault.
 
 ## 4. Framing
@@ -85,7 +85,7 @@ Budget rule: a superframe never exceeds T_poll; unsent demand traffic carries to
 | Bit rate | 1 Mbit/s (115.2 kbit/s fallback) | UART 8N1 |
 | T_turn | 20–100 µs | request end → response start |
 | T_resp | 200 µs | host timeout awaiting start bit |
-| T_gap | ≥ 50 µs | idle between transactions |
+| T_gap | ≥ 50 µs | idle between transactions; binds every station (ruling 2026-09-11) |
 | T_poll | 2 ms | superframe period |
 | Retries | 2 | per transaction |
 | Max payload | 64 B | one L3 message |

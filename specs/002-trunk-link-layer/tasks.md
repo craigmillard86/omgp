@@ -175,6 +175,15 @@ safety in every position (SC-004) and the §7-mode → script mapping (SC-005).
     src/dst/seq + response-bit-clear) are therefore asserted at T029, so #47's AC6 is met.
     T034 MAY still add the real-`Responder` variant (a `Responder` answering with the bit
     clear over the loop) as end-to-end confirmation, but it is no longer the gate on #47.
+  - *(Amended 2026-09-11 by the maintainer's ruling on `docs/OPEN-QUESTIONS.md` 2026-09-07
+    "SC-004: all 16 positions ARE exercised".)* At `TRUNK_retries == 2` the "retry 2" and
+    "after give-up" columns coincide for any fault that prevents recovery, so two rows each
+    share one script across those two columns and **14 scripts cover the matrix's 16
+    positions**. The file holds 16 `TEST_CASE`s across the four rows (drop 3,
+    delay-past-T_resp 5, CRC-corrupted 4, duplicate 4); two of the delay row's — "at attempts
+    0 AND 1" and "at the boundary" — occupy no matrix position. No position is uncovered, and
+    no duplicate case is required. *(The source entry's title says "15 cases"; 15 is neither
+    the script count nor the case count. Corrected here per the 2026-09-11 rulings entry.)*
 
 ### Implementation for User Story 3
 
