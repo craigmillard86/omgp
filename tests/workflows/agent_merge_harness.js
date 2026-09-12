@@ -27,7 +27,7 @@ function world({prs = [], issues = [], comments = {}, files = {}, checks = null,
       pulls: {
         list: async () => ({data: [...prState.values()].filter(p => p.state === 'open')}),
         get: async ({pull_number}) => { const p = prState.get(pull_number); if (!p) throw Object.assign(new Error('Not Found'), {status: 404}); return {data: p}; },
-        listFiles: async ({pull_number}) => ({data: (files[pull_number] || ['core/link.cpp']).map(filename => ({filename}))}),
+        listFiles: async ({pull_number}) => ({data: (files[pull_number] || ['core/link.cpp']).map(f => typeof f === 'string' ? {filename: f} : f)}),
         merge: async ({pull_number, sha, merge_method, commit_message}) => {
           if (mergeFails) throw Object.assign(new Error(mergeFails.message), {status: mergeFails.status});
           log.push(`merge@${pull_number} sha=${sha.slice(0, 7)} method=${merge_method} msg=${commit_message.replace(/\n+/g, ' | ').slice(0, 300)}`);
@@ -92,9 +92,109 @@ const said = (w, re) => w.log.some(l => re.test(l));
   await run(w);
   check('T2 with a clean red-team verdict too -> merged', mergedIt(w) && said(w, /VERDICT\(red-team\): clean/));
 
-  w = world({prs: [PR(['agent-authored', 'risk:t0'])], comments: {94: clean(HEAD)}, files: {94: ['docs/OPEN-QUESTIONS.md', 'specs/001-x/tasks.md', 'sim/x.cpp']}});
+  // The OPEN-QUESTIONS file carries a real patch here: the ruling guard below inspects it, and
+  // GitHub returns `patch` for ordinary text diffs. A file with NO patch is the fail-closed case
+  // and is tested on its own — this case is about the PATHS not blocking, which is unchanged.
+  w = world({prs: [PR(['agent-authored', 'risk:t0'])], comments: {94: clean(HEAD)},
+             files: {94: [{filename: 'docs/OPEN-QUESTIONS.md', patch: '@@\n+## 2026-09-12 — a question the agent raises\n+**Ruling:** PENDING — human\n'},
+                          'specs/001-x/tasks.md', 'sim/x.cpp']}});
   await run(w);
   check('the agent-sanctioned owner paths (OPEN-QUESTIONS, tasks.md) do not block the merge', mergedIt(w));
+
+  // --- the ruling guard ---------------------------------------------------------------------
+  // docs/OPEN-QUESTIONS.md and specs/**/tasks.md were removed from CODEOWNERS on 2026-09-12:
+  // branch protection was demanding the owner's review on them and so refusing the merge
+  // GOVERNANCE.md §1 explicitly sanctions (#342 died on `405 Waiting on code owner review`).
+  // Removing them, though, also removed the only gate on the ruling RECORD. An agent may append
+  // a question or a recommendation; recording a DECISION as the maintainer's, or editing the
+  // append-only history, is not something an autonomous merge may carry.
+  const oq = patch => ({filename: 'docs/OPEN-QUESTIONS.md', patch});
+  const oqPR = files => world({prs: [PR(['agent-authored', 'risk:t0'])], comments: {94: clean(HEAD)}, files: {94: files}});
+
+  w = oqPR([oq('@@\n+## 2026-09-12 — a question the agent raises\n+**Ruling:** PENDING — human\n')]);
+  await run(w);
+  check('an appended PENDING question still merges autonomously', mergedIt(w));
+
+  w = oqPR([oq('@@\n+**Ruling:** human, 2026-09-12. AC4 is discharged for T040.\n')]);
+  await run(w);
+  check('a recorded HUMAN ruling is never auto-merged', !mergedIt(w) && said(w, /ruling/i));
+
+  w = oqPR([oq('@@\n-**Ruling:** PENDING — human\n+**Ruling:** human, 2026-09-12. Adopted.\n')]);
+  await run(w);
+  check('editing a PENDING line into a decision is caught', !mergedIt(w) && said(w, /ruling/i));
+
+  w = oqPR([oq('@@\n-## 2026-09-05 — an entry that was already published\n')]);
+  await run(w);
+  check('removing a line from the append-only record is never auto-merged', !mergedIt(w) && said(w, /append-only/i));
+
+  w = oqPR([{filename: 'docs/OPEN-QUESTIONS.md'}]);   // GitHub omits `patch` on very large diffs
+  await run(w);
+  check('no patch to inspect -> fail closed', !mergedIt(w) && said(w, /patch/i));
+
+  w = oqPR([oq('@@\n+Recommended answer: keep the bound at 0.\n')]);
+  await run(w);
+  check('an appended recommendation with no ruling line still merges', mergedIt(w));
+
+  // --- the six bypasses the round-1 red team demonstrated (@67d42e8) --------------------------
+  // Every one of these merged a recorded decision or an edit to the append-only record. The
+  // shapes are the file's OWN conventions, not invented: :147/:357/:418/:731/:1004 quote the
+  // superseded pending text on the ruling line, and :1109 records a decision whose value BEGINS
+  // "pending — ratified by the human merge".
+  w = oqPR([oq('@@\n+**Ruling:** human, 2026-09-12 (open-questions session): ratified as recommended. The superseded pending text read, verbatim: "rule inline on the Phase 1 PR."\n')]);
+  await run(w);
+  check('A1 a ruling that QUOTES the superseded pending text is held', !mergedIt(w) && said(w, /ruling/i));
+
+  w = oqPR([oq('@@\n+**Ruling:** pending — ratified by the human merge of PR #120, which lands this entry.\n')]);
+  await run(w);
+  check('A2 "pending — ratified by the human merge" is a decision, not a pending entry', !mergedIt(w) && said(w, /ruling/i));
+
+  w = oqPR([oq('@@\n+**Ruling:** human, 2026-09-12. AC4 is discharged for T040. (No longer pending.)\n')]);
+  await run(w);
+  check('A3 the word "pending" anywhere no longer exempts a decision', !mergedIt(w) && said(w, /ruling/i));
+
+  w = oqPR([oq('@@\n context\n----\n context\n')]);
+  await run(w);
+  check('A4 removing a `---` entry separator is a removal from the append-only record', !mergedIt(w) && said(w, /append-only/i));
+
+  w = oqPR([oq('@@\n---- the maintainer asked for this to be struck\n')]);
+  await run(w);
+  check('A5 removing a content line that begins "--" is still a removal', !mergedIt(w) && said(w, /append-only/i));
+
+  w = oqPR([{filename: 'docs/OPEN-QUESTIONS-2026H1.md', previous_filename: 'docs/OPEN-QUESTIONS.md', status: 'renamed',
+             patch: '@@\n+**Ruling:** human, 2026-09-12. Adopted.\n-## 2026-09-05 — a published entry\n'}]);
+  await run(w);
+  check('A6 renaming the record does not walk the guard', !mergedIt(w) && said(w, /rename|append-only|ruling/i));
+
+  // The pending form the repo actually writes must still merge, or the guard blocks normal work.
+  // --- round 2: the marker is a FORMAT, and the format has variants -------------------------
+  // `**Ruling**: adopted` renders identically to `**Ruling:** adopted`; a heading form and the
+  // word "Decision" record a decision just as plainly. Keying on one literal spelling caught the
+  // one shape the author happened to use (round-2 red team).
+  for (const [shape, line] of [
+    ['colon outside the bold span', '+**Ruling**: adopted — human, 2026-09-12. Done.'],
+    ['heading form', '+### Ruling: adopted — human, 2026-09-12.'],
+    ['the word Decision', '+**Decision:** adopted — human, 2026-09-12.'],
+    ['bolded Decision, colon outside', '+**Decision**: ratified by the maintainer, 2026-09-12.'],
+    ['underscore emphasis', '+_Ruling:_ discharged — human, 2026-09-12.'],
+  ]) {
+    w = oqPR([oq('@@\n' + line + '\n')]);
+    await run(w);
+    check(`a recorded decision (${shape}) is held`, !mergedIt(w) && said(w, /ruling|decision/i));
+  }
+
+  // The pending forms of those same variants must still merge, or the guard blocks normal work.
+  for (const [shape, line] of [
+    ['colon outside the bold span', '+**Ruling**: PENDING — human. Recommended: keep it at 0.'],
+    ['the word Decision', '+**Decision:** PENDING — human.'],
+  ]) {
+    w = oqPR([oq('@@\n' + line + '\n')]);
+    await run(w);
+    check(`a PENDING entry (${shape}) still merges`, mergedIt(w));
+  }
+
+  w = oqPR([oq('@@\n+**Ruling:** PENDING — human. Recommended: keep `agent_retry_max` at 0.\n')]);
+  await run(w);
+  check('a PENDING entry with a recommendation still merges', mergedIt(w));
 
   w = world({prs: [PR(['agent-authored', 'risk:t1'], {number: 94}), PR(['agent-authored', 'risk:t1'], {number: 95})],
              comments: {94: clean(HEAD), 95: clean(HEAD)}});

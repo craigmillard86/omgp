@@ -129,6 +129,57 @@ jobs:
               const owned = changed.map(f => f.filename).filter(f => ownedPatterns.some(p => ownedBy(p, f)));
               if (owned.length) { skip(number, `CODEOWNERS-owned path(s) need the owner: ${owned.join(', ')}`); continue; }
 
+              // docs/OPEN-QUESTIONS.md left CODEOWNERS on 2026-09-12 so the merge GOVERNANCE §1
+              // sanctions can actually happen (#342 died on `405 Waiting on code owner review`).
+              // An agent may APPEND a question or a recommendation; recording a DECISION as the
+              // maintainer's, or editing the append-only history, stops here.
+              //
+              // Round-1 red team (@67d42e8) walked the first version six ways. What it taught:
+              //  * `!/PENDING/i` on the whole line is useless — the file's OWN convention for a
+              //    decision quotes the superseded pending text on the ruling line (:147, :357,
+              //    :418, :731, :1004), and :1109 records a decision whose value BEGINS "pending
+              //    — ratified by the human merge". So: the VALUE must start with PENDING *and*
+              //    the line must carry no decision marker.
+              //  * `!startsWith('---')` protected nothing — `patch` begins at the first @@ and
+              //    never holds the ---/+++ file headers — while hiding removals of the file's 48
+              //    bare `---` entry separators. Dropped.
+              //  * Renaming the file walked the guard entirely: `filename` becomes the new path
+              //    and the old one moves to `previous_filename`.
+              const OQ = 'docs/OPEN-QUESTIONS.md';
+              const oqf = changed.find(f => f.filename === OQ || f.previous_filename === OQ);
+              if (oqf) {
+                if (oqf.filename !== OQ) {
+                  skip(number, `renames the append-only record to ${oqf.filename} — where it lives is the maintainer's call, and the guard cannot follow it`);
+                  continue;
+                }
+                if (typeof oqf.patch !== 'string') {
+                  skip(number, 'docs/OPEN-QUESTIONS.md changed but GitHub returned no patch (too large) — cannot tell an appended question from a recorded ruling, so this is the maintainer\'s call');
+                  continue;
+                }
+                const lines = oqf.patch.split('\n');
+                const DECISION = /\b(ratified|adopted|discharged|human,\s*\d{4})/i;
+                // The marker is a FORMAT, and formats have variants: `**Ruling**: adopted`
+                // renders identically to `**Ruling:** adopted`, and a heading form or the word
+                // "Decision" records a decision just as plainly. Keying on one literal spelling
+                // caught only the shape the author happened to use (round-2 red team on #420).
+                // Strip heading and emphasis characters first, then read the field name.
+                //
+                // CONTROL, NOT GUARANTEE (rule 11): prose that records a decision with no marker
+                // at all — "the maintainer approved this in session; treat it as ruled" — is not
+                // detectable by any pattern, and this guard does not claim to catch it. What it
+                // catches is the recorded FORM a ruling takes in this file, which is what the
+                // file's own conventions and every entry in it use.
+                const bare = l => l.slice(1).replace(/^[#>\s]*/, '').replace(/[*_`]/g, '').trim();
+                const ruling = lines.filter(l => l.startsWith('+')).find(l => {
+                  const m = /^(?:Ruling|Decision)\s*:\s*(.*)$/i.exec(bare(l));
+                  if (!m) return false;                       // not a ruling line at all
+                  return !(/^PENDING\b/i.test(m[1].trim()) && !DECISION.test(l));
+                });
+                if (ruling) { skip(number, `records a ruling in docs/OPEN-QUESTIONS.md (${ruling.slice(1).trim().slice(0, 60)}) — a decision is the maintainer's, never an autonomous merge`); continue; }
+                const removed = lines.filter(l => l.startsWith('-'));
+                if (removed.length) { skip(number, `docs/OPEN-QUESTIONS.md is append-only and this diff removes ${removed.length} line(s) — supersede by appending, or let the maintainer merge it`); continue; }
+              }
+
               // Verdicts: claude[bot] only, FINAL line only, THIS head only (agent-approve's rule).
               const comments = await github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: number, per_page: 100});
               const verdictOf = kind => {

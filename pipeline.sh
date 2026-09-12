@@ -70,49 +70,16 @@ unit_sources_plain() {
   return "$rc"
 }
 
-# raise when tests are added; NEVER lower to get green (that change is itself T3)
-# 133865 = 133870 executed (9 binaries; the seeded property tests dominate) minus 5 slack —
-# T008/T009 follow-up, raised 2026-08-30 with test_link_types.cpp (was 133821)
-# 197000 = 197100 executed (12 binaries) minus ~100 slack — T014-T017+T022, raised
-# 2026-08-31 with test_link_frame/test_link_stuffing/test_link_resync.cpp (was 133865)
-# 200580 = 200682 executed (16 binaries) minus ~102 slack — T023-T026 added
-# test_canonical_frame/test_l3_helper_dispatch/test_mock_wire/test_link_health.cpp;
-# raised 2026-09-05 (T027/#45, was 197000). NEVER lowered.
-# 509360 = 509460 executed (17 binaries) minus 100 slack AT THE RAISING COMMIT — T029/T031
-# added test_link_master.cpp (then 308753 checks: its microsecond-cadence timing loops REQUIRE
-# per poll); raised 2026-09-06 (#137 review, MEDIUM: at 200580 the gate could not notice this
-# binary being dropped — 236588 executed at 40355cf was 36008 above it). The suite grows and
-# the floor is not chased upward, so the CURRENT total is the `unit: executed N check(s)`
-# line of the latest run, not this comment (it went stale twice: #137 reviews @050f397 and
-# @c0bf71c). What the floor protects is the invariant, restated with the figures measured
-# at 1a55116 (515373 = test_link_master 310744 + the other 16 binaries 204629): the other
-# 16 together stay BELOW the floor, so dropping test_link_master fires the gate —
-# demonstrated by that arithmetic, assuming those 16 have not grown by 304731 (slack over
-# the floor is 6013; over the 16-binary sum it is 304731). Was 200580.
-# 582296 = 582301 executed (19 binaries) minus 5 slack — T033-T035 added test_link_responder
-# (61784 checks) and test_link_loop (3066); raised 2026-09-11 at the T036/#54 checkpoint
-# (contracts/tooling.md "pipeline.sh": "raised to the new total minus 5, never lowered").
-# Was 509360. Measured on the ctest path at this commit; the two engine binaries are the ones
-# US3 adds, and the remaining 17 sum to 517451.
-# At total-5 the gate fires if ANY ONE of the 19 binaries stops reporting: the smallest
-# (test_link_interfaces, 6 checks) leaves 582295, below the floor — demonstrated by that
-# arithmetic over this run's per-binary EXECUTED lines, and only while no binary shrinks to
-# 5 checks or fewer. The wider margin the older entries above describe (dropping the single
-# biggest binary, test_link_master at 312820, leaves 269481) still holds a fortiori.
-# 582360 = 582365 executed (19 binaries) minus 5 slack — raised 2026-09-12 at the T040/#58
-# US4 checkpoint (contracts/tooling.md "pipeline.sh": "raised to the new total minus 5, never
-# lowered"). Was 582296. The US4 binaries are NOT what moved it: test_link_health (T037) and
-# test_link_loop's three US4 scripts (T039) were already on main when T036 measured 582301
-# (e230c65 is an ancestor of 09dabd5 — `git merge-base --is-ancestor`), so they are inside
-# the old floor already. The +64 since then is test_link_master (312884 here, 312820 at the
-# #137 review). The raise is the ratchet catching up to the measured total, not new US4 checks.
-# At total-5 the gate still fires if ANY ONE of the 19 binaries stops reporting: the smallest
-# (test_link_interfaces, 6 checks) leaves 582359, below the floor — demonstrated by that
-# arithmetic over this run's per-binary EXECUTED lines, and only while no binary shrinks to
-# 5 checks or fewer.
+# The unit-test execution COUNT gate. Its VALUE and its raise history live in
+# tests/unit-test-floor.txt, not here. pipeline.sh is CODEOWNERS-owned because it is the gate
+# DEFINITION, and every story checkpoint raises the floor — so keeping the number here made every
+# checkpoint PR touch an owned path and forfeit autonomous merge whatever its tier (measured over
+# the last 25 merges: of the 8 PRs that were task/* AND risk:t2, five were blocked by this file
+# alone, and every one of those five was a floor raise). The RULE stays here and stays owned;
+# only the datum moved. Never lowered: tools/refimpl/test_floor_datum.py fails on a decrease
+# against origin/main, and deleting that test is a reduction of test content (T3, GOVERNANCE §3).
 # The floor is the COUNT gate. The SET gate — every tests/{unit,property}/test_*.cpp compiled,
 # registered and executed, by name — is tools/check_test_set.py in stage_unit (#133).
-UNIT_TEST_FLOOR=582360
 
 stage_codegen() {
   # Constants + vectors header from the YAML, then prove the human-authored docs tables
@@ -216,6 +183,29 @@ stage_build() {
 }
 
 stage_unit() {
+  # The floor's value and its raise history live in tests/unit-test-floor.txt (see the comment
+  # above). Read it here, not at top level: only this stage gates on it. A datum that cannot be
+  # parsed stops the stage rather than defaulting to 0 and passing every filtered-out suite.
+  # EXACTLY one bare integer, or refuse. `grep -m1` took the FIRST, while the datum file tells
+  # raisers to append their arithmetic and documents the value as the last line — so a raise
+  # written the way the file's own instructions describe silently kept the OLD, lower floor and
+  # the ratchet, comparing first-to-first, stayed green (round-1 red team on #420, finding 5).
+  # Blanks are stripped so this agrees with test_floor_datum.parse_floor on an indented datum,
+  # which previously parsed there and stopped the build here (finding 6).
+  # Trim only LEADING/TRAILING whitespace (CR included), never internal: `tr -d '[:blank:]'`
+  # squeezed "1 0 0" into the integer 100 while the ratchet's parse_floor rejected it, and it left
+  # a trailing CR that grep then refused while parse_floor's .strip() accepted it. Compose the two
+  # and each reader saw exactly one integer - a DIFFERENT one - so the gate could run at 100 with
+  # the never-lowered ratchet reporting green (round-2 red team on #420). The rules here and in
+  # parse_floor are now identical, and test_both_readers_take_the_SAME_value compares the values
+  # rather than merely asking whether each refuses.
+  _floor=$(sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' tests/unit-test-floor.txt 2>/dev/null | grep -E '^[0-9]+$' || true)
+  _floor_n=$(printf '%s\n' "$_floor" | grep -c '^[0-9]' || true)
+  if [ "$_floor_n" != "1" ]; then
+    echo "unit: floor datum unreadable — tests/unit-test-floor.txt must carry EXACTLY one bare integer line (found $_floor_n); refusing to gate on nothing" >&2
+    return 1
+  fi
+  UNIT_TEST_FLOOR=$_floor
   if command -v ctest >/dev/null 2>&1 && [ -f build/native/CTestTestfile.cmake ]; then
     # Two paths, one predicate each. This one runs whatever cmake registered (ctest sees
     # add_test lines only, so check_test_set.py has to prove every source is in that set);

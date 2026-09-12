@@ -463,8 +463,9 @@ counts and exits non-zero when a planted surviving mutant carries no triage labe
 - **SC-007**: A static scan of host-core codec sources finds zero dynamic-allocation,
   exception or RTTI constructs and zero protocol literals that the definition file also
   defines (FR-005, FR-029).
-- **SC-008**: The pipeline's unit-test execution floor (`UNIT_TEST_FLOOR` in
-  `pipeline.sh`) is raised to reflect the tests this feature adds, so the gate cannot pass
+- **SC-008**: The pipeline's unit-test execution floor (`UNIT_TEST_FLOOR`; its value lives in
+  `tests/unit-test-floor.txt` and `pipeline.sh` reads and enforces it — Amended 2026-09-12,
+  autonomy gates) is raised to reflect the tests this feature adds, so the gate cannot pass
   on a silently filtered-out suite.
 - **SC-009**: A developer with no conversation history can, from the repository alone,
   add a new opcode end-to-end (definition file → generated constants → codec in both
