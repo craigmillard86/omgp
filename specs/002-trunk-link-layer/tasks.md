@@ -230,6 +230,17 @@ enrolment rotation and one notification per transition.
     of slack; the two sums are believed equal (19 sources ↔ 19 registered binaries, same
     flags) but that equality is **assumed**, not demonstrated. `tests/unit/
     test_pipeline_link_bootstrap.sh` would demonstrate it; nothing invokes it today.
+  - Claim release, recorded here because the merge path never reads this file: T040 is the
+    one clause-incomplete box in Phase 6, so **#58 must stay open** when #401 merges. A
+    PR-body edit does not achieve that. `agent-merge` derives its close targets from the
+    body's `Closes`/`Fixes`/`Resolves` references *and*, independently, from the branch
+    name (`.github/workflows/agent-merge.yml:178-180`: `pr.head.ref.match(/^task\/(\d+)$/)`
+    unioned with the body matches), and #401's head is `task/58` — so #58 closes on merge
+    whether the body reads `Closes #58` or `Refs #58`. The only mechanical hold is the
+    `needs-human` or `blocked` label on the PR (`agent-merge.yml:112` skips those);
+    labelling a PR is outside the review-fix dispatch's allow-list, so it is requested of a
+    human on #401. Should #58 close before the `docs/OPEN-QUESTIONS.md` (2026-09-12) ruling
+    lands, reopen it: that ruling is about this box.
 
 **Checkpoint**: SC-006 demonstrated; F3 has `poll_due`/`next_probe`/`on_result`/`tick` to build the superframe on.
 
