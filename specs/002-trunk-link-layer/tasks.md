@@ -209,7 +209,17 @@ enrolment rotation and one notification per transition.
 
 - [x] T038 [US4] Write `link/health.hpp` / `link/health.cpp` per contracts/link-cpp.md "Health tracker" and data-model.md §6 (16-entry table, `on_result`, `tick`, `state`, `poll_due`, `mark_polled`, `next_probe` rotation — bus-fault parts stubbed to "never fault" until US5), citing `trunk §6` and `§7` — make T037 pass; add to `link/CMakeLists.txt`
 - [x] T039 [US4] Extend `tests/unit/test_link_loop.cpp` with the SUSPECT and OFFLINE scripts (three `Silence` steps → SUSPECT; silence for 1 s of simulated time → OFFLINE; a `Respond` after that → RECOVERED) driving `Master` + `HealthTracker` together — write first, then wire `HealthTracker::on_result` from the loop
-- [x] T040 [US4] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; local mutation run
+- [ ] T040 [US4] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; local mutation run
+  - Two of the three clauses are discharged on PR #401 (#58): `./pipeline.sh` and
+    `./pipeline.sh esp32` are green at that head, and `UNIT_TEST_FLOOR` is raised
+    582296 → 582360. The **local mutation run** is not, and cannot be made meaningful on
+    that branch: it changes no source under `tools/mutate.cfg`'s `scope_dirs`
+    (`l3 link core`), so `tools/mutate.sh --diff origin/main` prints "nothing in scope"
+    and exits 0 at `tools/mutate.sh:104-107`, *before* the Mull presence check — a pass
+    there attests nothing about `link/health.cpp`. The box therefore stays unticked while
+    the floor raise lands. Tracked by #146 (mutation attestation for a PR that changes no
+    scoped source); the question of whether an empty scope discharges this clause is
+    recorded in `docs/OPEN-QUESTIONS.md` (2026-09-12) and is a human ruling.
 
 **Checkpoint**: SC-006 demonstrated; F3 has `poll_due`/`next_probe`/`on_result`/`tick` to build the superframe on.
 

@@ -3067,3 +3067,43 @@ This was measured, not assumed. On the 92-comment corpus of 2026-09-08 (verdicts
 **Ruling:** human, 2026-09-11, in session. The recommendation of the 2026-09-11 entry "#340's AC 1 ('stop at a horizontal rule') conflicts with its AC 2" is adopted: AC 1 no longer includes "and at a horizontal rule", and AC 2 governs. The emphasis- and heading-tolerant NOT EXAMINED test handles the "follow-ups, `---`, marker" shape on its own. Also recorded on #340.
 
 **Supersedes:** none — this rules on that entry.
+
+---
+
+## 2026-09-12 — Does an empty mutation scope discharge a checkpoint task's "local mutation run" clause?
+
+**Context:** the US2/US3/US4 checkpoint tasks of `specs/002-trunk-link-layer/tasks.md`
+(T032, T036, T040) each require a "local mutation run" alongside the full `./pipeline.sh`
+and `./pipeline.sh esp32` runs and the `UNIT_TEST_FLOOR` raise. A checkpoint PR that adds
+no source — T040/#58 (PR #401) is one: its diff is `pipeline.sh` and `tasks.md` — changes
+nothing under `tools/mutate.cfg`'s `scope_dirs` (`l3 link core`). `tools/mutate.sh:104-107`
+then prints `mutation: nothing in scope (origin/main) — no changed sources under: l3 link
+core` and exits 0 *before* the Mull presence check, so the command "passes" without
+building, mutating or executing anything. The clause is therefore unsatisfiable in
+substance on such a PR, while being trivially satisfiable in letter. Nothing in
+`tasks.md`, `docs/GOVERNANCE.md` or `docs/OPERATING-POLICY.md` says which reading binds.
+
+The same shape recurs: it is issue #146 (mutation attestation for PRs that change no
+scoped source), and it is what made the T040 red-team finding blocking — the box had been
+ticked with the clause admittedly not run.
+
+**Recommendation:** the clause is discharged **only by an explicit, checkable
+attestation**, not by a green vacuous exit and not by silence. Concretely: a checkpoint PR
+whose `scope_dirs` diff is empty states that fact, names the commit where the mutation
+evidence for the certified sources actually lives (for US4: PR #124 / issue #56, whose CI
+`deep-verify` ran `./tools/mutate.sh --diff origin/main --require`), and labels that
+evidence *assumed* rather than re-demonstrated, per CLAUDE.md rule 11. Until #146 makes
+that attestation mechanical, an agent does not tick the checkpoint box on an empty scope;
+a human ticks it, or rules the clause discharged here. The conservative default is chosen
+because the opposite reading lets "mutation run: pass" mean "no mutant was ever built",
+which is the blind spot `mutate.sh`'s own no-oracle and no-body rules exist to close.
+
+Not recommended: dropping the clause from the checkpoint tasks (it is load-bearing when
+the checkpoint PR *does* carry source), or adding a mutation stage to `pipeline.sh` on
+this branch (that is #146's design decision and outside T040's scope).
+
+**Ruling:** PENDING — human. Raised by the round-1 red team on PR #401 (finding 1, at
+`3ad363c`). If ruled the other way — an empty scope discharges the clause — T040 can be
+ticked as it stood, and no tooling changes.
+
+**Supersedes:** none.
