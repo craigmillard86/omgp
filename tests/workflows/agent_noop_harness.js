@@ -15,14 +15,14 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { detect, finalize } = require(path.join(__dirname, '..', '..', 'tools', 'ci', 'agent-noop.js'));
+const { detect, finalize, retryBudget } = require(path.join(__dirname, '..', '..', 'tools', 'ci', 'agent-noop.js'));
 
 const results = [];
 const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process.exitCode = 1; };
 
 // A mock of the slice of the API these two functions touch. Label removal 404s when the label is
 // absent, as the real API does — finalize must treat that as a non-event.
-function world({ prs = [], labels = [], comments = [], head = 'a'.repeat(40) } = {}) {
+function world({ prs = [], labels = [], comments = [], head = 'a'.repeat(40), labelFails = null } = {}) {
   const log = [], outputs = {};
   const state = { labels: [...labels], comments: [...comments], head };
   const github = {
@@ -34,8 +34,12 @@ function world({ prs = [], labels = [], comments = [], head = 'a'.repeat(40) } =
       },
       issues: {
         listComments: async () => ({ data: state.comments }),
-        addLabels: async ({ labels: l }) => { state.labels.push(...l); log.push(`+${l.join('+')}`); },
+        addLabels: async ({ labels: l }) => {
+          if (labelFails === 'add') throw Object.assign(new Error('Resource not accessible'), { status: 403 });
+          state.labels.push(...l); log.push(`+${l.join('+')}`);
+        },
         removeLabel: async ({ name }) => {
+          if (labelFails === 'remove') throw Object.assign(new Error('Server Error'), { status: 500 });
           if (!state.labels.includes(name)) throw Object.assign(new Error('Not Found'), { status: 404 });
           state.labels = state.labels.filter(x => x !== name); log.push(`-${name}`);
         },
@@ -153,6 +157,96 @@ const during = '2026-09-12T10:00:30Z';
   check('fix finalize: FAILS the job', typeof w.outputs.__failed === 'string');
   check('fix finalize: the comment carries the figures', said(w, /comment:.*26.*4/));
   check('fix finalize: says the attempt was returned, so the count is auditable', said(w, /comment:.*returned/i));
+
+  // === round-1 findings (@44e58f7) ============================================================
+
+  // [RT-1] Production, once established, is not un-established by a missing figures file. Both
+  // steps are `if: always()`, so a cancelled or timed-out run reaches here with EXEC_FILE empty —
+  // and the old `!f.ok ||` short-circuit then declared a no-op while `reason` said the head moved.
+  w = world({ head: 'b'.repeat(40), labels: ['agent-authored', 'review-fix-1'] });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '342', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, EXEC_FILE: '' } });
+  check('fix: a missing execution file does NOT override a moved head', r.noop === false);
+
+  w = world({ prs: [{ head: { ref: 'task/58' }, created_at: during, updated_at: during }], labels: ['task', 'in-progress'] });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: '' } });
+  check('implement: a missing execution file does NOT override an open PR from this run', r.noop === false);
+
+  // [RT-2] A task/<n> PR opened by an EARLIER dispatch must not vouch for this run. This is the
+  // #58 -> #401 shape: the claim is released, the issue is re-picked, its old PR is still open.
+  w = world({ prs: [{ head: { ref: 'task/58' }, created_at: before, updated_at: before }] });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0,
+    EXEC_FILE: execFile({ num_turns: 156, permission_denials_count: 26, is_error: false }) } });
+  check('implement: a PR from a PREVIOUS run does not mask this run\'s no-op', r.noop === true);
+
+  w = world({ prs: [{ head: { ref: 'task/58' }, created_at: before, updated_at: during }] });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: execFile({ num_turns: 40 }) } });
+  check('implement: an older PR the run PUSHED to does count', r.noop === false);
+
+  // [RT-4] The verdict exclusion is load-bearing on a concurrent claude[bot] run. The repo writes
+  // verdicts backticked, and review comments end with the standard attribution footer.
+  for (const [shape, body] of [
+    ['backticked', 'notes\n`VERDICT(red-team): clean @ abc`'],
+    ['attribution footer after it', 'notes\nVERDICT(review): findings @ abc\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)'],
+    ['trailing --- rule', 'notes\nVERDICT(review): clean @ abc\n\n---'],
+  ]) {
+    w = world({ head: 'a'.repeat(40), comments: [{ user: { login: 'claude[bot]' }, created_at: during, body }] });
+    r = await detect({ ...w, env: { KIND: 'fix', PR: '342', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, EXEC_FILE: execFile({ num_turns: 26 }) } });
+    check(`fix: a verdict comment (${shape}) is still not the fixer's output`, r.noop === true);
+  }
+
+  // [M1] The SINCE window itself: a plain claude[bot] comment left by attempt 1 must not vouch
+  // for attempt 2. No case pinned this, so deleting the window survived the whole suite.
+  w = world({ head: 'a'.repeat(40), comments: [{ user: { login: 'claude[bot]' }, created_at: before, body: 'Attempt 1: I fixed finding 2.' }] });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '342', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, EXEC_FILE: execFile({ num_turns: 26 }) } });
+  check('fix: a comment from a PREVIOUS attempt does not count as this run\'s output', r.noop === true);
+
+  // [REV-5a] A 500 on the label removal is not "no claim was present".
+  w = world({ labels: ['task', 'in-progress'], labelFails: 'remove' });
+  await finalize({ ...w, env: { KIND: 'implement', ISSUE: '58', ATTEMPTS: '1', TURNS: '9', DENIALS: '0', REASON: 'no open PR on task/58' } });
+  check('implement finalize: a failed release says so, never "no claim was present"',
+    said(w, /comment:.*(could NOT|by hand)/i) && !said(w, /comment:.*No .in-progress. claim was present/));
+
+  // [REV-5b] finalize must report what detect actually found, not a hard-coded sentence that can
+  // contradict it (reachable with is_error true and an open PR present).
+  w = world({ labels: ['task', 'in-progress'] });
+  await finalize({ ...w, env: { KIND: 'implement', ISSUE: '58', ATTEMPTS: '1', TURNS: '3', DENIALS: '0',
+    REASON: 'an open PR exists on task/58 (is_error)' } });
+  check('implement finalize: the comment carries detect\'s reason', said(w, /comment:.*is_error|comment:.*open PR exists/));
+
+  // [REV-5c] Escalation must not be lost to a 403 before the explanation is posted.
+  w = world({ labels: ['agent-authored', 'review-fix-1'], labelFails: 'add' });
+  let threw2 = null;
+  try { await finalize({ ...w, env: { KIND: 'fix', PR: '342', ATTEMPT: '1', ATTEMPTS: '1', TURNS: '26', DENIALS: '4', REASON: 'head unchanged' } }); } catch (e) { threw2 = e; }
+  check('fix finalize: a 403 on needs-human still leaves the comment and the failure', said(w, /comment:/) && typeof w.outputs.__failed === 'string');
+
+  // [REV-6] GOVERNANCE §1 on the fix path too, not only the implement path.
+  w = world({ labels: ['agent-authored', 'review-fix-1'] });
+  await finalize({ ...w, env: { KIND: 'fix', PR: '342', ATTEMPT: '1', ATTEMPTS: '1', TURNS: '26', DENIALS: '4', REASON: 'head unchanged' } });
+  check('fix finalize: never applies a release label either', !said(w, /\+(ready|queued)/));
+
+  // === AC2: the bounded retry budget (#361) ===================================================
+  // #361 asks for a retry bounded by `agent_retry_max`, default 1, clamped, unreadable => no
+  // retry. The first version shipped 0 with a PENDING ruling; the round-1 review is right that a
+  // directive with explicit parameters is not a spec ambiguity, so the budget is parsed here and
+  // the workflows spend it. Same fail-closed direction as every other knob in the repo.
+  const cfg = body => {
+    const f = path.join(TMP, `cfg-${seq++}.yml`);
+    fs.writeFileSync(f, body);
+    return f;
+  };
+  const budget = (body, core) => retryBudget({ CONFIG: cfg(body) }, core || { notice: () => {}, warning: () => {} });
+
+  check('the configured budget is read', budget('agent_retry_max: 1\n') === 1);
+  check('zero disables the retry entirely', budget('agent_retry_max: 0\n') === 0);
+  check('an absent key fails closed to 0', budget('wip_cap: 2\n') === 0);
+  check('a garbage value fails closed to 0', budget('agent_retry_max: banana\n') === 0);
+  check('a negative value fails closed to 0', budget('agent_retry_max: -3\n') === 0);
+  check('an oversized value is clamped, not obeyed', budget('agent_retry_max: 99\n') <= 2);
+  check('an unreadable config fails closed to 0', retryBudget({ CONFIG: '/nonexistent/agent-config.yml' }, { notice: () => {}, warning: () => {} }) === 0);
+  check('an inline comment after the value is tolerated (house style)', budget('agent_retry_max: 1   # one retry\n') === 1);
+  let noticed = [];
+  budget('agent_retry_max: nonsense\n', { notice: m => noticed.push(m), warning: m => noticed.push(m) });
+  check('a rejected value says so rather than failing silently', noticed.some(m => /agent_retry_max/.test(m)));
 
   for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
   console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);

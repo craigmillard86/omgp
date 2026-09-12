@@ -99,37 +99,52 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y cmake ninja-build
           pip install -r tools/requirements.txt   # includes the clang-format pin: a bare ./pipeline.sh reaches stage_quality, which FAILS on CI without it (#135; #167 review)
+      - name: Mark the start of the run
+        id: t0
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # ONE prompt, read from a file, used by both the first pass and the retry. Two inline
+      # copies would drift, and a drifted retry prompt silently changes the agent's instructions
+      # on the second pass — the objection that made the first version of #361 ship no retry.
+      - name: Load the agent prompt
+        id: prompt
+        env:
+          ISSUE: ${{ needs.pick.outputs.issue }}
+        run: |
+          {
+            echo "text<<PROMPT_EOF_${GITHUB_RUN_ID}"
+            sed -e "s|{{ISSUE}}|${ISSUE}|g" .github/agent-prompts/implement.md
+            echo "PROMPT_EOF_${GITHUB_RUN_ID}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Claude Code — implement task
         id: agent                       # the execution file (turns, denials, is_error) is a step output; an id-less step has none
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: github-actions   # backlog-changed nudges are sent by ready-gate with GITHUB_TOKEN, so the run's actor is github-actions[bot]; without this the action refuses (run 33332211854 on #28, same class as #77)
-          prompt: |
-            You are the backlog agent. Read CLAUDE.md and
-            docs/OPERATING-POLICY.md first; stay strictly within agent
-            permissions. Your task is issue #${{ needs.pick.outputs.issue }}.
-            1. Read the issue and its Spec Kit feature context under
-               specs/<NNN-feature>/, plus the relevant docs/ sections it cites.
-            2. Implement TDD-style: failing tests/scenario first, then code,
-               iterating with ./pipeline.sh stages until the FULL local
-               pipeline is green.
-            3. Commit on branch task/<issue-number> with `Refs #<n>` in
-               commits; open a PR titled after the task, labelled
-               agent-authored + the task's feature label, body summarising
-               approach and evidence, containing the closing reference in
-               EXACTLY the form `Closes #<n>` (the number directly after
-               the keyword, on its own line). GitHub honours no other
-               form: `Closes T021 (issue #39)` on #114 closed nothing,
-               left `in-progress` on the issue and stalled the WIP cap.
-            4. If you discover the task is blocked, ambiguous beyond a safe
-               default, or requires a human-ruling artefact (protocol YAML,
-               vectors, spec docs): implement nothing speculative — comment
-               your analysis on the issue, swap `in-progress` for
-               `needs-human`, and stop.
+          prompt: ${{ steps.prompt.outputs.text }}
           claude_args: |
             --model claude-opus-5
             --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr create*),Bash(gh issue*),Edit,Read,Write,Grep,Glob"
+
+      # The checkout above is this job's workspace, and the Claude step ran first holding Edit and
+      # Write on it: requiring the detector from there let the monitored agent rewrite its own
+      # no-op check and have github-script execute that edit with write scopes. GOVERNANCE §2 heads
+      # the gate table "all mechanical, none trust-based". review-fix already took the module from
+      # the default branch; dispatch did not (round-1 review on #416). Placed AFTER the agent step,
+      # so the tree it commits from never sees this path.
+      - name: Fetch the shared no-op detector from the default branch
+        if: always()
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch || 'main' }}
+          sparse-checkout: |
+            tools/ci
+            .github/agent-config.yml
+          sparse-checkout-cone-mode: false
+          path: .agent-ci
+          persist-credentials: false
 
       # #361. This step used to be `if: failure()`, which is why it never once fired: the five
       # observed no-ops (#54 twice, #342's fix twice, #58 after 156 turns / 26 denials / $9.07)
@@ -142,10 +157,51 @@ jobs:
         env:
           KIND: implement
           ISSUE: ${{ needs.pick.outputs.issue }}
+          SINCE: ${{ steps.t0.outputs.at }}
           EXEC_FILE: ${{ steps.agent.outputs.execution_file }}
         with:
           script: |
-            const m = require(`${process.env.GITHUB_WORKSPACE}/tools/ci/agent-noop.js`);
+            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
+            await m.detect({github, context, core, env: process.env});
+
+      - name: How many retries may this run spend?
+        id: budget
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          CONFIG: ${{ github.workspace }}/.agent-ci/.github/agent-config.yml
+        with:
+          script: |
+            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
+            core.setOutput('n', String(m.retryBudget(process.env, core)));
+
+      # #361 AC2. A no-op is retried once (agent_retry_max, default 1) before the claim is
+      # released. The retry is a SECOND STEP rather than a loop because Actions has no loop — and
+      # it reads the same prompt, so the two passes cannot diverge.
+      - name: Claude Code — retry the task
+        id: agent_retry
+        if: always() && steps.detect.outputs.noop == 'true' && steps.budget.outputs.n != '0'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: github-actions
+          prompt: ${{ steps.prompt.outputs.text }}
+          claude_args: |
+            --model claude-opus-5
+            --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr create*),Bash(gh issue*),Edit,Read,Write,Grep,Glob"
+
+      - name: Did the retry produce anything?
+        id: detect_retry
+        if: always() && steps.agent_retry.conclusion != 'skipped'
+        uses: actions/github-script@v7
+        env:
+          KIND: implement
+          ISSUE: ${{ needs.pick.outputs.issue }}
+          SINCE: ${{ steps.t0.outputs.at }}
+          EXEC_FILE: ${{ steps.agent_retry.outputs.execution_file }}
+        with:
+          script: |
+            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
             await m.detect({github, context, core, env: process.env});
 
       - name: Release the claim and fail loudly if it produced nothing
@@ -155,25 +211,25 @@ jobs:
         env:
           KIND: implement
           ISSUE: ${{ needs.pick.outputs.issue }}
-          NOOP: ${{ steps.detect.outputs.noop }}
-          ATTEMPTS: '1'
-          TURNS: ${{ steps.detect.outputs.turns }}
-          DENIALS: ${{ steps.detect.outputs.denials }}
+          NOOP: ${{ steps.detect_retry.outputs.noop != '' && steps.detect_retry.outputs.noop || steps.detect.outputs.noop }}
+          REASON: ${{ steps.detect_retry.outputs.reason != '' && steps.detect_retry.outputs.reason || steps.detect.outputs.reason }}
+          ATTEMPTS: ${{ steps.detect_retry.outputs.noop != '' && '2' || '1' }}
+          TURNS: ${{ steps.detect_retry.outputs.turns != '' && steps.detect_retry.outputs.turns || steps.detect.outputs.turns }}
+          DENIALS: ${{ steps.detect_retry.outputs.denials != '' && steps.detect_retry.outputs.denials || steps.detect.outputs.denials }}
         with:
           script: |
-            const m = require(`${process.env.GITHUB_WORKSPACE}/tools/ci/agent-noop.js`);
-            if (process.env.NOOP !== 'true') return;   // it produced a PR — nothing to release
+            const m = require(`${process.env.GITHUB_WORKSPACE}/.agent-ci/tools/ci/agent-noop.js`);
+            // An EMPTY noop means `detect` itself failed — a missing module, an API 403/500, a failed
+            // checkout. The step this replaced was `if: failure()` and released the claim on any
+            // job failure, so returning here would be a REGRESSION: the claim would sit held with
+            // nothing said (round-1 red team + review). Unknown fails closed, like readFigures.
+            if (process.env.NOOP === 'false') return;   // production established — nothing to release
             await m.finalize({github, context, core, env: process.env});
 
-      # The transcript is the only evidence of what a no-op run actually did — which tool calls
-      # were denied, and where it gave up. Retention is short and the artifact is private to the
-      # repo: this is arbitrary tool output, and freedom from secrets in it is NOT established
-      # (assumed, per CLAUDE.md rule 11), so it is kept only long enough to diagnose a stall.
-      - name: Upload the agent transcript
-        if: always() && steps.agent.outputs.execution_file != ''
-        uses: actions/upload-artifact@v7
-        with:
-          name: agent-transcript-${{ needs.pick.outputs.issue }}-${{ github.run_id }}
-          path: ${{ steps.agent.outputs.execution_file }}
-          retention-days: 7
-          if-no-files-found: warn
+      # NO transcript artifact. GOVERNANCE §4b: "This repository is public", so an artifact is
+      # downloadable by anyone, and secret masking covers step logs, not bytes inside an uploaded
+      # file. `execution_file` is arbitrary tool output — `git remote -v`, `gh auth status` and the
+      # like land in it verbatim — produced by a job holding CLAUDE_CODE_OAUTH_TOKEN. The first
+      # version of this workflow uploaded it and called the artifact "private to the repo", which
+      # was simply false (round-1 review on #416). The figures that actually diagnose a stall
+      # (turns, denials, is_error) are in the job log and in the comment finalize posts.

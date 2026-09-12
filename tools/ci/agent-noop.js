@@ -9,21 +9,29 @@
 // five times on 2026-09-07/08 and 2026-09-11: #54 twice, #342's fix twice, and #58 after 156
 // turns, 26 permission denials and $9.07. Each run left its claim in place — `in-progress` on the
 // issue, or a spent `review-fix-<n>` label on the PR — so the WIP cap stayed held and the loop
-// stalled until a human looked. Both workflows already carried a step meant to catch exactly
-// this, and neither could ever run: `agent-dispatch.yml:134` and `review-fix.yml:278` were
-// `if: failure()`, and a silent no-op is not a failure. Detection must therefore run on SUCCESS.
+// stalled until a human looked.
+//
+// Both workflows already carried a step meant to catch this, gated `if: failure()`. The precise
+// claim matters, and the first version of this file got it wrong: that step was NOT dead. Run
+// 33332211854 shows it firing — the Claude step failed, and "Release claim if no PR was opened"
+// ran and released the claim (round-1 review on #416). What it could not do is fire for a run
+// that EXITS SUCCESS having produced nothing, which is every one of the five. Detection therefore
+// runs on success — and, because the old step covered failures too, an UNKNOWN outcome (detect
+// itself throwing, an empty `noop` output) must still release the claim rather than return.
 //
 // What counts as production is deliberately generous, because the cost of a false no-op (a real
 // PR abandoned, a claim released under a working agent) is worse than the cost of a missed one
 // (the status quo, which a human already has to notice):
-//   implement — an OPEN pull request whose head is `task/<issue>`. Another issue's PR does not
-//               count; neither does a closed one.
+//   implement — an OPEN pull request on `task/<issue>` that this run created or pushed to. A PR
+//               left open by an EARLIER dispatch does not count: #58's claim was released and the
+//               issue re-picked while PR #401 was still open, so a second silent run would have
+//               been vouched for by the first run's work. With no SINCE recorded, it counts.
 //   fix       — the PR head moved, OR claude[bot] said something during the run. review-fix is
 //               explicitly allowed to rebut a finding and change no code (review-fix.yml step 5),
-//               so a comment IS a real outcome. Verdict comments are excluded: claude-review and
-//               red-team post `VERDICT(<kind>)` comments on the same PR, and one landing while
-//               the fixer runs must not be mistaken for the fixer's own work.
-// `is_error`, or an unreadable execution file, is a no-op whatever else is true — fail closed.
+//               so a comment IS a real outcome. Verdict comments are excluded on ANY line, since
+//               the repo writes them backticked and often with a trailing attribution footer.
+// `is_error` is a no-op whatever else is true. Missing figures fail closed only where production
+// is UNKNOWN — once established, production is not un-established by an unreadable file.
 const fs = require('fs');
 
 // claude-code-action's `execution_file` is JSON: either the result record itself or the message
@@ -41,8 +49,34 @@ function readFigures(env, core) {
   return { turns: num(rec.num_turns), denials: num(rec.permission_denials_count), isError: rec.is_error === true, ok: true };
 }
 
-const lastLine = body => ((body || '').trim().split('\n').pop() || '').trim();
-const isVerdict = body => /^VERDICT\([^)]*\):/.test(lastLine(body));
+// A verdict comment is claude-review's or red-team's, never the fixer's. Matching only the LAST
+// line let three real shapes through (round-1 red team): the repo writes verdicts backticked, a
+// review comment ends with the standard attribution footer, and a trailing `---` rule is common.
+// So: any line, unwrapped from backticks/emphasis. This errs toward EXCLUDING a comment — a fixer
+// comment that merely quotes a verdict stops counting as output — which errs toward declaring a
+// no-op. That direction is loud (needs-human, a comment, a failed job), never silent.
+const unwrap = line => (line || '').trim().replace(/^[`*_>\s]+/, '').replace(/[`*_\s]+$/, '');
+const isVerdict = body => (body || '').split('\n').some(l => /^VERDICT\([^)]*\):/.test(unwrap(l)));
+
+// How many times a no-op run may be retried in-job before the claim is released (#361 AC2).
+// Read at RUN time from the DEFAULT-branch config, like every other knob here, so retuning it
+// needs no workflow-scope push. Fail closed to 0 on anything unreadable, absent, negative or
+// non-numeric, and clamp above: a typo must never buy an agent more attempts than the ruling
+// allows. The clamp mirrors auto_fix_max_attempts' "values above 10 are clamped DOWN".
+const RETRY_CLAMP = 2;
+
+function retryBudget(env, core) {
+  let text;
+  try { text = fs.readFileSync(env.CONFIG, 'utf8'); }
+  catch (e) { core.warning(`agent-noop: agent_retry_max unreadable (${e.message}) — no retry (fail closed)`); return 0; }
+  const m = /^agent_retry_max: *(-?\w+)/m.exec(text);
+  if (!m) { core.notice('agent-noop: agent_retry_max absent from agent-config.yml — no retry (fail closed)'); return 0; }
+  const raw = m[1];
+  if (!/^\d+$/.test(raw)) { core.notice(`agent-noop: agent_retry_max=${raw} is not a whole number — no retry (fail closed)`); return 0; }
+  const n = Number(raw);
+  if (n > RETRY_CLAMP) { core.notice(`agent-noop: agent_retry_max=${n} exceeds the ${RETRY_CLAMP}-retry clamp — using ${RETRY_CLAMP}`); return RETRY_CLAMP; }
+  return n;
+}
 
 async function detect({ github, context, core, env }) {
   const { owner, repo } = context.repo;
@@ -55,9 +89,20 @@ async function detect({ github, context, core, env }) {
   let produced = false, reason = '';
   if (kind === 'implement') {
     const issue = String(env.ISSUE || '').trim();
+    const since = Date.parse(env.SINCE || '');
     const prs = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', per_page: 100 });
-    produced = prs.some(p => p && p.state !== 'closed' && p.head && p.head.ref === `task/${issue}`);
-    reason = produced ? `an open PR exists on task/${issue}` : `no open PR on task/${issue}`;
+    const mine = prs.filter(p => p && p.state !== 'closed' && p.head && p.head.ref === `task/${issue}`);
+    // "Is there a PR now?" is not "did THIS run produce one". #58's claim was released and the
+    // issue re-picked while PR #401 was still open on task/58 — a second silent run would then be
+    // vouched for by the first run's PR, which is the stall #361 exists to catch (round-1 red
+    // team). A PR counts only if it was opened or pushed to after this run started. With no
+    // SINCE (nothing recorded the start) it counts, because a false no-op is the worse error.
+    const fresh = p => !Number.isFinite(since) ||
+      Date.parse(p.created_at || '') > since || Date.parse(p.updated_at || '') > since;
+    produced = mine.some(fresh);
+    reason = produced ? `an open PR on task/${issue} was created or updated by this run`
+      : mine.length ? `the only open PR on task/${issue} predates this run`
+        : `no open PR on task/${issue}`;
   } else {
     const number = Number(env.PR);
     const before = String(env.HEAD_BEFORE || '').trim();
@@ -75,9 +120,15 @@ async function detect({ github, context, core, env }) {
         : `head unchanged at ${before.slice(0, 7)} and claude[bot] said nothing`;
   }
 
-  const noop = !f.ok || f.isError === true || !produced;
+  // `!f.ok ||` used to short-circuit here, so a cancelled or timed-out run — both steps are
+  // `if: always()` — was declared a no-op even when detection had just established that a PR
+  // exists or the head moved, releasing a live claim and posting a comment its own `reason`
+  // contradicted (round-1 red team). Missing figures fail closed only where production is
+  // UNKNOWN; where it is known and positive, it stands.
+  const noop = !produced || f.isError === true;
   if (noop) core.notice(`agent-noop: NO-OP — ${reason}${f.isError ? ' (is_error)' : ''}${f.ok ? '' : ' (figures unavailable)'}`);
   core.setOutput('noop', String(noop));
+  core.setOutput('reason', reason);   // finalize reports THIS, not a hard-coded sentence
   core.setOutput('turns', String(f.turns));
   core.setOutput('denials', String(f.denials));
   return { noop, turns: f.turns, denials: f.denials, reason };
@@ -85,12 +136,15 @@ async function detect({ github, context, core, env }) {
 
 // A label that is already absent is a non-event (404), the same rule review-fix's exhaustion path
 // and ci-failure-router follow; any other error is real and must not be swallowed.
+// -> 'removed' | 'absent' | 'failed'. Both callers report this to a human, and conflating
+// "already absent (404)" with "removal failed (500)" made finalize assert that no claim was held
+// when the claim was held and the WIP cap was stuck (round-1 review).
 async function dropLabel(github, owner, repo, number, name, core) {
-  try { await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name }); return true; }
+  try { await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name }); return 'removed'; }
   catch (e) {
-    if (e && e.status === 404) return false;
+    if (e && e.status === 404) return 'absent';
     core.warning(`agent-noop: could NOT remove \`${name}\` from #${number} (${(e && e.status) || ''} ${(e && e.message) || e}) — do it by hand`);
-    return false;
+    return 'failed';
   }
 }
 
@@ -99,36 +153,50 @@ async function finalize({ github, context, core, env }) {
   const kind = env.KIND;
   const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
   const spent = `${env.ATTEMPTS} attempt(s), last run: turns=${env.TURNS}, permission denials=${env.DENIALS}`;
+  // detect computed an accurate reason; hard-coding "no branch, no PR, no comment" here made the
+  // comment contradict it on the is_error path (round-1 review).
+  const why = env.REASON ? `Detected: ${env.REASON}.` : 'It produced no branch, no PR and no comment.';
+  const said = {
+    removed: 'has been released',
+    absent: 'was not present',
+    failed: 'could NOT be released — do it by hand',
+  };
 
   if (kind === 'implement') {
     const n = Number(env.ISSUE);
-    const released = await dropLabel(github, owner, repo, n, 'in-progress', core);
+    const claim = await dropLabel(github, owner, repo, n, 'in-progress', core);
     // Never `ready`/`queued`: releasing a claim is not a release decision (GOVERNANCE §1).
     await github.rest.issues.createComment({
       owner, repo, issue_number: n,
-      body: `🛑 Dispatch produced **nothing** — no branch, no PR, no comment — after ${spent}.\n\n` +
-        `${released ? 'The `in-progress` claim has been released' : 'No `in-progress` claim was present'}, so the WIP cap is not held. ` +
+      body: `🛑 Dispatch produced nothing usable after ${spent}.\n\n${why}\n\n` +
+        `The \`in-progress\` claim ${said[claim]}${claim === 'failed' ? ', so the WIP cap may still be held' : ''}. ` +
         `The issue keeps whatever release label it had; re-dispatch is a human decision.\n\n` +
         `A high denial count usually means the agent hit the allow-list rather than the task. ` +
-        `The transcript is attached to the run as an artifact: ${runUrl}`});
-    core.setFailed(`agent-noop: dispatch for #${n} produced nothing after ${spent} — claim released, job failed so this is not silent (#361).`);
+        `The per-attempt figures are above and in the job log: ${runUrl}`});
+    core.setFailed(`agent-noop: dispatch for #${n} produced nothing after ${spent} — ${env.REASON || 'no output'}; claim ${claim}, job failed so this is not silent (#361).`);
     return;
   }
 
   const pr = Number(env.PR);
   // The gate applies `review-fix-<n>` BEFORE this job runs (review-fix.yml:161), so a run that
-  // produced nothing has already spent one of the four attempts. Hand it back: the bound exists
-  // to cap real fix rounds, and an agent that never acted did not take one.
+  // produced nothing has already spent one of the four attempts. Hand it back.
   const label = `review-fix-${env.ATTEMPT}`;
-  const returned = await dropLabel(github, owner, repo, pr, label, core);
-  await github.rest.issues.addLabels({ owner, repo, issue_number: pr, labels: ['needs-human'] });
+  const attempt = await dropLabel(github, owner, repo, pr, label, core);
+  // Unguarded, a 403 here aborted before the comment below — losing both the escalation and the
+  // explanation on the one path whose entire purpose is not being silent (round-1 review).
+  let escalated = true;
+  try { await github.rest.issues.addLabels({ owner, repo, issue_number: pr, labels: ['needs-human'] }); }
+  catch (e) { escalated = false; core.warning(`agent-noop: could NOT apply \`needs-human\` to #${pr} (${(e && e.status) || ''}) — apply it by hand`); }
   await github.rest.issues.createComment({
     owner, repo, issue_number: pr,
-    body: `🛑 Review-fix produced **nothing** — no commit, no comment — after ${spent}.\n\n` +
-      `${returned ? `\`${label}\` has been removed, so this attempt is **returned** and does not count against \`review_fix_max_attempts\`` : `\`${label}\` was already absent, so no attempt was counted`}. ` +
-      `\`needs-human\` is applied: the findings are still unfixed, and a run that does nothing twice will do nothing a third time.\n\n` +
-      `The transcript is attached to the run as an artifact: ${runUrl}`});
-  core.setFailed(`agent-noop: review-fix on #${pr} produced nothing after ${spent} — attempt returned, needs-human applied, job failed (#361).`);
+    body: `🛑 Review-fix produced nothing usable after ${spent}.\n\n${why}\n\n` +
+      `\`${label}\` ${attempt === 'removed' ? 'has been removed, so this attempt is **returned** and does not count against `review_fix_max_attempts`'
+        : attempt === 'absent' ? 'was already absent, so no attempt was counted'
+          : 'could NOT be removed — this attempt is still counted; remove the label by hand to return it'}. ` +
+      `${escalated ? '`needs-human` is applied' : '⚠️ `needs-human` could NOT be applied — apply it by hand'}: the findings are still unfixed, ` +
+      `and a run that does nothing twice will do nothing a third time.\n\n` +
+      `The per-attempt figures are above and in the job log: ${runUrl}`});
+  core.setFailed(`agent-noop: review-fix on #${pr} produced nothing after ${spent} — ${env.REASON || 'no output'}; attempt ${attempt}, needs-human ${escalated ? 'applied' : 'NOT applied'}, job failed (#361).`);
 }
 
-module.exports = { detect, finalize, readFigures, isVerdict };
+module.exports = { detect, finalize, readFigures, isVerdict, retryBudget };
