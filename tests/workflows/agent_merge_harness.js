@@ -182,6 +182,37 @@ const said = (w, re) => w.log.some(l => re.test(l));
     check(`a recorded decision (${shape}) is held`, !mergedIt(w) && said(w, /ruling|decision/i));
   }
 
+  // --- round 3: list markers, table cells and synonyms ----------------------------------------
+  // `bare()` strips heading and emphasis characters, so a `*` list marker vanished with the
+  // emphasis strip and was caught — while `-` survived and the field name never reached column 0.
+  // That asymmetry is what makes this an omission rather than deliberate scoping: both render
+  // identically, and both carry the decision marker the guard exists to catch. With
+  // docs/OPEN-QUESTIONS.md out of CODEOWNERS and scoring T0 by path, this guard is the ENTIRE
+  // remaining gate between an agent and autonomously recording a decision as the maintainer's.
+  for (const [shape, line] of [
+    ['dash-bulleted', '+- **Ruling:** adopted — human, 2026-09-12. AC4 discharged.'],
+    ['numbered list', '+1. **Ruling:** adopted — human, 2026-09-12.'],
+    ['star-bulleted (was already caught)', '+* **Ruling:** adopted — human, 2026-09-12.'],
+    ['table row', '+| **Ruling:** | adopted — human, 2026-09-12 |'],
+    ['fullwidth colon', '+**Ruling**： adopted — human, 2026-09-12.'],
+    ['qualified field name', '+**Ruling (final):** adopted — human, 2026-09-12.'],
+    ['Resolution synonym', '+**Resolution:** adopted — human, 2026-09-12.'],
+  ]) {
+    w = oqPR([oq('@@\n' + line + '\n')]);
+    await run(w);
+    check(`a recorded decision (${shape}) is held`, !mergedIt(w) && said(w, /ruling|decision|resolution/i));
+  }
+
+  // ...and the same shapes in their PENDING form must still merge.
+  for (const [shape, line] of [
+    ['dash-bulleted', '+- **Ruling:** PENDING — human. Recommended: keep it as is.'],
+    ['table row', '+| **Ruling:** | PENDING — human |'],
+  ]) {
+    w = oqPR([oq('@@\n' + line + '\n')]);
+    await run(w);
+    check(`a PENDING entry (${shape}) still merges`, mergedIt(w));
+  }
+
   // The pending forms of those same variants must still merge, or the guard blocks normal work.
   for (const [shape, line] of [
     ['colon outside the bold span', '+**Ruling**: PENDING — human. Recommended: keep it at 0.'],

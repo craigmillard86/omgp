@@ -68,6 +68,9 @@ jobs:
             // ordering). Everything else owned — protocol, vectors, spec docs, governance,
             // .github/, CLAUDE.md, the constitution, pipeline/toolchain definitions — is the
             // owner's call and is never merged here, whatever tier it scores.
+            // Redundant since 2026-09-12 — neither path is in CODEOWNERS any more, so the filter
+            // below removes nothing. Kept deliberately: if either is ever re-listed, this is what
+            // keeps GOVERNANCE §1's exception real instead of silently reinstating the #342 block.
             const SANCTIONED = ['/docs/OPEN-QUESTIONS.md', '/specs/**/tasks.md'];
 
             // Config and CODEOWNERS come from the DEFAULT-branch checkout. Anything
@@ -169,9 +172,22 @@ jobs:
                 // detectable by any pattern, and this guard does not claim to catch it. What it
                 // catches is the recorded FORM a ruling takes in this file, which is what the
                 // file's own conventions and every entry in it use.
-                const bare = l => l.slice(1).replace(/^[#>\s]*/, '').replace(/[*_`]/g, '').trim();
+                // Round 3: a `*` list marker vanished with the emphasis strip and was caught, while
+                // `-` survived and the field name never reached column 0 — an omission, not scoping,
+                // since both render identically. Table cells, a fullwidth colon, a qualified field
+                // name and the synonym "Resolution" walked through for the same reason: the guard
+                // matched a FORM, and the form has variants. Strip the markers Markdown allows,
+                // then read the field name.
+                const bare = l => l.slice(1)
+                  .replace(/^[\s>#]*/, '')           // indentation, quote markers, heading hashes
+                  .replace(/^[-*+]\s+/, '')          // bullet list markers
+                  .replace(/^\d+[.)]\s+/, '')       // numbered list markers
+                  .replace(/^\|\s*/, '')            // leading table pipe
+                  .replace(/[*_`|]/g, '')            // emphasis, code ticks, remaining table pipes
+                  .replace(/：/g, ':')                // fullwidth colon
+                  .trim();
                 const ruling = lines.filter(l => l.startsWith('+')).find(l => {
-                  const m = /^(?:Ruling|Decision)\s*:\s*(.*)$/i.exec(bare(l));
+                  const m = /^(?:Ruling|Decision|Resolution)(?:\s*\([^)]*\))?\s*:\s*(.*)$/i.exec(bare(l));
                   if (!m) return false;                       // not a ruling line at all
                   return !(/^PENDING\b/i.test(m[1].trim()) && !DECISION.test(l));
                 });
