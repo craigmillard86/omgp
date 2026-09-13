@@ -38,7 +38,8 @@ jobs:
             // file OUT of that glob removes it from the suite exactly as much as `git rm` does,
             // and GitHub reports a pure rename as additions 0 / deletions 0 with the old path in
             // previous_filename — so the deletion rule below could never see it. Renaming the
-            // floor ratchet away scored T1, and doing that WHILE lowering the floor scored T2:
+            // floor ratchet (withdrawn with the floor half at 2389c40; the hole is independent of it)
+            // away scored T1, and doing that WHILE lowering the floor scored T2:
             // inside auto_merge_max_tier, past needs-human, past CODEOWNERS (round-2 red team on
             // #420). The broad `^tests/` deletion rule is KEPT as it was: narrowing it to test_*
             // would stop counting deletions of scenarios and vectors under tests/.
