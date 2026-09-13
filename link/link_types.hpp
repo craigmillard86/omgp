@@ -122,6 +122,14 @@ struct AddrStats {
 struct BusStats {
     uint32_t rate_changes;
     uint32_t bus_faults;
+    // Frames discarded with no attributable address (#144; maintainer ruling 2026-09-11,
+    // "count it at bus level"). FR-011 requires every non-expected frame to be counted, and
+    // FR-011a's other block is per trunk address — but a frame arriving outside any open
+    // response window has no address the engine may charge: a corrupt one never decodes, and
+    // an intact one's `src` is wire-derived and unauthenticated (trunk §5 reserves only
+    // 0xFF). Those discards land here instead, which leaves AddrStats::discards meaning
+    // "discarded during that address's own transaction" and nothing else.
+    uint32_t discards;
 };
 
 } // namespace link
