@@ -214,7 +214,12 @@ advances the rotation and, while `fault`, the rate alternation, so a scheduler t
 every superframe boundary while a transaction was in flight would count phantom rate changes.
 During a reference pass (§7) `next_probe()` yields each enrolled address (state ≠ UNENROLLED)
 once, in address order, at `TRUNK_bit_rate`, without alternating, and records the address it
-yielded in `BusState.pass_addr` until that probe's outcome arrives.
+yielded in `BusState.pass_addr` until that probe's outcome arrives. **While `pass_addr ≠ 0`,
+`next_probe()` re-yields `pass_addr` and advances nothing** — so a scheduler that mis-calls it at
+a superframe boundary with the probe still in flight (obligation 2 violated) gets the same probe
+back and the pass still completes; without the re-yield that mis-call moved `pass_addr` past the
+probe on the wire and the pass could never end (round-13 red team on #472). Fail-safe under the
+violated assumption, not dependent on it.
 
 ## 7. Bus state
 
@@ -239,10 +244,15 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   {addr : state ≠ UNENROLLED}. Under the F3 obligations of §6 (probes are the only traffic during
   a fault; one `next_probe()` call per probe issued) the fallback answer that starts the pass is
   the outcome of the only transaction there was and nothing is in flight when the pass begins.
-  This layer's own control, independent of that assumption: `ref_pass_left` is decremented only
-  by an `on_result` for `pass_addr`, the address of the pass probe in flight (any other outcome
-  is not the pass's and leaves the pass untouched), and never when a probe is issued (a `tick()`
-  between the last probe and its result must not fire the clear, round-8 red team).
+  This layer's own control: `ref_pass_left` is decremented only by the FIRST `on_result` for
+  `pass_addr`, the address of the pass probe in flight, which also sets `pass_addr = 0` — later
+  outcomes for that address, and outcomes for any other address, are not the pass's and leave
+  it untouched — and never when a probe is issued (a `tick()` between the last probe and its
+  result must not fire the clear, round-8 red team). What this control cannot do, stated (rule
+  11): `on_result` carries only an address, so a non-probe outcome for the very address the pass
+  has just probed, arriving before the probe's own, is indistinguishable here; that case does
+  not arise under F3 obligation 1 (probes are the only traffic during a fault), which the rule
+  assumes.
   A valid answer at the reference rate during the pass → clear at the reference rate as above,
   at once (FR-026); the recorded answerer keeps the state it had (it cannot hear the reference
   rate and will be found by §6 in its own time). If
