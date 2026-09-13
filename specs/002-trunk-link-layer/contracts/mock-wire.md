@@ -36,6 +36,19 @@ with the default delay. Steps with `node == 0xFF` apply to every node.
   engines (analysis F1). Tests step time explicitly; nothing sleeps.
 - Capacity: a fixed queue of `4 × kMaxWire` bytes (enough for a response, a duplicate and
   a babble burst); overflow is a test failure (`REQUIRE`), never silent truncation.
+- Undelivered injected bytes (#148): the same no-silent-loss rule, extended from *dropped*
+  to *undelivered*. Every byte `inject_bytes()` enqueues is counted until `receive()`
+  releases it; `pending_injected()` reads that count and `~MockWire()` fails (`CHECK`, not
+  `REQUIRE` — a destructor must not throw while unwinding) when it is non-zero, naming the
+  outstanding count. So a case that plants a fault — a duplicate, a babble burst, a
+  corrupted response — and then lets the wire die before the engine consumes it is failed
+  rather than passing while asserting nothing about that fault. A case that *means* to leave
+  residue acknowledges it with `take_pending_injected()`, which returns the count and clears
+  the accounting (the `take_fault()` idiom) without dequeueing the bytes. Scoped to
+  `inject_bytes()`: bytes a `Kind` scheduled are never counted, since a late scripted
+  response legitimately outlives many cases, and neither is a byte that never reached a full
+  RX queue — that one is already the capacity fault above. The guard fires only at
+  destruction; mid-test residue (bytes not yet due) is normal.
 - All randomness from `Step::seed` through an xorshift32 in the mock; the same script
   reproduces byte-for-byte.
 

@@ -436,6 +436,118 @@ TEST_CASE("Kind::Duplicate answers with the real response, then the identical by
     REQUIRE(second_copy_start == first_end + 40);
 }
 
+// --- Undelivered injected RX bytes (#148) --------------------------------------------------
+// The direct test of MockWire::inject_bytes() tasks.md records as outstanding under T028, and
+// the proof of the accounting ~MockWire() checks. A cell that injects a fault — a duplicate, a
+// babble burst, a corrupted response — and then lets the wire die before the engine consumes
+// it asserts nothing about that fault while passing (the SC-004 duplicate cells found by the
+// review of #145). contracts/mock-wire.md "Capacity" already forbids a SILENT dropped byte;
+// these two cases extend that from dropped to undelivered.
+
+TEST_CASE("MockWire counts the injected RX bytes receive() has not released, and reaches zero "
+          "once they are drained",
+          "[link][mock_wire]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint64_t bt = byte_time_us(omgp::TRUNK_bit_rate);
+
+    // A wire nothing was injected into owes nothing.
+    size_t pending = 1;
+    HEAP_FREE_SCOPE({ pending = wire.pending_injected(); });
+    REQUIRE(pending == 0);
+
+    // Scheduled bytes (Respond/CrcError/Duplicate) are deliberately NOT tracked — the guard is
+    // scoped to raw injection (#148): a late scripted response legitimately outlives many
+    // cases. Driven on its own MockWire, inside this scope, so that its destructor runs here
+    // with a whole undrained response still queued and stays silent about it.
+    {
+        FakeClock sched_clock;
+        MockWire scheduled(sched_clock);
+        const std::vector<uint8_t> req = encode_request(0x01, 0);
+        uint64_t tx_end = 0;
+        HEAP_FREE_SCOPE({ tx_end = scheduled.transmit(req.data(), req.size(), 0); });
+        REQUIRE(tx_end == req.size() * bt); // the Respond answer really was scheduled, undrained
+        REQUIRE(scheduled.pending_injected() == 0);
+    }
+
+    // n injected bytes, one byte_time_us() apart (mock_wire.hpp): all outstanding at once.
+    const uint8_t noise[6] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
+    constexpr size_t n = sizeof noise;
+    const uint64_t start = 1000;
+    HEAP_FREE_SCOPE({ wire.inject_bytes(noise, n, start); });
+    REQUIRE(wire.pending_injected() == n);
+
+    // Advance only far enough for the first k to reach their start instants, and drain those.
+    constexpr size_t k = 4;
+    static_assert(k < n, "the case must leave some injected bytes undelivered at this point");
+    wire.advance_to(start + (k - 1) * bt);
+    uint8_t byte = 0;
+    uint64_t start_us = 0;
+    size_t drained = 0;
+    bool got = false;
+    for (;;) {
+        HEAP_FREE_SCOPE({ got = wire.receive(byte, start_us); });
+        if (!got)
+            break;
+        ++drained;
+    }
+    REQUIRE(drained == k); // otherwise the residue below is not the one this case claims
+    REQUIRE(wire.pending_injected() == n - k);
+
+    // Past the last byte's start instant the rest is released, and the accounting empties.
+    wire.advance_to(start + (n - 1) * bt);
+    for (;;) {
+        HEAP_FREE_SCOPE({ got = wire.receive(byte, start_us); });
+        if (!got)
+            break;
+        ++drained;
+    }
+    REQUIRE(drained == n);
+    REQUIRE(wire.pending_injected() == 0);
+    // Nothing left for ~MockWire() to complain about: this case ends silent by consuming the
+    // bytes it planted, the first of the two routes open to a case (#148).
+}
+
+TEST_CASE("MockWire::take_pending_injected() acknowledges undelivered injected bytes and clears "
+          "the accounting the destructor checks",
+          "[link][mock_wire]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t burst[3] = {0xDE, 0xAD, 0xBE};
+    constexpr size_t n = sizeof burst;
+    const uint64_t start = 500;
+    wire.inject_bytes(burst, n, start);
+
+    // The clock is never advanced: this case deliberately leaves the whole burst undelivered —
+    // exactly the residue ~MockWire() fails on — and acknowledges it explicitly instead, the
+    // second of the two routes open to a case (#148).
+    REQUIRE(wire.pending_injected() == n);
+    size_t acked = 0;
+    HEAP_FREE_SCOPE({ acked = wire.take_pending_injected(); });
+    REQUIRE(acked == n);
+    // take_fault()'s idiom: the count is consumed, not merely observed, so a second reader
+    // (including the destructor) sees nothing outstanding.
+    REQUIRE(wire.take_pending_injected() == 0);
+    REQUIRE(wire.pending_injected() == 0);
+
+    // Acknowledging the residue clears the ACCOUNTING, not the wire: the bytes are still
+    // queued and still released on their own start instants, and the count stays at 0 rather
+    // than wrapping below it (size_t: an unguarded decrement would read as a huge number here).
+    wire.advance_to(start + (n - 1) * byte_time_us(omgp::TRUNK_bit_rate));
+    uint8_t byte = 0;
+    uint64_t start_us = 0;
+    size_t drained = 0;
+    bool got = false;
+    for (;;) {
+        HEAP_FREE_SCOPE({ got = wire.receive(byte, start_us); });
+        if (!got)
+            break;
+        ++drained;
+    }
+    REQUIRE(drained == n);
+    REQUIRE(wire.pending_injected() == 0);
+}
+
 TEST_CASE("encode_crc_corrupted refuses a payload longer than the protocol allows", "[mock]") {
     // Red team @ef1ec22 [LOW]: the guard added with this function's export was pinned by
     // nothing, so deleting it would pass the suite -- and what it prevents is a stack

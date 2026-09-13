@@ -109,6 +109,22 @@ class MockWire : public omgp::link::ByteWire {
     // these bytes model another station's transmission, not a request addressed to a node.
     void inject_bytes(const uint8_t* bytes, size_t n, uint64_t start_us);
 
+    // Test helper (#148): how many inject_bytes() bytes are still queued — enqueued by
+    // inject_bytes() and not yet released by receive(). 0 on a wire nothing was injected
+    // into. Bytes a Kind scheduled (schedule_respond/crc_error/duplicate) are NOT counted:
+    // the accounting is scoped to raw injection, because a late scripted response
+    // legitimately outlives many cases while an un-consumed injected fault means the case
+    // asserted nothing about the fault it planted. Nor are bytes inject_bytes() could not
+    // enqueue on a full RX queue — those are already reported by the "RX queue capacity
+    // exceeded" fault_ above, and counting them here would report one dropped byte twice.
+    size_t pending_injected() const;
+
+    // Test helper (#148): pending_injected(), and clears the accounting (take_fault()'s
+    // idiom) — the acknowledgement path for a case that deliberately ends with injected
+    // bytes still on the wire. Clearing the accounting does NOT dequeue those bytes: they
+    // are still released on their own start instants, they simply stop being counted.
+    size_t take_pending_injected();
+
     // Test helper (PR #112 review, finding 1): returns the fault recorded since the last
     // take_fault() call (or nullptr if none), and clears it. A test that deliberately drives
     // MockWire into a specific fault (e.g. RX-queue overflow) uses this, plus its own
@@ -145,6 +161,12 @@ class MockWire : public omgp::link::ByteWire {
     struct QueuedByte {
         uint8_t byte;
         uint64_t start_us;
+        // Whether inject_bytes() (rather than a scheduled Kind) enqueued this byte, so
+        // receive() knows to discount it from injected_pending_ when it releases it. Per
+        // byte, not a queue-wide count alone: injected and scheduled bytes interleave in
+        // the one start-instant-sorted queue, so the releasing end cannot tell them apart
+        // any other way.
+        bool injected;
     };
 
     // 4 x kMaxWire (contracts/mock-wire.md "Capacity"): enough for a response, a
@@ -169,10 +191,12 @@ class MockWire : public omgp::link::ByteWire {
     // response, then the same bytes again delay_us after that first copy ends.
     void schedule_duplicate(const omgp::link::FrameFields& request, uint64_t tx_end,
                             uint32_t delay_us);
-    void enqueue(uint8_t byte, uint64_t start_us);
+    // `injected`: mark this byte as inject_bytes()'s (see QueuedByte::injected). Defaulted
+    // false so the three schedule_*() paths stay untracked without restating it.
+    void enqueue(uint8_t byte, uint64_t start_us, bool injected = false);
     // Queues `written` already-encoded bytes starting at `t0`, one byte_time_us() apart —
     // the enqueue() loop schedule_respond/schedule_crc_error/schedule_duplicate all share.
-    void enqueue_frame(const uint8_t* buf, size_t written, uint64_t t0);
+    void enqueue_frame(const uint8_t* buf, size_t written, uint64_t t0, bool injected = false);
     void record_transcript(const omgp::link::FrameFields& f, uint64_t tx_start_us);
 
     FakeClock& clock_;
@@ -218,6 +242,10 @@ class MockWire : public omgp::link::ByteWire {
     // takes rx_queue_[0].
     QueuedByte rx_queue_[kRxCapacity] = {};
     size_t rx_count_ = 0;
+    // How many of rx_queue_'s entries carry injected == true (#148). Maintained alongside
+    // the flags rather than recomputed, so pending_injected() is a read and the destructor
+    // does no work on the queue while unwinding.
+    size_t injected_pending_ = 0;
 
     TxRecord transcript_[kTranscriptCapacity] = {};
     size_t transcript_count_ = 0;
