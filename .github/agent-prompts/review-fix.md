@@ -49,9 +49,14 @@ of PR #{{PR}} at head
    A finding you believe is WRONG is not fixed by silencing it:
    rebut it in the comment with evidence and leave the code.
    A finding that is only in the PR DESCRIPTION (a false or
-   stale claim) IS yours to fix: correct the body with
-   `gh pr edit {{PR}} --body-file <file>` and record what you
-   changed under (a). Never change the title, base or labels.
+   stale claim) IS yours to fix: write the corrected body to
+   `/tmp/pr-body.md` and run exactly
+   `gh pr edit {{PR}} --body-file /tmp/pr-body.md` — nothing
+   else on that line; any other form is denied. You must not
+   add, remove or change any `Closes`/`Fixes`/`Resolves #n`
+   reference: the loop compares them before and after the run
+   and escalates any change. Never change the title, base or
+   labels.
    A description edit does not move the head, and the reviewers
    re-read only on a push — so after correcting the body, push
    an empty commit (`git commit --allow-empty -m "docs(pr):

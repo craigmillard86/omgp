@@ -118,7 +118,7 @@ async function detect({ github, context, core, env }) {
   // is the line that tells a human this was a permissions problem, not an empty backlog.
   core.notice(`agent-noop: ${kind} run — turns=${f.turns} denials=${f.denials} is_error=${f.isError}`);
 
-  let produced = false, partial = false, onlyComment = false, reason = '';
+  let produced = false, partial = false, onlyComment = false, refsChanged = false, refsDetail = '', reason = '';
   const since = Date.parse(env.SINCE || '');
   const sinceKnown = Number.isFinite(since);
   if (!sinceKnown) core.warning('agent-noop: the run start (SINCE) is empty or unparseable — t0 did not run, so nothing can be attributed to this run (fail closed)');
@@ -185,6 +185,19 @@ async function detect({ github, context, core, env }) {
     // head, so no new review, so agent-merge says "review reported findings" until a human reads
     // the comment (#463, seen on #452). finalize turns it into the label humans watch.
     onlyComment = spoke && !moved;
+    // The fixer may now rewrite the description (#463), and agent-merge closes — and the
+    // exhaustion path releases — every issue the body's Closes/Fixes/Resolves name. The gate
+    // snapshots that set before the run (`none` when empty; '' means an older gate that did not);
+    // a change is escalated and the job failed (round-2 review + red team on #466).
+    const closesOf = t => [...new Set([...(t || '').matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi)].map(x => Number(x[1])))].sort((a, b) => a - b).join(',');
+    const snap = String(env.CLOSES_BEFORE || '').trim();
+    if (snap) {
+      const beforeSet = snap === 'none' ? '' : snap.split(',').map(s => Number(s.trim())).filter(Number.isFinite).sort((a, b) => a - b).join(',');
+      const nowSet = closesOf(pr.body);
+      refsChanged = beforeSet !== nowSet;
+      refsDetail = `before: ${beforeSet ? '#' + beforeSet.split(',').join(', #') : 'none'}; now: ${nowSet ? '#' + nowSet.split(',').join(', #') : 'none'}`;
+      if (refsChanged) core.warning(`agent-noop: the PR's closing references changed during the run (${refsDetail})`);
+    }
     reason = moved ? `head moved from ${before.slice(0, 7)} to ${pr.head.sha.slice(0, 7)}`
       : spoke ? 'the fixer commented during the run'
         : !sinceKnown ? `head unchanged at ${before.slice(0, 7)} and the run start is unknown (t0 did not run)`
@@ -207,10 +220,12 @@ async function detect({ github, context, core, env }) {
   core.setOutput('produced', String(produced));
   core.setOutput('partial', String(partial));   // implement only: a branch with no PR
   core.setOutput('only_comment', String(onlyComment));   // fix only: answered, did not push
+  core.setOutput('refs_changed', String(refsChanged));   // fix only: Closes/Fixes/Resolves set moved
+  core.setOutput('refs_detail', refsDetail);
   core.setOutput('reason', reason);   // finalize reports THIS, not a hard-coded sentence
   core.setOutput('turns', String(f.turns));
   core.setOutput('denials', String(f.denials));
-  return { noop, produced, partial, only_comment: onlyComment, turns: f.turns, denials: f.denials, reason };
+  return { noop, produced, partial, only_comment: onlyComment, refs_changed: refsChanged, refs_detail: refsDetail, turns: f.turns, denials: f.denials, reason };
 }
 
 // A label that is already absent is a non-event (404), the same rule review-fix's exhaustion path
@@ -234,7 +249,7 @@ async function finalize({ github, context, core, env }) {
   // run that produced, did not error, is not comment-only and not partial has nothing to
   // finalize. Compared against the literal 'true' — the workflow sends the STRING 'false' on
   // every ordinary run, and 'false' is truthy (round-1 red team on #466).
-  if (env.NOOP === 'false' && env.ONLY_COMMENT !== 'true' && env.PARTIAL !== 'true') {
+  if (env.NOOP === 'false' && env.ONLY_COMMENT !== 'true' && env.PARTIAL !== 'true' && env.REFS_CHANGED !== 'true') {
     core.notice('agent-noop: production established — nothing to finalize');
     return;
   }
@@ -291,6 +306,21 @@ async function finalize({ github, context, core, env }) {
 
   const pr = Number(env.PR);
   const label = `review-fix-${env.ATTEMPT}`;
+  if (env.REFS_CHANGED === 'true') {
+    // An agent rewrote the text the merge gate acts on mechanically. Whatever else the run did,
+    // this is escalated and fails: the references are restored by a human, not by the loop.
+    let esc = true;
+    try { await github.rest.issues.addLabels({ owner, repo, issue_number: pr, labels: ['needs-human'] }); }
+    catch (e) { esc = false; core.warning(`agent-noop: could NOT apply \`needs-human\` to #${pr} (${(e && e.status) || ''}) — apply it by hand`); }
+    await github.rest.issues.createComment({
+      owner, repo, issue_number: pr,
+      body: `🛑 Review-fix changed the closing references in this PR's description (${env.REFS_DETAIL || 'detail unavailable'}), after ${spent}.\n\n` +
+        `\`agent-merge\` closes, and the exhaustion path releases, every issue those \`Closes\`/\`Fixes\`/\`Resolves\` references name — text an agent must not change. ` +
+        `${esc ? '`needs-human` is applied' : '⚠️ `needs-human` could NOT be applied — apply it by hand'}: restore the references by hand before this PR goes any further. ` +
+        `\`${label}\` stays: the attempt was spent. Job log: ${runUrl}`});
+    core.setFailed(`agent-noop: review-fix on #${pr} changed the PR's closing references (${env.REFS_DETAIL || ''}) — needs-human ${esc ? 'applied' : 'NOT applied'}, job failed (#463).`);
+    return;
+  }
   // Only a run that did NOT error: is_error is a no-op whatever else is true (see the header), so
   // an errored comment-only run falls through to the produced-then-errored branch below, which
   // fails loudly and says it errored (round-1 review on #466).

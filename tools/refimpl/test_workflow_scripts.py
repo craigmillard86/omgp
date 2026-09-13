@@ -643,6 +643,9 @@ def test_rebuttal_only_fix_run_is_escalated_and_the_fixer_may_edit_the_body():
                   f"gh pr edit {pr} --body-file /tmp/pr-body.md --remove-label review-fix-1",
                   f"gh pr edit {pr} --body-file /tmp/other.md", f"gh pr edit {pr} --body-file /tmp/pr-body.md;gh pr edit {pr} --base main"):
             assert not allowed(c), (st.get("id"), "must be denied by the allow-list", c)
+        # ...and still nothing that reaches the approval path.
+        for banned in ("Bash(gh pr review*)", "Bash(gh pr merge*)", "Bash(gh api*)", "Bash(gh*)", "Bash(*)"):
+            assert banned not in granted, (st.get("id"), banned)
     assert "/tmp/pr-body.md" in prompt_text_for_review_fix(), "the prompt must dictate the exact sanctioned command"
     # The Closes/Fixes/Resolves set the merge gate acts on is snapshotted by the gate and compared
     # by detect; finalize is told REFS_CHANGED and must not return early on it.
@@ -651,9 +654,6 @@ def test_rebuttal_only_fix_run_is_escalated_and_the_fixer_may_edit_the_body():
     assert "CLOSES_BEFORE" in denv and "needs.gate.outputs.closes" in str(denv["CLOSES_BEFORE"]), "detect must receive the snapshot"
     assert "REFS_CHANGED" in env and "steps.detect.outputs.refs_changed" in str(env["REFS_CHANGED"]), "finalize must be told"
     assert "REFS_CHANGED" in _script("review-fix.yml", "fix", "finalize"), "finalize's early return must not swallow it"
-        # ...and still nothing that reaches the approval path.
-        for banned in ("Bash(gh pr review*)", "Bash(gh pr merge*)", "Bash(gh api*)", "Bash(gh*)", "Bash(*)"):
-            assert banned not in granted, (st.get("id"), banned)
     prompt = prompt_text_for_review_fix()
     assert "gh pr edit" in prompt, "review-fix.md must tell the fixer it may correct the PR body"
     assert "Closes" in prompt and "must not" in prompt, "the prompt must forbid touching the closing references"

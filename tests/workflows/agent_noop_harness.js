@@ -477,6 +477,9 @@ const during = '2026-09-12T10:00:30Z';
   w = world({ head: 'b'.repeat(40), body: 'Closes #1' });
   r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: with no snapshot from the gate the guard cannot judge and does not flag', r.refs_changed === false);
+  w = world({ head: 'b'.repeat(40), body: 'Closes #1' });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'none', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  check('fix: a reference added to a body that had NONE is flagged (the gate writes `none`, not empty)', r.refs_changed === true);
   w = world({ labels: ['agent-authored', 'risk:t0', 'review-fix-1'] });
   await finalize({ ...w, env: { KIND: 'fix', PR: '466', ATTEMPT: '1', ATTEMPTS: '1', TURNS: '30', DENIALS: '0', NOOP: 'false', PRODUCED: 'true', ONLY_COMMENT: 'false', REFS_CHANGED: 'true',
     REASON: 'head moved from aaaaaaa to bbbbbbb' } });
