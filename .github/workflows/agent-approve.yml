@@ -80,7 +80,10 @@ jobs:
               return re.test(path) || path.startsWith(p + '/');
             };
             const changed = await github.paginate(github.rest.pulls.listFiles, {owner, repo, pull_number: pr.number, per_page: 100});
-            const owned = changed.map(f => f.filename).filter(f => ownedPatterns.some(pat => ownedBy(pat, f)));
+            // A rename is ONE entry: new path in `filename`, old path in `previous_filename`, and it
+            // may carry a patch. Both paths are checked (round-6 red team + review on #420).
+            const owned = changed.flatMap(f => f.previous_filename ? [f.filename, f.previous_filename] : [f.filename])
+              .filter(f => ownedPatterns.some(pat => ownedBy(pat, f)));
             if (owned.length) {
               core.notice(`approve: CODEOWNERS-owned path(s) changed — the owner's review is required, not auto-approving: ${owned.join(', ')}`);
               return;

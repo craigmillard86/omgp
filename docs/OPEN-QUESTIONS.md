@@ -3070,6 +3070,50 @@ This was measured, not assumed. On the 92-comment corpus of 2026-09-08 (verdicts
 
 ---
 
+## 2026-09-12 — Does an empty mutation scope discharge a checkpoint task's "local mutation run" clause?
+
+**Context:** the US2/US3/US4 checkpoint tasks of `specs/002-trunk-link-layer/tasks.md`
+(T032, T036, T040) each require a "local mutation run" alongside the full `./pipeline.sh`
+and `./pipeline.sh esp32` runs and the `UNIT_TEST_FLOOR` raise. A checkpoint PR that adds
+no source — T040/#58 (PR #401) is one: its diff is `pipeline.sh`, `tasks.md` and this file
+— changes nothing under `tools/mutate.cfg`'s `scope_dirs` (`l3 link core`).
+`tools/mutate.sh:105-108` then prints `mutation: nothing in scope (origin/main) — no
+changed sources under: l3 link core` and exits 0 *before* the Mull presence check
+(`:105` `if [ -z "$SCOPE" ]; then`, `:106` the echo, `:107` `exit 0`), so the command
+"passes" without
+building, mutating or executing anything. The clause is therefore unsatisfiable in
+substance on such a PR, while being trivially satisfiable in letter. Nothing in
+`tasks.md`, `docs/GOVERNANCE.md` or `docs/OPERATING-POLICY.md` says which reading binds.
+
+The same shape recurs: it is issue #146 (mutation attestation for PRs that change no
+scoped source), and it is what made the T040 red-team finding blocking — the box had been
+ticked with the clause admittedly not run.
+
+**Recommendation:** the clause is discharged **only by an explicit, checkable
+attestation**, not by a green vacuous exit and not by silence. Concretely: a checkpoint PR
+whose `scope_dirs` diff is empty states that fact, names the commit where the mutation
+evidence for the certified sources actually lives (for US4: PR #124 / issue #56, whose CI
+`deep-verify` ran `./tools/mutate.sh --diff origin/main --require`), and labels that
+evidence *assumed* rather than re-demonstrated, per CLAUDE.md rule 11. Until #146 makes
+that attestation mechanical, an agent does not tick the checkpoint box on an empty scope;
+a human ticks it, or rules the clause discharged here. The conservative default is chosen
+because the opposite reading lets "mutation run: pass" mean "no mutant was ever built",
+which is the blind spot `mutate.sh`'s own no-oracle and no-body rules exist to close.
+
+Not recommended: dropping the clause from the checkpoint tasks (it is load-bearing when
+the checkpoint PR *does* carry source), or adding a mutation stage to `pipeline.sh` on
+this branch (that is #146's design decision and outside T040's scope).
+
+**Ruling:** ANSWERED — see the entry immediately below, appended on merge of #409
+(2026-09-12): an empty diff scope discharges the clause, and the defect is in the criterion.
+This question was raised by the round-1 red team on PR #401 (finding 1, at `3ad363c`) and is
+recorded as asked; only this ruling line is updated, so the pending count does not carry a
+question that has been answered.
+
+**Supersedes:** none.
+
+---
+
 ## 2026-09-12 — T040's "local mutation run": an empty diff scope discharges it, and the criterion is the defect
 
 **Context:** T040 (#58) requires a "local mutation run" as its fourth acceptance criterion. The dispatch agent could not run one — `tools/mutate.sh` is outside the dispatch allow-list and `pipeline.sh` has no mutation stage (tracked as #402) — and said so rather than working around the denial. It then found the more interesting reason, which stands even with the tooling unblocked: **the branch changes no file inside `tools/mutate.cfg`'s `scope_dirs` (`l3 link core`)**. `tools/mutate.sh:105-108` short-circuits on an empty scope, printing "nothing in scope" and exiting 0 *before* the Mull presence check. A run there would have produced a vacuous pass — a green tick attesting nothing about `link/health.cpp`.
@@ -3103,6 +3147,77 @@ Two related defects found while implementing the threshold:
 **The one judgement this adds, recorded because #134 does not state it:** an **untagged** bullet is treated as MEDIUM and filed. The alternative — treat untagged as LOW and drop it — fails toward silence, and a reviewer omitting a tag would then lose a real proposal without a trace. Failing toward filing keeps the loss visible as a closeable issue, which is the same direction every other choice in this workflow takes. If the maintainer prefers the stricter reading, it is a one-word change and this entry is the place to record it.
 
 **Supersedes:** none. **Amends:** nothing — it implements #134 as written.
+
+---
+
+## 2026-09-12 — Autonomy gates: branch protection was overriding GOVERNANCE §1, and the floor's datum sat in an owned file
+
+**Context:** the maintainer observed that "everything gets escalated to needs-human" and that they appear to have to verify every merge. Measured over the last 40 merged PRs: **39 were merged by the maintainer, 1 by the bot**, while only 18 were T3. So roughly 22 were eligible by tier (`auto_merge_max_tier: 2`) and were merged by hand anyway. The causes are three, and only one of them was intended:
+
+1. **`agent-merge.yml:113` merges only `task/*` heads.** 14 of the last 25 merges were on `governance/`, `docs/`, `ci/`, `policy/` branches — the governance work — so they were structurally ineligible. *This is correct and is not changed:* governance changes should be the maintainer's.
+2. **`pipeline.sh` is CODEOWNERS-owned, and every checkpoint raises `UNIT_TEST_FLOOR`.** Of the 8 PRs that were `task/*` AND `risk:t2` (past both the branch and tier gates), **5 were blocked by that one file**, and all five were floor raises.
+3. **Branch protection contradicted the written policy.** `GOVERNANCE.md` §1 (and §4, :215) states that a human merges "any CODEOWNERS-owned path **except** `docs/OPEN-QUESTIONS.md` and `specs/**/tasks.md`", and `agent-merge`'s `SANCTIONED` list implements exactly that. But CODEOWNERS *also* listed those two paths, and GitHub's "require review from Code Owners" knows nothing about the workflow's exception. PR #342 is the instance: `risk:t2`, clean review and red-team verdicts, every check green, autonomous merge due — and GitHub answered **`405 Waiting on code owner review from craigmillard86`**. The exception existed only in the half of the system that does not enforce.
+
+**Ruling:** none needed for (3) — it enforces `GOVERNANCE.md` §1 as already written, and the maintainer directed the change on 2026-09-12. (2) is a placement decision, recorded below.
+
+**What changed:**
+- `.github/CODEOWNERS` no longer lists `docs/OPEN-QUESTIONS.md` or `specs/**/tasks.md`. Branch protection now matches the policy instead of overriding it.
+- **The ruling record keeps a gate, mechanically instead of by ownership.** `agent-merge` now refuses any PR whose `OPEN-QUESTIONS` diff adds a `**Ruling:**` line that is not `PENDING`, or removes a line from the append-only history, or whose patch GitHub omitted (fail closed). Appending a question or a recommendation stays autonomous; recording a decision as the maintainer's does not. This is the property the CODEOWNERS listing was quietly buying, and it would have been lost silently.
+- **The floor move was attempted and WITHDRAWN.** `UNIT_TEST_FLOOR` stays in `pipeline.sh`, where changing it needs the owner mechanically. Three adversarial rounds each found a new hole in the replacement, and the third showed why: see below.
+
+**Corrected after adversarial round 1 (@`67d42e8`), and the corrections matter more than the entry did.** The red team and review together raised eleven findings; all were correct. Two of them were **false claims in the text above as first written**, not merely gaps:
+
+- *"Deleting that ratchet is a reduction of test content, T3, so it cannot ride in on an autonomous merge."* False. `risk-score.yml`'s rule was anchored at `^tests/`, and the ratchet lives at `tools/refimpl/test_floor_datum.py` — deleting it scored **T1**, inside `auto_merge_max_tier: 2`. Worse, a one-line change to the floor datum is `+1/-1`, so `deletions > additions` is false and it scored **T0**: the number this PR moved out of an owned file could have been lowered by an autonomous merge with nothing to stop it. The claim is now true because this PR makes it true — the rule covers `tools/refimpl/test_*`, and the datum scores T2.
+- *"Fails closed on CI where the base ref is fetched."* False. The only job running that test is `native`, which checks out with no `fetch-depth` — `ci.yml:126` says in the repo's own words that "a depth-1 clone has no such ref". `origin/main` was absent on every PR run, so the ratchet took its skip branch **every time**, and the ON_CI fail-closed branch was unreachable because its own guard needed the same ref. The test now fetches the base explicitly and fails, rather than skipping, when it cannot.
+
+Also fixed: the ruling guard's `PENDING` test was a whole-line substring match, which this file's own conventions defeat — six recorded human rulings quote the superseded *pending* text on the ruling line (`:147`, `:357`, `:418`, `:731`, `:1004`) and `:1109` records a decision whose value *begins* "pending — ratified by the human merge". The guard now requires the ruling's **value** to start with PENDING **and** the line to carry no decision marker. The append-only check's `!startsWith('---')` clause protected nothing (a `patch` never contains file headers) while hiding removals of the file's 48 bare `---` separators; it is gone. Renaming the record walked the guard entirely; `previous_filename` is now matched and a rename is refused. Both floor readers took the *first* bare integer while this file documents the *last*, so a raise appended the way its own instructions describe silently kept the old floor; both now refuse an ambiguous datum outright. `risk-score.yml` gained the harness it never had (`tests/workflows/risk_score_harness.js`, 12 cases).
+
+**Round 2 (@`4211c8b`) found three more, and two of them were in round 1's own fixes.**
+
+- *`[HIGH]` The gate and the ratchet did not read the same number.* Round 1 made each reader refuse an ambiguous datum, and I wrote that they "mirror `pipeline.sh` exactly, so the two readers cannot disagree". False. `tr -d '[:blank:]'` deleted **internal** blanks, so the shell read `1 0 0` as `100` while `parse_floor` rejected it; `.strip()` dropped a trailing CR that `tr` left in place, so `582360\r` was invisible to the gate and visible to the ratchet. Composed, each reader saw exactly one integer — a *different* one — and the unit-test count gate could have run at **100** with `test_the_floor_is_never_lowered` green. Every per-reader check stayed green because each reader was only ever checked against itself. Both now trim leading and trailing whitespace only, identically, and the test compares the two **values** rather than asking whether each refuses.
+- *`[HIGH]` Renaming a test out of the collector's glob removed it with no deletion anywhere.* Round 1 taught this exact lesson in `agent-merge.yml` — a rename reports the old path in `previous_filename` — and I did not apply it three files away in `risk-score.yml`. Renaming the ratchet out of `test_*.py` scored **T1**; doing that *while* lowering the floor scored **T2**, inside `auto_merge_max_tier`, past `needs-human`, past CODEOWNERS. The broad `^tests/` deletion rule is kept exactly as it was — narrowing it to `test_*` would have stopped counting deletions of scenarios and vectors — and a rename **out of** the collected-test glob is now a reduction of test content on top of it.
+- *`[MEDIUM]` The ruling guard keyed on one literal spelling.* `**Ruling**: adopted` renders identically to `**Ruling:** adopted`; a heading form and the word "Decision" record a decision just as plainly. The marker is now read after stripping heading and emphasis characters.
+
+**What the ruling guard does NOT do, stated because the round-2 reproducer includes it:** prose that records a decision with no marker at all — "the maintainer approved this in session; treat it as ruled" — is not detectable by any pattern, and the guard does not claim to catch it. It is a **control over the recorded form**, not a guarantee about the file's meaning. The forms it covers are the ones every entry in this file actually uses.
+
+**Round 3 (@`7fc5176`) and the maintainer's decision to split (2026-09-12).**
+
+Round 3 found the floor half's flaw is structural rather than a bug to patch. The attack is a *balanced* edit: flip one assertion in the ratchet (`== "ok"` → `in ("ok","lowered")`, one line added, one removed → **T1**) and change the datum `582360` → `100` (one line added, one removed → **T2**). Total **T2** — inside `auto_merge_max_tier`, no owned path, no `needs-human`, ratchet green, `unit` green, merged autonomously with the count gate switched off. Deleting the ratchet and renaming it were made mechanical in rounds 1 and 2; **neutering it in place is not**, and cannot be: for a floor raise to merge autonomously the number must be unowned, and any guard protecting it is then unowned too and editable in the same PR.
+
+Round 3 also found the ratchet had made this PR's own `native` check RED (run `34698191598`): the datum does not exist on `main`, so the base lookup returned nothing, and round 1's fail-closed rule could not tell *"the file is new"* from *"the base is unreachable"*. The PR that introduces the datum could not pass its own ratchet, and the only route to green would have been to weaken it — the worst possible pressure to build into a gate.
+
+The three rounds, on that half alone: the ratchet never ran → the two readers disagreed (the gate would have run at **100** with every check green) → in-place neutering, plus a self-inflicted red build.
+
+**Ruling:** human, 2026-09-12. **Split the change.** The CODEOWNERS correction and the ruling guard stay — they are what `GOVERNANCE.md` §1 already authorised and what PR #342's `405` was costing — and drew no findings across three rounds. The floor move is withdrawn: `UNIT_TEST_FLOOR` returns to `pipeline.sh`. The cost is accepted and should be recorded plainly: a checkpoint PR that raises the floor still needs the maintainer's merge, which is 5 of the 8 otherwise-eligible T2 PRs measured at the top of this entry. That friction is the price of the number being owned, and owning it is the only control that survived attack.
+
+**Kept from the withdrawn half, because the hole is real either way:** `risk-score.yml`'s "reduces test content" rule now covers `tools/refimpl/test_*` and treats a rename OUT of the collected-test glob as a removal. Deleting the 441-test Python suite scored T1 before any of this.
+
+**Still true and still stated:** the ruling guard is a control over the recorded FORM, not a guarantee about the file's meaning. Prose that records a decision with no marker is not detectable by any pattern. `docs/OPEN-QUESTIONS.md` also scores T0 by path, and deliberately so — tiering it T3 would re-block every sanctioned agent append behind `needs-human`, which is the friction this entry exists to remove.
+
+**Supersedes:** none. **Amends:** `.github/CODEOWNERS`; `.github/workflows/risk-score.yml`; `docs/GOVERNANCE.md` §1 and §4 (which described those paths as an ownership exception they no longer have, and did not record the ruling guard); SC-008 in `specs/001-protocol-foundation/spec.md`; `specs/001-protocol-foundation/contracts/tooling.md`; `docs/ADDING-AN-OPCODE.md`.
+
+---
+
+## 2026-09-13 — Correction by supersession: the 2026-09-12 autonomy-gates entry describes work that `2389c40` withdrew
+
+**Context:** review round 4 of PR #420 (@`2389c40`) found that the entry above was written before the split and not re-read after it. Its **Amends** line, three present-tense sentences in its round-1 and round-2 sections, and two figures describe the withdrawn floor half as shipped. This file is append-only, so that entry stands as written and this one corrects it.
+
+**What is wrong in the 2026-09-12 entry, and what is true at `2389c40`:**
+
+- `:3197` **Amends** lists SC-008 in `specs/001-protocol-foundation/spec.md`, `specs/001-protocol-foundation/contracts/tooling.md` and `docs/ADDING-AN-OPCODE.md`. None is amended: all three edits were reverted by `2389c40`, and `spec.md` and `ADDING-AN-OPCODE.md` still point at `pipeline.sh`, which is where the floor stays. The line also omits `.github/workflows/agent-merge.yml`, where the ruling guard it records lives. The files #420 changes are exactly: `.github/CODEOWNERS`, `.github/workflows/agent-merge.yml`, `.github/workflows/risk-score.yml`, `docs/GOVERNANCE.md` §1 and §4, this file, and the three harnesses `tests/workflows/agent_approve_harness.js`, `agent_merge_harness.js`, `risk_score_harness.js` with their driver `tools/refimpl/test_workflow_scripts.py`. *Demonstrated by `git diff origin/main...2389c40 --stat`: nine files, none of them `pipeline.sh` or the three specs/docs named.*
+- `:3170` *"the datum scores T2"* — there is no datum. `tests/unit-test-floor.txt` was deleted with the withdrawal. What survives is the rule: `risk-score.yml` counts a deletion, or a rename out of the collected glob, under `tools/refimpl/test_*` as reduced test content.
+- `:3171` *"The test now fetches the base explicitly and fails, rather than skipping"* — `tools/refimpl/test_floor_datum.py` was deleted; no such test exists at this head.
+- `:3177` *"Both now trim leading and trailing whitespace only, identically, and the test compares the two values"* — both readers and that test were withdrawn. `pipeline.sh` is byte-identical to `main` and reads `UNIT_TEST_FLOOR` exactly as it did before #420.
+- `:3173` says `risk_score_harness.js` has **12 cases**; it has **15** at this head (counted: 15 `check(` calls).
+- `:3193` says the Python suite has **441** tests; `python -m pytest tools/refimpl/ --collect-only -q` collects **436** at this head. The same figure sat in comments at `tests/workflows/risk_score_harness.js:8`, `tools/refimpl/test_workflow_scripts.py:1118` and `.github/workflows/risk-score.yml:27`, each also naming the withdrawn ratchet as a reason the rule exists; all three are corrected in this PR. Comments only; no test changes.
+
+The round-1, round-2 and round-3 narratives of the floor readers, the ratchet and the rename attack remain a true record of what was found and why that half was withdrawn. Only their "now" clauses are stale, and they are the ones listed above.
+
+**Round 5 (@`5c6b71e`) found one more hole in the guard itself:** the rename check inspected a single entry, so renaming the record to an archive path *and* adding a fresh file at the old path in one PR let the fresh file's clean patch through, with GitHub's filename ordering choosing which entry was seen. Fixed at `2d800bf`: every matching entry is checked and a rename in either direction is refused. Red first: `A6b`/`A6c`/`A6d` in `agent_merge_harness.js`, 72/74 at `4bc512f`, 74/74 after. Round 5 also found that the first draft of this entry recorded a dated human ruling and an instruction to merge #420 with no artefact behind either, which is the exact form the guard refuses; the line below is what remains.
+
+**Ruling:** PENDING — human. Recommended: correct the record by supersession, as this entry does.
+
+**Supersedes:** the 2026-09-12 entry "Autonomy gates: branch protection was overriding GOVERNANCE §1, and the floor's datum sat in an owned file" — on its Amends line and the five present-tense claims listed above only. Its measurement, the CODEOWNERS correction, the ruling guard and the split ruling stand. **Amends:** nothing beyond that entry.
 
 ---
 

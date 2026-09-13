@@ -9,7 +9,7 @@ Amendments to either are Tier 3 changes (see §3).
 
 | Decision | Who | How recorded |
 |---|---|---|
-| Merge to main | Autonomous for `agent-authored` PRs at or below `auto_merge_max_tier` (T2; ruling 2026-09-02): approval comes from a clean machine-readable verdict at the exact head (`auto_approve_max_tier`, ruling 2026-08-31) and the merge itself is made by `agent-merge` when every check is green at that same head. A human clicks merge for everything else: T3 always, any CODEOWNERS-owned path except `docs/OPEN-QUESTIONS.md` and `specs/**/tasks.md`, any human-authored PR, and anything labelled `needs-human` | PR approval + `ci-gate`; agent-approve then agent-merge workflow |
+| Merge to main | Autonomous for `agent-authored` PRs at or below `auto_merge_max_tier` (T2; ruling 2026-09-02): approval comes from a clean machine-readable verdict at the exact head (`auto_approve_max_tier`, ruling 2026-08-31) and the merge itself is made by `agent-merge` when every check is green at that same head. A human clicks merge for everything else: T3 always, any CODEOWNERS-owned path, any human-authored PR, anything labelled `needs-human`, and any diff that records a ruling in `docs/OPEN-QUESTIONS.md`, removes a line from it or renames it (Amended 2026-09-12: `docs/OPEN-QUESTIONS.md` and `specs/**/tasks.md` — the two OPERATING-POLICY §2 already sanctions agents to write — LEFT CODEOWNERS, because listing them made branch protection refuse the very merge this row authorises; `agent-merge`'s ruling guard replaces that ownership) | PR approval + `ci-gate`; agent-approve then agent-merge workflow |
 | Protocol change (YAML + docs) | Human ruling | T3 PR, CODEOWNERS review |
 | Spec ambiguity resolution | Human ruling (agent may recommend) | OPEN-QUESTIONS.md entry |
 | Golden-vector regeneration | Human ruling with written justification | commit message + T3 review |
@@ -212,10 +212,20 @@ the enforcement.
     `dismiss_stale_reviews` off.
   - **Never merged by an agent:** T3 (any tier above
     `auto_merge_max_tier`), human-authored PRs, forks, drafts, `needs-human`
-    or `blocked`, and any CODEOWNERS-owned path other than
-    `docs/OPEN-QUESTIONS.md` and `specs/**/tasks.md` — the two OPERATING-POLICY
-    §2 already sanctions agents to write. Ground truth and governance keep
-    their owner regardless of the tier the diff happens to score.
+    or `blocked`, and any CODEOWNERS-owned path. Ground truth and governance
+    keep their owner regardless of the tier the diff happens to score.
+    (Amended 2026-09-12: `docs/OPEN-QUESTIONS.md` and `specs/**/tasks.md` —
+    the two OPERATING-POLICY §2 already sanctions agents to write — were
+    listed in CODEOWNERS as well, so GitHub's "require review from Code
+    Owners" refused the very merge this policy authorises: PR #342 had clean
+    verdicts and every check green and died on `405 Waiting on code owner
+    review`. They left CODEOWNERS. What ownership was buying is now explicit
+    here: `agent-merge` refuses any diff that records a ruling in
+    `docs/OPEN-QUESTIONS.md` — a `**Ruling:**` line whose value is not
+    PENDING, or which carries a decision marker such as "ratified" — or that
+    removes a line from the append-only record, renames it, or arrives with
+    no patch to inspect. Appending a question or a recommendation stays
+    autonomous.)
   - **The claim is released by the merger, not by the PR's prose.** After a
     successful merge, `agent-merge` removes `in-progress` from and closes
     the issues the PR closes (`Closes/Fixes/Resolves #n`) plus the branch's
