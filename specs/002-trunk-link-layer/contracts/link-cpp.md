@@ -97,9 +97,14 @@ public:
 Behaviour (tests assert each): a new transaction uses the destination's next 4-bit
 sequence; retries reuse it and set `retry`; at most `TRUNK_retries` retries; response
 window `[tx_end, tx_end + TRUNK_T_resp_us)`; a CRC-failed frame in the window ends the
-attempt at once; frames failing any acceptance check are discarded and counted — against
-`dst` while `dst`'s own transaction is awaiting a response, otherwise against
-`BusStats.discards`, which also takes a CRC-failed frame outside any open attempt's window
+attempt at once; frames failing any acceptance check are discarded and counted — a decoded
+one against `dst` while `dst`'s own transaction is awaiting a response, otherwise against
+`BusStats.discards`, which also takes a CRC-failed frame that did not open inside an awaiting
+transaction's window (the two paths differ on purpose in that state: a decoded frame arrives
+during a transaction the host opened and so has an address to charge, a corrupt one decodes
+to nothing and can be attributed only by its window; pinned by "while dst's transaction is
+awaiting but the frame opened outside its window …". `AddrStats.discards` is therefore never
+written for a CRC-failed frame — in its own window that is `crc_failures`)
 (ruling 2026-09-11, `docs/OPEN-QUESTIONS.md`; #144 — it closes the FR-011 tension the
 2026-09-06 entries recorded, where a claimed `src` of `0x10..0xFE` was counted nowhere and an
 in-range one was charged to an unauthenticated wire byte. No address is charged for a frame

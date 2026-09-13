@@ -3293,8 +3293,25 @@ answer is findable from each of them.
 `stats_[dst_]` only while that address's own transaction is `awaiting`, and everything else to
 `bus_stats_.discards`; `spec.md` FR-011a's per-bus list gains "frames discarded with no
 attributable address"; `data-model.md` §8 and `contracts/link-cpp.md` carry the field and the
-split. `AddrStats::discards` now means "discarded during that address's own transaction" and
-nothing else.
+split. `AddrStats::discards` now means "a **decoded** frame discarded during that address's
+own transaction" and nothing else.
+
+**The split's criterion, corrected (red team @25545f5 finding 1).** An earlier revision of
+this entry, and the three documents above, said `AddrStats::discards` counts frames
+"discarded while that address's own transaction is awaiting a response", and justified the
+bus counter with "a discard outside any open response window has no address the engine may
+charge". Neither survives the `awaiting`-but-out-of-window state, which this feature's own
+suite proves reachable: there a CRC-failed frame goes to `bus_stats().discards` while a
+decoded one is charged to `stats(dst).discards`. What decides it is whether the frame
+DECODED — a decoded frame arrives during a transaction this host itself opened, so there is
+an address it may charge; a corrupt frame decodes to nothing and can be attributed only by
+its window, inside which it is `crc_failures` and never `discards`. **Demonstrated by**
+`tests/unit/test_link_master.cpp` "while dst's transaction is awaiting but the frame opened
+outside its window, a DECODED discard is charged to dst and a CRC-failed one goes to the
+bus". The engine's behaviour is unchanged by the correction; only the statements about it
+are. *(Corrected in place, not superseded: the text amended is this entry as added by #144's
+own unmerged commit `722e859`/`25545f5`, part of the pull request under review rather than
+recorded history on `main`. No pre-existing entry is edited.)*
 
 **Claim labels (rule 11).** "No address is charged for a frame merely because that frame
 claimed its address" is **proved by construction** of `drain_wire()`'s if/else: the only
@@ -3322,8 +3339,8 @@ accounting remains a separate, ruling-bearing change (the claimed-src entry's ow
 ## 2026-09-13 — structural Deframer discards are still invisible above the engine; #144's bus counter does not cover them
 
 **Context:** #144 (ruling above) closes FR-011's counting gap for the two discard classes
-`Master` itself decides: a delivered frame that fails the acceptance screen with no window
-open, and a CRC-failed frame outside any open attempt's window. It does **not** cover the
+`Master` itself decides: a decoded frame that fails the acceptance screen with no transaction
+awaiting a response, and a CRC-failed frame outside any awaiting transaction's window. It does **not** cover the
 Deframer's *structural* discards — `Discard::BadLength`, `BadEscape`, `TooLong`,
 `ReservedAddress` (`link/frame.cpp`). Those reach `drain_wire()` as `feed()` returning false
 with no `BadCrc` delta, take the `if (!delivered) continue` path, and are counted only in

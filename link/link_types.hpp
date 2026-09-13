@@ -124,11 +124,19 @@ struct BusStats {
     uint32_t bus_faults;
     // Frames discarded with no attributable address (#144; maintainer ruling 2026-09-11,
     // "count it at bus level"). FR-011 requires every non-expected frame to be counted, and
-    // FR-011a's other block is per trunk address — but a frame arriving outside any open
-    // response window has no address the engine may charge: a corrupt one never decodes, and
-    // an intact one's `src` is wire-derived and unauthenticated (trunk §5 reserves only
-    // 0xFF). Those discards land here instead, which leaves AddrStats::discards meaning
-    // "discarded during that address's own transaction" and nothing else.
+    // FR-011a's other block is per trunk address — but two discard classes have no address
+    // the Master engine may charge, and they land here instead:
+    //   * a DECODED frame that fails the acceptance screen with no transaction awaiting a
+    //     response. Its `src` is wire-derived and unauthenticated (trunk §5 reserves only
+    //     0xFF) and may name no address at all (0x10..0xFE has no AddrStats slot), so it is
+    //     not a basis for attribution.
+    //   * a CRC-FAILED frame that did not open inside an awaiting transaction's window. It
+    //     never decodes, so nothing in it can attribute it; the only thing that could is
+    //     timing, and inside that window it is the polled node's `crc_failures` instead.
+    // AddrStats::discards therefore counts decoded frames only, discarded while that
+    // address's own transaction is awaiting a response (link/master.cpp drain_wire(); the
+    // two paths' split is pinned by test_link_master "while dst's transaction is awaiting
+    // but the frame opened outside its window ...", red team @25545f5).
     uint32_t discards;
 };
 

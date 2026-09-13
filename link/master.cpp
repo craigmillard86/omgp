@@ -420,6 +420,17 @@ void Master::drain_wire(MasterEvent& event) {
             // such; `crc_failures` stays per node, for a node's own window. Its bus activity
             // is already recorded by the unconditional last_activity_/last_rx_us_ update
             // above.
+            //
+            // Note the asymmetry with the delivered-frame discard below, which charges dst_
+            // whenever `awaiting`, window or not (red team @25545f5 finding 1 — the two
+            // branches disagree in the reachable `awaiting && !in_window` state, and the
+            // documents used to describe both as "discarded while that address's transaction
+            // is awaiting"). It is deliberate, and it is what each branch has to work with: a
+            // delivered frame arrives during a transaction THIS engine opened, so there is an
+            // address it may charge; a corrupt frame decodes to nothing, so the only thing
+            // that could attribute it is timing — its window — and outside it there is
+            // nothing left. Pinned by test_link_master "while dst's transaction is awaiting
+            // but the frame opened outside its window ...".
             bus_stats_.discards++;
             continue;
         }
@@ -451,9 +462,11 @@ void Master::drain_wire(MasterEvent& event) {
         // outside the window, or no transaction open at all: discarded silently (trunk
         // §4), counted (FR-011), and does not end the attempt (data-model.md §4). Charged
         // to dst_ only while dst_'s own transaction is awaiting a response — FR-011a's
-        // per-address block means "discarded during that address's own transaction" and
-        // nothing else (PR #137 review @3a15d29, LOW, which narrowed this from the whole
-        // open transaction to `awaiting`).
+        // per-address block means "a DECODED frame discarded during that address's own
+        // transaction" and nothing else (PR #137 review @3a15d29, LOW, which narrowed this
+        // from the whole open transaction to `awaiting`; the "decoded" half is the CRC
+        // branch's, above — a corrupt frame never reaches here and is never charged to an
+        // address's `discards`).
         //
         // Otherwise (gap-deferred before a first or retried transmission, or no transaction
         // at all) there is no window to attribute it to, and it is counted per bus (#144;
