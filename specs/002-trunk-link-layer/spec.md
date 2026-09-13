@@ -355,10 +355,21 @@ assert no bus fault.
   observe them.
 - **FR-011a**: The link layer MUST keep, per trunk address, a fixed-size counter block —
   transactions started, retries sent, timeouts, CRC-failed responses, frames discarded,
-  replays served (node side) — and, per bus, bit-rate changes and bus faults declared;
+  replays served (node side) — and, per bus, bit-rate changes, bus faults declared, and
+  frames discarded with no attributable address;
   counters MUST be readable by the layer above, resettable by it, never allocated after
   initialisation, and MUST be what this feature's own tests assert (e.g. "exactly two
   retries", "one replay served") instead of reaching into engine internals.
+  *(Ruled 2026-09-11, `OPEN-QUESTIONS.md` "Maintainer rulings … 2026-09-11" item 8, and the
+  maintainer's own comment on #144: the per-bus list gains "frames discarded with no
+  attributable address" so FR-011's unconditional "MUST be counted" is satisfiable as
+  written. Two discard classes have no address the engine may charge: a decoded frame that
+  fails the acceptance screen with no transaction awaiting a response (its `src` is
+  wire-derived and unauthenticated, and may name no address at all), and a CRC-failed frame
+  that did not open inside an awaiting transaction's window (it decodes to nothing, so only
+  its window could attribute it — and inside that window it counts as `crc_failures`, not as
+  a discard). The per-address discard counter therefore means "a decoded frame discarded
+  during that address's own transaction" and nothing else. Implementation: #144.)*
 - **FR-012**: The engine MUST model transmission time from the frame's stuffed length and
   the bit rate in use (10 bits per byte, 8N1) so that "final stop bit" instants — from
   which turnaround and timeout are measured — are computed, not assumed, and change

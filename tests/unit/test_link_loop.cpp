@@ -473,18 +473,20 @@ TEST_CASE("SC-004 delay-past-T_resp at attempt 0: recovers via the retry; the st
     REQUIRE(loop.responder.stats().replays_served == 1);
     REQUIRE_FALSE(loop.master.busy());
     REQUIRE(loop.master.stats(kNode).discards == 0); // nothing stray has arrived yet
+    REQUIRE(loop.master.bus_stats().discards == 0);  // ...on either counter (#144)
 
     // The withheld attempt-0 response was scheduled at kFarFuture (run_transaction) — still
     // in host_wire's RX queue, since nothing has advanced the clock that far yet. Let it
     // arrive now that the transaction has long since concluded: no busy(), no second event,
-    // and the frame OBSERVED as a discard charged to its claimed source (link/master.cpp
-    // "no transaction at all ... the frame's own claimed source is charged") — the
-    // assertion that separates "delivered and ignored" from "never delivered" (red team
+    // and the frame OBSERVED as a discard counted at bus level (link/master.cpp: with no
+    // transaction open there is no address to attribute it to — #144, ruling 2026-09-11) —
+    // the assertion that separates "delivered and ignored" from "never delivered" (red team
     // @fc3fc1a finding 1: without it, deleting the stray from the wire left this cell green).
     const MasterEvent late = loop.host_wire.advance_to(kFarFuture + 10 * byte_us(), loop.master);
     REQUIRE(late.kind == MasterEvent::None);
     REQUIRE_FALSE(loop.master.busy());
-    REQUIRE(loop.master.stats(kNode).discards == 1);
+    REQUIRE(loop.master.bus_stats().discards == 1);
+    REQUIRE(loop.master.stats(kNode).discards == 0);
 }
 
 TEST_CASE("SC-004 delay-past-T_resp through retry 1: recovers on the second retry; the stale "
@@ -512,7 +514,8 @@ TEST_CASE("SC-004 delay-past-T_resp through retry 1: recovers on the second retr
         kFarFuture + 10 * omgp::TRUNK_T_resp_us + 10 * byte_us(), loop.master);
     REQUIRE(late.kind == MasterEvent::None);
     REQUIRE_FALSE(loop.master.busy());
-    REQUIRE(loop.master.stats(kNode).discards == 1); // the one stray, observed
+    REQUIRE(loop.master.bus_stats().discards == 1); // the one stray, observed (bus-level, #144)
+    REQUIRE(loop.master.stats(kNode).discards == 0);
 }
 
 TEST_CASE("SC-004 delay-past-T_resp at attempts 0 AND 1: uses the full retry budget and still "
@@ -546,7 +549,8 @@ TEST_CASE("SC-004 delay-past-T_resp at attempts 0 AND 1: uses the full retry bud
         kFarFuture + 10 * omgp::TRUNK_T_resp_us + 10 * byte_us(), loop.master);
     REQUIRE(late.kind == MasterEvent::None);
     REQUIRE_FALSE(loop.master.busy());
-    REQUIRE(loop.master.stats(kNode).discards == 2); // both strays, observed
+    REQUIRE(loop.master.bus_stats().discards == 2); // both strays, observed (bus-level, #144)
+    REQUIRE(loop.master.stats(kNode).discards == 0);
 }
 
 TEST_CASE("SC-004 delay-past-T_resp after give-up: Failed{Timeout}; the stale late answer is "
@@ -568,7 +572,10 @@ TEST_CASE("SC-004 delay-past-T_resp after give-up: Failed{Timeout}; the stale la
         kFarFuture + 20 * omgp::TRUNK_T_resp_us + 10 * byte_us(), loop.master);
     REQUIRE(late.kind == MasterEvent::None);
     REQUIRE_FALSE(loop.master.busy());
-    REQUIRE(loop.master.stats(kNode).discards == 1); // the stray, observed after give-up
+    // The stray, observed after give-up — bus-level: the transaction is over, so no address
+    // owns the window it arrived outside of (#144, ruling 2026-09-11).
+    REQUIRE(loop.master.bus_stats().discards == 1);
+    REQUIRE(loop.master.stats(kNode).discards == 0);
     // FR-011, as the other Failed cells carry it: the Responder accepted and answered every
     // attempt of ONE transaction, so its own transcript must show that transaction's sequence
     // on each. Review @68a52ac: the previous commit put this loop on the ANSWERED "through
@@ -763,19 +770,19 @@ TEST_CASE("SC-004 CRC-corrupted frame after give-up: a corrupt frame arriving wi
         INFO("attempt " << i);
         REQUIRE(loop.node_wire.transcript(i).seq == 0);
     }
-    // ...and it is counted NOWHERE. Measured, not assumed -- this cell was written expecting
-    // crc_failures + 1 and found otherwise. A corrupt frame never decodes, so there is no
-    // f.src to charge it to (link/master.cpp's discard accounting charges dst_ while
-    // awaiting, else f.src), and outside a window the Master is awaiting nothing: the bad CRC
-    // moves no counter at all. Contrast the Duplicate row's late copy, which decodes cleanly,
-    // has a source, and IS counted.
+    // ...and it is counted at BUS level, against no node. A corrupt frame never decodes, so
+    // there is no f.src to charge it to (link/master.cpp's discard accounting charges dst_
+    // while awaiting), and outside a window the Master is awaiting nothing — which is
+    // precisely why it is bus-level evidence rather than a node's failure.
     //
-    // Pinned as today's observable, not asserted as desired: whether trunk §4's discard
-    // accounting should see corruption occurring between transactions is a question about
-    // link/master.cpp (T031/#49, closed, and no part of this PR's diff), recorded in
-    // docs/OPEN-QUESTIONS.md 2026-09-07.
+    // This cell was written expecting crc_failures + 1, measured otherwise, and pinned the
+    // "counted nowhere" outcome as today's observable while docs/OPEN-QUESTIONS.md 2026-09-07
+    // asked whether trunk §4's discard accounting should see corruption occurring between
+    // transactions. Ruled 2026-09-11: count it at bus level (#144). `crc_failures` stays a
+    // per-node counter and is still unmoved.
     CHECK(loop.master.stats(kNode).crc_failures == crc_failures_before);
     CHECK(loop.master.stats(kNode).discards == 0);
+    CHECK(loop.master.bus_stats().discards == 1);
     CHECK(loop.master.bus_stats().bus_faults == 0);
 }
 
@@ -785,10 +792,11 @@ TEST_CASE("SC-004 CRC-corrupted frame after give-up: a corrupt frame arriving wi
 // `handler.invocations == 1` is NOT load-bearing in this row (review @fc3fc1a, LOW): the
 // duplicate is of the RESPONSE, so the Responder sees each request once and the replay
 // buffer is exercised only by the Drop attempts these plans contain. What each cell here
-// pins is that the extra copy was delivered and OBSERVED as a discard — `stats(kNode).
-// discards` counts it (link/master.cpp: a frame with no window open is charged to its own
-// claimed source) — with no second event and no re-opened transaction (red team @fc3fc1a
-// finding 1: without the discard count, deleting the copy from the wire left the row green).
+// pins is that the extra copy was delivered and OBSERVED as a discard — `bus_stats().
+// discards` counts it (link/master.cpp: a frame with no window open has no address it may be
+// charged to, #144 ruling 2026-09-11) — with no second event and no re-opened transaction
+// (red team @fc3fc1a finding 1: without the discard count, deleting the copy from the wire
+// left the row green).
 
 TEST_CASE("SC-004 duplicate at attempt 0: succeeds once; the late duplicate has no effect",
           "[link]") {
@@ -807,7 +815,8 @@ TEST_CASE("SC-004 duplicate at attempt 0: succeeds once; the late duplicate has 
     REQUIRE(loop.master.attempts() == 1); // the genuine answer landed first attempt
     REQUIRE(loop.handler.invocations == 1);
     REQUIRE_FALSE(loop.master.busy());
-    REQUIRE(loop.master.stats(kNode).discards == 1); // the late copy, observed
+    REQUIRE(loop.master.bus_stats().discards == 1); // the late copy, observed (bus-level, #144)
+    REQUIRE(loop.master.stats(kNode).discards == 0);
 }
 
 TEST_CASE("SC-004 duplicate through retry 1: succeeds once the retry lands; the late "
@@ -829,7 +838,8 @@ TEST_CASE("SC-004 duplicate through retry 1: succeeds once the retry lands; the 
     REQUIRE(loop.handler.invocations == 1);
     REQUIRE(loop.responder.stats().replays_served == 1);
     REQUIRE_FALSE(loop.master.busy());
-    REQUIRE(loop.master.stats(kNode).discards == 1); // the late copy, observed
+    REQUIRE(loop.master.bus_stats().discards == 1); // the late copy, observed (bus-level, #144)
+    REQUIRE(loop.master.stats(kNode).discards == 0);
 }
 
 TEST_CASE("SC-004 duplicate through retry 2: uses the full retry budget and still succeeds "
@@ -851,7 +861,8 @@ TEST_CASE("SC-004 duplicate through retry 2: uses the full retry budget and stil
     REQUIRE(loop.handler.invocations == 1);
     REQUIRE(loop.responder.stats().replays_served == 2);
     REQUIRE_FALSE(loop.master.busy());
-    REQUIRE(loop.master.stats(kNode).discards == 1); // the late copy, observed
+    REQUIRE(loop.master.bus_stats().discards == 1); // the late copy, observed (bus-level, #144)
+    REQUIRE(loop.master.stats(kNode).discards == 0);
 }
 
 TEST_CASE("SC-004 duplicate after give-up: a late duplicate of the final, withheld attempt "
@@ -866,6 +877,7 @@ TEST_CASE("SC-004 duplicate after give-up: a late duplicate of the final, withhe
     REQUIRE(loop.master.attempts() == 3); // initial + TRUNK_retries, never a fourth
     REQUIRE(loop.handler.invocations == 1);
     REQUIRE(loop.master.stats(kNode).discards == 0); // nothing has arrived at all yet
+    REQUIRE(loop.master.bus_stats().discards == 0);  // ...on either counter (#144)
     // FR-011 (#52: "every matrix cell asserts the sequence the Responder accepted equals the
     // open transaction's own"): a Failed cell has no ev.response to read it from, but the
     // Responder DID accept and answer all three attempts -- its own transcript carries the
@@ -891,7 +903,8 @@ TEST_CASE("SC-004 duplicate after give-up: a late duplicate of the final, withhe
         loop.master);
     REQUIRE(late.kind == MasterEvent::None);
     REQUIRE_FALSE(loop.master.busy());
-    REQUIRE(loop.master.stats(kNode).discards == 2); // both late copies, observed
+    REQUIRE(loop.master.bus_stats().discards == 2); // both late copies, observed (bus-level)
+    REQUIRE(loop.master.stats(kNode).discards == 0);
 }
 
 // --- SC-005 "babble": extraneous bus noise between transactions ---------------------------
