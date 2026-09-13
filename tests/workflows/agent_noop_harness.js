@@ -546,6 +546,19 @@ const during = '2026-09-12T10:00:30Z';
   check('closingRefs: a nested list item (indented) is prose to GitHub', closingRefs('- a\n    - Closes #999', 'o', 'r') === 'Closes #999');
   check('closingRefs: a lazy paragraph continuation (indented, no blank line) is prose to GitHub', closingRefs('this PR also\n    Closes #999', 'o', 'r') === 'Closes #999');
   check('closingRefs: an indented table row is prose to GitHub', closingRefs('| a |\n|---|\n    | Closes #999 |', 'o', 'r') === 'Closes #999');
+  // Round-7 red team on #466: the round-6 strip stripped only the FIRST line of an indented code
+  // block (it cleared the blank-line flag on the line it stripped), so a reference on the block's
+  // second line was prose to the GitHub view. An indented block runs until a non-indented,
+  // non-blank line; a fence's end and a thematic break both end a paragraph, so an indented block
+  // may follow them directly; `* * *` is a thematic break, not a list item.
+  check('closingRefs: the SECOND line of an indented code block is code too', closingRefs('notes\n\n    sample body:\n    Closes #463\n', 'o', 'r') === '');
+  check('closingRefs: a blank line inside an indented block does not end it', closingRefs('notes\n\n    a\n\n    Closes #463\n', 'o', 'r') === '');
+  check('closingRefs: an indented block directly after a fenced block is code', closingRefs('```\nx\n```\n    Closes #463\n', 'o', 'r') === '');
+  check('closingRefs: an indented block after a `* * *` thematic break is code, not list content', closingRefs('notes\n\n* * *\n\n    Closes #463\n', 'o', 'r') === '');
+  check('closingRefs: the block ends at the first non-indented line', closingRefs('notes\n\n    code\nCloses #463\n', 'o', 'r') === 'Closes #463');
+  w = world({ head: 'b'.repeat(40), body: 'notes\n\n    sample body:\n    Closes #463\n' });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=Closes #463;gh=Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  check('fix: a reference MOVED to the second line of an indented block is flagged (gh view changed)', r.refs_changed === true);
   for (const [form, before, after] of [
     ['a nested list item', 'Closes #463', 'Closes #463\n- a\n    - Closes #999'],
     ['a lazy continuation', 'Closes #463', 'Closes #463\n\nthis PR also\n    Closes #999'],
