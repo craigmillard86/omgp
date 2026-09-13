@@ -22,10 +22,21 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 HARNESS = ROOT / "tests" / "workflows" / "story_gate_harness.js"
 
 
-def _script(workflow: str, job: str) -> str:
+def _script(workflow: str, job: str, step_id: str | None = None) -> str:
+    """The github-script body of a job, or of one step in it.
+
+    Without `step_id` this returns the FIRST github-script step, which is what every caller
+    predating 2026-09-12 expects. That default is also why a job's later steps were never
+    tested: agent-dispatch and review-fix each carry a second github-script step whose
+    `if: failure()` guard could not fire for a run that exits success having produced nothing,
+    and no test could see it. Select by `id` to reach those.
+    """
     wf = yaml.safe_load((ROOT / ".github" / "workflows" / workflow).read_text())
     steps = wf["jobs"][job]["steps"]
-    return next(s["with"]["script"] for s in steps if "actions/github-script" in s.get("uses", ""))
+    scripts = [s for s in steps if "actions/github-script" in s.get("uses", "")]
+    if step_id is None:
+        return next(s["with"]["script"] for s in scripts)
+    return next(s["with"]["script"] for s in scripts if s.get("id") == step_id)
 
 
 @pytest.mark.skipif(shutil.which("node") is None,
@@ -342,7 +353,7 @@ def test_review_fix_wiring():
     assert fix["steps"][0]["with"]["ref"] == "${{ needs.gate.outputs.branch }}"
     assert fix["steps"][0]["with"]["persist-credentials"] is False   # the push must re-trigger review/CI
     action = next(s for s in fix["steps"] if "claude-code-action" in s.get("uses", ""))
-    prompt = action["with"]["prompt"]
+    prompt = _prompt_text("review-fix.yml", "fix")   # follows the .github/agent-prompts/ hoist
     for must in ("CLAUDE.md", "OPERATING-POLICY", "./pipeline.sh", "tests/vectors/",
                  "protocol/omgp-protocol.yaml", "SCOPE POLICY", "BLOCKING finding"):
         assert must in prompt, must
@@ -371,10 +382,30 @@ def test_review_fix_wiring():
         assert "`[HIGH]`" in p and "`[MEDIUM]`" in p and "`[LOW]`" in p, wfn
 
 
-def _verdict_prompt(wfn, job):
+def _prompt_text(wfn, job):
+    """The prompt a Claude step actually runs, following the file hoist if there is one.
+
+    agent-dispatch and review-fix read ONE prompt from .github/agent-prompts/ so their first pass
+    and their retry cannot diverge (#361 AC2). The content pins below must follow that indirection
+    rather than read `${{ steps.prompt.outputs.text }}`: a pin that reads the expression does not
+    fail, it passes VACUOUSLY — and several of these assertions are negative ("must NOT say"),
+    which would then stop checking anything at all."""
     wf = yaml.safe_load((ROOT / ".github" / "workflows" / wfn).read_text(encoding="utf-8"))
-    return next(s for s in wf["jobs"][job]["steps"]
-                if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
+    steps = wf["jobs"][job]["steps"]
+    prompt = next(s for s in steps if "claude-code-action" in s.get("uses", ""))["with"]["prompt"]
+    # "Contains an expression" is not "is a reference": claude-review and red-team keep their
+    # prompts inline and merely interpolate values into them. Only a prompt whose ENTIRE value is
+    # the loader step's output follows the hoist.
+    stripped = prompt.strip()
+    if not (stripped.startswith("${{") and stripped.endswith("}}") and "outputs.text" in stripped):
+        return prompt
+    refs = [m for st in steps for m in re.findall(r"\.github/agent-prompts/[\w.-]+\.md", str(st.get("run", "")))]
+    assert refs, f"{wfn}:{job} uses an expression for its prompt but no step names a prompt file"
+    return (ROOT / refs[0]).read_text(encoding="utf-8")
+
+
+def _verdict_prompt(wfn, job):
+    return _prompt_text(wfn, job)
 
 
 def test_scope_routing_guardrails_are_pinned():
@@ -453,6 +484,179 @@ def test_review_followups_wiring():
     # as well as bare — the old bare-only strip never fired on real verdicts. Behaviour is the
     # harness's job; this pins that the guard exists at all.
     assert "severityOf(" in script and "SEVERITY" in script, "the filer must apply #134's MEDIUM+ threshold"
+
+
+NOOP_WORKFLOWS = (("agent-dispatch.yml", "implement", "ISSUE"), ("review-fix.yml", "fix", "PR"))
+
+
+def test_noop_guards_run_on_success_and_use_the_shared_module():
+    """The guard must run when the job SUCCEEDS — that is the whole defect (#361).
+
+    Five runs on 2026-09-07/08 and 2026-09-11 exited `success` having produced no branch, no PR
+    and no comment, one of them after 156 turns and $9.07. Both workflows already had a
+    release/report step; both were `if: failure()`, so neither could fire. Behaviour lives in
+    tools/ci/agent-noop.js and is proved by agent_noop_harness.js; these are wiring pins."""
+    for wf_name, job, _ in NOOP_WORKFLOWS:
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / wf_name).read_text())
+        steps = wf["jobs"][job]["steps"]
+        by_id = {s.get("id"): s for s in steps if s.get("id")}
+        for sid in ("detect", "finalize"):
+            assert sid in by_id, (wf_name, job, f"a `{sid}` step must exist")
+            cond = str(by_id[sid].get("if", ""))
+            assert "failure()" not in cond, (wf_name, sid, "must not be gated on failure() — a no-op succeeds")
+        assert "always()" in str(by_id["finalize"].get("if", "")), (wf_name, "finalize must run even when a step failed")
+        # `detect` must ALSO be always(): asserting only the absence of failure() let `if: success()`
+        # keep this test green while silently disabling the guard for every failed run — finalize
+        # would then read an empty NOOP and return, holding the claim (round-1 red team, #416 f.5).
+        assert "always()" in str(by_id["detect"].get("if", "")), (wf_name, "detect must run whatever the outcome")
+        # A claim released is not a release DECISION: neither step may apply `ready`/`queued`
+        # (GOVERNANCE §1). Pinned on the YAML, where such a label would actually be written.
+        for sid in ("detect", "finalize"):
+            body = _script(wf_name, job, sid) + str(by_id[sid].get("env", ""))
+            assert "ready" not in body and "queued" not in body, (wf_name, sid, "must never touch a release label")
+        # The detector must come from the default branch AND live somewhere the monitored agent
+        # cannot write. Round 1 established the first half; round 2 showed the pin only asserted
+        # that a checkout EXISTED — a mutant moving it back above the Claude step reintroduced the
+        # vulnerability verbatim and the whole suite stayed green (66 passed). Worse, my own AC2
+        # retry step then ran AFTER that checkout holding Edit/Write/Bash(git*), so the agent could
+        # rewrite .agent-ci/tools/ci/agent-noop.js and have github-script execute it with
+        # issues:write — and .agent-ci is untracked and not in .gitignore, the exact hazard
+        # review-fix.yml's own comment gives for writing the prompt to RUNNER_TEMP instead.
+        #
+        # So the PROPERTY, not the mechanism: whatever path the detector is loaded from must not be
+        # inside the workspace any Claude step can write. RUNNER_TEMP satisfies it by construction;
+        # a workspace checkout only satisfies it if no Claude step runs after it, which the retry
+        # makes impossible. Pinned so a future restructure cannot quietly lose it.
+        for sid in ("detect", "finalize"):
+            body = _script(wf_name, job, sid)
+            assert "agent-noop.js" in body, (wf_name, sid, "must load the shared detector")
+            assert "GITHUB_WORKSPACE" not in body, (
+                wf_name, sid,
+                "the detector must not be loaded from the job workspace: every Claude step in this "
+                "job holds Edit/Write there, so the monitored agent could rewrite its own gate")
+        claude_idx = [i for i, st in enumerate(steps) if "claude-code-action" in st.get("uses", "")]
+        fetch_idx = [i for i, st in enumerate(steps)
+                     if "agent-noop.js" in str(st.get("run", "")) or
+                        str(st.get("with", {}).get("path", "")) == ".agent-ci"]
+        for f in fetch_idx:
+            assert all(c < f for c in claude_idx) or "RUNNER_TEMP" in str(steps[f].get("run", "")), (
+                wf_name, f"step {f} puts the detector in the workspace with a Claude step after it")
+        # The RAW transcript must NOT be uploaded. GOVERNANCE §4b: "This repository is public",
+        # so an artifact is downloadable by anyone, and secret masking covers step logs, not bytes
+        # inside an uploaded file. The execution file is arbitrary tool output — `git remote -v`,
+        # `gh auth status` and the like land in it verbatim — from a job holding
+        # CLAUDE_CODE_OAUTH_TOKEN. The figures (turns, denials, is_error) are what diagnosing a
+        # stall actually needs, and they go in the comment and the job log (round-1 review, #416).
+        for st in steps:
+            if "upload-artifact" in st.get("uses", ""):
+                path = str(st.get("with", {}).get("path", ""))
+                assert "execution_file" not in path, (
+                    wf_name, "the raw execution file is not uploaded on a public repo")
+
+
+def test_noop_round3_wiring():
+    """Round-3 findings on #416 that live in the YAML, not the module.
+
+    RT-1/REV-1: `t0` had no `if:`, so a failed apt/pip/checkout step skipped it, SINCE arrived
+    empty, and detection fell OPEN on stale evidence while the retry could fire with an EMPTY
+    prompt (the prompt step was skipped too). RT-2/RT-3/REV-2: finalize must know whether the
+    run PRODUCED (an errored run that pushed keeps its attempt spent / its claim held) and, for
+    dispatch, whether production was PARTIAL (a branch with no PR is loud, not green).
+    REV-3: the detector must be loaded from RUNNER_TEMP by construction, not merely "not from
+    GITHUB_WORKSPACE" — `require('./tools/ci/agent-noop.js')` satisfied the old pin and is round
+    1's vulnerability verbatim."""
+    load = re.compile(r"require\(`\$\{process\.env\.RUNNER_TEMP\}/agent-noop\.js`\)")
+    for wf_name, job, _ in NOOP_WORKFLOWS:
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / wf_name).read_text())
+        steps = wf["jobs"][job]["steps"]
+        by_id = {s.get("id"): s for s in steps if s.get("id")}
+        assert "always()" in str(by_id["t0"].get("if", "")), (wf_name, "t0 must record the start whatever ran before it")
+        retry = by_id["agent_retry"]
+        assert "steps.agent.conclusion != 'skipped'" in str(retry.get("if", "")), (
+            wf_name, "the retry must not run when the first pass never ran — its prompt would be empty")
+        env = by_id["finalize"].get("env", {})
+        assert "PRODUCED" in env and "steps.detect.outputs.produced" in str(env["PRODUCED"]), (
+            wf_name, "finalize must be told whether the run produced output")
+        if wf_name == "agent-dispatch.yml":
+            assert "PARTIAL" in env and "steps.detect.outputs.partial" in str(env["PARTIAL"]), (
+                wf_name, "finalize must be told when a branch was pushed with no PR")
+            assert "PARTIAL" in _script(wf_name, job, "finalize"), (
+                wf_name, "finalize's early return must not swallow a partial run")
+        for st in steps:
+            body = str(st.get("with", {}).get("script", ""))
+            if "agent-noop.js" not in body:
+                continue
+            assert load.search(body), (wf_name, st.get("id"), "the detector must be loaded from RUNNER_TEMP, literally")
+            assert not re.search(r"__dirname|process\.cwd|\./tools|GITHUB_WORKSPACE", body), (
+                wf_name, st.get("id"), "no workspace-relative load of the detector")
+    # The fixer's comment is recognised by a marker the prompt tells it to write; the module's
+    # `spoke` looks for exactly this shape (agent_noop_harness.js FIXER). Pinned together here so
+    # the two cannot drift apart silently. CONTROL, not guarantee: a fixer that ignores the
+    # instruction is declared a no-op — the loud direction.
+    prompt = (ROOT / ".github" / "agent-prompts" / "review-fix.md").read_text()
+    assert "review-fix({{ATTEMPT}}) @ {{HEAD}}" in prompt, "review-fix.md must tell the fixer to open its comment with the marker"
+
+
+def test_every_claude_step_has_an_id_so_its_execution_file_is_readable():
+    """`execution_file` (turns, denials, is_error) is a step output; an id-less step has none."""
+    for wf_name, job, _ in NOOP_WORKFLOWS:
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / wf_name).read_text())
+        claude = [s for s in wf["jobs"][job]["steps"] if "claude-code-action" in s.get("uses", "")]
+        assert claude, (wf_name, job, "expected a claude-code-action step")
+        assert all(s.get("id") for s in claude), (wf_name, job, "every Claude step needs an id")
+
+
+def test_agent_retry_max_is_configured_and_spent():
+    """#361 AC2: a no-op run is retried up to `agent_retry_max` (default 1) before the claim goes.
+
+    The first version of this change shipped the key at 0 with no retry step and a PENDING ruling.
+    The round-1 review is right that #361 is a directive with explicit parameters, not a spec
+    ambiguity with a safe default — so the budget is real, and the workflows must be able to spend
+    it. The prompt lives in a file both Claude steps read, because two inline copies would drift
+    and a drifted retry prompt silently changes the agent's instructions on the second pass."""
+    cfg = (ROOT / ".github" / "agent-config.yml").read_text()
+    m = re.search(r"^agent_retry_max: *(\d+)", cfg, re.M)
+    assert m, "agent_retry_max must exist in agent-config.yml"
+    configured = int(m.group(1))
+    assert configured == 1, "#361 names 1 as the default; changing it is a ruling, not a tweak"
+
+    for wf_name, job, _ in NOOP_WORKFLOWS:
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / wf_name).read_text())
+        steps = wf["jobs"][job]["steps"]
+        claude = [st for st in steps if "claude-code-action" in st.get("uses", "")]
+        assert len(claude) == configured + 1, (
+            wf_name, job, f"agent_retry_max={configured} needs {configured + 1} Claude steps, found {len(claude)}")
+        # The retry runs only when the first pass produced nothing, and only while budget remains.
+        retry = claude[-1]
+        cond = str(retry.get("if", ""))
+        # Keyed on `produced`, not `noop`: AC2 says an attempt that produced output is never
+        # retried, while also naming is_error as a no-op trigger — so a review-fix run that pushed
+        # and then errored was a no-op that must NOT be retried (round-2 review). The two questions
+        # are answered by two outputs, and the retry asks the one about production.
+        assert "produced" in cond, (wf_name, "the retry must be gated on whether anything was produced")
+        # ...and it must fail CLOSED on a budget it could not read: `n != '0'` alone is TRUE for the
+        # empty string a failed `budget` step leaves behind, and every later step is always().
+        assert "steps.budget.outputs.n != ''" in cond, (
+            wf_name, "the retry must not be spent on an unreadable budget (AC2 fail-closed)")
+        assert "retry" in str(retry.get("id", "")), (wf_name, "the retry step needs its own id")
+        # One prompt, read from a file — not a second inline copy that can drift from the first.
+        prompts = {st.get("with", {}).get("prompt", "") for st in claude}
+        assert len(prompts) == 1, (wf_name, "both Claude steps must use the SAME prompt text")
+        # AC2's fourth clause: a delay between attempts. #361 describes the observed no-ops as
+        # "probably a transient problem on the Claude side at the time", so an immediate retry
+        # re-enters the window that caused them. Nothing pinned this and nothing implemented it
+        # (round-2 review) — a scan of the whole diff for sleep/delay/wait found only `await`.
+        ids_in_order = [st.get("id") for st in steps]
+        pause = [i for i, st in enumerate(steps) if "sleep" in str(st.get("run", ""))]
+        assert pause, (wf_name, "AC2 requires a delay between attempts; no step sleeps")
+        d, rr = ids_in_order.index("detect"), ids_in_order.index("agent_retry")
+        assert any(d < i < rr for i in pause), (
+            wf_name, "the delay must sit between the detection and the retry, not elsewhere")
+
+        # Detection must run again after the retry, or the retry's outcome is never judged.
+        ids = [st.get("id") for st in steps]
+        assert ids.count("detect") + ids.count("detect_retry") >= 2, (
+            wf_name, "the retry's outcome needs its own detection")
 
 
 def test_both_workflows_declare_the_same_seven_sections():
