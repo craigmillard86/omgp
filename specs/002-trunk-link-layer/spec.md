@@ -463,8 +463,10 @@ assert no bus fault.
   transport abstraction MUST expose the bit-rate change so a scripted transport can
   observe and react to it.
 - **FR-026** *(rewritten 2026-09-13: F4, human 2026-09-06; ruling human 2026-09-13)*: While
-  BUS_FAULT is declared the host MUST send no status polls and no demand traffic — probes are
-  the only traffic; it MUST alternate its probes
+  BUS_FAULT is declared the link layer MUST send no status polls, and the scheduler above it
+  MUST issue no other traffic (an obligation on F3, `contracts/link-cpp.md` "What F3/F4 need";
+  nothing can be delivered to a SUSPECT or OFFLINE node) — probes are the only traffic; it MUST
+  alternate its probes
   between the reference and the fallback bit rate (one probe at each, in turn) over every
   address that is UNENROLLED, OFFLINE or SUSPECT (no address is ENROLLED while a fault is
   declared) — except during a reference pass, when every probe goes out at the reference
