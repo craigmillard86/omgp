@@ -565,6 +565,18 @@ const during = '2026-09-12T10:00:30Z';
   check('closingRefs: `see #400*closes #131*` counts', closingRefs('see #400*closes #131*', 'o', 'r') === 'merge:closes #131');
   check('closingRefs: `a**fixes #131**` counts', closingRefs('a**fixes #131**', 'o', 'r') === 'merge:fixes #131');
   check('closingRefs: a plain `Closes #12` read by both readers on the SAME span appears once', closingRefs('Closes #12', 'o', 'r') === 'Closes #12');
+  // Round-13 red team on #466: the joined set used `,` as its separator and detect re-split on
+  // `,`, but a markdown-link target may contain a comma — one element shredded into fragments
+  // that could stand in for a whole, separate reference. Commas (and the escape itself) inside
+  // an element are now percent-encoded, so the separator is unambiguous.
+  check('closingRefs: a comma inside a link target is encoded, never a separator', closingRefs('Closes [#1](https://ex/x,y)', 'o', 'r') === 'Closes [#1](https://ex/x%2Cy)');
+  check('closingRefs: a literal percent sign is encoded first, so encoded commas cannot collide', closingRefs('Closes [#1](https://ex/a%2Cb)', 'o', 'r') === 'Closes [#1](https://ex/a%252Cb)');
+  w = world({ head: 'b'.repeat(40), body: 'Closes [#1](https://ex/x,closes o/r#7,y)\n\ncloses o/r#7' });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: closingRefs('Closes [#1](https://ex/x,closes o/r#7,y)', 'o', 'r'), EXEC_FILE: execFile({ num_turns: 30 }) } });
+  check('fix: a reference ADDED beside a comma-bearing link IS flagged', r.refs_changed === true);
+  w = world({ head: 'b'.repeat(40), body: 'Closes [#1](https://ex/x,fixes GH-9,y)' });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: closingRefs('Closes [#1](https://ex/x,fixes GH-9,y)\n\nfixes GH-9', 'o', 'r'), EXEC_FILE: execFile({ num_turns: 30 }) } });
+  check('fix: a reference REMOVED beside a comma-bearing link IS flagged', r.refs_changed === true);
   check('closingRefs: `_closes #131_` is the wider reader\'s only — agent-merge does not read it', closingRefs('_closes #131_', 'o', 'r') === '_closes #131');
   w = world({ head: 'b'.repeat(40), body: '_closes #131_ (rejected)\n\nsee a**closes #131**' });
   r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: closingRefs('_closes #131_ (rejected)', 'o', 'r'), EXEC_FILE: execFile({ num_turns: 30 }) } });
