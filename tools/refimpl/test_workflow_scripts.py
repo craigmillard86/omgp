@@ -675,9 +675,11 @@ def test_reference_guard_reads_at_least_what_agent_merge_reads(tmp_path):
     merge automation acts on while the guard said "unchanged". Pin the property, not a spelling:
     extract agent-merge's literal regex from its workflow and check, on a corpus of awkward bodies,
     that the GUARD's compared set (`closingRefs`, what the gate snapshots and `detect` compares)
-    contains every match agent-merge's regex finds, in its own `merge:` namespace — round 12: the
-    corpus loop had drifted onto the release path, which by then WAS agent-merge's regex, so it
-    was a tautology; it reads the guard now."""
+    contains every match agent-merge's regex finds — as a `merge:` element, or as the identical
+    span read by the wider reader (whose spelling then ENDS with agent-merge's text, e.g.
+    `***fixes #131` for `fixes #131`; the module drops the duplicate only on that positional
+    condition, never on text). Round 12: the corpus loop had drifted onto the release path, which
+    by then WAS agent-merge's regex, so it was a tautology; it reads the guard now."""
     if shutil.which("node") is None:
         pytest.skip("node not present")
     merge_src = (ROOT / ".github" / "workflows" / "agent-merge.yml").read_text()
@@ -698,7 +700,7 @@ def test_reference_guard_reads_at_least_what_agent_merge_reads(tmp_path):
         "for (const b of bodies) {\n"
         "  const merge = [...new Set([...b.matchAll(mergeRe)].map(x => Number(x[1])))];\n"
         "  const guard = noop.closingRefs(b, 'o', 'r').split(',');\n"
-        "  for (const m of b.matchAll(mergeRe)) { const sp = 'merge:' + m[0].replace(/\\s+/g, ' '); if (!guard.includes(sp)) bad.push(JSON.stringify(b) + ' -> agent-merge reads ' + JSON.stringify(m[0]) + ', the guard set lacks ' + JSON.stringify(sp)); }\n"
+        "  for (const m of b.matchAll(mergeRe)) { const sp = 'merge:' + m[0].replace(/\\s+/g, ' '); if (!guard.some(g => g === sp || g === sp.slice(6) || g.endsWith(sp.slice(6)))) bad.push(JSON.stringify(b) + ' -> agent-merge reads ' + JSON.stringify(m[0]) + ', the guard set lacks ' + JSON.stringify(sp)); }\n"
         "}\n"
         "console.log(bad.length ? bad.join('\\n') : 'SUPERSET');\n")
     r = subprocess.run(["node", str(runner), str(ROOT / "tools" / "ci" / "agent-noop.js"), json.dumps(corpus)],

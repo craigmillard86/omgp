@@ -97,10 +97,10 @@ const isFixer = body => FIXER_MARK.test(unwrap((body || '').split('\n').find(l =
 //
 // `closingRefs` returns each reference AS SPELLED — the whole matched keyword-and-reference
 // text, whitespace runs collapsed — because the guard's job is to notice any change to what the
-// merge gate will act on, and agent-merge's own parser reads only `KEYWORD<space>#n`: folding
-// `o/r#465` to `465` (round 4), or `Closes:#n`, `**Closes** #n` and `Closes [#n](url)` to `#n`
-// (round 5), hid rewrites that leave in-progress on an issue the merge should have released.
-// `closingIssues` canonicalises same-repo forms to numbers for the RELEASE paths.
+// merge gate will act on: folding `o/r#465` to `465` (round 4), or `Closes:#n`, `**Closes** #n`
+// and `Closes [#n](url)` to `#n` (round 5), hid rewrites that leave in-progress on an issue the
+// merge should have released. `closingIssues` gives the exhaustion release its same-repo numbers
+// (see its own comment for what it covers and why).
 // What the closing-reference guard protects is what the merge automation READS: agent-merge's
 // release/close path and this workflow's exhaustion release regex the raw body, so the guard
 // compares the raw body's references, each as spelled. It does NOT model what GitHub's renderer
@@ -113,13 +113,12 @@ const isFixer = body => FIXER_MARK.test(unwrap((body || '').split('\n').find(l =
 // wraps a live reference in code leaves that issue open — visible in the issue, recoverable by
 // a human, forbidden by the prompt, and closed by the follow-up that closes raw-referenced
 // issues on any merge. On the autonomous path agent-merge closes from the raw view regardless.
-// Two readers, unioned. CLOSING knows the four spellings GitHub documents; MERGE_RE is
-// agent-merge.yml's release/close regex VERBATIM (pinned equal by
-// test_reference_guard_reads_at_least_what_agent_merge_reads), so whatever CLOSING misses that
-// agent-merge would act on — `a**closes #131`, where a lookbehind failed and `\b` matches at the
-// keyword (round-11 red team on #466) — is read anyway: the superset holds by construction, not
-// by the wider regex being right. The release path (closingIssues) uses MERGE_RE ALONE, so it
-// never writes a label for a form agent-merge would not have closed (widening both is #496).
+// Two readers, unioned into one compared set. CLOSING knows the four spellings GitHub documents;
+// MERGE_RE is agent-merge.yml's release/close regex VERBATIM (pinned byte-equal by
+// test_reference_guard_reads_at_least_what_agent_merge_reads, which also checks the guard's set
+// carries every MERGE_RE match over a corpus). MERGE_RE's matches live in their own `merge:`
+// namespace and are never deduped against CLOSING's, so the guard's set is a superset of what
+// agent-merge reads by construction, and a change to either reader's view is a change.
 const CLOSING = /(?<![\w*_])[*_]*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[*_]*\s*:?\s*(?:<?(https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+))>?|\[#(\d+)\]\(([^)]*)\)|([\w.-]+)\/([\w.-]+)#(\d+)|GH-(\d+)|#(\d+))/gi;
 const MERGE_RE = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
 const ISSUE_URL = /^https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)\/?$/i;
@@ -128,8 +127,10 @@ function closingMatches(text, owner, repo) {   // the RAW body; no markup is int
   const sameRepo = (o, r) => o.toLowerCase() === own && r.toLowerCase() === rep;
   const out = [];
   const body = String(text || '');
+  const spans = [];   // [start, end) of every wider-reader match
   for (const m of body.matchAll(CLOSING)) {
     const spelled = m[0].replace(/\s+/g, ' ');
+    spans.push([m.index, m.index + m[0].length]);
     if (m[1]) out.push({ spelled, kind: 2, num: Number(m[4]), same: sameRepo(m[2], m[3]) });
     else if (m[5]) {
       const tgt = ISSUE_URL.exec(m[6] || '');
@@ -140,10 +141,16 @@ function closingMatches(text, owner, repo) {   // the RAW body; no markup is int
     else if (m[10]) out.push({ spelled, kind: 1, num: Number(m[10]), same: true });
     else out.push({ spelled, kind: 0, num: Number(m[11]), same: true });
   }
-  // agent-merge's reader, verbatim: anything it finds that CLOSING did not is a reference too.
+  // agent-merge's reader, verbatim, in its OWN namespace (`merge:` prefix). A match is dropped
+  // only when it lies INSIDE a wider-reader match that ends on the same `#n` token — the same
+  // reference, read twice (`***fixes #131***`: the wider reader takes the emphasis, both end at
+  // the token). A suffix dedup on the TEXT let `_closes #131_` (wider-reader only; `_` is a word
+  // character) swallow a distinct `a**closes #131**` elsewhere in the body that agent-merge acts
+  // on (round-12 red team on #466); position, not text, decides.
   for (const m of body.matchAll(MERGE_RE)) {
-    const spelled = m[0].replace(/\s+/g, ' ');
-    if (!out.some(i => i.spelled === spelled || i.spelled.endsWith(spelled))) out.push({ spelled, kind: 0, num: Number(m[1]), same: true });
+    const st = m.index, en = m.index + m[0].length;
+    if (spans.some(([a, b]) => a <= st && b === en)) continue;
+    out.push({ spelled: 'merge:' + m[0].replace(/\s+/g, ' '), kind: 3, num: Number(m[1]), same: true, merge: true });
   }
   return out;
 }
@@ -158,10 +165,14 @@ function joinSpelled(items) {
   return uniq.map(i => i.spelled).join(',');
 }
 function closingRefs(body, owner, repo) { return joinSpelled(closingMatches(body, owner, repo)); }
-// The release paths act on what agent-merge acts on — MERGE_RE, nothing wider — so the exhaustion
-// release never strips `in-progress` from, or escalates, an issue the merge would not have
-// closed (round-11 red team on #466). Widening both readers together is #496.
-function closingIssues(body, owner, repo) { return mergeGateIssues(body); }
+// The exhaustion release releases CLAIMS: every same-repo issue the body names in a spelling
+// GitHub honours (the four documented forms; a markdown link only when its target agrees), plus
+// everything agent-merge reads — so an issue this PR claims can be re-dispatched after
+// exhaustion. Round 11 narrowed this to agent-merge's reader and left a claimed issue's
+// `in-progress` stale (round-12 red team on #466). Stated, not derived: a control.
+function closingIssues(body, owner, repo) {
+  return [...new Set(closingMatches(body, owner, repo).filter(i => i.same).map(i => i.num))].sort((x, y) => x - y);
+}
 
 // How many times a no-op run may be retried in-job before the claim is released (#361 AC2).
 // Read at RUN time from the DEFAULT-branch config, like every other knob here, so retuning it

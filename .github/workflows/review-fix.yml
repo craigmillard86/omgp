@@ -143,8 +143,9 @@ jobs:
               // Exhausted: release the claim on the PR and on the issues it closes, then
               // escalate — the same shape as ci-failure-router's exhaustion path, including
               // its rule that only a 404 ("label already absent") is a non-event.
-              // Same-repo closing references only (cross-repo ones cannot be released here), from the
-              // shared closingRefs — the one implementation of GitHub's auto-close forms (#463).
+              // Same-repo issues the body claims in any spelling GitHub honours, plus what agent-merge
+              // reads, from the shared closingIssues (tools/ci/agent-noop.js, #463) — cross-repo
+              // references cannot be released here.
               const closes = noop.closingIssues(pr.body || '', owner, repo);
               const m = pr.head.ref.match(/^task\/(\d+)$/);
               const issues = closes.length ? closes : (m ? [Number(m[1])] : []);

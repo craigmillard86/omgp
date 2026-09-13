@@ -564,7 +564,7 @@ const during = '2026-09-12T10:00:30Z';
   check('closingRefs: `PR#452**closes #131**` counts, in agent-merge\'s namespace', closingRefs('PR#452**closes #131** as a side effect.', 'o', 'r') === 'merge:closes #131');
   check('closingRefs: `see #400*closes #131*` counts', closingRefs('see #400*closes #131*', 'o', 'r') === 'merge:closes #131');
   check('closingRefs: `a**fixes #131**` counts', closingRefs('a**fixes #131**', 'o', 'r') === 'merge:fixes #131');
-  check('closingRefs: a plain `Closes #12` is in BOTH namespaces', closingRefs('Closes #12', 'o', 'r') === 'Closes #12,merge:Closes #12');
+  check('closingRefs: a plain `Closes #12` read by both readers on the SAME span appears once', closingRefs('Closes #12', 'o', 'r') === 'Closes #12');
   check('closingRefs: `_closes #131_` is the wider reader\'s only — agent-merge does not read it', closingRefs('_closes #131_', 'o', 'r') === '_closes #131');
   w = world({ head: 'b'.repeat(40), body: '_closes #131_ (rejected)\n\nsee a**closes #131**' });
   r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: closingRefs('_closes #131_ (rejected)', 'o', 'r'), EXEC_FILE: execFile({ num_turns: 30 }) } });
