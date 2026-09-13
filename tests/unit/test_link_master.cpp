@@ -3467,12 +3467,14 @@ TEST_CASE("an unsolicited frame while idle whose claimed source is exactly kAddr
     REQUIRE(master.bus_stats().bus_faults == 0);
 }
 
-// The five cases below are #144's own: the forgeable half of the old attribution, the
-// out-of-range half's sibling in the middle of the range, the in-window case the ruling
-// deliberately leaves alone, (red team @722e859 finding 1) the boundary of what that
-// in-window branch proves — the sender of an in-window discard is not what the per-address
-// counter follows — and (red team @25545f5 finding 1) the split's real criterion, pinned in
-// the one engine state where the two discard paths disagree: `awaiting` but out of window.
+// The six cases below are #144's own, in order: the forgeable half of the old attribution (a
+// claimed src in range); its out-of-range half (a claimed src with no AddrStats slot, counted
+// nowhere before the ruling); the in-window case the ruling deliberately leaves alone; (red
+// team @722e859 finding 1) the boundary of what that in-window branch proves — the sender of
+// an in-window discard is not what the per-address counter follows; the 2026-09-07 CRC entry,
+// a corrupt frame with no transaction open, which moved no counter this layer exposes at all;
+// and (red team @25545f5 finding 1) the split's real criterion, pinned in the one engine state
+// where the two discard paths disagree: `awaiting` but out of window.
 
 TEST_CASE("an idle-time discard claiming an in-range source is counted on the bus and leaves "
           "every per-address record alone: no address is charged for a frame merely because "
@@ -3526,7 +3528,11 @@ TEST_CASE("an idle-time discard claiming a source well past kAddrCount is counte
 
     REQUIRE(ev.kind == MasterEvent::None);
     REQUIRE(master.bus_stats().discards == 1);
-    REQUIRE(master.stats(0x40).discards == 0); // the out-of-range sentinel, never written
+    // NOT evidence, and kept only so the accessor's contract is exercised: stats() returns a
+    // static zeroed sentinel for addr >= kAddrCount (link/master.cpp:46), so this line reads 0
+    // whatever drain_wire() wrote. What detects an out-of-range write is ASan on the write
+    // itself, plus the in-range loop below.
+    REQUIRE(master.stats(0x40).discards == 0);
     for (uint8_t a = 0; a < kAddrCount; ++a) {
         CAPTURE(a);
         REQUIRE(master.stats(a).discards == 0);

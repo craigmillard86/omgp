@@ -3273,7 +3273,26 @@ inside the ruling; one field is used, because the entries it settles are one que
 entry records the ruling against the entries that carry it and states what landed, so the
 answer is findable from each of them.
 
-**Answers, by appending — the entries below keep their own text and history:**
+**Ruling:** option (a) — a frame discarded with no attributable address is counted at bus
+level, in `BusStats.discards`; ratified by the maintainer, 2026-09-11. Stated as a field line
+because the decision has to be *mechanically* findable, not only readable: `docs/GOVERNANCE.md`
+§1 reserves the merge click for any diff that records a ruling in this file, and since the
+2026-09-12 CODEOWNERS amendment only `agent-merge`'s guard enforces it. That guard reads a
+field name at the start of an added line; until this line every decision in the entry lived
+mid-line as `**Ruled: …**`, so the guard never fired and a ruling-recording diff was eligible
+for autonomous merge (round-4 review). **Demonstrated by** reading
+`.github/workflows/agent-merge.yml:199`'s pattern against the entry's added lines — a read of
+the regex, *not* a run of its harness.
+
+**Answers, by appending — the entries below keep their own text and history.** *Scope of the
+ruling, labelled (rule 11): the maintainer's item 8 and their comment on #144 name the
+**2026-09-07** CRC entry explicitly. That the same decision settles the three **2026-09-06**
+entries below is an **inference** by this pull request, not a quoted decision — it follows from
+the maintainer releasing #144, whose acceptance criteria are exactly the claimed-`src`
+attribution and are written "conditional on the ruling selecting option (a)". It is a sound
+reading and the whole feature rests on it, but it is this agent's reading; if the maintainer
+holds the ruling narrower, the two "Ruled: option (a)" lines below are what changes, and the
+code under them with it.*
 
 - **2026-09-06 "a discarded frame whose claimed src is out of range (0x10..0xFE) is counted
   nowhere; FR-011 says every discard MUST be counted"** — **Ruled: option (a).** Such a frame
