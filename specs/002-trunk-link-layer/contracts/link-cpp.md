@@ -199,7 +199,8 @@ public:
     void on_result(uint8_t addr, bool ok, uint64_t now_us);   // one transaction outcome
     void tick(uint64_t now_us);                                // time-only transitions (SUSPECT → OFFLINE)
     HealthState state(uint8_t addr) const;
-    bool poll_due(uint8_t addr, uint64_t now_us) const;        // ENROLLED: true; SUSPECT: every 10×T_poll; else false
+    bool poll_due(uint8_t addr, uint64_t now_us) const;        // ENROLLED: true; SUSPECT: every 10×T_poll; else false;
+                                                               // while bus_fault(): false for every address (F4, 2026-09-13)
     void mark_polled(uint8_t addr, uint64_t now_us);
     Probe next_probe(uint64_t now_us);                         // enrolment rotation; alternates rates while bus_fault()
     bool bus_fault() const;
