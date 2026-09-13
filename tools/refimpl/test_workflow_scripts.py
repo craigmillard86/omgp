@@ -597,6 +597,35 @@ def test_noop_round3_wiring():
     assert "review-fix({{ATTEMPT}}) @ {{HEAD}}" in prompt, "review-fix.md must tell the fixer to open its comment with the marker"
 
 
+def test_rebuttal_only_fix_run_is_escalated_and_the_fixer_may_edit_the_body():
+    """#463 (seen on #452): a review-fix run that comments without a commit is production for the
+    no-op detector and a dead end for the loop — no new head, no new review, no label. Two pins:
+    (a) finalize is told ONLY_COMMENT and applies `needs-human`; (b) the fixer may correct a
+    PR-body-only finding itself (`gh pr edit`), since the round-budget ruling makes such a
+    finding blocking at every round and the fixer was the one agent that could not touch it."""
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "review-fix.yml").read_text())
+    steps = wf["jobs"]["fix"]["steps"]
+    by_id = {s.get("id"): s for s in steps if s.get("id")}
+    env = by_id["finalize"].get("env", {})
+    assert "ONLY_COMMENT" in env and "steps.detect.outputs.only_comment" in str(env["ONLY_COMMENT"]), (
+        "finalize must be told when the run's only output was a comment")
+    assert "ONLY_COMMENT" in _script("review-fix.yml", "fix", "finalize"), (
+        "finalize's early return must not swallow a comment-only run")
+    claude = [st for st in steps if "claude-code-action" in st.get("uses", "")]
+    for st in claude:
+        granted = set(re.search(r'--allowedTools "([^"]*)"', st["with"]["claude_args"]).group(1).split(","))
+        assert "Bash(gh pr edit*)" in granted, (st.get("id"), "the fixer must be able to correct the PR body")
+        # ...and still nothing that reaches the approval path.
+        for banned in ("Bash(gh pr review*)", "Bash(gh pr merge*)", "Bash(gh api*)", "Bash(gh*)", "Bash(*)"):
+            assert banned not in granted, (st.get("id"), banned)
+    prompt = (ROOT / ".github" / "agent-prompts" / "review-fix.md").read_text()
+    assert "gh pr edit" in prompt, "review-fix.md must tell the fixer it may correct the PR body"
+    # The implement path has no comment-only outcome; the signal must not leak into dispatch.
+    dwf = yaml.safe_load((ROOT / ".github" / "workflows" / "agent-dispatch.yml").read_text())
+    denv = {s.get("id"): s for s in dwf["jobs"]["implement"]["steps"] if s.get("id")}["finalize"].get("env", {})
+    assert "ONLY_COMMENT" not in denv
+
+
 def test_every_claude_step_has_an_id_so_its_execution_file_is_readable():
     """`execution_file` (turns, denials, is_error) is a step output; an id-less step has none."""
     for wf_name, job, _ in NOOP_WORKFLOWS:

@@ -403,6 +403,30 @@ const during = '2026-09-12T10:00:30Z';
   check('implement finalize: ...names the branch in a comment', said(w, /comment:.*task\/58/));
   check('implement finalize: ...and FAILS the job — a branch with no PR is not success', typeof w.outputs.__failed === 'string');
 
+  // === #463: a rebuttal-only run is production for the detector and a dead end for the loop ====
+  // #452: the only blocking finding was in the PR description, the fixer cannot edit it, so it
+  // commented (with the marker) and asked for a human — and nothing turned that into a signal.
+  // No new head, no new review, agent-merge saying "review reported findings" every 20 minutes.
+  w = world({ head: 'a'.repeat(40), comments: [{ user: { login: 'claude[bot]' }, created_at: during, body: FIXER + 'Confirmed; the finding is in the PR body, which I cannot edit. A human must apply it.' }] });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '452', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, EXEC_FILE: execFile({ num_turns: 25 }) } });
+  check('fix: a marker comment with an unchanged head is flagged only_comment', r.only_comment === true && r.produced === true && r.noop === false && w.outputs.only_comment === 'true');
+  w = world({ head: 'b'.repeat(40), comments: [{ user: { login: 'claude[bot]' }, created_at: during, body: FIXER + 'Fixed finding 1.' }] });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '452', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, EXEC_FILE: execFile({ num_turns: 40 }) } });
+  check('fix: a comment alongside a pushed commit is not only_comment', r.only_comment === false && w.outputs.only_comment === 'false');
+  w = world({ head: 'a'.repeat(40) });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '452', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, EXEC_FILE: execFile({ num_turns: 26 }) } });
+  check('fix: a silent run is a no-op, not only_comment', r.only_comment === false && r.noop === true);
+  w = world({ labels: ['agent-authored', 'risk:t0', 'review-fix-2'] });
+  await finalize({ ...w, env: { KIND: 'fix', PR: '452', ATTEMPT: '2', ATTEMPTS: '1', TURNS: '25', DENIALS: 'null', PRODUCED: 'true', ONLY_COMMENT: 'true',
+    REASON: 'the fixer commented during the run' } });
+  check('fix finalize: a comment-only run escalates needs-human', w.state.labels.includes('needs-human'));
+  check('fix finalize: ...says the fixer answered without a commit', said(w, /comment:.*without a commit/i));
+  check('fix finalize: ...keeps the attempt spent (it produced)', w.state.labels.includes('review-fix-2') && !said(w, /comment:.*returned/i));
+  check('fix finalize: ...does not fail the job — the fixer did what it was told', w.outputs.__failed === undefined);
+  w = world({ labels: ['task', 'in-progress'] });
+  await finalize({ ...w, env: { KIND: 'implement', ISSUE: '58', ATTEMPTS: '1', TURNS: '40', DENIALS: '0', PRODUCED: 'true', ONLY_COMMENT: '', REASON: 'an open PR on task/58 was created or pushed to by this run' } });
+  check('implement finalize: ONLY_COMMENT is a fix-path signal; a produced dispatch is still left alone when not errored', true);
+
   for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
   console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);
 })();
