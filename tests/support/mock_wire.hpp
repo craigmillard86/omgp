@@ -8,6 +8,14 @@
 // scope, ahead of the rest of T030); Garbage/Babble/Rate are declared so T011/T028 can
 // reference the enum, with their behaviour landing in T030 (tasks.md) — see the switch
 // in mock_wire.cpp.
+//
+// contracts/mock-wire.md:16 gives Kind::Respond's answer to "the node's RequestHandler"
+// (and the CrcError/Duplicate rows build "the real response" from it): set_handler()
+// below is that seat, a fixed omgp::link::RequestHandler* per trunk address (#147). The
+// echo answer this file used to fabricate for every node was an interim default ratified
+// 2026-09-03 (docs/OPEN-QUESTIONS.md 2026-09-01 item 1) because no RequestHandler type
+// existed at T010; that ruling now covers only the no-handler fallback — a node with a
+// handler registered answers with whatever the handler returns.
 #pragma once
 
 #include "fake_clock.hpp"
@@ -189,6 +197,20 @@ class MockWire : public omgp::link::ByteWire {
     static constexpr size_t kTranscriptCapacity = 128;
 
     const Step* next_step(uint8_t node);
+
+    // The response `request` is to be answered with, shared by all three answering Kinds
+    // (contracts/mock-wire.md:16, and the CrcError/Duplicate rows' "the real response"):
+    // the node's registered RequestHandler's answer, written into `payload_buf` and
+    // pointed at by `out`, or — for a node with no handler — the interim echo of the
+    // request's own payload. Called exactly ONCE per request, so Duplicate's two emitted
+    // copies are two copies of one answer rather than two invocations.
+    // Returns false, having recorded a fault and left `out` unusable, when the handler
+    // claims a response longer than omgp::LIMIT_max_l3_payload: the caller then enqueues
+    // nothing (never a truncated frame, never a silent drop).
+    bool build_response(const omgp::link::FrameFields& request,
+                        uint8_t (&payload_buf)[omgp::LIMIT_max_l3_payload],
+                        omgp::link::FrameFields& out);
+
     void schedule_respond(const omgp::link::FrameFields& request, uint64_t tx_end,
                           uint32_t delay_us);
     // Kind::CrcError (contracts/mock-wire.md): the real response with its last CRC byte
