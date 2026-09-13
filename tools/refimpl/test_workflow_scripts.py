@@ -650,6 +650,12 @@ def test_rebuttal_only_fix_run_is_escalated_and_the_fixer_may_edit_the_body():
     # The Closes/Fixes/Resolves set the merge gate acts on is snapshotted by the gate and compared
     # by detect; finalize is told REFS_CHANGED and must not return early on it.
     assert "closes" in wf["jobs"]["gate"]["outputs"], "the gate must export the body's closing-reference set"
+    # Round 3: ONE implementation. The gate loads the module from the default-branch checkout
+    # (that job runs no Claude step, so the workspace is trusted there) and calls closingRefs;
+    # no second regex may exist in the gate script.
+    gate_script = _script("review-fix.yml", "gate")
+    assert "agent-noop.js" in gate_script and "closingRefs(" in gate_script, "the gate must snapshot with the shared closingRefs"
+    assert "close[sd]?" not in gate_script, "no private copy of the closing-keyword regex in the gate"
     denv = by_id["detect"].get("env", {})
     assert "CLOSES_BEFORE" in denv and "needs.gate.outputs.closes" in str(denv["CLOSES_BEFORE"]), "detect must receive the snapshot"
     assert "REFS_CHANGED" in env and "steps.detect.outputs.refs_changed" in str(env["REFS_CHANGED"]), "finalize must be told"

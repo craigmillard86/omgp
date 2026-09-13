@@ -15,7 +15,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { detect, finalize, retryBudget, isVerdict } = require(path.join(__dirname, '..', '..', 'tools', 'ci', 'agent-noop.js'));
+const { detect, finalize, retryBudget, isVerdict, closingRefs } = require(path.join(__dirname, '..', '..', 'tools', 'ci', 'agent-noop.js'));
 
 const results = [];
 const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process.exitCode = 1; };
@@ -487,6 +487,32 @@ const during = '2026-09-12T10:00:30Z';
   check('fix finalize: ...names the references in the comment', said(w, /comment:.*(Closes|closing reference)/i));
   check('fix finalize: ...and FAILS the job — an agent rewrote text the merge gate acts on', typeof w.outputs.__failed === 'string');
   check('fix finalize: ...and the attempt stays spent', w.state.labels.includes('review-fix-1'));
+
+  // === round 3 (#466): every form GitHub's auto-close honours, one implementation, both branches ==
+  // [RT-1] `KEYWORD #n` was the only form compared; GitHub also closes on `GH-n`, `owner/repo#n`
+  // and the issue URL, so an ADDED reference in those forms escaped. `closingRefs` is the one
+  // implementation the gate (snapshot) and detect (comparison) both call; it canonicalises
+  // same-repo references to the bare number and keeps cross-repo ones as `owner/repo#n`.
+  check('closingRefs: #n', closingRefs('Closes #12', 'o', 'r') === '12');
+  check('closingRefs: GH-n', closingRefs('fixes GH-12', 'o', 'r') === '12');
+  check('closingRefs: owner/repo#n for THIS repo canonicalises to the number', closingRefs('resolved o/r#12', 'o', 'r') === '12');
+  check('closingRefs: the issue URL for this repo canonicalises to the number', closingRefs('Closes https://github.com/o/r/issues/12', 'o', 'r') === '12');
+  check('closingRefs: a cross-repo reference is kept whole', closingRefs('closes x/y#5', 'o', 'r') === 'x/y#5');
+  check('closingRefs: every keyword, any case, optional colon; numbers first ascending, then cross-repo',
+    closingRefs('CLOSE #3, closed: #1, Fix #2, fixed GH-10, Resolve #3, resolves x/y#5, RESOLVED o/r#7', 'o', 'r') === '1,2,3,7,10,x/y#5');
+  check('closingRefs: repo comparison is case-insensitive', closingRefs('closes O/R#4', 'o', 'r') === '4');
+  check('closingRefs: an empty body is the empty string', closingRefs('', 'o', 'r') === '');
+  for (const [form, body] of [['GH-n', 'Closes #463\nCloses GH-134'], ['owner/repo#n', 'Closes #463\nfixes o/r#134'], ['issue URL', 'Closes #463\nresolves https://github.com/o/r/issues/134']]) {
+    w = world({ head: 'b'.repeat(40), body });
+    r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+    check(`fix: a reference ADDED as ${form} is flagged`, r.refs_changed === true && /134/.test(r.refs_detail));
+  }
+  // [RT-2] Both new finalize branches return; their order was unpinned. A changed reference set
+  // outranks a comment-only outcome: an agent rewrote the merge gate's text, so the job fails.
+  w = world({ labels: ['agent-authored', 'review-fix-1'] });
+  await finalize({ ...w, env: { KIND: 'fix', PR: '466', ATTEMPT: '1', ATTEMPTS: '1', TURNS: '30', DENIALS: '0', NOOP: 'false', PRODUCED: 'true', ONLY_COMMENT: 'true', REFS_CHANGED: 'true', REFS_DETAIL: 'before: #463; now: #1, #463',
+    REASON: 'the fixer commented during the run' } });
+  check('fix finalize: ONLY_COMMENT and REFS_CHANGED together — the reference change wins and the job fails', typeof w.outputs.__failed === 'string' && said(w, /comment:.*closing reference/i) && w.state.labels.includes('needs-human'));
 
   for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
   console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);
