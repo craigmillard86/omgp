@@ -3260,3 +3260,17 @@ Three mutants survived the first suite (the `SINCE` window, the `state: 'open'` 
 **Judgement added by round 3, stated because it is a control and not a guarantee (rule 11):** the fixer is recognised by a marker its prompt tells it to write. A fixer that ignores the instruction is declared a no-op — escalated, returned, failed — which is the loud direction. The prompt and the detector both load from the default branch, so they cannot drift apart within a run; `test_noop_round3_wiring` pins the literal in both.
 
 **Supersedes:** none.
+
+---
+
+## 2026-09-13 — F4's two deferred values: `T_rate_reprobe_ms = 1000` (one node per probe) and a return quorum of a strict majority of live enrolled nodes
+
+**Context:** the F4 ruling (2026-09-06) made the bit rate a property of the trunk and said the host, while at the fallback rate, "re-probes the reference rate on a fixed cadence" and "returns to it as soon as a quorum of enrolled nodes answers there". Neither the cadence nor the quorum was given a value anywhere in the repo, and golden rule 4 forbids an inline timing constant, so #59 (T041) and #60 (T042) stopped on it (comments of 2026-09-07 and 2026-09-12). #155, which was to carry F4 into the documents, had not started.
+
+**Cadence.** `T_rate_reprobe_ms = 1000`, one enrolled node per probe, round-robin over the enrolment rotation. Equal to `offline_after_suspect_ms`, so a node that has come back at the reference rate is seen within one health epoch; a probe costs one poll slot that times out after `T_resp` (200 µs), and at the fallback rate every ordinary frame is roughly nine times slower, so one slot per second is negligible against the degraded bus. Alternatives considered: 100 ms (ten wasted slots per second for a faster return) and once per superframe (couples the probe to the budget F4 says derives from the rate in use).
+
+**Quorum.** Strict majority of *live* enrolled nodes (state ENROLLED), minimum one: `count(ref_ok) × 100 > rate_return_quorum_pct × |live|` with `rate_return_quorum_pct = 50`. Counting only live nodes means a SUSPECT or OFFLINE node cannot hold the trunk at the fallback rate, which is the one-node downgrade F4 exists to remove; with one live node, that node is the quorum. Alternatives considered: a majority of *all* enrolled nodes (several offline nodes make the quorum unreachable until they are unenrolled), all live nodes (one marginal receiver keeps everyone slow), any one node (no hysteresis; a marginal node flaps the trunk).
+
+**Where it lands:** `protocol/omgp-protocol.yaml` `link_trunk.T_rate_reprobe_ms` and `link_trunk.rate_return_quorum_pct` (generated as `TRUNK_T_rate_reprobe_ms`, `TRUNK_rate_return_quorum_pct`); `docs/trunk-link-layer.md` §7 and the §9 table; `specs/002-trunk-link-layer/data-model.md` §7 (re-probe, return and fall-back rules, with `ref_ok` per node); `spec.md` FR-026; `contracts/link-cpp.md` `bit_rate()`. A failed reference probe is counted in `BusStats`, never against the probed node's health. The remainder of #155 (F1, F2(b), F3) is untouched here.
+
+**Ruling:** human, 2026-09-13 — the maintainer chose both values in session (recorded by their comment on #59 the same day); the maintainer's merge of the PR carrying this entry ratifies it. **Supersedes:** nothing; it completes the 2026-09-06 F4 entry, whose "value to be set" clauses this answers. **Amends:** the five artefacts named above, each with a dated marker.

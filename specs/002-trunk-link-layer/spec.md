@@ -448,9 +448,15 @@ assert no bus fault.
 - **FR-026**: While BUS_FAULT is declared, the host MUST alternate its enrolment probes
   between the reference and the fallback bit rate (one probe at each, in turn); the first
   valid response at either rate MUST clear BUS_FAULT exactly once with a recovery
-  notification, and the bit rate that obtained the response MUST become the rate in use
-  until the layer above changes it. **Ruling (human, 2026-08-29;
-  `docs/OPEN-QUESTIONS.md`)**. Per-node health MUST resume normally afterwards: the
+  notification. *(Amended 2026-09-13: F4, human 2026-09-06, values human 2026-09-13.)* The bit
+  rate is a property of the trunk: the reference rate is in use whenever any enrolled node
+  answers at it, and the host uses the fallback rate only while no enrolled node answers at
+  the reference rate. While at the fallback rate the host MUST re-probe the reference rate
+  every `TRUNK_T_rate_reprobe_ms`, one enrolled node per probe, and MUST return to the
+  reference rate when strictly more than `TRUNK_rate_return_quorum_pct` % of live (ENROLLED)
+  nodes, minimum one, have answered there. The superseded clause read: "the bit rate that
+  obtained the response MUST become the rate in use until the layer above changes it"
+  **(ruling human, 2026-08-29; superseded by F4 in `docs/OPEN-QUESTIONS.md`)**. Per-node health MUST resume normally afterwards: the
   answering node becomes ENROLLED; the others keep their SUSPECT/OFFLINE state and timers
   (their clocks were not paused by the fault).
 

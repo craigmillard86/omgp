@@ -208,8 +208,23 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   `|enrolled| ≥ 1` and every enrolled node ∈ {SUSPECT, OFFLINE} and `!fault`.
 - While `fault`: `next_probe()` alternates `bit_rate` between reference and fallback per
   call (starting with the fallback, §7); `rate_changes++` on each change.
-- Clear: first `ok` result at any rate while `fault` → `fault = false`, `bit_rate` = the
-  rate that got the answer, `BUS_RECOVERED`; the answering node → ENROLLED as in §6.
+- Clear *(amended 2026-09-13: F4, rulings 2026-09-06 and 2026-09-13)*: first `ok` result at
+  any rate while `fault` → `fault = false`, `BUS_RECOVERED`; the answering node → ENROLLED as
+  in §6; `bit_rate` = the rate that got the answer. If that is the fallback rate, the
+  reference re-probe below starts. The superseded clause read "`bit_rate` = the rate that got
+  the answer" with nothing further, i.e. the answering rate pinned the trunk.
+- Reference re-probe (while `!fault` and `bit_rate == TRUNK_bit_rate_fallback`): every
+  `TRUNK_T_rate_reprobe_ms`, ONE enrolled node — round-robin over the enrolment rotation — is
+  probed at `TRUNK_bit_rate`. The probe's outcome is recorded as that node's `ref_ok` and is
+  counted in `BusStats`, never in the node's failure count (the node is answering at the
+  fallback rate; a failed reference probe says nothing about its health).
+- Return: when `count(live nodes with ref_ok)` × 100 > `TRUNK_rate_return_quorum_pct` ×
+  `|live|`, minimum one, where live = {addr : state = ENROLLED} → `bit_rate` = `TRUNK_bit_rate`,
+  `rate_changes++`, every `ref_ok` cleared. Only live nodes count: a SUSPECT or OFFLINE node
+  cannot hold the trunk at the fallback rate, which is the one-node downgrade F4 removes.
+- Fall back (while `!fault` and `bit_rate == TRUNK_bit_rate`): only through the declare rule
+  above — a fault is declared only when every enrolled node is SUSPECT/OFFLINE, so the
+  reference rate stays in use whenever any enrolled node answers at it.
 
 ## 8. Statistics (FR-011a)
 

@@ -189,7 +189,9 @@ public:
     void mark_polled(uint8_t addr, uint64_t now_us);
     Probe next_probe(uint64_t now_us);                         // enrolment rotation; alternates rates while bus_fault()
     bool bus_fault() const;
-    uint32_t bit_rate() const;                                 // rate in use after the last recovery
+    uint32_t bit_rate() const;                                 // rate in use: the reference whenever any enrolled node answers at it;
+                                                               // at the fallback, re-probes every TRUNK_T_rate_reprobe_ms and returns on
+                                                               // a live-majority quorum (F4; data-model §7, amended 2026-09-13)
 };
 ```
 Rules: SUSPECT after `TRUNK_suspect_after_failures` consecutive failures; OFFLINE after

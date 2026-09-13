@@ -70,7 +70,7 @@ Budget rule: a superframe never exceeds T_poll; unsent demand traffic carries to
 - **Retry**: on response timeout or CRC-failed response, the host retransmits with the same L2 sequence and `ctrl.retry` set, up to **2 retries**. L3 idempotency (Protocol Draft §3) makes this safe. A node receiving a retry of a sequence it already answered re-sends its previous response (single-frame replay buffer per node).
 - **Node suspect**: 3 consecutive failed transactions → node marked SUSPECT; polled once per 10 superframes. (What counts as a failed transaction versus a valid `ERR_BUSY` answer: §8, and the open persistence bound in §10.5.)
 - **Node dead**: 1 s in SUSPECT without a valid response (per §8, an `ERR_BUSY` answer is a valid response) → node marked OFFLINE, reported to L4 (which decides audio-safety consequences, e.g. muting that backplane's paths). OFFLINE nodes stay in the enrolment rotation.
-- **Bus health**: if all nodes fail simultaneously, the host declares BUS_FAULT, re-probes at the fallback bit rate, and surfaces a system alert. This distinguishes a dead node from a broken trunk.
+- **Bus health**: if all nodes fail simultaneously, the host declares BUS_FAULT, re-probes at the fallback bit rate, and surfaces a system alert. This distinguishes a dead node from a broken trunk. *(Amended 2026-09-13, F4 rulings 2026-09-06 and 2026-09-13.)* The bit rate is a property of the trunk, not of the node that answered: the reference rate is in use whenever any enrolled node answers at it, and the host uses the fallback rate only while no enrolled node answers at the reference rate. While at the fallback rate it re-probes the reference rate every **T_rate_reprobe**, one enrolled node per probe, and returns to the reference rate when a strict majority of live (ENROLLED) nodes, minimum one, has answered there.
 
 ## 8. Bridging rules (backplane duty)
 
@@ -87,6 +87,8 @@ Budget rule: a superframe never exceeds T_poll; unsent demand traffic carries to
 | T_resp | 200 µs | host timeout awaiting start bit |
 | T_gap | ≥ 50 µs | idle between transactions; binds every station (ruling 2026-09-11) |
 | T_poll | 2 ms | superframe period |
+| T_rate_reprobe | 1000 ms | while at the fallback rate: re-probe the reference rate at this cadence, one enrolled node per probe (ruling 2026-09-13) |
+| Rate-return quorum | > 50 % of live nodes, min 1 | return to the reference rate when a strict majority of ENROLLED nodes answers there (ruling 2026-09-13) |
 | Retries | 2 | per transaction |
 | Max payload | 64 B | one L3 message |
 
