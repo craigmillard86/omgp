@@ -22,7 +22,10 @@ jobs:
             const pr = context.payload.pull_request;
             const files = await github.paginate(github.rest.pulls.listFiles,
               {owner, repo, pull_number: pr.number, per_page: 100});
-            const paths = files.map(f => f.filename);
+            // A rename is ONE entry: new path in `filename`, old path in `previous_filename`. Both
+            // count, or renaming a governance artefact to an unlisted path scores by the new path
+            // alone — T0 for docs/GOVERNANCE.md (round-6 red team on #420).
+            const paths = files.flatMap(f => f.previous_filename ? [f.filename, f.previous_filename] : [f.filename]);
             const touches = re => paths.some(p => re.test(p));
             // "Test content" is not only C++ under tests/: tools/refimpl/test_*.py is the 436-test
             // Python suite that drives every workflow harness in this repo (agent-merge,

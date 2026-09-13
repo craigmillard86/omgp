@@ -129,7 +129,11 @@ jobs:
 
               // Human-owned paths stay human, at any tier.
               const changed = await github.paginate(github.rest.pulls.listFiles, {owner, repo, pull_number: number, per_page: 100});
-              const owned = changed.map(f => f.filename).filter(f => ownedPatterns.some(p => ownedBy(p, f)));
+              // A rename is ONE entry: new path in `filename`, old path in `previous_filename`, and it
+              // may carry a patch (move + edit). Both paths are checked, or renaming an owned file
+              // to an unowned path walks this (round-6 red team on #420).
+              const touched = f => f.previous_filename ? [f.filename, f.previous_filename] : [f.filename];
+              const owned = changed.flatMap(touched).filter(f => ownedPatterns.some(p => ownedBy(p, f)));
               if (owned.length) { skip(number, `CODEOWNERS-owned path(s) need the owner: ${owned.join(', ')}`); continue; }
 
               // docs/OPEN-QUESTIONS.md left CODEOWNERS on 2026-09-12 so the merge GOVERNANCE §1
