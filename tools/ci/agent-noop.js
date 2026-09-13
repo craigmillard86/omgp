@@ -85,23 +85,45 @@ const isVerdict = body => (body || '').split('\n').some(l => !isQuoted(l) && /^V
 const FIXER_MARK = /^review-fix\(\d+\) @ [0-9a-f]{7,40}\b/i;
 const isFixer = body => FIXER_MARK.test(unwrap((body || '').split('\n').find(l => l.trim()) || ''));
 
-// The closing references GitHub honours on merge — `KEYWORD #n`, `KEYWORD GH-n`,
-// `KEYWORD owner/repo#n`, `KEYWORD <issue URL>`, keyword in any case, optional colon — as the
-// ONE canonical set both the review-fix gate (snapshot, before the run) and detect (comparison,
-// after) use. Same-repo references canonicalise to the bare number; cross-repo ones stay
-// `owner/repo#n`. Numbers first ascending, then cross-repo strings, joined by ','. Comparing
-// only `#n` let an added `GH-n` escape the escalation, and two private copies of the regex could
-// drift into a spurious failing escalation on every run (round-3 red team on #466).
-const CLOSING = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)|([\w.-]+)\/([\w.-]+)#(\d+)|GH-(\d+)|#(\d+))\b/gi;
-function closingRefs(body, owner, repo) {
-  const same = (o, r) => o.toLowerCase() === String(owner).toLowerCase() && r.toLowerCase() === String(repo).toLowerCase();
-  const nums = new Set(), others = new Set();
-  for (const m of String(body || '').matchAll(CLOSING)) {
-    if (m[3]) { if (same(m[1], m[2])) nums.add(Number(m[3])); else others.add(`${m[1]}/${m[2]}#${m[3]}`); }
-    else if (m[6]) { if (same(m[4], m[5])) nums.add(Number(m[6])); else others.add(`${m[4]}/${m[5]}#${m[6]}`); }
-    else nums.add(Number(m[7] || m[8]));
+// Closing references, in the four spellings GitHub documents — `KEYWORD #n`, `KEYWORD GH-n`,
+// `KEYWORD owner/repo#n`, `KEYWORD <issue URL>` (bare, autolinked or markdown-linked), keyword in
+// any case, optionally emphasised, optional colon — matched AFTER fenced code blocks, inline code
+// spans and HTML comments are removed, since GitHub does not honour a reference inside those.
+// CONTROL, NOT GUARANTEE (rule 11): GitHub's own parser is the authority; this covers the
+// spellings named here and nothing else. Cross-repo forms count only under THIS repo's owner —
+// `core/scheduler#3` in prose is a path, not a reference (round-4 red team on #466).
+//
+// `closingRefs` returns the set AS SPELLED, because the guard's job is to notice any change to
+// what the merge gate will act on, and agent-merge's own parser reads only `#n`: canonicalising
+// `o/r#465` to `465` hid a rewrite of `Closes #465` into `Closes o/r#465` that left in-progress
+// on a closed issue (round-4 review on #466). `closingIssues` canonicalises same-repo forms to
+// numbers for the RELEASE paths, which need numbers.
+const stripMarkup = t => String(t || '')
+  .replace(/```[\s\S]*?```/g, ' ')
+  .replace(/<!--[\s\S]*?-->/g, ' ')
+  .replace(/`[^`\n]*`/g, ' ');
+const CLOSING = /\b[*_]{0,2}(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[*_]{0,2}\s*:?\s*(?:<?(https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+))>?|\[#(\d+)\]\([^)]*\)|([\w.-]+)\/([\w.-]+)#(\d+)|GH-(\d+)|#(\d+))(?![\w-])/gi;
+function closingMatches(body, owner, repo) {
+  const own = String(owner).toLowerCase(), rep = String(repo).toLowerCase();
+  const out = [];
+  for (const m of stripMarkup(body).matchAll(CLOSING)) {
+    if (m[1]) out.push({ spelled: m[1], num: Number(m[4]), same: m[2].toLowerCase() === own && m[3].toLowerCase() === rep });
+    else if (m[5]) out.push({ spelled: `#${m[5]}`, num: Number(m[5]), same: true });
+    else if (m[8]) { if (m[6].toLowerCase() !== own) continue; out.push({ spelled: `${m[6]}/${m[7]}#${m[8]}`, num: Number(m[8]), same: m[7].toLowerCase() === rep }); }
+    else if (m[9]) out.push({ spelled: `GH-${m[9]}`, num: Number(m[9]), same: true });
+    else out.push({ spelled: `#${m[10]}`, num: Number(m[10]), same: true });
   }
-  return [...[...nums].sort((a, b) => a - b).map(String), ...[...others].sort()].join(',');
+  return out;
+}
+const kindOf = sp => (sp.startsWith('#') ? 0 : sp.startsWith('GH-') ? 1 : 2);
+function closingRefs(body, owner, repo) {
+  const seen = new Set(), items = [];
+  for (const it of closingMatches(body, owner, repo)) { if (!seen.has(it.spelled)) { seen.add(it.spelled); items.push(it); } }
+  items.sort((x, y) => kindOf(x.spelled) - kindOf(y.spelled) || x.num - y.num || (x.spelled < y.spelled ? -1 : x.spelled > y.spelled ? 1 : 0));
+  return items.map(i => i.spelled).join(',');
+}
+function closingIssues(body, owner, repo) {
+  return [...new Set(closingMatches(body, owner, repo).filter(i => i.same).map(i => i.num))].sort((x, y) => x - y);
 }
 
 // How many times a no-op run may be retried in-job before the claim is released (#361 AC2).
@@ -210,10 +232,10 @@ async function detect({ github, context, core, env }) {
     // a change is escalated and the job failed (round-2 review + red team on #466).
     const snap = String(env.CLOSES_BEFORE || '').trim();
     if (snap) {
-      const beforeSet = snap === 'none' ? '' : snap;   // the gate wrote it with closingRefs, so it is canonical
+      const beforeSet = snap === 'none' ? '' : snap;   // the gate wrote it with closingRefs, so it is in the same spelled form
       const nowSet = closingRefs(pr.body, owner, repo);
       refsChanged = beforeSet !== nowSet;
-      const show = s => s ? s.split(',').map(x => (/^\d+$/.test(x) ? '#' + x : x)).join(', ') : 'none';
+      const show = s => s ? s.split(',').join(', ') : 'none';
       refsDetail = `before: ${show(beforeSet)}; now: ${show(nowSet)}`;
       if (refsChanged) core.warning(`agent-noop: the PR's closing references changed during the run (${refsDetail})`);
     }
@@ -395,4 +417,4 @@ async function finalize({ github, context, core, env }) {
   core.setFailed(`agent-noop: review-fix on #${pr} produced nothing after ${spent} — ${env.REASON || 'no output'}; attempt ${attempt}, needs-human ${escalated ? 'applied' : 'NOT applied'}, job failed (#361).`);
 }
 
-module.exports = { detect, finalize, readFigures, isVerdict, isFixer, retryBudget, closingRefs };
+module.exports = { detect, finalize, readFigures, isVerdict, isFixer, retryBudget, closingRefs, closingIssues };

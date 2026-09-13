@@ -145,7 +145,7 @@ jobs:
               // its rule that only a 404 ("label already absent") is a non-event.
               // Same-repo closing references only (cross-repo ones cannot be released here), from the
               // shared closingRefs — the one implementation of GitHub's auto-close forms (#463).
-              const closes = noop.closingRefs(pr.body || '', owner, repo).split(',').filter(x => /^\d+$/.test(x)).map(Number);
+              const closes = noop.closingIssues(pr.body || '', owner, repo);
               const m = pr.head.ref.match(/^task\/(\d+)$/);
               const issues = closes.length ? closes : (m ? [Number(m[1])] : []);
               const attempt = async (what, fn) => { try { await fn(); return null; } catch (e) { return e.status === 404 ? null : `${what} (${e.status || ''} ${e.message || e})`; } };
