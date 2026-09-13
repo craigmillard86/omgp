@@ -162,7 +162,10 @@ function joinSpelled(items) {
   const seen = new Set(), uniq = [];
   for (const it of items) { if (!seen.has(it.spelled)) { seen.add(it.spelled); uniq.push(it); } }
   uniq.sort((x, y) => x.kind - y.kind || x.num - y.num || (x.spelled < y.spelled ? -1 : x.spelled > y.spelled ? 1 : 0));
-  return uniq.map(i => i.spelled).join(',');
+  // `,` is the separator, so a comma INSIDE an element (a markdown-link target may carry one)
+  // is percent-encoded, `%` first so an encoded comma cannot collide with a literal `%2C`
+  // (round-13 red team on #466: a shredded element could stand in for a separate reference).
+  return uniq.map(i => i.spelled.replace(/%/g, '%25').replace(/,/g, '%2C')).join(',');
 }
 function closingRefs(body, owner, repo) { return joinSpelled(closingMatches(body, owner, repo)); }
 // The exhaustion release releases CLAIMS: every same-repo issue the body names in a spelling
