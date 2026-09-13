@@ -235,8 +235,9 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   recorded answerer.) The pass length is exactly `|enrolled|` probes — the same number in
   `trunk §7`, FR-026 and here; trunk §7's two retries give each address three attempts. On
   a clear at the fallback rate every other enrolled node keeps its SUSPECT/OFFLINE state and
-  timers. `rate_changes++` on each change of `bit_rate`. On declare, `fallback_answerer = 0`,
-  `ref_pass_left = 0`. The superseded clause read "first `ok` result at any rate while `fault`
+  timers. `rate_changes++` on each change of `bit_rate`. On declare, and on every clear at
+  either rate, `fallback_answerer = 0` and `ref_pass_left = 0` — a clear at the reference rate
+  can fire mid-pass, and a stale pass counter must not survive it. The superseded clause read "first `ok` result at any rate while `fault`
   → `fault = false`, `bit_rate` = the rate that got the answer": the answering rate pinned the
   trunk, so one node strapped at the fallback rate could downgrade a reference-rate rig
   (#110 F4).

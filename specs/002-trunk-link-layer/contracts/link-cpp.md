@@ -212,7 +212,8 @@ public:
 ```
 Rules: SUSPECT after `TRUNK_suspect_after_failures` consecutive failures; OFFLINE after
 `TRUNK_offline_after_suspect_ms` in SUSPECT without a valid response; any valid response
-→ ENROLLED; UNENROLLED never counts; BUS_FAULT when ≥ 1 node is enrolled and all enrolled
+→ ENROLLED, except that a fallback-rate answer during a fault is deferred to the clear
+(data-model §7, 2026-09-13); UNENROLLED never counts; BUS_FAULT when ≥ 1 node is enrolled and all enrolled
 nodes are SUSPECT/OFFLINE (declared once); alternating-rate probes while BUS_FAULT except during
 the reference pass; a valid answer at the reference rate clears the fault there at once, a valid
 answer at the fallback rate clears it only after a reference pass — every enrolled address once, at

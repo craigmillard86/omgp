@@ -121,7 +121,8 @@ from the tree on 2026-08-29; facts about the trunk protocol come from
   `on_result(addr, ok, now)`, `state(addr)`, `poll_due(addr, now)` (ENROLLED: always;
   SUSPECT: `now − last_poll ≥ 10 × T_poll`; OFFLINE/UNENROLLED: only via the enrolment
   rotation), `next_probe(now) → {addr, bit_rate}` (rotation over UNENROLLED and OFFLINE
-  addresses; while BUS_FAULT the rate alternates reference/fallback per probe — ruling Q3),
+  addresses; while BUS_FAULT the rate alternates reference/fallback per probe, except during a
+  reference pass (F4, 2026-09-13) — ruling Q3),
   `bus_fault()`. Transitions and BUS_FAULT declare/clear call
   `HealthListener::on_event(kind, addr)` (kinds: ENROLLED, SUSPECT, OFFLINE, RECOVERED,
   BUS_FAULT, BUS_RECOVERED, ALERT); the listener is a virtual interface implemented by F3
