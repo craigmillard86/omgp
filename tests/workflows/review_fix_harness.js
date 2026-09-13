@@ -91,10 +91,10 @@ const quiet = w => !w.log.some(l => l.startsWith('comment@') || /^[+-]/.test(l))
   {
     const wc = world({pr: PR(['agent-authored'], {body: 'Resolves #7\nfixes GH-12\ncloses o/r#3\ncloses x/y#5'}), comments: [verdict('review', 'findings', HEAD)]});
     await gate(wc);
-    check('gate exports both views — raw (agent-merge) and GitHub-honoured — as spelled', wc.outputs.closes === 'raw=Resolves #7,fixes GH-12,closes o/r#3,closes x/y#5;gh=Resolves #7,fixes GH-12,closes o/r#3,closes x/y#5');
+    check('gate exports the closing-reference set as the automation reads it, as spelled', wc.outputs.closes === 'Resolves #7,fixes GH-12,closes o/r#3,closes x/y#5');
     const wf = world({pr: PR(['agent-authored'], {body: 'Closes #7\n\n```\nCloses #8\n```'}), comments: [verdict('review', 'findings', HEAD)]});
     await gate(wf);
-    check('gate: a fenced reference is in the raw view only', wf.outputs.closes === 'raw=Closes #7,Closes #8;gh=Closes #7');
+    check('gate: a fenced reference counts — the automation reads the raw body', wf.outputs.closes === 'Closes #7,Closes #8');
     const wn = world({pr: PR(['agent-authored'], {body: 'no references here'}), comments: [verdict('review', 'findings', HEAD)]});
     await gate(wn);
     check('gate exports `none` for a body with no closing reference (not the empty string)', wn.outputs.closes === 'none');
