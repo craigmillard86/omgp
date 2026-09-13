@@ -466,7 +466,8 @@ assert no bus fault.
   BUS_FAULT is declared the host MUST send no status polls; it MUST alternate its probes
   between the reference and the fallback bit rate (one probe at each, in turn) over every
   address that is UNENROLLED, OFFLINE or SUSPECT (no address is ENROLLED while a fault is
-  declared). The host MUST prefer the reference rate: a valid response at the reference rate
+  declared) — except during a reference pass, when every probe goes out at the reference
+  rate. The host MUST prefer the reference rate: a valid response at the reference rate
   MUST clear BUS_FAULT at the reference rate at once. A valid response at the fallback rate
   MUST NOT clear BUS_FAULT by itself and MUST NOT yet change that node's health state: the
   host MUST then probe every enrolled address once at the reference rate, in address order
