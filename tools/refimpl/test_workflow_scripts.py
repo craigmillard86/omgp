@@ -674,7 +674,10 @@ def test_reference_guard_reads_at_least_what_agent_merge_reads(tmp_path):
     (`agent-merge.yml`'s release/close regex), so a body edit could add or remove a reference the
     merge automation acts on while the guard said "unchanged". Pin the property, not a spelling:
     extract agent-merge's literal regex from its workflow and check, on a corpus of awkward bodies,
-    that the guard's same-repo issue set is a SUPERSET of what that regex finds."""
+    that the GUARD's compared set (`closingRefs`, what the gate snapshots and `detect` compares)
+    contains every match agent-merge's regex finds, in its own `merge:` namespace — round 12: the
+    corpus loop had drifted onto the release path, which by then WAS agent-merge's regex, so it
+    was a tautology; it reads the guard now."""
     if shutil.which("node") is None:
         pytest.skip("node not present")
     merge_src = (ROOT / ".github" / "workflows" / "agent-merge.yml").read_text()
@@ -694,8 +697,8 @@ def test_reference_guard_reads_at_least_what_agent_merge_reads(tmp_path):
         "let bad = [];\n"
         "for (const b of bodies) {\n"
         "  const merge = [...new Set([...b.matchAll(mergeRe)].map(x => Number(x[1])))];\n"
-        "  const guard = new Set(noop.closingIssues(b, 'o', 'r'));\n"
-        "  for (const n of merge) if (!guard.has(n)) bad.push(JSON.stringify(b) + ' -> agent-merge sees #' + n + ', guard does not');\n"
+        "  const guard = noop.closingRefs(b, 'o', 'r').split(',');\n"
+        "  for (const m of b.matchAll(mergeRe)) { const sp = 'merge:' + m[0].replace(/\\s+/g, ' '); if (!guard.includes(sp)) bad.push(JSON.stringify(b) + ' -> agent-merge reads ' + JSON.stringify(m[0]) + ', the guard set lacks ' + JSON.stringify(sp)); }\n"
         "}\n"
         "console.log(bad.length ? bad.join('\\n') : 'SUPERSET');\n")
     r = subprocess.run(["node", str(runner), str(ROOT / "tools" / "ci" / "agent-noop.js"), json.dumps(corpus)],
