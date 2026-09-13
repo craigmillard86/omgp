@@ -196,16 +196,17 @@ struct Probe { uint8_t addr; uint32_t bit_rate; };
 class HealthTracker {
 public:
     HealthTracker(Clock&, HealthListener&);
-    void on_result(uint8_t addr, bool ok, uint64_t now_us);   // one transaction outcome
+    void on_result(uint8_t addr, bool ok, uint64_t now_us);   // one transaction outcome (any kind; during a fault, a probe's)
     void tick(uint64_t now_us);                                // time-only transitions (SUSPECT → OFFLINE)
     HealthState state(uint8_t addr) const;
     bool poll_due(uint8_t addr, uint64_t now_us) const;        // ENROLLED: true; SUSPECT: every 10×T_poll; else false;
                                                                // while bus_fault(): false for every address (F4, 2026-09-13)
     void mark_polled(uint8_t addr, uint64_t now_us);
     Probe next_probe(uint64_t now_us);                         // enrolment rotation; alternates rates while bus_fault(),
-                                                               // except during a reference pass (F4, 2026-09-13). Called only
-                                                               // when no transaction is outstanding (trunk §3), so on_result
-                                                               // always reports the last probe issued
+                                                               // except during a reference pass (F4, 2026-09-13). While
+                                                               // bus_fault() probes are the only traffic (no polls, no demand
+                                                               // slots), so on_result then reports the last probe issued; outside
+                                                               // a fault on_result reports every transaction, status polls included
     bool bus_fault() const;
     uint32_t bit_rate() const;                                 // rate in use after the last recovery: the reference if any node answered
                                                                // there during the fault, else the fallback; no automatic return (F4;

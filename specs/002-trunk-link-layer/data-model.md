@@ -201,12 +201,18 @@ rotation (`next_probe(now)`): round-robin over addresses 0x01–0x0F whose state
 UNENROLLED or OFFLINE; returns `{addr, bit_rate}`. *(Amended 2026-09-13, F4.)* While `fault`
 (§7) the candidate set also includes every SUSPECT address, so the alternating-rate probes
 reach the nodes whose silence declared the fault at once rather than only after they age to
-OFFLINE. Trunk §3 (strict master poll) admits **one transaction at a time** on the wire, and the
-scheduler calls `next_probe()` only when none is outstanding, so every `on_result` is the outcome
-of the last probe issued — no correlation state is needed and none is kept (rounds 9-10 on #472
-specified a matcher for out-of-order outcomes that trunk §3 forbids; withdrawn). During a
-reference pass (§7) `next_probe()` yields each enrolled address (state ≠ UNENROLLED) once, in
-address order, at `TRUNK_bit_rate`, without alternating.
+OFFLINE. **While `fault`, probes are the only traffic the host sends**: no status polls
+(`poll_due()` false for every address) and no demand slots — every enrolled node is SUSPECT or
+OFFLINE, so no L3 traffic can be delivered, and F3 holds demand traffic while `bus_fault()` —
+one probe per superframe (trunk §6), one transaction at a time on the wire (trunk §3). So during
+a fault every `on_result` is the outcome of the last probe issued and no correlation state is
+needed (rounds 9-11 on #472: outside a fault `on_result` reports every transaction, status polls
+included — that is how SUSPECT and OFFLINE are reached — and a demand-slot outcome landing
+mid-pass would have ended the pass early; suspending demand traffic during a fault is what makes
+the simple rule sound). During a reference pass (§7) `next_probe()` yields each enrolled address
+(state ≠ UNENROLLED) once, in address order, at `TRUNK_bit_rate`, without alternating; while a
+pass probe's outcome is still outstanding at a superframe boundary it re-yields that same
+address, and the scheduler issues nothing while a transaction is in flight.
 
 ## 7. Bus state
 
@@ -228,9 +234,10 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   (its §6 transition is deferred — an ENROLLED node would be status-polled at the reference
   rate it cannot hear, fail into SUSPECT, and the recovery would be re-declared as a fault at
   once), and a **reference pass** starts — `ref_pass_left = |enrolled|` where enrolled =
-  {addr : state ≠ UNENROLLED}. Trunk §3 admits one transaction at a time, so the fallback answer
-  that starts the pass is the outcome of the only transaction there was, nothing is in flight
-  when the pass begins, and every `on_result` during the pass is the pass probe's (§6).
+  {addr : state ≠ UNENROLLED}. Probes are the only traffic during a fault and one transaction is
+  on the wire at a time (§6), so the fallback answer that starts the pass is the outcome of the
+  only transaction there was, nothing is in flight when the pass begins, and every `on_result`
+  during the pass is the pass probe's.
   `ref_pass_left` is decremented by each pass outcome, never when a probe is issued (a
   `tick()` between the last probe and its result must not fire the clear, round-8 red team).
   A valid answer at the reference rate during the pass → clear at the reference rate as above,
