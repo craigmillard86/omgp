@@ -78,6 +78,9 @@ jobs:
           script: |
             const fs = require('fs');
             const {owner, repo} = context.repo;
+            // The shared detector module, from THIS job's default-branch checkout: this job runs no
+            // Claude step, so its workspace is trusted. Unreadable => the gate fails, loudly (#463).
+            const noop = require(`${process.env.GITHUB_WORKSPACE}/tools/ci/agent-noop.js`);
             const out = (go, extra = {}) => { core.setOutput('go', go); for (const [k, v] of Object.entries(extra)) core.setOutput(k, v); };
             // The bound comes from the DEFAULT-branch config, so it can be retuned without a
             // workflow-scope push. Unreadable or absent => no attempt (fail closed).
@@ -140,7 +143,9 @@ jobs:
               // Exhausted: release the claim on the PR and on the issues it closes, then
               // escalate — the same shape as ci-failure-router's exhaustion path, including
               // its rule that only a 404 ("label already absent") is a non-event.
-              const closes = [...new Set([...(pr.body || '').matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi)].map(x => Number(x[1])))];
+              // Same-repo closing references only (cross-repo ones cannot be released here), from the
+              // shared closingRefs — the one implementation of GitHub's auto-close forms (#463).
+              const closes = noop.closingRefs(pr.body || '', owner, repo).split(',').filter(x => /^\d+$/.test(x)).map(Number);
               const m = pr.head.ref.match(/^task\/(\d+)$/);
               const issues = closes.length ? closes : (m ? [Number(m[1])] : []);
               const attempt = async (what, fn) => { try { await fn(); return null; } catch (e) { return e.status === 404 ? null : `${what} (${e.status || ''} ${e.message || e})`; } };
@@ -165,7 +170,7 @@ jobs:
             // Snapshot the closing references the merge gate acts on: the fixer may now edit the body
             // (#463), and detect compares this against the body after the run — with the SAME
             // function, loaded from this job's default-branch checkout (no Claude step runs here).
-            const closesBefore = require(`${process.env.GITHUB_WORKSPACE}/tools/ci/agent-noop.js`).closingRefs(pr.body || '', owner, repo) || 'none';
+            const closesBefore = noop.closingRefs(pr.body || '', owner, repo) || 'none';
             return out('yes', {pr: number, branch: pr.head.ref, head, attempt: n, kinds: kinds.join(','), closes: closesBefore});
 
   fix:
