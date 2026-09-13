@@ -87,11 +87,13 @@ const isFixer = body => FIXER_MARK.test(unwrap((body || '').split('\n').find(l =
 
 // Closing references, in the four spellings GitHub documents — `KEYWORD #n`, `KEYWORD GH-n`,
 // `KEYWORD owner/repo#n`, `KEYWORD <issue URL>` (bare, autolinked or markdown-linked), keyword in
-// any case, optionally emphasised, optional colon — matched AFTER fenced code blocks, inline code
-// spans and HTML comments are removed, since GitHub does not honour a reference inside those.
+// any case, optionally emphasised, optional colon — matched AFTER code (fenced, indented, inline)
+// and HTML comments are removed, since GitHub does not honour a reference inside those.
 // CONTROL, NOT GUARANTEE (rule 11): GitHub's own parser is the authority; this covers the
-// spellings named here and nothing else. Cross-repo forms count only under THIS repo's owner —
-// `core/scheduler#3` in prose is a path, not a reference (round-4 red team on #466).
+// spellings named here and nothing else. Cross-repo forms count under ANY owner, as the URL form
+// always did — GitHub honours them, permission-gated — so `fixes core/scheduler#3` in prose is a
+// documented false positive in the loud direction (one escalation), not a lost auto-close
+// (round-5 red team on #466 reversed round 4's owner filter).
 //
 // `closingRefs` returns each reference AS SPELLED — the whole matched keyword-and-reference
 // text, whitespace runs collapsed — because the guard's job is to notice any change to what the
@@ -99,21 +101,51 @@ const isFixer = body => FIXER_MARK.test(unwrap((body || '').split('\n').find(l =
 // `o/r#465` to `465` (round 4), or `Closes:#n`, `**Closes** #n` and `Closes [#n](url)` to `#n`
 // (round 5), hid rewrites that leave in-progress on an issue the merge should have released.
 // `closingIssues` canonicalises same-repo forms to numbers for the RELEASE paths.
-const stripMarkup = t => String(t || '')
-  .replace(/```[\s\S]*?```/g, ' ')
-  .replace(/<!--[\s\S]*?-->/g, ' ')
-  .replace(/`[^`\n]*`/g, ' ');
-const CLOSING = /(?<![\w*_])[*_]{0,2}(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[*_]{0,2}\s*:?\s*(?:<?(https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+))>?|\[#(\d+)\]\([^)]*\)|([\w.-]+)\/([\w.-]+)#(\d+)|GH-(\d+)|#(\d+))(?![\w-])/gi;
+// Markup GitHub does not honour a reference inside: fenced code (``` or ~~~, three or more, matching
+// closer), indented code (4 spaces / a tab), inline code spans, HTML comments. Each is replaced by a
+// SENTINEL that the keyword/reference separator cannot span — replacing it with a space let
+// `Closes` bind to a `#n` on the far side of the removed span, a reference that exists only
+// because the markup was removed (round-5 red team on #466). The pilcrow is a printable
+// non-word, non-space character no reference form contains.
+const SENTINEL = ' ¶ ';
+function stripMarkup(t) {
+  const lines = String(t || '').split('\n');
+  const out = [];
+  let fence = null;   // {ch, len} while inside a fenced block
+  for (const line of lines) {
+    const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (open && open[1][0] === fence.ch && open[1].length >= fence.len && /^ {0,3}(`{3,}|~{3,})\s*$/.test(line)) fence = null;
+      out.push(SENTINEL); continue;
+    }
+    if (open) { fence = { ch: open[1][0], len: open[1].length }; out.push(SENTINEL); continue; }
+    if (/^(?: {4}|\t)/.test(line)) { out.push(SENTINEL); continue; }   // indented code
+    out.push(line);
+  }
+  return out.join('\n')
+    .replace(/<!--[\s\S]*?-->/g, SENTINEL)
+    .replace(/`[^`\n]*`/g, SENTINEL);
+}
+const CLOSING = /(?<![\w*_])[*_]{0,2}(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[*_]{0,2}\s*:?\s*(?:<?(https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+))>?|\[#(\d+)\]\(([^)]*)\)|([\w.-]+)\/([\w.-]+)#(\d+)|GH-(\d+)|#(\d+))(?![\w-])/gi;
+const ISSUE_URL = /^https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)\/?$/i;
 function closingMatches(body, owner, repo) {
   const own = String(owner).toLowerCase(), rep = String(repo).toLowerCase();
+  const sameRepo = (o, r) => o.toLowerCase() === own && r.toLowerCase() === rep;
   const out = [];
   for (const m of stripMarkup(body).matchAll(CLOSING)) {
     const spelled = m[0].replace(/\s+/g, ' ');
-    if (m[1]) out.push({ spelled, kind: 2, num: Number(m[4]), same: m[2].toLowerCase() === own && m[3].toLowerCase() === rep });
-    else if (m[5]) out.push({ spelled, kind: 0, num: Number(m[5]), same: true });
-    else if (m[8]) { if (m[6].toLowerCase() !== own) continue; out.push({ spelled, kind: 2, num: Number(m[8]), same: m[7].toLowerCase() === rep }); }
-    else if (m[9]) out.push({ spelled, kind: 1, num: Number(m[9]), same: true });
-    else out.push({ spelled, kind: 0, num: Number(m[10]), same: true });
+    if (m[1]) out.push({ spelled, kind: 2, num: Number(m[4]), same: sameRepo(m[2], m[3]) });
+    else if (m[5]) {
+      // Markdown link: the target carries the meaning. The release path trusts it only when it is
+      // THIS repo's issue and agrees with the display number; otherwise it is a reference for the
+      // guard (any change is a change) and nothing for the release (round-5 red team on #466).
+      const tgt = ISSUE_URL.exec(m[6] || '');
+      const agrees = !!tgt && sameRepo(tgt[1], tgt[2]) && Number(tgt[3]) === Number(m[5]);
+      out.push({ spelled, kind: 0, num: Number(m[5]), same: agrees });
+    }
+    else if (m[9]) out.push({ spelled, kind: 2, num: Number(m[9]), same: sameRepo(m[7], m[8]) });
+    else if (m[10]) out.push({ spelled, kind: 1, num: Number(m[10]), same: true });
+    else out.push({ spelled, kind: 0, num: Number(m[11]), same: true });
   }
   return out;
 }

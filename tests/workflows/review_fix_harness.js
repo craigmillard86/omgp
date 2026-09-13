@@ -89,9 +89,9 @@ const quiet = w => !w.log.some(l => l.startsWith('comment@') || /^[+-]/.test(l))
   // copies of the regex drifting by a word would otherwise escalate every run as a spurious
   // "an agent rewrote the references" failure with the whole suite green.
   {
-    const wc = world({pr: PR(['agent-authored'], {body: 'Resolves #7\nfixes GH-12\ncloses o/r#3\ncloses x/y#5 (another owner: prose)'}), comments: [verdict('review', 'findings', HEAD)]});
+    const wc = world({pr: PR(['agent-authored'], {body: 'Resolves #7\nfixes GH-12\ncloses o/r#3\ncloses x/y#5'}), comments: [verdict('review', 'findings', HEAD)]});
     await gate(wc);
-    check('gate exports the closing-reference set as spelled (form-preserving)', wc.outputs.closes === 'Resolves #7,fixes GH-12,closes o/r#3');
+    check('gate exports the closing-reference set as spelled (form-preserving; cross-owner counts)', wc.outputs.closes === 'Resolves #7,fixes GH-12,closes o/r#3,closes x/y#5');
     const wn = world({pr: PR(['agent-authored'], {body: 'no references here'}), comments: [verdict('review', 'findings', HEAD)]});
     await gate(wn);
     check('gate exports `none` for a body with no closing reference (not the empty string)', wn.outputs.closes === 'none');
