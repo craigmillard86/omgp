@@ -3260,3 +3260,19 @@ Three mutants survived the first suite (the `SINCE` window, the `state: 'open'` 
 **Judgement added by round 3, stated because it is a control and not a guarantee (rule 11):** the fixer is recognised by a marker its prompt tells it to write. A fixer that ignores the instruction is declared a no-op — escalated, returned, failed — which is the loud direction. The prompt and the detector both load from the default branch, so they cannot drift apart within a run; `test_noop_round3_wiring` pins the literal in both.
 
 **Supersedes:** none.
+
+---
+
+## 2026-09-13 — #463: a comment-only review-fix run is escalated, and the fixer may correct the PR description
+
+**Context:** PR #452 (`task/148`, T0) stalled for 40 minutes on 2026-09-13 and was merged by hand. Its round-2 review had one blocking finding, `[LOW]`, entirely in the PR description. The fixer confirmed it, could not act on it (`gh pr edit` was outside `review-fix.yml`'s allow-list, and that file is outside its bounds), and commented asking for a human. Under #361's detector that comment is production, so the attempt stood and nothing escalated; no new head meant no new review; `agent-merge` reported "review reported findings" every 20 minutes. Every other terminal state in the loop applies `needs-human`; this one only said so in prose.
+
+**Two changes:**
+- `tools/ci/agent-noop.js` reports `only_comment` on the fix path (the fixer's marker comment with an unchanged head), and `finalize` then applies `needs-human` with a comment saying the fixer answered without a commit. The attempt stays spent — it produced — and the job does not fail, because the fixer did what its prompt says. Pinned by `agent_noop_harness.js` and `test_rebuttal_only_fix_run_is_escalated_and_the_fixer_may_edit_the_body`.
+- `review-fix.yml`'s two Claude steps gain `Bash(gh pr edit*)`, and `review-fix.md` limits its use to correcting the description for a body-only finding, never title, base or labels. The round-budget ruling (2026-09-07) makes a false PR-body claim blocking at every round; without this grant the fixer is the one agent that cannot address the one class of finding that always blocks, so any body nit on the autonomous path becomes a human merge.
+
+**What this does not do:** it does not judge the rebuttal. A comment-only run is escalated whether the fixer was right or wrong; the human rules. `gh pr edit` can also change title, base and labels — the restriction to the body is in the prompt, a control, not a guarantee (rule 11); the approval path (`gh pr review`, `gh pr merge`, `gh api`) stays ungranted, pinned by the same test.
+
+**Ruling:** PENDING — human. Recommended: adopt both. The allow-list widening is a workflow edit (T3); the maintainer's merge of the PR carrying this entry is the ruling.
+
+**Supersedes:** none. **Amends:** `.github/workflows/review-fix.yml`; `.github/agent-prompts/review-fix.md`; `tools/ci/agent-noop.js`.
