@@ -528,11 +528,11 @@ const during = '2026-09-12T10:00:30Z';
   // Round-5 red team: the markdown-link target carries the meaning; it is part of the spelling
   // (round 5 review) and the release path trusts it only when it agrees with the display text.
   check('closingRefs: a link whose target disagrees with its text is a different spelling', closingRefs('Closes [#463](https://github.com/o/r/issues/999)', 'o', 'r') === 'Closes [#463](https://github.com/o/r/issues/999)');
-  check('closingIssues: a link whose target is this repo\'s issue of the SAME number releases it', closingIssues('Closes [#463](https://github.com/o/r/issues/463)', 'o', 'r').join(',') === '463');
+  check('closingIssues: a markdown link releases nothing — agent-merge does not read it', closingIssues('Closes [#463](https://github.com/o/r/issues/463)', 'o', 'r').join(',') === '');
   check('closingIssues: a link whose target disagrees with its text releases nothing', closingIssues('Closes [#463](https://github.com/o/r/issues/999)', 'o', 'r').join(',') === '');
   check('closingIssues: a link to another repo\'s issue releases nothing here', closingIssues('Closes [#7](https://github.com/x/y/issues/7)', 'o', 'r').join(',') === '');
   check('closingIssues: a cross-owner owner/repo#n releases nothing here', closingIssues('Closes x/y#1', 'o', 'r').join(',') === '');
-  check('closingIssues: same-repo forms canonicalise to numbers for the release paths', closingIssues('Closes #7\nfixes GH-12\ncloses o/r#3\ncloses O/R#4\nresolves https://github.com/o/r/issues/9\ncloses o/other#5', 'o', 'r').join(',') === '3,4,7,9,12');
+  check('closingIssues: only the `#n` form agent-merge reads releases (its widening is #496)', closingIssues('Closes #7\nfixes GH-12\ncloses o/r#3\ncloses O/R#4\nresolves https://github.com/o/r/issues/9\ncloses o/other#5', 'o', 'r').join(',') === '7');
   check('closingIssues: reads the RAW body like agent-merge — a reference inside a fence still releases', closingIssues('```\nCloses #7\n```', 'o', 'r').join(',') === '7');
   // Round 9 (#466): the guard compares what the automation READS — the raw body — and models no
   // markdown. A reference inside code or a comment is a live instruction to agent-merge and counts;
@@ -549,6 +549,23 @@ const during = '2026-09-12T10:00:30Z';
   check('closingRefs: `#n` followed by an underscore counts', closingRefs('resolves #131_x', 'o', 'r') === 'resolves #131');
   check('closingRefs: `#n` followed by letters counts', closingRefs('closes #131abc', 'o', 'r') === 'closes #131');
   check('closingRefs: any run of emphasis markers before the keyword', closingRefs('***fixes #131*** — noted.', 'o', 'r') === '***fixes #131');
+  // Round-11 red team on #466: the lookbehind forbade an emphasis run that starts after a word
+  // character, while agent-merge's `\b` matches at the keyword itself — `a**closes #131` was live
+  // for the merge automation and invisible to the guard. The guard now includes agent-merge's own
+  // regex verbatim as a second reader, so the superset holds BY CONSTRUCTION, whatever the wider
+  // regex does; and the release path mirrors agent-merge exactly, so it never writes a label for
+  // a form agent-merge would not have closed.
+  check('closingRefs: `PR#452**closes #131**` counts, as agent-merge reads it', closingRefs('PR#452**closes #131** as a side effect.', 'o', 'r') === 'closes #131');
+  check('closingRefs: `see #400*closes #131*` counts', closingRefs('see #400*closes #131*', 'o', 'r') === 'closes #131');
+  check('closingRefs: `a**fixes #131**` counts', closingRefs('a**fixes #131**', 'o', 'r') === 'fixes #131');
+  check('closingIssues: mirrors agent-merge exactly — `GH-n`, `owner/repo#n` and the URL form release nothing here', closingIssues('fixes GH-12\ncloses o/r#3\nresolves https://github.com/o/r/issues/9', 'o', 'r').join(',') === '');
+  check('closingIssues: ...and `#n` after a word-adjacent emphasis run releases, as agent-merge would', closingIssues('a**fixes #131**', 'o', 'r').join(',') === '131');
+  check('closingIssues: `#131abc` releases #131, as agent-merge reads it', closingIssues('closes #131abc', 'o', 'r').join(',') === '131');
+  for (const [form, after] of [['a word-adjacent emphasis run', 'Closes #463\n\nPR#452**closes #131** as a side effect.'], ['a single word-adjacent star', 'Closes #463\n\nsee #400*closes #131*']]) {
+    w = world({ head: 'b'.repeat(40), body: after });
+    r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+    check(`fix: a reference ADDED after ${form} is flagged — agent-merge would close it`, r.refs_changed === true);
+  }
   for (const [form, before, after] of [
     ['a hyphen suffix', 'Closes #463', 'Closes #463\n\nAlso fixes #131-followup in passing.'],
     ['an underscore suffix', 'Closes #463', 'Closes #463\n\nresolves #131_x'],

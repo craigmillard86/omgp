@@ -702,6 +702,13 @@ def test_reference_guard_reads_at_least_what_agent_merge_reads(tmp_path):
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "SUPERSET", r.stdout
+    # Round 11: the superset holds by CONSTRUCTION — the module carries agent-merge's regex
+    # verbatim as a second reader. Pin the two literals equal, so a change to either without the
+    # other turns red here rather than surfacing as a silent divergence.
+    noop_src = (ROOT / "tools" / "ci" / "agent-noop.js").read_text()
+    m2 = re.search(r"const MERGE_RE = (/[^\n]*?/gi);", noop_src)
+    assert m2, "agent-noop.js must carry agent-merge's closing-reference regex as MERGE_RE"
+    assert m2.group(1) == merge_re, f"MERGE_RE {m2.group(1)} != agent-merge.yml {merge_re}"
 
 
 def test_review_fix_finalize_glue_calls_finalize_on_a_comment_only_run(tmp_path):
