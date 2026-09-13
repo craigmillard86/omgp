@@ -612,9 +612,25 @@ def test_rebuttal_only_fix_run_is_escalated_and_the_fixer_may_edit_the_body():
     assert "ONLY_COMMENT" in _script("review-fix.yml", "fix", "finalize"), (
         "finalize's early return must not swallow a comment-only run")
     claude = [st for st in steps if "claude-code-action" in st.get("uses", "")]
+    import fnmatch
     for st in claude:
         granted = set(re.search(r'--allowedTools "([^"]*)"', st["with"]["claude_args"]).group(1).split(","))
-        assert "Bash(gh pr edit*)" in granted, (st.get("id"), "the fixer must be able to correct the PR body")
+        # Round-1 review on #466: `Bash(gh pr edit*)` is a prefix glob and `gh pr edit` is not a
+        # body-only verb — it also adds/removes labels (`needs-human`, `risk:t<n>`,
+        # `review-fix-<n>`), which is the surface agent-merge and the attempt budget READ. The
+        # grant is scoped to the one form the prompt sanctions: this PR's number, then
+        # --body-file. Checked with the allow-list's own prefix semantics, not by string equality.
+        edit_grants = [g for g in granted if g.startswith("Bash(gh pr edit")]
+        assert edit_grants == ["Bash(gh pr edit ${{ needs.gate.outputs.pr }} --body-file*)"], (
+            st.get("id"), "the fixer's gh pr edit grant must be scoped to <this PR> --body-file", edit_grants)
+        pats = [g[5:-1] for g in granted if g.startswith("Bash(")]
+        pr = "${{ needs.gate.outputs.pr }}"
+        allowed = lambda c: any(fnmatch.fnmatchcase(c, p) for p in pats)
+        assert allowed(f"gh pr edit {pr} --body-file /tmp/b.md"), "the sanctioned body edit must be permitted"
+        for c in (f"gh pr edit {pr} --remove-label needs-human", f"gh pr edit {pr} --add-label risk:t0",
+                  f"gh pr edit {pr} --remove-label review-fix-1", f"gh pr edit {pr} --base main",
+                  "gh pr edit 999 --body-file /tmp/b.md", f"gh pr edit {pr} --title x --body-file /tmp/b.md"):
+            assert not allowed(c), (st.get("id"), "must be denied by the allow-list", c)
         # ...and still nothing that reaches the approval path.
         for banned in ("Bash(gh pr review*)", "Bash(gh pr merge*)", "Bash(gh api*)", "Bash(gh*)", "Bash(*)"):
             assert banned not in granted, (st.get("id"), banned)

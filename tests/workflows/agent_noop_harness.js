@@ -426,6 +426,16 @@ const during = '2026-09-12T10:00:30Z';
   w = world({ labels: ['task', 'in-progress'] });
   await finalize({ ...w, env: { KIND: 'implement', ISSUE: '58', ATTEMPTS: '1', TURNS: '40', DENIALS: '0', PRODUCED: 'true', ONLY_COMMENT: '', REASON: 'an open PR on task/58 was created or pushed to by this run' } });
   check('implement finalize: ONLY_COMMENT is a fix-path signal; a produced dispatch is still left alone when not errored', true);
+  // Round-1 review on #466: the comment-only branch sat before the produced-then-errored branch
+  // and never consulted NOOP, so an is_error (or cancelled) run whose only output was a comment
+  // exited GREEN with a comment calling the crash a considered rebuttal. is_error is a no-op
+  // whatever else is true (:40): escalate AND fail loudly.
+  w = world({ labels: ['agent-authored', 'review-fix-1'] });
+  await finalize({ ...w, env: { KIND: 'fix', PR: '452', ATTEMPT: '1', ATTEMPTS: '1', TURNS: '12', DENIALS: '0', NOOP: 'true', PRODUCED: 'true', ONLY_COMMENT: 'true',
+    REASON: 'the fixer commented during the run' } });
+  check('fix finalize: an ERRORED comment-only run still fails the job', typeof w.outputs.__failed === 'string');
+  check('fix finalize: ...and its headline says it errored, not that it answered', said(w, /comment:.*errored/i) && !said(w, /comment:.*answered without a commit/i));
+  check('fix finalize: ...and still escalates', w.state.labels.includes('needs-human'));
 
   for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
   console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);
