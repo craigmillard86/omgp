@@ -163,8 +163,9 @@ jobs:
             await github.rest.issues.createComment({owner, repo, issue_number: number,
               body: `${marker}\n🔧 ${kinds.join(' + ')} findings at ${head.slice(0, 7)} — review-fix attempt ${n} of ${MAX} starting on \`${pr.head.ref}\` (run ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}).\n\nPolicy (#134): BLOCKING findings — defects in the change, security, weakened tests, spec divergence, unmet acceptance criteria, false claims — are fixed (a fix may SHRINK the diff by dropping out-of-scope work); FOLLOW-UP findings outside the linked issue's acceptance criteria are left for a proposed issue, not fixed here. Disable the \`review-fix\` workflow to stop this loop.`});
             // Snapshot the closing references the merge gate acts on: the fixer may now edit the body
-            // (#463), and detect compares this against the body after the run.
-            const closesBefore = [...new Set([...(pr.body || '').matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi)].map(x => Number(x[1])))].sort((a, b) => a - b).join(',') || 'none';
+            // (#463), and detect compares this against the body after the run — with the SAME
+            // function, loaded from this job's default-branch checkout (no Claude step runs here).
+            const closesBefore = require(`${process.env.GITHUB_WORKSPACE}/tools/ci/agent-noop.js`).closingRefs(pr.body || '', owner, repo) || 'none';
             return out('yes', {pr: number, branch: pr.head.ref, head, attempt: n, kinds: kinds.join(','), closes: closesBefore});
 
   fix:

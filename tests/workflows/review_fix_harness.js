@@ -88,12 +88,14 @@ const quiet = w => !w.log.some(l => l.startsWith('comment@') || /^[+-]/.test(l))
   // compares with (tools/ci/agent-noop.js closingRefs), and its value is asserted here — two
   // copies of the regex drifting by a word would otherwise escalate every run as a spurious
   // "an agent rewrote the references" failure with the whole suite green.
-  w = world({pr: PR(['agent-authored'], {body: 'Resolves #7\nfixes GH-12\ncloses o/r#3\ncloses x/y#5'})});
-  await gate(w);
-  check('gate exports the canonical closing-reference set', w.outputs.closes === '3,7,12,x/y#5');
-  w = world({pr: PR(['agent-authored'], {body: 'no references here'})});
-  await gate(w);
-  check('gate exports `none` for a body with no closing reference (not the empty string)', w.outputs.closes === 'none');
+  {
+    const wc = world({pr: PR(['agent-authored'], {body: 'Resolves #7\nfixes GH-12\ncloses o/r#3\ncloses x/y#5'}), comments: [verdict('review', 'findings', HEAD)]});
+    await gate(wc);
+    check('gate exports the canonical closing-reference set', wc.outputs.closes === '3,7,12,x/y#5');
+    const wn = world({pr: PR(['agent-authored'], {body: 'no references here'}), comments: [verdict('review', 'findings', HEAD)]});
+    await gate(wn);
+    check('gate exports `none` for a body with no closing reference (not the empty string)', wn.outputs.closes === 'none');
+  }
   check('attempt comment carries the sha marker and states the scope policy', said(w, new RegExp(`review-fix sha=${HEAD}`), 94) && said(w, new RegExp(`attempt 1 of ${MAX}`), 94) && said(w, /FOLLOW-UP findings outside the linked issue/, 94));
   check('attempt path touches no issue labels', !w.log.some(l => /@26$/.test(l)));
 

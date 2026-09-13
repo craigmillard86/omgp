@@ -85,6 +85,25 @@ const isVerdict = body => (body || '').split('\n').some(l => !isQuoted(l) && /^V
 const FIXER_MARK = /^review-fix\(\d+\) @ [0-9a-f]{7,40}\b/i;
 const isFixer = body => FIXER_MARK.test(unwrap((body || '').split('\n').find(l => l.trim()) || ''));
 
+// The closing references GitHub honours on merge — `KEYWORD #n`, `KEYWORD GH-n`,
+// `KEYWORD owner/repo#n`, `KEYWORD <issue URL>`, keyword in any case, optional colon — as the
+// ONE canonical set both the review-fix gate (snapshot, before the run) and detect (comparison,
+// after) use. Same-repo references canonicalise to the bare number; cross-repo ones stay
+// `owner/repo#n`. Numbers first ascending, then cross-repo strings, joined by ','. Comparing
+// only `#n` let an added `GH-n` escape the escalation, and two private copies of the regex could
+// drift into a spurious failing escalation on every run (round-3 red team on #466).
+const CLOSING = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)|([\w.-]+)\/([\w.-]+)#(\d+)|GH-(\d+)|#(\d+))\b/gi;
+function closingRefs(body, owner, repo) {
+  const same = (o, r) => o.toLowerCase() === String(owner).toLowerCase() && r.toLowerCase() === String(repo).toLowerCase();
+  const nums = new Set(), others = new Set();
+  for (const m of String(body || '').matchAll(CLOSING)) {
+    if (m[3]) { if (same(m[1], m[2])) nums.add(Number(m[3])); else others.add(`${m[1]}/${m[2]}#${m[3]}`); }
+    else if (m[6]) { if (same(m[4], m[5])) nums.add(Number(m[6])); else others.add(`${m[4]}/${m[5]}#${m[6]}`); }
+    else nums.add(Number(m[7] || m[8]));
+  }
+  return [...[...nums].sort((a, b) => a - b).map(String), ...[...others].sort()].join(',');
+}
+
 // How many times a no-op run may be retried in-job before the claim is released (#361 AC2).
 // Read at RUN time from the DEFAULT-branch config, like every other knob here, so retuning it
 // needs no workflow-scope push. Fail closed to 0 on anything unreadable, absent, negative or
@@ -189,13 +208,13 @@ async function detect({ github, context, core, env }) {
     // exhaustion path releases — every issue the body's Closes/Fixes/Resolves name. The gate
     // snapshots that set before the run (`none` when empty; '' means an older gate that did not);
     // a change is escalated and the job failed (round-2 review + red team on #466).
-    const closesOf = t => [...new Set([...(t || '').matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi)].map(x => Number(x[1])))].sort((a, b) => a - b).join(',');
     const snap = String(env.CLOSES_BEFORE || '').trim();
     if (snap) {
-      const beforeSet = snap === 'none' ? '' : snap.split(',').map(s => Number(s.trim())).filter(Number.isFinite).sort((a, b) => a - b).join(',');
-      const nowSet = closesOf(pr.body);
+      const beforeSet = snap === 'none' ? '' : snap;   // the gate wrote it with closingRefs, so it is canonical
+      const nowSet = closingRefs(pr.body, owner, repo);
       refsChanged = beforeSet !== nowSet;
-      refsDetail = `before: ${beforeSet ? '#' + beforeSet.split(',').join(', #') : 'none'}; now: ${nowSet ? '#' + nowSet.split(',').join(', #') : 'none'}`;
+      const show = s => s ? s.split(',').map(x => (/^\d+$/.test(x) ? '#' + x : x)).join(', ') : 'none';
+      refsDetail = `before: ${show(beforeSet)}; now: ${show(nowSet)}`;
       if (refsChanged) core.warning(`agent-noop: the PR's closing references changed during the run (${refsDetail})`);
     }
     reason = moved ? `head moved from ${before.slice(0, 7)} to ${pr.head.sha.slice(0, 7)}`
@@ -376,4 +395,4 @@ async function finalize({ github, context, core, env }) {
   core.setFailed(`agent-noop: review-fix on #${pr} produced nothing after ${spent} — ${env.REASON || 'no output'}; attempt ${attempt}, needs-human ${escalated ? 'applied' : 'NOT applied'}, job failed (#361).`);
 }
 
-module.exports = { detect, finalize, readFigures, isVerdict, isFixer, retryBudget };
+module.exports = { detect, finalize, readFigures, isVerdict, isFixer, retryBudget, closingRefs };
