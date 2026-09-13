@@ -3467,11 +3467,12 @@ TEST_CASE("an unsolicited frame while idle whose claimed source is exactly kAddr
     REQUIRE(master.bus_stats().bus_faults == 0);
 }
 
-// The four cases below are #144's own: the forgeable half of the old attribution, the
+// The five cases below are #144's own: the forgeable half of the old attribution, the
 // out-of-range half's sibling in the middle of the range, the in-window case the ruling
-// deliberately leaves alone, and (red team @722e859 finding 1) the boundary of what that
+// deliberately leaves alone, (red team @722e859 finding 1) the boundary of what that
 // in-window branch proves — the sender of an in-window discard is not what the per-address
-// counter follows.
+// counter follows — and (red team @25545f5 finding 1) the split's real criterion, pinned in
+// the one engine state where the two discard paths disagree: `awaiting` but out of window.
 
 TEST_CASE("an idle-time discard claiming an in-range source is counted on the bus and leaves "
           "every per-address record alone: no address is charged for a frame merely because "
@@ -3639,6 +3640,83 @@ TEST_CASE("a CRC-corrupt frame arriving with no transaction open is counted on t
         CAPTURE(a);
         REQUIRE(master.stats(a).discards == 0);
         REQUIRE(master.stats(a).crc_failures == 0); // never a node's failure: it has no source
+    }
+}
+
+TEST_CASE("while dst's transaction is awaiting but the frame opened outside its window, a "
+          "DECODED discard is charged to dst and a CRC-failed one goes to the bus: the split "
+          "follows decodability, not `awaiting`",
+          "[link][timing:T_resp]") {
+    // Red team @25545f5 finding 1. Both branches of drain_wire() are entered in the SAME
+    // engine state here — `awaiting` true, `in_window` false — and they route to different
+    // counters, so "discarded while that address's own transaction is awaiting a response"
+    // does not by itself decide where a discard lands. What decides it is whether the frame
+    // DECODED:
+    //   * a decoded frame that fails the acceptance screen is charged to dst_, the address
+    //     whose request this engine transmitted (window or not — the screen rejects it either
+    //     way, and the transaction that gives it an address is still open);
+    //   * a CRC-failed frame never decodes, so nothing in it can attribute it; the only thing
+    //     that could is TIMING — opening inside the awaiting address's window, where it is
+    //     that node's `crc_failures` (not `discards`) and ends the attempt at once. Outside
+    //     that window there is nothing left to attribute it by, so it is bus-level evidence.
+    // Pinned as today's observable and as the meaning of the two counters; the documents
+    // (data-model.md §8, contracts/link-cpp.md, link_types.hpp) are worded from this case.
+    //
+    // Both halves use the coarse-poll cadence of "a CRC-failed frame opening EXACTLY at the
+    // deadline …" above: one poll() drains the whole frame before its own timeout branch
+    // runs, so `awaiting` is still true when the closing FLAG lands.
+    const uint8_t payload[] = {0x5A};
+
+    SECTION("the CRC-failed half lands on the bus, against no node") {
+        FakeClock clock;
+        MockWire wire(clock);
+        const uint8_t dst = 0x07;
+        const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+        wire.set_script(dst, silence, 3);
+        Master master(wire, clock, omgp::ADDR_host);
+
+        REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+        const uint64_t tx_end =
+            wire.transcript(0).tx_start_us +
+            request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us();
+        const uint64_t deadline = tx_end + omgp::TRUNK_T_resp_us;
+
+        const std::vector<uint8_t> bad = crc_bad_response(dst, 0, payload, sizeof payload);
+        wire.inject_bytes(bad.data(), bad.size(), deadline); // opening FLAG AT deadline_
+        const MasterEvent ev =
+            wire.advance_to(deadline + bad.size() * byte_us() + byte_us(), master);
+
+        REQUIRE(ev.kind == MasterEvent::None); // the attempt timed out, retries remain
+        REQUIRE(master.bus_stats().discards == 1);
+        REQUIRE(master.stats(dst).discards == 0);     // not the polled node's discard ...
+        REQUIRE(master.stats(dst).crc_failures == 0); // ... nor its CRC failure: not its window
+    }
+
+    SECTION("the decoded half is charged to dst, in the same state") {
+        FakeClock clock;
+        MockWire wire(clock);
+        const uint8_t dst = 0x07;
+        const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+        wire.set_script(dst, silence, 3);
+        Master master(wire, clock, omgp::ADDR_host);
+
+        REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+        const uint64_t tx_end =
+            wire.transcript(0).tx_start_us +
+            request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us();
+        const uint64_t deadline = tx_end + omgp::TRUNK_T_resp_us;
+
+        // Intact, and rejected by the acceptance screen on seq alone.
+        const std::vector<uint8_t> wrong_seq =
+            encode_expected(omgp::ADDR_host, dst, true, false, 0x07, payload, sizeof payload);
+        wire.inject_bytes(wrong_seq.data(), wrong_seq.size(), deadline);
+        const MasterEvent ev =
+            wire.advance_to(deadline + wrong_seq.size() * byte_us() + byte_us(), master);
+
+        REQUIRE(ev.kind == MasterEvent::None);
+        REQUIRE(master.stats(dst).discards == 1); // charged to dst, though out of window
+        REQUIRE(master.bus_stats().discards == 0);
+        REQUIRE(master.stats(dst).crc_failures == 0);
     }
 }
 
@@ -3863,6 +3941,10 @@ TEST_CASE("a second CRC-failed frame in the T_gap after an in-window CRC failure
 
     // Pristine: the concluded attempt is not re-concluded. Without `awaiting`: 2.
     REQUIRE(master.stats(dst).crc_failures == 1);
+    // Where it DOES land: the gap's corrupt frame has no attributable address, so it is
+    // counted per bus (#144; red team @25545f5 finding 1 — this increment was unpinned here).
+    REQUIRE(master.bus_stats().discards == 1);
+    REQUIRE(master.stats(dst).discards == 0);
     REQUIRE(master.attempts() == 1); // no extra retry consumed
 
     // Positive control (PR #142 review @9632347, LOW): the injected frame's last byte lands
@@ -3955,6 +4037,10 @@ TEST_CASE("a CRC-failed frame opening EXACTLY at the deadline, drained by one co
     MasterEvent ev = wire.advance_to(bad_end + byte_us(), master);
     REQUIRE(ev.kind == MasterEvent::None);        // attempt 0 timed out, retries remain
     REQUIRE(master.stats(dst).crc_failures == 0); // `<=`: 1 — charged to the polled node
+    // Not "counted nowhere" either: outside the window it is unattributable, so it is bus
+    // evidence (#144; red team @25545f5 finding 1 — this increment was unpinned here).
+    REQUIRE(master.bus_stats().discards == 1);
+    REQUIRE(master.stats(dst).discards == 0);
     REQUIRE(master.stats(dst).timeouts == 1);
     REQUIRE(master.attempts() == 1);
     REQUIRE(master.busy());
