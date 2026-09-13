@@ -185,6 +185,15 @@ void MockWire::set_script(uint8_t node, const Step* steps, size_t count) {
     script_pos_[node] = 0;
 }
 
+void MockWire::set_handler(uint8_t node, omgp::link::RequestHandler& handler) {
+    // Runs on the test's own call stack (a rig-setup call, never inside transmit()), so an
+    // out-of-range address is REQUIRE'd here rather than deferred through fault_ — same
+    // treatment set_script() gives it. There is no 0xFF wildcard seat: contracts/mock-wire.md
+    // gives Respond's answer to "the node's" handler, one node at a time.
+    REQUIRE(node < omgp::link::kAddrCount);
+    handlers_[node] = &handler;
+}
+
 const Step* MockWire::next_step(uint8_t node) {
     if (node < omgp::link::kAddrCount && scripts_[node] != nullptr &&
         script_pos_[node] < script_len_[node]) {

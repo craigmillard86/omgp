@@ -14,6 +14,7 @@
 #include "link/byte_wire.hpp"
 #include "link/frame.hpp"
 #include "link/link_types.hpp"
+#include "link/responder.hpp" // omgp::link::RequestHandler (contracts/link-cpp.md)
 #include "omgp_protocol.h"
 
 #include <cstddef>
@@ -86,6 +87,15 @@ class MockWire : public omgp::link::ByteWire {
     // fallback script. `steps` must outlive this MockWire; an exhausted or unset script
     // behaves as Respond with delay_us == TRUNK_T_turn_min_us (contracts/mock-wire.md).
     void set_script(uint8_t node, const Step* steps, size_t count);
+
+    // contracts/mock-wire.md:16 — the node's RequestHandler answers Kind::Respond (and
+    // supplies "the real response" CrcError/Duplicate are built from). Registers `handler`
+    // as node `node`'s (0x00..0x0F, omgp::link::kAddrCount); it must outlive this MockWire.
+    // Registering again for the same node replaces the previous handler; a node with none
+    // registered keeps the interim echo answer (see schedule_respond() in mock_wire.cpp).
+    // Allocation-free by construction: handlers_ below is a fixed raw-pointer array, no
+    // std::function and no container (#147).
+    void set_handler(uint8_t node, omgp::link::RequestHandler& handler);
 
     // omgp::link::ByteWire
     uint64_t transmit(const uint8_t* bytes, size_t n, uint64_t now_us) override;
@@ -234,6 +244,12 @@ class MockWire : public omgp::link::ByteWire {
     // node == 0xFF apply to every node" means each node draws its own sequence of
     // fallback effects, not that the rig-wide first taker exhausts it for everyone else.
     size_t wildcard_pos_[omgp::link::kAddrCount] = {};
+
+    // One RequestHandler seat per trunk address (contracts/mock-wire.md:16, #147). A raw
+    // pointer array, not std::function and not a container: MockWire stays allocation-free
+    // (the contract's preamble) so F4 can seed its virtual wire from it. nullptr — the
+    // initial state of every slot — selects the interim echo answer instead.
+    omgp::link::RequestHandler* handlers_[omgp::link::kAddrCount] = {};
 
     // Sorted by start_us (ascending), not a FIFO: byte-wire-and-clock.md requires
     // receive() to release the earliest-start-instant byte first, and interleaved delays
