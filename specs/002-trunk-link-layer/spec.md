@@ -241,9 +241,13 @@ assert no bus fault.
 2. **Given** several ENROLLED nodes, **When** only some of them fail, **Then** those nodes
    follow the Story 4 state machine and no bus fault is declared.
 3. **Given** a declared bus fault, **When** probes alternate between the reference and
-   fallback rates and a node answers one of them, **Then** the bus fault clears, a
-   recovery notification is raised, and the bit rate in use is the one the answer arrived
-   at (FR-026).
+   fallback rates and a node answers at the **reference** rate, **Then** the bus fault clears
+   at once, a recovery notification is raised, and the reference rate is in use. *(Amended
+   2026-09-13, F4.)* **When** instead a node answers at the **fallback** rate, **Then** the
+   host probes every enrolled address once at the reference rate; a reference-rate answer
+   clears the fault at the reference rate, and none clears it at the fallback rate — in
+   either case exactly one recovery notification. The superseded text read: "the bit rate in
+   use is the one the answer arrived at".
 4. **Given** a single enrolled node, **When** it becomes SUSPECT, **Then** BUS_FAULT is
    declared (one node is all nodes) and the re-probe policy starts; a SUSPECT node in a
    two-node rig whose peer is ENROLLED declares nothing.
@@ -458,19 +462,25 @@ assert no bus fault.
   (115.2 kbit/s, from the generated symbol) and thereafter alternate per FR-026, and the
   transport abstraction MUST expose the bit-rate change so a scripted transport can
   observe and react to it.
-- **FR-026**: While BUS_FAULT is declared, the host MUST alternate its enrolment probes
-  between the reference and the fallback bit rate (one probe at each, in turn); the first
-  valid response MUST clear BUS_FAULT exactly once with a recovery notification. *(Amended
-  2026-09-13: F4, human 2026-09-06; ruling human 2026-09-13.)* The bit rate is a property of
-  the trunk and the host MUST prefer the reference rate: a valid response at the reference
-  rate clears the fault at the reference rate at once; a valid response at the fallback rate
-  clears the fault at the fallback rate only after one further full rotation of reference-rate
-  probes has drawn no response. There is NO automatic return from the fallback rate: nodes
-  select their rate by strap or configuration (trunk §2) and cannot hear the other rate, so the
-  rate in use stands until the layer above or a human changes it. The superseded clause read:
-  "the bit rate that obtained the response MUST become the rate in use until the layer above
-  changes it" **(ruling human, 2026-08-29; the pinning half superseded by F4 in
-  `docs/OPEN-QUESTIONS.md`; the no-automatic-return half reaffirmed 2026-09-13)**. Per-node health MUST resume normally afterwards: the
+- **FR-026** *(rewritten 2026-09-13: F4, human 2026-09-06; ruling human 2026-09-13)*: While
+  BUS_FAULT is declared, the host MUST alternate its probes between the reference and the
+  fallback bit rate (one probe at each, in turn) over every enrolled address and every
+  UNENROLLED address. The host MUST prefer the reference rate: a valid response at the
+  reference rate MUST clear BUS_FAULT at the reference rate at once. A valid response at the
+  fallback rate MUST NOT clear BUS_FAULT by itself: the host MUST then probe every enrolled
+  address once at the reference rate, in address order (exactly |enrolled| probes); a valid
+  response during that pass clears BUS_FAULT at the reference rate; no response in the whole
+  pass clears BUS_FAULT at the fallback rate. BUS_FAULT clears exactly once per episode, with
+  one recovery notification, and the transport MUST expose each bit-rate change (FR-025).
+  There is NO automatic return from the fallback rate: nodes select their rate by strap or
+  configuration (trunk §2) and cannot hear the other rate, so the rate in use stands until
+  the layer above or a human changes it. Per-node health MUST resume normally afterwards: the
+  answering node becomes ENROLLED; the others keep their SUSPECT/OFFLINE state and timers.
+  The superseded text (human, 2026-08-29) read: "the first valid response at either rate MUST
+  clear BUS_FAULT exactly once with a recovery notification, and the bit rate that obtained
+  the response MUST become the rate in use until the layer above changes it" — its pinning
+  half is superseded by F4 in `docs/OPEN-QUESTIONS.md`; its no-automatic-return half is
+  reaffirmed 2026-09-13. Per-node health MUST resume normally afterwards: the
   answering node becomes ENROLLED; the others keep their SUSPECT/OFFLINE state and timers
   (their clocks were not paused by the fault).
 

@@ -254,7 +254,7 @@ enrolment rotation and one notification per transition.
 ## Phase 7: User Story 5 — A dead bus is not ten dead nodes (Priority: P3)
 
 **Goal**: BUS_FAULT declaration (ruling Q2), alternating-rate re-probe and recovery
-(ruling Q3), rate pinned to the answering rate, bus statistics.
+(ruling Q3), rate pinned to the answering rate *(amended 2026-09-13, F4: the host prefers the reference rate and a fallback answer clears the fault only after a reference pass of every enrolled address; no automatic return — data-model §7)*, bus statistics.
 
 **Independent Test**: `./build/native/test_link_busfault` green, including
 `[timing:bit_rate_fallback]`.
@@ -266,7 +266,7 @@ enrolment rotation and one notification per transition.
 
 ### Implementation for User Story 5
 
-- [ ] T043 [US5] Implement the bus-fault logic in `link/health.cpp` per data-model.md §7 (declare rule, alternation in `next_probe`, clear-and-pin on the first valid answer, `BusStats`), citing `trunk §7` — make T041 and T042 pass
+- [ ] T043 [US5] Implement the bus-fault logic in `link/health.cpp` per data-model.md §7 (declare rule, alternation in `next_probe`, clear-and-pin on the first valid answer *(amended 2026-09-13, F4: a reference-rate answer clears at once; a fallback answer starts a reference pass of every enrolled address, `BusState.fallback_answered`/`ref_pass_left`; no automatic return — data-model §7)*, `BusStats`), citing `trunk §7` — make T041 and T042 pass
 - [ ] T044 [US5] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; local mutation run
 
 **Checkpoint**: SC-007 demonstrated; every §7 mode has a script (SC-005 table complete).

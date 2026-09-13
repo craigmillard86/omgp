@@ -195,7 +195,11 @@ Transitions (`on_result(addr, ok, now)`):
 Poll eligibility (`poll_due(addr, now)`): ENROLLED → true; SUSPECT → `now − last_poll ≥
 10 × T_poll`; OFFLINE, UNENROLLED → false (reached only via `next_probe`). Enrolment
 rotation (`next_probe(now)`): round-robin over addresses 0x01–0x0F whose state is
-UNENROLLED or OFFLINE; returns `{addr, bit_rate}`.
+UNENROLLED or OFFLINE; returns `{addr, bit_rate}`. *(Amended 2026-09-13, F4.)* While `fault`
+(§7) the candidate set also includes every SUSPECT address, so the alternating-rate probes
+reach the nodes whose silence declared the fault at once rather than only after they age to
+OFFLINE; and during a reference pass (§7) `next_probe()` yields each enrolled address
+(state ≠ UNENROLLED) once, in address order, at `TRUNK_bit_rate`, without alternating.
 
 ## 7. Bus state
 
@@ -212,16 +216,18 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
 - Clear *(amended 2026-09-13: F4 ruling 2026-09-06, ruling 2026-09-13)*: while `fault`, a valid
   answer at the **reference** rate → `fault = false`, `bit_rate = TRUNK_bit_rate`, `BUS_RECOVERED`;
   the answering node → ENROLLED as in §6. A valid answer at the **fallback** rate does not clear
-  the fault by itself: `fallback_answered = true`, the answering node → ENROLLED as in §6, and
-  `next_probe()` then probes at the reference rate only, once per enrolled address
-  (`ref_pass_left = |enrolled|`, decremented per probe). If any of those answers → clear at
-  the reference rate as above (the fallback answerer will fail its next polls and follow §6).
-  If `ref_pass_left` reaches 0 with no answer → `fault = false`,
-  `bit_rate = TRUNK_bit_rate_fallback`, `BUS_RECOVERED`. `rate_changes++` on each change of
-  `bit_rate`. On declare, `fallback_answered = false`, `ref_pass_left = 0`. The superseded
-  clause read "first `ok` result at any rate while `fault` → `fault = false`, `bit_rate` = the
-  rate that got the answer": the answering rate pinned the trunk, so one node strapped at the
-  fallback rate could downgrade a reference-rate rig (#110 F4).
+  the fault by itself: `fallback_answered = true`, the answering node → ENROLLED as in §6, and a
+  **reference pass** starts — `ref_pass_left = |enrolled|` where enrolled = {addr : state ≠
+  UNENROLLED}, and `next_probe()` yields each of those addresses once, in address order, at
+  `TRUNK_bit_rate` (§6), decrementing `ref_pass_left` per probe. If any answers → clear at the
+  reference rate as above (the fallback answerer will fail its next polls and follow §6). If
+  `ref_pass_left` reaches 0 with no answer → `fault = false`, `bit_rate = TRUNK_bit_rate_fallback`,
+  `BUS_RECOVERED`. The pass length is exactly `|enrolled|` probes — the same number in
+  `trunk §7`, FR-026 and here. `rate_changes++` on each change of `bit_rate`. On declare,
+  `fallback_answered = false`, `ref_pass_left = 0`. The superseded clause read "first `ok`
+  result at any rate while `fault` → `fault = false`, `bit_rate` = the rate that got the
+  answer": the answering rate pinned the trunk, so one node strapped at the fallback rate
+  could downgrade a reference-rate rig (#110 F4).
 - No automatic return (ruling 2026-09-13): nodes select their rate by strap or configuration
   (trunk §2) and cannot hear a probe at the other rate, so once `!fault` the rate in use stands
   until the layer above or a human changes it. The fallback rate is a bring-up rate. A
