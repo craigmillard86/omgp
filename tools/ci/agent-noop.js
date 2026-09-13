@@ -93,33 +93,34 @@ const isFixer = body => FIXER_MARK.test(unwrap((body || '').split('\n').find(l =
 // spellings named here and nothing else. Cross-repo forms count only under THIS repo's owner —
 // `core/scheduler#3` in prose is a path, not a reference (round-4 red team on #466).
 //
-// `closingRefs` returns the set AS SPELLED, because the guard's job is to notice any change to
-// what the merge gate will act on, and agent-merge's own parser reads only `#n`: canonicalising
-// `o/r#465` to `465` hid a rewrite of `Closes #465` into `Closes o/r#465` that left in-progress
-// on a closed issue (round-4 review on #466). `closingIssues` canonicalises same-repo forms to
-// numbers for the RELEASE paths, which need numbers.
+// `closingRefs` returns each reference AS SPELLED — the whole matched keyword-and-reference
+// text, whitespace runs collapsed — because the guard's job is to notice any change to what the
+// merge gate will act on, and agent-merge's own parser reads only `KEYWORD<space>#n`: folding
+// `o/r#465` to `465` (round 4), or `Closes:#n`, `**Closes** #n` and `Closes [#n](url)` to `#n`
+// (round 5), hid rewrites that leave in-progress on an issue the merge should have released.
+// `closingIssues` canonicalises same-repo forms to numbers for the RELEASE paths.
 const stripMarkup = t => String(t || '')
   .replace(/```[\s\S]*?```/g, ' ')
   .replace(/<!--[\s\S]*?-->/g, ' ')
   .replace(/`[^`\n]*`/g, ' ');
-const CLOSING = /\b[*_]{0,2}(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[*_]{0,2}\s*:?\s*(?:<?(https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+))>?|\[#(\d+)\]\([^)]*\)|([\w.-]+)\/([\w.-]+)#(\d+)|GH-(\d+)|#(\d+))(?![\w-])/gi;
+const CLOSING = /(?<![\w*_])[*_]{0,2}(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[*_]{0,2}\s*:?\s*(?:<?(https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+))>?|\[#(\d+)\]\([^)]*\)|([\w.-]+)\/([\w.-]+)#(\d+)|GH-(\d+)|#(\d+))(?![\w-])/gi;
 function closingMatches(body, owner, repo) {
   const own = String(owner).toLowerCase(), rep = String(repo).toLowerCase();
   const out = [];
   for (const m of stripMarkup(body).matchAll(CLOSING)) {
-    if (m[1]) out.push({ spelled: m[1], num: Number(m[4]), same: m[2].toLowerCase() === own && m[3].toLowerCase() === rep });
-    else if (m[5]) out.push({ spelled: `#${m[5]}`, num: Number(m[5]), same: true });
-    else if (m[8]) { if (m[6].toLowerCase() !== own) continue; out.push({ spelled: `${m[6]}/${m[7]}#${m[8]}`, num: Number(m[8]), same: m[7].toLowerCase() === rep }); }
-    else if (m[9]) out.push({ spelled: `GH-${m[9]}`, num: Number(m[9]), same: true });
-    else out.push({ spelled: `#${m[10]}`, num: Number(m[10]), same: true });
+    const spelled = m[0].replace(/\s+/g, ' ');
+    if (m[1]) out.push({ spelled, kind: 2, num: Number(m[4]), same: m[2].toLowerCase() === own && m[3].toLowerCase() === rep });
+    else if (m[5]) out.push({ spelled, kind: 0, num: Number(m[5]), same: true });
+    else if (m[8]) { if (m[6].toLowerCase() !== own) continue; out.push({ spelled, kind: 2, num: Number(m[8]), same: m[7].toLowerCase() === rep }); }
+    else if (m[9]) out.push({ spelled, kind: 1, num: Number(m[9]), same: true });
+    else out.push({ spelled, kind: 0, num: Number(m[10]), same: true });
   }
   return out;
 }
-const kindOf = sp => (sp.startsWith('#') ? 0 : sp.startsWith('GH-') ? 1 : 2);
 function closingRefs(body, owner, repo) {
   const seen = new Set(), items = [];
   for (const it of closingMatches(body, owner, repo)) { if (!seen.has(it.spelled)) { seen.add(it.spelled); items.push(it); } }
-  items.sort((x, y) => kindOf(x.spelled) - kindOf(y.spelled) || x.num - y.num || (x.spelled < y.spelled ? -1 : x.spelled > y.spelled ? 1 : 0));
+  items.sort((x, y) => x.kind - y.kind || x.num - y.num || (x.spelled < y.spelled ? -1 : x.spelled > y.spelled ? 1 : 0));
   return items.map(i => i.spelled).join(',');
 }
 function closingIssues(body, owner, repo) {
@@ -232,8 +233,9 @@ async function detect({ github, context, core, env }) {
     // a change is escalated and the job failed (round-2 review + red team on #466).
     const snap = String(env.CLOSES_BEFORE || '').trim();
     if (snap) {
-      const beforeSet = snap === 'none' ? '' : snap;   // the gate wrote it with closingRefs, so it is in the same spelled form
-      const nowSet = closingRefs(pr.body, owner, repo);
+      const asSet = t => [...new Set(String(t || '').split(',').map(x => x.trim()).filter(Boolean))].sort().join(',');
+      const beforeSet = snap === 'none' ? '' : asSet(snap);   // the gate wrote it with closingRefs, so it is in the same spelled form
+      const nowSet = asSet(closingRefs(pr.body, owner, repo));
       refsChanged = beforeSet !== nowSet;
       const show = s => s ? s.split(',').join(', ') : 'none';
       refsDetail = `before: ${show(beforeSet)}; now: ${show(nowSet)}`;
