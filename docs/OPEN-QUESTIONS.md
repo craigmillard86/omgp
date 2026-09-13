@@ -3260,3 +3260,52 @@ Three mutants survived the first suite (the `SINCE` window, the `state: 'open'` 
 **Judgement added by round 3, stated because it is a control and not a guarantee (rule 11):** the fixer is recognised by a marker its prompt tells it to write. A fixer that ignores the instruction is declared a no-op — escalated, returned, failed — which is the loud direction. The prompt and the detector both load from the default branch, so they cannot drift apart within a run; `test_noop_round3_wiring` pins the literal in both.
 
 **Supersedes:** none.
+
+---
+
+## 2026-09-13 — `contracts/mock-wire.md:16`'s "(usually a real `Responder`)" still names a type that cannot occupy the seat #147 built
+
+**Context:** #147 retired item (1) of the 2026-09-01 entry above by implementing the
+literal reading of `contracts/mock-wire.md:16`: `MockWire::set_handler(node, handler)`
+seats an `omgp::link::RequestHandler&` per trunk address, and `Kind::Respond` — plus the
+`CrcError`/`Duplicate` rows' "the real response" — now answers from it. The interim echo
+survives only where no handler is registered for the addressed `dst`, so no existing
+script changes meaning and `tests/unit/test_link_master.cpp`'s response-length timing
+assertions are untouched. That much is settled by the issue, which a human released.
+
+What is not settled is the row's parenthetical. `contracts/mock-wire.md:16` reads "the
+node's `RequestHandler` (usually a real `Responder`) answers", and the 2026-09-03 ruling
+above phrased the same expectation as "T034 already plans to replace the mock's per-node
+handling with a real `Responder`". But an `omgp::link::Responder` is **not** a
+`RequestHandler`: `link/responder.hpp:40` shows it *takes* one by reference, alongside a
+`ByteWire`, a `Clock` and an address. A `Responder` therefore cannot be passed to
+`set_handler()`, and the two readings cannot both be satisfied by one API — seating a real
+`Responder` would mean `MockWire` driving a sub-`ByteWire` per node plus turnaround
+polling, so that the replay buffer is what answers. #147 out-of-scoped that larger reading
+explicitly (F4/T034 territory) and forbade amending the contract, directing any residual
+wording problem here instead.
+
+The gap is not academic: SC-004's whole point is that a replay buffer must be shown never
+to re-invoke the handler, and a seated `RequestHandler` cannot demonstrate that on its own
+— `tests/unit/test_link_loop.cpp` still bridges `MockWire` by hand for exactly this reason
+(2026-09-06 entry "T034's SC-004 loop bridges MockWire by hand"). What #147 delivers is
+the seat #57 (T039) and #60 (T042) need; what it does not deliver is a node whose answer
+comes from a real engine.
+
+**Recommendation:** amend `contracts/mock-wire.md:16` to drop "(usually a real
+`Responder`)" and say instead that the node's `RequestHandler` answers, with a real
+`Responder` driven over a virtual wire being F4's job rather than the mock's — a
+documentation change only, matching what is now implemented. If instead the
+`Responder`-level reading is wanted from `MockWire`, it should be a new, separately
+released story (the enricher's judgement call (1) on #147, flagged for veto and not
+vetoed), because it is a different feature and not a correction to this one.
+
+**Ruling:** pending — human. `contracts/mock-wire.md` is a Spec Kit contract and a T3
+artefact (2026-09-03 entry "specs/**/contracts/ are T3 artefacts"), so an agent does not
+edit it; nothing in the tree depends on the parenthetical's resolution today.
+
+**Supersedes:** item (1) of the 2026-09-01 entry "MockWire (T010) design choices:
+Respond's answer, wildcard-script ordering, and deferred-REQUIRE capacity checks" — the
+interim echo is no longer the answer for a node with a handler registered, and covers only
+the no-handler fallback. Items (2) (own-script → wildcard → default ordering) and (3)
+(deferred `fault_` capacity checks) are untouched and stand as ruled.
