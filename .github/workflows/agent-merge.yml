@@ -149,15 +149,20 @@ jobs:
               //  * Renaming the file walked the guard entirely: `filename` becomes the new path
               //    and the old one moves to `previous_filename`.
               const OQ = 'docs/OPEN-QUESTIONS.md';
-              const oqf = changed.find(f => f.filename === OQ || f.previous_filename === OQ);
-              if (oqf) {
-                if (oqf.filename !== OQ) {
-                  skip(number, `renames the append-only record to ${oqf.filename} — where it lives is the maintainer's call, and the guard cannot follow it`);
-                  continue;
+              //  * Round 5: `find` returned ONE entry. Rename the record to an archive path AND
+              //    add a fresh file at the old path in the same PR, and two entries match; GitHub
+              //    lists files by name, so the attacker chose which one was inspected. Every
+              //    matching entry is checked, and a rename in EITHER direction is refused.
+              const oqfs = changed.filter(f => f.filename === OQ || f.previous_filename === OQ);
+              let held = null;
+              for (const oqf of oqfs) {
+                if (oqf.filename !== OQ || oqf.previous_filename) {
+                  held = `renames the append-only record (${oqf.previous_filename || OQ} → ${oqf.filename}) — where it lives is the maintainer's call, and the guard cannot follow it`;
+                  break;
                 }
                 if (typeof oqf.patch !== 'string') {
-                  skip(number, 'docs/OPEN-QUESTIONS.md changed but GitHub returned no patch (too large) — cannot tell an appended question from a recorded ruling, so this is the maintainer\'s call');
-                  continue;
+                  held = 'docs/OPEN-QUESTIONS.md changed but GitHub returned no patch (too large) — cannot tell an appended question from a recorded ruling, so this is the maintainer\'s call';
+                  break;
                 }
                 const lines = oqf.patch.split('\n');
                 const DECISION = /\b(ratified|adopted|discharged|human,\s*\d{4})/i;
@@ -191,10 +196,11 @@ jobs:
                   if (!m) return false;                       // not a ruling line at all
                   return !(/^PENDING\b/i.test(m[1].trim()) && !DECISION.test(l));
                 });
-                if (ruling) { skip(number, `records a ruling in docs/OPEN-QUESTIONS.md (${ruling.slice(1).trim().slice(0, 60)}) — a decision is the maintainer's, never an autonomous merge`); continue; }
+                if (ruling) { held = `records a ruling in docs/OPEN-QUESTIONS.md (${ruling.slice(1).trim().slice(0, 60)}) — a decision is the maintainer's, never an autonomous merge`; break; }
                 const removed = lines.filter(l => l.startsWith('-'));
-                if (removed.length) { skip(number, `docs/OPEN-QUESTIONS.md is append-only and this diff removes ${removed.length} line(s) — supersede by appending, or let the maintainer merge it`); continue; }
+                if (removed.length) { held = `docs/OPEN-QUESTIONS.md is append-only and this diff removes ${removed.length} line(s) — supersede by appending, or let the maintainer merge it`; break; }
               }
+              if (held) { skip(number, held); continue; }
 
               // Verdicts: claude[bot] only, FINAL line only, THIS head only (agent-approve's rule).
               const comments = await github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: number, per_page: 100});
