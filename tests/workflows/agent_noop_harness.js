@@ -15,7 +15,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { detect, finalize, retryBudget, isVerdict, closingRefs, closingIssues } = require(path.join(__dirname, '..', '..', 'tools', 'ci', 'agent-noop.js'));
+const { detect, finalize, retryBudget, isVerdict, closingRefs, closingRefsRaw, closingIssues } = require(path.join(__dirname, '..', '..', 'tools', 'ci', 'agent-noop.js'));
 
 const results = [];
 const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process.exitCode = 1; };
@@ -463,29 +463,32 @@ const during = '2026-09-12T10:00:30Z';
   // may now rewrite the body, so those references are inside its reach. The gate snapshots the
   // set before the run; detect compares after; a change is escalated and fails the job.
   w = world({ head: 'b'.repeat(40), body: 'Fixes bug.\n\nCloses #463' });
-  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=Closes #463;gh=Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: an unchanged Closes set is not flagged', r.refs_changed === false && w.outputs.refs_changed === 'false');
   w = world({ head: 'b'.repeat(40), body: 'Closes #463\nResolves #1' });
-  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=Closes #463;gh=Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: an ADDED closing reference is flagged', r.refs_changed === true && w.outputs.refs_changed === 'true');
   w = world({ head: 'b'.repeat(40), body: 'No references any more.' });
-  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=Closes #463;gh=Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: a REMOVED closing reference is flagged too', r.refs_changed === true);
   w = world({ head: 'b'.repeat(40), body: 'closes #12 and fixes #463' });
-  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'fixes #463,closes #12', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=fixes #463,closes #12;gh=fixes #463,closes #12', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: the comparison is a SET — order does not matter', r.refs_changed === false);
   // Round 5: the keyword and separator DO matter, because agent-merge reads only `KEYWORD<space>#n`.
   for (const [form, body] of [['Closes:#n', 'Closes:#144'], ['**Closes** #n', '**Closes** #144'], ['Closes [#n](url)', 'Closes [#144](https://github.com/o/r/issues/144)'], ['Fixes #n (keyword changed)', 'Fixes #144']]) {
     w = world({ head: 'b'.repeat(40), body });
-    r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #144', EXEC_FILE: execFile({ num_turns: 30 }) } });
+    r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=Closes #144;gh=Closes #144', EXEC_FILE: execFile({ num_turns: 30 }) } });
     check(`fix: \`Closes #144\` re-spelled as ${form} IS flagged`, r.refs_changed === true);
   }
   w = world({ head: 'b'.repeat(40), body: 'Closes #1' });
   r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '', EXEC_FILE: execFile({ num_turns: 30 }) } });
-  check('fix: with no snapshot from the gate the guard cannot judge and does not flag', r.refs_changed === false);
+  check('fix: with no snapshot from the gate the guard FAILS CLOSED and flags (round-6 red team)', r.refs_changed === true && /snapshot/i.test(r.refs_detail));
   w = world({ head: 'b'.repeat(40), body: 'Closes #1' });
   r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'none', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: a reference added to a body that had NONE is flagged (the gate writes `none`, not empty)', r.refs_changed === true);
+  w = world({ head: 'b'.repeat(40), body: 'Closes #463' });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=Closes #463;gh=Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  check('fix: the two-view snapshot format is what the gate writes and detect reads', r.refs_changed === false);
   w = world({ labels: ['agent-authored', 'risk:t0', 'review-fix-1'] });
   await finalize({ ...w, env: { KIND: 'fix', PR: '466', ATTEMPT: '1', ATTEMPTS: '1', TURNS: '30', DENIALS: '0', NOOP: 'false', PRODUCED: 'true', ONLY_COMMENT: 'false', REFS_CHANGED: 'true',
     REASON: 'head moved from aaaaaaa to bbbbbbb' } });
@@ -528,6 +531,38 @@ const during = '2026-09-12T10:00:30Z';
   // Round-5 red team, HIGH: stripping markup to a SPACE let `Closes` bind to a `#n` on the far
   // side of the removed span, so `Closes \`note\` #463` counted — a reference GitHub does not honour,
   // manufactured by the stripping itself. Removed markup must break the binding.
+  // Round-6 red team on #466: the thing the guard protects — agent-merge's release/close path,
+  // and this workflow's exhaustion release — parses the RAW body with no stripping. A reference
+  // inside a fence, a code span, an HTML comment or an indented line is invisible to GitHub but a
+  // live instruction to agent-merge. So the guard compares two views: `closingRefsRaw` (what
+  // agent-merge reads) and `closingRefs` (what GitHub honours); a change in EITHER is a change.
+  check('closingRefsRaw: a reference inside a fenced block IS read by agent-merge, so it counts raw', closingRefsRaw('```\nCloses #463\n```', 'o', 'r') === 'Closes #463');
+  check('closingRefsRaw: a reference inside an HTML comment counts raw', closingRefsRaw('<!-- Closes #463 -->', 'o', 'r') === 'Closes #463');
+  check('closingRefsRaw: a reference inside a code span counts raw', closingRefsRaw('the old body said `Closes #999`', 'o', 'r') === 'Closes #999');
+  check('closingRefsRaw: a reference in a nested list item counts raw', closingRefsRaw('- a\n    - Closes #999', 'o', 'r') === 'Closes #999');
+  check('closingRefsRaw: no stripping at all — a code span between keyword and reference still binds raw (as agent-merge would read it)', closingRefsRaw('Closes `x` #1', 'o', 'r') === '');
+  // GitHub model: indented lines are code only where CommonMark says so — after a blank line and
+  // not as list-item content — so a nested list item or a lazy continuation is prose.
+  check('closingRefs: a nested list item (indented) is prose to GitHub', closingRefs('- a\n    - Closes #999', 'o', 'r') === 'Closes #999');
+  check('closingRefs: a lazy paragraph continuation (indented, no blank line) is prose to GitHub', closingRefs('this PR also\n    Closes #999', 'o', 'r') === 'Closes #999');
+  check('closingRefs: an indented table row is prose to GitHub', closingRefs('| a |\n|---|\n    | Closes #999 |', 'o', 'r') === 'Closes #999');
+  for (const [form, before, after] of [
+    ['a nested list item', 'Closes #463', 'Closes #463\n- a\n    - Closes #999'],
+    ['a lazy continuation', 'Closes #463', 'Closes #463\n\nthis PR also\n    Closes #999'],
+    ['an HTML comment', 'Closes #463', 'Closes #463\n\n<!-- Closes #999 -->'],
+    ['a fenced block', 'Closes #463', 'Closes #463\n\n```\nCloses #999\n```'],
+    ['a code span', 'Closes #463', 'Closes #463\n\nthe old body said `Closes #999`'],
+  ]) {
+    w = world({ head: 'b'.repeat(40), body: after });
+    r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=Closes #463;gh=Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+    check(`fix: a reference ADDED inside ${form} is flagged — agent-merge would act on it`, r.refs_changed === true);
+  }
+  w = world({ head: 'b'.repeat(40), body: 'Closes #463\n- a\n    - Closes #99' });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=Closes #463,Closes #99;gh=Closes #463,Closes #99', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  check('fix: an unchanged body with a nested-list reference is NOT flagged', r.refs_changed === false);
+  w = world({ head: 'b'.repeat(40), body: '```\nCloses #463\n```' });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=Closes #463;gh=Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  check('fix: a reference MOVED into a fence is flagged — GitHub stops honouring it (gh view changed, raw unchanged)', r.refs_changed === true);
   check('closingRefs: an inline code span between keyword and reference breaks the reference', closingRefs('Closes `note` #463', 'o', 'r') === '');
   check('closingRefs: an HTML comment between keyword and reference breaks the reference', closingRefs('Closes <!-- keep --> #463', 'o', 'r') === '');
   check('closingRefs: a fenced block between keyword and reference breaks the reference', closingRefs('Closes\n```\nx\n```\n#463', 'o', 'r') === '');
@@ -543,15 +578,16 @@ const during = '2026-09-12T10:00:30Z';
   check('closingIssues: a link to another repo\'s issue releases nothing here', closingIssues('Closes [#7](https://github.com/x/y/issues/7)', 'o', 'r').join(',') === '');
   check('closingIssues: a cross-owner owner/repo#n releases nothing here', closingIssues('Closes x/y#1', 'o', 'r').join(',') === '');
   check('closingIssues: same-repo forms canonicalise to numbers for the release paths', closingIssues('Closes #7\nfixes GH-12\ncloses o/r#3\ncloses O/R#4\nresolves https://github.com/o/r/issues/9\ncloses o/other#5', 'o', 'r').join(',') === '3,4,7,9,12');
+  check('closingIssues: reads the RAW body like agent-merge — a reference inside a fence still releases', closingIssues('```\nCloses #7\n```', 'o', 'r').join(',') === '7');
   w = world({ head: 'b'.repeat(40), body: 'Closes #470\nCloses o/r#465' });
-  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #465,Closes #470', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=Closes #465,Closes #470;gh=Closes #465,Closes #470', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: `Closes #465` rewritten as `Closes o/r#465` IS flagged — the form agent-merge reads changed', r.refs_changed === true);
   w = world({ head: 'b'.repeat(40), body: '<!-- Closes #463 -->' });
-  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=Closes #463;gh=Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: a reference moved into an HTML comment IS flagged as removed', r.refs_changed === true);
   for (const [form, body] of [['GH-n', 'Closes #463\nCloses GH-134'], ['owner/repo#n', 'Closes #463\nfixes o/r#134'], ['issue URL', 'Closes #463\nresolves https://github.com/o/r/issues/134']]) {
     w = world({ head: 'b'.repeat(40), body });
-    r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+    r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=Closes #463;gh=Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
     check(`fix: a reference ADDED as ${form} is flagged`, r.refs_changed === true && /134/.test(r.refs_detail));
   }
   // [RT-2] Both new finalize branches return; their order was unpinned. A changed reference set
