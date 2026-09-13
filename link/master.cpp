@@ -466,11 +466,21 @@ void Master::drain_wire(MasterEvent& event) {
         // could inflate an innocent node's discards by claiming its address while the host
         // was idle.
         //
-        // No address is charged for a frame it did not send: true by construction of this
-        // if/else — the only AddrStats write here is to dst_, the address whose own request
-        // this engine transmitted and whose window is open; the wire-derived f.src indexes
-        // nothing. Demonstrated by test_link_master "an idle-time discard claiming an
-        // in-range source ..." and "... a source well past kAddrCount ...".
+        // What this if/else establishes, true by construction of it: AddrStats::discards is
+        // written only for dst_ — the address whose own request this engine transmitted and is
+        // awaiting an answer from — and never from anything the wire said, because the
+        // wire-derived f.src indexes nothing here. So no address is charged for a frame merely
+        // because that frame claimed its address. Demonstrated by test_link_master "an
+        // idle-time discard claiming an in-range source ..." and "... a source well past
+        // kAddrCount ...".
+        //
+        // What it does NOT establish (red team @722e859 finding 1, correcting an earlier
+        // wording of this comment that claimed the wider property): it is NOT true that no
+        // address is charged for a frame it did not send. While dst_'s transaction is
+        // awaiting, a discarded frame is charged to dst_ whoever actually sent it — a third
+        // station's frame under its own src lands on dst_. That attribution predates #144 and
+        // the 2026-09-11 ruling leaves it alone; it is pinned by test_link_master "inside
+        // dst's window, a THIRD station's frame is charged to dst ...".
         if (awaiting)
             stats_[dst_].discards++;
         else

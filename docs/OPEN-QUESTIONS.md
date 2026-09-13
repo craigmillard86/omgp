@@ -3296,14 +3296,22 @@ attributable address"; `data-model.md` §8 and `contracts/link-cpp.md` carry the
 split. `AddrStats::discards` now means "discarded during that address's own transaction" and
 nothing else.
 
-**Claim labels (rule 11).** "No address is charged for a frame it did not send" is **proved by
-construction** of `drain_wire()`'s if/else: the only `AddrStats` write on the discard path is
-to `dst_`, an address this engine itself addressed; the wire-derived `f.src` indexes no table.
-**Demonstrated by** `tests/unit/test_link_master.cpp` "an idle-time discard claiming an
-in-range source …", "… a source well past kAddrCount …" (under ASan), "a frame discarded while
-dst's own transaction is awaiting …" and "a CRC-corrupt frame arriving with no transaction
-open …". That no *other* code path writes `AddrStats::discards` is a **control** — the current
-contents of `link/` — not a guarantee. That nothing yet *reads* `BusStats::discards` is also a
+**Claim labels (rule 11).** "No address is charged for a frame merely because that frame
+claimed its address" is **proved by construction** of `drain_wire()`'s if/else: the only
+`AddrStats` write on the discard path is to `dst_`, an address this engine itself addressed;
+the wire-derived `f.src` indexes no table. **Demonstrated by**
+`tests/unit/test_link_master.cpp` "an idle-time discard claiming an in-range source …", "… a
+source well past kAddrCount …" (under ASan), "a frame discarded while dst's own transaction is
+awaiting …" and "a CRC-corrupt frame arriving with no transaction open …". The **wider**
+property "no address is charged for a frame it did not send" is **false and not claimed** (an
+earlier revision of this entry, of the `link/master.cpp` comment and of a test name asserted
+it; red team @722e859 finding 1): while `dst_`'s transaction is awaiting, a discarded frame is
+charged to `dst_` whoever actually sent it, so a third station's frame under its own `src`
+lands on the polled node. That attribution predates #144, the ruling above leaves it alone,
+and it is **demonstrated by** the new case "inside dst's window, a THIRD station's frame is
+charged to dst …". Whether an innocent polled node should carry it is a separate question,
+open only once something consumes the counter. That no *other* code path writes
+`AddrStats::discards` is a **control** — the current contents of `link/` — not a guarantee. That nothing yet *reads* `BusStats::discards` is also a
 control: the counter is diagnostic today, and feeding it into trunk §7 SUSPECT/OFFLINE
 accounting remains a separate, ruling-bearing change (the claimed-src entry's own note).
 

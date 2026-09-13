@@ -3467,12 +3467,15 @@ TEST_CASE("an unsolicited frame while idle whose claimed source is exactly kAddr
     REQUIRE(master.bus_stats().bus_faults == 0);
 }
 
-// The three cases below are #144's own: the forgeable half of the old attribution, the
-// out-of-range half's sibling in the middle of the range, and the in-window case the ruling
-// deliberately leaves alone.
+// The four cases below are #144's own: the forgeable half of the old attribution, the
+// out-of-range half's sibling in the middle of the range, the in-window case the ruling
+// deliberately leaves alone, and (red team @722e859 finding 1) the boundary of what that
+// in-window branch proves — the sender of an in-window discard is not what the per-address
+// counter follows.
 
 TEST_CASE("an idle-time discard claiming an in-range source is counted on the bus and leaves "
-          "every per-address record alone: no address is charged for a frame it did not send",
+          "every per-address record alone: no address is charged for a frame merely because "
+          "that frame claimed its address",
           "[link]") {
     // The forgeable half (docs/OPEN-QUESTIONS.md 2026-09-06 "an idle-time discard is charged
     // to the frame's CLAIMED in-range src"). `src` is wire-derived and unauthenticated —
@@ -3560,6 +3563,48 @@ TEST_CASE("a frame discarded while dst's own transaction is awaiting a response 
     REQUIRE(master.busy()); // the window keeps running (US2 AC6)
     REQUIRE(master.stats(dst).discards == 1);
     REQUIRE(master.bus_stats().discards == 0);
+}
+
+TEST_CASE("inside dst's window, a THIRD station's frame is charged to dst — the per-address "
+          "counter follows the open transaction, not the sender",
+          "[link]") {
+    // The boundary of what the `awaiting` branch establishes, pinned so the claim above it
+    // cannot be read wider than it is (red team @722e859 finding 1). `stats_[dst_].discards`
+    // is written for the address whose own transaction is awaiting an answer, whoever put the
+    // discarded frame on the wire: station 0x07 below sends under its OWN src — no forgery —
+    // and node 0x02, which transmitted nothing, carries the count.
+    //
+    // Pinned as today's observable, not asserted as desired. That a babbler can inflate the
+    // currently-polled node's `discards` this way predates #144, is the half the 2026-09-11
+    // ruling deliberately leaves alone, and is diagnostic-only while nothing reads the counter
+    // (a control — the current contents of `core/` — not a guarantee).
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x02;      // the node being polled
+    const uint8_t attacker = 0x07; // a different station entirely
+    const Step silence[] = {{dst, Kind::Silence}};
+    wire.set_script(dst, silence, 1);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t payload[] = {0x11};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
+
+    const uint8_t body[] = {0xEE};
+    const std::vector<uint8_t> other =
+        encode_expected(omgp::ADDR_host, attacker, true, false, 0, body, sizeof body);
+    const uint64_t open_at = tx_end + 10;
+    REQUIRE(open_at < tx_end + omgp::TRUNK_T_resp_us);
+    wire.inject_bytes(other.data(), other.size(), open_at);
+    const MasterEvent ev = wire.advance_to(open_at + other.size() * byte_us(), master);
+
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE(master.busy()); // the window keeps running (US2 AC6)
+    REQUIRE(master.stats(dst).discards == 1);
+    REQUIRE(master.stats(attacker).discards == 0); // the actual sender is not charged
+    REQUIRE(master.bus_stats().discards == 0);     // and it is not unattributable either
 }
 
 TEST_CASE("a CRC-corrupt frame arriving with no transaction open is counted on the bus, "

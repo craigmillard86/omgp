@@ -103,9 +103,13 @@ attempt at once; frames failing any acceptance check are discarded and counted �
 (ruling 2026-09-11, `docs/OPEN-QUESTIONS.md`; #144 — it closes the FR-011 tension the
 2026-09-06 entries recorded, where a claimed `src` of `0x10..0xFE` was counted nowhere and an
 in-range one was charged to an unauthenticated wire byte. No address is charged for a frame
-it did not send: true by construction of `drain_wire()`'s if/else, whose only `AddrStats`
-write is to `dst_`; demonstrated by `test_link_master.cpp`'s "an idle-time discard claiming an
-in-range source …" and "… a source well past kAddrCount …") — and a byte-for-byte drain:
+merely because that frame claimed its address: true by construction of `drain_wire()`'s
+if/else, whose only `AddrStats` write is to `dst_` and which never indexes the wire-derived
+`src`; demonstrated by `test_link_master.cpp`'s "an idle-time discard claiming an in-range
+source …" and "… a source well past kAddrCount …". The wider "no address is charged for a
+frame it did not send" does **not** hold and is not claimed: while `dst`'s transaction is
+awaiting, a discarded frame is charged to `dst` whoever sent it, pinned by "inside dst's
+window, a THIRD station's frame is charged to dst …") — and a byte-for-byte drain:
 `poll()` reads every byte due at
 `now_us`, including those behind the byte that concluded an attempt; the next transmission
 starts no earlier than `last_activity + TRUNK_T_gap_us`, where `last_activity` is re-read on
