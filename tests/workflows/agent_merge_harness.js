@@ -165,6 +165,23 @@ const said = (w, re) => w.log.some(l => re.test(l));
   await run(w);
   check('A6 renaming the record does not walk the guard', !mergedIt(w) && said(w, /rename|append-only|ruling/i));
 
+  // Round 5 red team on #420: `find` returned ONE entry. Rename the record to an archive path
+  // AND add a fresh docs/OPEN-QUESTIONS.md in the same PR, and two entries match — if the added
+  // one is reached first, only its clean patch is inspected and the rename never fires. GitHub
+  // orders listFiles by filename, so the attacker chose the order. Every match must be checked.
+  const recreated = {filename: 'docs/OPEN-QUESTIONS.md', status: 'added', patch: '@@\n+# Open questions\n+\n+(fresh)\n'};
+  w = oqPR([recreated, {filename: 'docs/questions-archive.md', previous_filename: 'docs/OPEN-QUESTIONS.md', status: 'renamed',
+             patch: '@@\n+**Ruling:** human, 2026-09-13. Adopted.\n-## 2026-09-05 — a published entry\n'}]);
+  await run(w);
+  check('A6b rename + recreate, recreated file listed FIRST, is refused', !mergedIt(w) && said(w, /rename/i));
+  w = oqPR([{filename: 'docs/OPEN-QUESTIONS-2026H1.md', previous_filename: 'docs/OPEN-QUESTIONS.md', status: 'renamed',
+             patch: '@@\n-## 2026-09-05 — a published entry\n'}, recreated]);
+  await run(w);
+  check('A6c rename + recreate, rename listed first, is refused (control)', !mergedIt(w) && said(w, /rename/i));
+  w = oqPR([{filename: 'docs/OPEN-QUESTIONS.md', previous_filename: 'docs/scratch.md', status: 'renamed', patch: '@@\n+(fresh)\n'}]);
+  await run(w);
+  check('A6d renaming another file INTO the record\'s path is refused', !mergedIt(w) && said(w, /rename/i));
+
   // The pending form the repo actually writes must still merge, or the guard blocks normal work.
   // --- round 2: the marker is a FORMAT, and the format has variants -------------------------
   // `**Ruling**: adopted` renders identically to `**Ruling:** adopted`; a heading form and the
