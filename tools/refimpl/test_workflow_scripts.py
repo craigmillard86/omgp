@@ -554,6 +554,49 @@ def test_noop_guards_run_on_success_and_use_the_shared_module():
                     wf_name, "the raw execution file is not uploaded on a public repo")
 
 
+def test_noop_round3_wiring():
+    """Round-3 findings on #416 that live in the YAML, not the module.
+
+    RT-1/REV-1: `t0` had no `if:`, so a failed apt/pip/checkout step skipped it, SINCE arrived
+    empty, and detection fell OPEN on stale evidence while the retry could fire with an EMPTY
+    prompt (the prompt step was skipped too). RT-2/RT-3/REV-2: finalize must know whether the
+    run PRODUCED (an errored run that pushed keeps its attempt spent / its claim held) and, for
+    dispatch, whether production was PARTIAL (a branch with no PR is loud, not green).
+    REV-3: the detector must be loaded from RUNNER_TEMP by construction, not merely "not from
+    GITHUB_WORKSPACE" — `require('./tools/ci/agent-noop.js')` satisfied the old pin and is round
+    1's vulnerability verbatim."""
+    load = re.compile(r"require\(`\$\{process\.env\.RUNNER_TEMP\}/agent-noop\.js`\)")
+    for wf_name, job, _ in NOOP_WORKFLOWS:
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / wf_name).read_text())
+        steps = wf["jobs"][job]["steps"]
+        by_id = {s.get("id"): s for s in steps if s.get("id")}
+        assert "always()" in str(by_id["t0"].get("if", "")), (wf_name, "t0 must record the start whatever ran before it")
+        retry = by_id["agent_retry"]
+        assert "steps.agent.conclusion != 'skipped'" in str(retry.get("if", "")), (
+            wf_name, "the retry must not run when the first pass never ran — its prompt would be empty")
+        env = by_id["finalize"].get("env", {})
+        assert "PRODUCED" in env and "steps.detect.outputs.produced" in str(env["PRODUCED"]), (
+            wf_name, "finalize must be told whether the run produced output")
+        if wf_name == "agent-dispatch.yml":
+            assert "PARTIAL" in env and "steps.detect.outputs.partial" in str(env["PARTIAL"]), (
+                wf_name, "finalize must be told when a branch was pushed with no PR")
+            assert "PARTIAL" in _script(wf_name, job, "finalize"), (
+                wf_name, "finalize's early return must not swallow a partial run")
+        for st in steps:
+            body = str(st.get("with", {}).get("script", ""))
+            if "agent-noop.js" not in body:
+                continue
+            assert load.search(body), (wf_name, st.get("id"), "the detector must be loaded from RUNNER_TEMP, literally")
+            assert not re.search(r"__dirname|process\.cwd|\./tools|GITHUB_WORKSPACE", body), (
+                wf_name, st.get("id"), "no workspace-relative load of the detector")
+    # The fixer's comment is recognised by a marker the prompt tells it to write; the module's
+    # `spoke` looks for exactly this shape (agent_noop_harness.js FIXER). Pinned together here so
+    # the two cannot drift apart silently. CONTROL, not guarantee: a fixer that ignores the
+    # instruction is declared a no-op — the loud direction.
+    prompt = (ROOT / ".github" / "agent-prompts" / "review-fix.md").read_text()
+    assert "review-fix({{ATTEMPT}}) @ {{HEAD}}" in prompt, "review-fix.md must tell the fixer to open its comment with the marker"
+
+
 def test_every_claude_step_has_an_id_so_its_execution_file_is_readable():
     """`execution_file` (turns, denials, is_error) is a step output; an id-less step has none."""
     for wf_name, job, _ in NOOP_WORKFLOWS:

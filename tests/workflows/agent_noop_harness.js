@@ -15,7 +15,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { detect, finalize, retryBudget } = require(path.join(__dirname, '..', '..', 'tools', 'ci', 'agent-noop.js'));
+const { detect, finalize, retryBudget, isVerdict } = require(path.join(__dirname, '..', '..', 'tools', 'ci', 'agent-noop.js'));
 
 const results = [];
 const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process.exitCode = 1; };
@@ -68,6 +68,10 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'noop-'));
 let seq = 0;
 const execFile = obj => { const p = path.join(TMP, `exec-${seq++}.json`); fs.writeFileSync(p, JSON.stringify(obj)); return p; };
 const said = (w, re) => w.log.some(m => re.test(m));
+// The first line review-fix.md step 5 tells the fixer to write. Other workflows post as
+// claude[bot] on the same PR (ci-failure-router's auto-fix, claude-mention, agent-triage) and
+// none of them writes this, so it is what makes a comment the FIXER's (round-3 red team).
+const FIXER = 'review-fix(1) @ ' + 'a'.repeat(40) + '\n';
 
 // The run's clock: comments before T0 predate the run, comments after it are its output.
 const T0 = '2026-09-12T10:00:00Z';
@@ -76,15 +80,15 @@ const during = '2026-09-12T10:00:30Z';
 
 (async () => {
   // --- implement: did a PR appear for THIS issue? ------------------------------------------
-  let w = world({ prs: [{ head: { ref: 'task/58' } }] });
-  let r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', EXEC_FILE: execFile({ num_turns: 76, permission_denials_count: 20, is_error: false }) } });
+  let w = world({ prs: [{ head: { ref: 'task/58' }, created_at: during }] });
+  let r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: execFile({ num_turns: 76, permission_denials_count: 20, is_error: false }) } });
   check('implement: a PR on task/<issue> is not a no-op', r.noop === false);
   check('implement: the execution figures are read', r.turns === 76 && r.denials === 20);
   check('implement: the figures reach the log', said(w, /turns=76/) && said(w, /denials=20/));
 
   // The execution file is a message ARRAY in practice; the totals are on its last result record.
-  w = world({ prs: [{ head: { ref: 'task/58' } }] });
-  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', EXEC_FILE: execFile([
+  w = world({ prs: [{ head: { ref: 'task/58' }, created_at: during }] });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: execFile([
     { type: 'system', subtype: 'init' },
     { type: 'assistant', message: { content: 'working' } },
     { type: 'result', subtype: 'success', is_error: false, num_turns: 76, permission_denials_count: 20 }]) } });
@@ -119,7 +123,7 @@ const during = '2026-09-12T10:00:30Z';
   check('fix: a new head commit is not a no-op', r.noop === false);
 
   // review-fix may rebut a finding and change nothing (its step 5), so a comment IS production.
-  w = world({ head: 'a'.repeat(40), comments: [{ user: { login: 'claude[bot]' }, created_at: during, body: 'Finding 2 is wrong because X; no code change.' }] });
+  w = world({ head: 'a'.repeat(40), comments: [{ user: { login: 'claude[bot]' }, created_at: during, body: FIXER + 'Finding 2 is wrong because X; no code change.' }] });
   r = await detect({ ...w, env: { KIND: 'fix', PR: '342', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, EXEC_FILE: execFile({ num_turns: 26, permission_denials_count: 4 }) } });
   check('fix: an explanatory claude[bot] comment during the run counts as output', r.noop === false);
 
@@ -290,7 +294,7 @@ const during = '2026-09-12T10:00:30Z';
   // Round 1 was right to stop matching only the last line; excluding a QUOTED verdict is the
   // over-correction. A false escalation on the workflow's own documented happy path.
   w = world({ head: 'a'.repeat(40), comments: [{ user: { login: 'claude[bot]' }, created_at: during,
-    body: 'I rebut finding 2. The reviewer wrote:\n> `VERDICT(red-team): findings @ abc`\nThat is wrong: link/frame.cpp:88 already rejects it. No code change.' }] });
+    body: FIXER + 'I rebut finding 2. The reviewer wrote:\n> `VERDICT(red-team): findings @ abc`\nThat is wrong: link/frame.cpp:88 already rejects it. No code change.' }] });
   r = await detect({ ...w, env: { KIND: 'fix', PR: '342', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, EXEC_FILE: execFile({ num_turns: 26 }) } });
   check('fix: a rebuttal QUOTING the verdict it rebuts is production, not a no-op', r.noop === false);
 
@@ -314,6 +318,82 @@ const during = '2026-09-12T10:00:30Z';
   r = await detect({ ...w, env: { KIND: 'fix', PR: '342', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0,
     EXEC_FILE: execFile({ num_turns: 26, permission_denials_count: 4 }) } });
   check('fix: a run that produced nothing IS eligible for the retry', r.produced === false);
+
+  // === round-3 findings (@2559c21) =============================================================
+
+  // [RT-1 / REV-1] `t0` sat after checkout/setup/apt/pip with no `if:`; any failure there skipped
+  // it, SINCE arrived EMPTY, and every window test fell open — a PR from an earlier dispatch, a
+  // stale task/<n> branch or attempt 1's comment then vouched for a run in which no agent ran at
+  // all, and finalize returned with the claim held. The old `if: failure()` step released it.
+  // An unknown start is an unknown outcome: fail closed, like readFigures.
+  w = world({ prs: [{ head: { ref: 'task/58' }, created_at: before, commits: [{ commit: { committer: { date: before } } }] }] });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: '', EXEC_FILE: '' } });
+  check('implement: an EMPTY run start (t0 skipped) is a no-op even with an older PR open', r.noop === true && r.produced === false);
+  check('implement: ...and the reason says the start was unknown, not "no PR"', /start/i.test(r.reason));
+  w = world({ prs: [], branch: { ref: 'task/58', pushed_during: false } });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: '', EXEC_FILE: '' } });
+  check('implement: an EMPTY run start with a stale task/<n> branch is a no-op', r.noop === true && r.produced === false);
+  w = world({ prs: [{ head: { ref: 'task/58' }, created_at: before }] });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: 'not-a-date', EXEC_FILE: '' } });
+  check('implement: an unparseable run start is treated the same as an empty one', r.noop === true && r.produced === false);
+  w = world({ head: 'a'.repeat(40), comments: [{ user: { login: 'claude[bot]' }, created_at: before, body: FIXER + 'Attempt 1: I fixed finding 2.' }] });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '342', HEAD_BEFORE: 'a'.repeat(40), SINCE: '', EXEC_FILE: '' } });
+  check('fix: an EMPTY run start does not let attempt 1\'s comment vouch for attempt 2', r.noop === true && r.produced === false);
+  w = world({ head: 'b'.repeat(40) });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '342', HEAD_BEFORE: 'a'.repeat(40), SINCE: '', EXEC_FILE: '' } });
+  check('fix: a moved head needs no window — it is production even with the start unknown', r.noop === false && r.produced === true);
+
+  // [RT-4] `spoke` counted ANY non-verdict claude[bot] comment in the window. ci-failure-router's
+  // auto-fix, claude-mention and agent-triage all post as claude[bot] on the same PR and none
+  // emits a VERDICT line, so one of them speaking mid-run turned a 140-turn no-op into
+  // "production". Only the fixer's own comment counts, and the prompt makes it identifiable.
+  w = world({ head: 'a'.repeat(40), comments: [{ user: { login: 'claude[bot]' }, created_at: during, body: 'CI triage: the native job hit a flaky apt mirror.' }] });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '342', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, EXEC_FILE: execFile({ num_turns: 140, permission_denials_count: 22 }) } });
+  check('fix: another claude[bot] workflow speaking mid-run is NOT the fixer\'s output', r.noop === true && r.produced === false);
+  w = world({ head: 'a'.repeat(40), comments: [{ user: { login: 'claude[bot]' }, created_at: during, body: '`' + FIXER.trim() + '`\n\nFixed finding 1 at link/frame.cpp:88.' }] });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '342', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, EXEC_FILE: execFile({ num_turns: 40 }) } });
+  check('fix: the fixer\'s marker line still counts when written backticked', r.noop === false);
+  // [RT-4b] A verdict written as a list item or inside <blockquote> escaped the exclusion.
+  check('isVerdict: a verdict as a list item is a verdict', isVerdict('- VERDICT(red-team): findings @ abc') === true);
+  check('isVerdict: a numbered list item too', isVerdict('1. VERDICT(review): findings @ abc') === true);
+  w = world({ head: 'a'.repeat(40), comments: [{ user: { login: 'claude[bot]' }, created_at: during, body: '<blockquote>VERDICT(review): findings @ abc</blockquote>' }] });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '342', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, EXEC_FILE: execFile({ num_turns: 40 }) } });
+  check('fix: a verdict inside <blockquote>, with no fixer marker, is not output', r.noop === true);
+
+  // [RT-2] is_error AFTER the fixer pushed: the attempt is SPENT, not returned. finalize handed
+  // `review-fix-<n>` back and told the PR the attempt "does not count" — on a run that pushed code.
+  w = world({ head: 'b'.repeat(40), labels: ['agent-authored', 'review-fix-1'] });
+  await finalize({ ...w, env: { KIND: 'fix', PR: '342', ATTEMPT: '1', ATTEMPTS: '1', TURNS: '88', DENIALS: '1', PRODUCED: 'true',
+    REASON: 'head moved from aaaaaaa to bbbbbbb' } });
+  check('fix finalize: an errored run that PUSHED keeps its attempt spent', w.state.labels.includes('review-fix-1') && !w.log.includes('-review-fix-1'));
+  check('fix finalize: ...says so, rather than "returned"', said(w, /comment:.*spent/i) && !said(w, /comment:.*returned/i));
+  check('fix finalize: ...still escalates and fails', w.state.labels.includes('needs-human') && typeof w.outputs.__failed === 'string');
+  check('fix finalize: ...and the headline does not say "produced nothing"', !said(w, /comment:.*produced nothing/i));
+
+  // [RT-3] is_error AFTER a PR was opened: the claim stays with the live PR, and the headline
+  // agrees with its own `Detected:` line.
+  w = world({ labels: ['task', 'in-progress'] });
+  await finalize({ ...w, env: { KIND: 'implement', ISSUE: '58', ATTEMPTS: '1', TURNS: '120', DENIALS: '2', PRODUCED: 'true',
+    REASON: 'an open PR on task/58 was created or pushed to by this run' } });
+  check('implement finalize: an errored run that OPENED a PR keeps in-progress', w.state.labels.includes('in-progress') && !w.log.includes('-in-progress'));
+  check('implement finalize: ...the headline does not contradict the reason', !said(w, /comment:.*produced nothing/i) && said(w, /comment:.*open PR/));
+  check('implement finalize: ...and still fails the job so a human looks', typeof w.outputs.__failed === 'string');
+
+  // [REV-2] Branch pushed, no PR: round 2 was right to keep the claim, and wrong to go quiet. It
+  // is #58's exact shape (26 denials on `gh pr create`), and AC1 names "a pushed branch AND an
+  // opened PR". So: produced (no retry, no release), PARTIAL (finalize still speaks and fails).
+  w = world({ prs: [], branch: { ref: 'task/58', pushed_during: true } });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: execFile({ num_turns: 156, permission_denials_count: 26 }) } });
+  check('implement: branch-without-PR is flagged partial', r.partial === true && r.produced === true && w.outputs.partial === 'true');
+  w = world({ prs: [{ head: { ref: 'task/58' }, created_at: during }] });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: execFile({ num_turns: 40 }) } });
+  check('implement: a PR opened by this run is not partial', r.partial === false && w.outputs.partial === 'false');
+  w = world({ labels: ['task', 'in-progress'] });
+  await finalize({ ...w, env: { KIND: 'implement', ISSUE: '58', ATTEMPTS: '1', TURNS: '156', DENIALS: '26', PRODUCED: 'true', PARTIAL: 'true',
+    REASON: 'commits were pushed to task/58 during this run, though no PR was opened — check whether `gh pr create` was denied' } });
+  check('implement finalize: a partial run keeps the claim', w.state.labels.includes('in-progress'));
+  check('implement finalize: ...names the branch in a comment', said(w, /comment:.*task\/58/));
+  check('implement finalize: ...and FAILS the job — a branch with no PR is not success', typeof w.outputs.__failed === 'string');
 
   for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
   console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);
