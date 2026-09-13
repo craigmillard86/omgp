@@ -65,10 +65,16 @@ SUSPECT node at 9×T_poll and true at 10×T_poll.
 ./build/native/test_link_busfault -s
 ```
 Expected: with three enrolled nodes all SUSPECT → exactly one `BUS_FAULT` + one `ALERT`;
-`next_probe()` rates alternate `115200, 1000000, 115200, …`; a `Rate` step making one node
-hear only 115.2 kbit/s → the fault clears once on that node's answer and `bit_rate()` is
-115200; with a single enrolled node the same sequence declares the fault (ruling Q2); with
-two nodes of which one stays ENROLLED, nothing is declared.
+`next_probe()` rates alternate `115200, 1000000, 115200, …` while faulted and no reference
+pass is running; *(amended 2026-09-13, F4 — the superseded text read "the fault clears once on
+that node's answer and `bit_rate()` is 115200")* a `Rate` step making one node hear only
+115.2 kbit/s → its answer does NOT clear the fault: `bus_fault()` stays true, that node's state
+is unchanged, no address is `poll_due()`, and `next_probe()` then yields every enrolled address
+once at 1 000 000 without alternating; when the last of those outcomes arrives with no answer
+the fault clears once, `bit_rate()` is 115200, the answering node is ENROLLED and no fault is
+re-declared; a reference-rate answer at any point clears once at 1 000 000 instead; with a
+single enrolled node the same sequence declares the fault (ruling Q2); with two nodes of which
+one stays ENROLLED, nothing is declared.
 
 ## 7. Fuzzing produces clean rejections only — and can fail (SC-003)
 
