@@ -438,10 +438,11 @@ bool MockWire::receive(uint8_t& byte, uint64_t& start_us) {
         return false; // "in the future": stays queued (byte-wire-and-clock.md)
     byte = front.byte;
     start_us = front.start_us;
-    // Delivered, so it is no longer outstanding (#148). Guarded rather than an unconditional
-    // decrement: take_pending_injected() clears the flags of bytes still queued, so a byte
-    // released after an acknowledgement arrives here with injected == false and the count
-    // cannot wrap below zero.
+    // Delivered, so it is no longer outstanding (#148). The `> 0` conjunct is belt and braces,
+    // not what makes the count safe: injected_pending_ is incremented for exactly the bytes
+    // whose flag is set, and take_pending_injected() clears both together, so front.injected
+    // implies injected_pending_ >= 1 and the conjunct is never the reason this is skipped
+    // (proved by construction — those are the only two places either is written).
     if (front.injected && injected_pending_ > 0)
         --injected_pending_;
     for (size_t i = 1; i < rx_count_; ++i)
