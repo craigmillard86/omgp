@@ -113,24 +113,25 @@ const isFixer = body => FIXER_MARK.test(unwrap((body || '').split('\n').find(l =
 // wraps a live reference in code leaves that issue open — visible in the issue, recoverable by
 // a human, forbidden by the prompt, and closed by the follow-up that closes raw-referenced
 // issues on any merge. On the autonomous path agent-merge closes from the raw view regardless.
-// For the `KEYWORD #n` form this must read AT LEAST what agent-merge.yml's release/close regex
-// reads (`\b KEYWORD \s+ #(\d+)`, no trailing restriction): a trailing-character lookahead and a
-// two-character emphasis cap made `fixes #131-followup` and `***fixes #131***` invisible here and
-// live for agent-merge (round-10 red team on #466). Pinned as a superset property by
-// test_reference_guard_reads_at_least_what_agent_merge_reads, against agent-merge's own literal.
+// Two readers, unioned. CLOSING knows the four spellings GitHub documents; MERGE_RE is
+// agent-merge.yml's release/close regex VERBATIM (pinned equal by
+// test_reference_guard_reads_at_least_what_agent_merge_reads), so whatever CLOSING misses that
+// agent-merge would act on — `a**closes #131`, where a lookbehind failed and `\b` matches at the
+// keyword (round-11 red team on #466) — is read anyway: the superset holds by construction, not
+// by the wider regex being right. The release path (closingIssues) uses MERGE_RE ALONE, so it
+// never writes a label for a form agent-merge would not have closed (widening both is #496).
 const CLOSING = /(?<![\w*_])[*_]*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[*_]*\s*:?\s*(?:<?(https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+))>?|\[#(\d+)\]\(([^)]*)\)|([\w.-]+)\/([\w.-]+)#(\d+)|GH-(\d+)|#(\d+))/gi;
+const MERGE_RE = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
 const ISSUE_URL = /^https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)\/?$/i;
 function closingMatches(text, owner, repo) {   // the RAW body; no markup is interpreted
   const own = String(owner).toLowerCase(), rep = String(repo).toLowerCase();
   const sameRepo = (o, r) => o.toLowerCase() === own && r.toLowerCase() === rep;
   const out = [];
-  for (const m of String(text || '').matchAll(CLOSING)) {
+  const body = String(text || '');
+  for (const m of body.matchAll(CLOSING)) {
     const spelled = m[0].replace(/\s+/g, ' ');
     if (m[1]) out.push({ spelled, kind: 2, num: Number(m[4]), same: sameRepo(m[2], m[3]) });
     else if (m[5]) {
-      // Markdown link: the target carries the meaning. The release path trusts it only when it is
-      // THIS repo's issue and agrees with the display number; otherwise it is a reference for the
-      // guard (any change is a change) and nothing for the release (round-5 red team on #466).
       const tgt = ISSUE_URL.exec(m[6] || '');
       const agrees = !!tgt && sameRepo(tgt[1], tgt[2]) && Number(tgt[3]) === Number(m[5]);
       out.push({ spelled, kind: 0, num: Number(m[5]), same: agrees });
@@ -139,7 +140,16 @@ function closingMatches(text, owner, repo) {   // the RAW body; no markup is int
     else if (m[10]) out.push({ spelled, kind: 1, num: Number(m[10]), same: true });
     else out.push({ spelled, kind: 0, num: Number(m[11]), same: true });
   }
+  // agent-merge's reader, verbatim: anything it finds that CLOSING did not is a reference too.
+  for (const m of body.matchAll(MERGE_RE)) {
+    const spelled = m[0].replace(/\s+/g, ' ');
+    if (!out.some(i => i.spelled === spelled || i.spelled.endsWith(spelled))) out.push({ spelled, kind: 0, num: Number(m[1]), same: true });
+  }
   return out;
+}
+// What agent-merge itself would close/release: MERGE_RE alone, same repo by construction.
+function mergeGateIssues(text) {
+  return [...new Set([...String(text || '').matchAll(MERGE_RE)].map(m => Number(m[1])))].sort((x, y) => x - y);
 }
 function joinSpelled(items) {
   const seen = new Set(), uniq = [];
@@ -148,11 +158,10 @@ function joinSpelled(items) {
   return uniq.map(i => i.spelled).join(',');
 }
 function closingRefs(body, owner, repo) { return joinSpelled(closingMatches(body, owner, repo)); }
-// The release paths (this workflow's exhaustion release; agent-merge's own) act on what they can
-// PARSE, which is the raw body — so the numbers come from the raw view, same-repo forms only.
-function closingIssues(body, owner, repo) {
-  return [...new Set(closingMatches(body, owner, repo).filter(i => i.same).map(i => i.num))].sort((x, y) => x - y);
-}
+// The release paths act on what agent-merge acts on — MERGE_RE, nothing wider — so the exhaustion
+// release never strips `in-progress` from, or escalates, an issue the merge would not have
+// closed (round-11 red team on #466). Widening both readers together is #496.
+function closingIssues(body, owner, repo) { return mergeGateIssues(body); }
 
 // How many times a no-op run may be retried in-job before the claim is released (#361 AC2).
 // Read at RUN time from the DEFAULT-branch config, like every other knob here, so retuning it
