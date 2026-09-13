@@ -117,6 +117,20 @@ std::vector<uint8_t> crc_bad_response(uint8_t node, uint8_t seq, const uint8_t* 
     return bad;
 }
 
+// How many of a run of `n` bytes injected at `start`, one byte time apart (MockWire::
+// inject_bytes()), still have start instants strictly after `t` — the tail a poll at `t`
+// could not have drained. Cases below that deliberately over-supply an adversary's traffic
+// past their last poll acknowledge exactly this many with MockWire::take_pending_injected(),
+// rather than leaving ~MockWire()'s undelivered-injected-byte guard to fail them (#148).
+// Computed from the CASE's own timeline — not read back from the mock — so an acknowledgement
+// states what the case expects to leave behind and is red if the mock releases anything else.
+size_t injected_tail(size_t n, uint64_t start, uint64_t t, uint32_t bps = omgp::TRUNK_bit_rate) {
+    if (t < start)
+        return n;
+    const uint64_t due = (t - start) / byte_time_us(bps) + 1; // bytes at start, start+B, ... <= t
+    return due >= n ? 0 : n - static_cast<size_t>(due);
+}
+
 } // namespace
 
 // --- US2 AC1: happy path -------------------------------------------------------------
@@ -1527,6 +1541,14 @@ TEST_CASE("continuous bus traffic cannot defer a transmission forever — at the
     // FR-011a: counted at its first transmission; no failure booked against the node.
     REQUIRE(master.stats(dst).transactions == 1);
     REQUIRE(master.stats(dst).timeouts == 0);
+    // #148: the babble is deliberately still running when the request goes out (asserted
+    // above: babble_end > cap + T_poll) — that is the whole claim — so its tail is still
+    // queued at the last poll, which was first_poll_past_cap. Acknowledged, at the count this
+    // case's own timeline says, rather than consumed: consuming it would mean polling past the
+    // babble's end, which is the situation this case exists to exclude.
+    const size_t tail = injected_tail(babble.size(), babble_start, first_poll_past_cap);
+    REQUIRE(tail > 0); // the over-supply is real; the acknowledgement is not of an empty wire
+    REQUIRE(wire.take_pending_injected() == tail);
 }
 
 // --- T-1: the scenario the single-instant "gap still denied" bound failed (PR #137 red-team
@@ -1623,6 +1645,11 @@ TEST_CASE("under continuous babble the request goes out exactly at deferred_to +
             deferred_to + static_cast<uint64_t>(kMaxWire) * byte_us() + omgp::TRUNK_T_gap_us);
     REQUIRE(ev.kind == MasterEvent::None);
     REQUIRE(master.busy());
+    // #148: same as the case above — the babble outlasts the cap by construction (asserted at
+    // babble_end > cap + T_gap), so the tail past the last poll (at `cap`) is acknowledged.
+    const size_t tail = injected_tail(babble.size(), babble_start, cap);
+    REQUIRE(tail > 0);
+    REQUIRE(wire.take_pending_injected() == tail);
 }
 
 TEST_CASE("a worst-case-length frame starting exactly at the deferred instant is never "
@@ -1707,12 +1734,15 @@ TEST_CASE("a transaction under continuous FLAG-free babble runs all three attemp
     // Babble is fed in chunks ahead of each poll (MockWire's RX queue is 4 * kMaxWire bytes and
     // is drained as polled), always covering at least one cadence beyond the poll instant so
     // the wire is never quiet at any instant the engine can observe.
-    uint64_t babble_next = 100;
+    const uint64_t babble_from = 100;
+    uint64_t babble_next = babble_from;
+    size_t babble_bytes = 0; // one contiguous run from babble_from; its length, for #148 below
     auto babble_through = [&](uint64_t t) {
         static const std::vector<uint8_t> chunk(100, 0x5A);
         while (babble_next <= t + cadence) {
             wire.inject_bytes(chunk.data(), chunk.size(), babble_next);
             babble_next += static_cast<uint64_t>(chunk.size()) * byte_us();
+            babble_bytes += chunk.size();
         }
     };
 
@@ -1759,6 +1789,13 @@ TEST_CASE("a transaction under continuous FLAG-free babble runs all three attemp
         REQUIRE(wire.transcript(k).retry);
         REQUIRE(wire.transcript(k).tx_start_us >= prev_tx_end + R + G + F + G);
     }
+    // #148: babble_through() deliberately supplies at least one cadence beyond every poll —
+    // that is how "the wire is never quiet at any instant the engine can observe" is kept true
+    // — so the run always ends with that overshoot still queued. Acknowledged at the count the
+    // case's own bookkeeping (babble_bytes, from babble_from) says, not consumed.
+    const size_t tail = injected_tail(babble_bytes, babble_from, t);
+    REQUIRE(tail > 0);
+    REQUIRE(wire.take_pending_injected() == tail);
 }
 
 // --- T-3b: the WORST-CASE adversary — FLAG-delimited babble that also exploits the T_resp
@@ -1785,9 +1822,11 @@ std::vector<uint8_t> stuffed_body(size_t appends) {
 // goes stale. It needs only public information (tx_end is observable, T_resp is a published
 // constant) to do so.
 struct Adversary {
+    // The instant of its first byte; from there its stream is contiguous at `bt` spacing.
+    static constexpr uint64_t first = 1;
     MockWire& wire;
     uint64_t bt;
-    uint64_t cursor = 1, flag_at = 0;
+    uint64_t cursor = first, flag_at = 0;
     std::vector<uint8_t> burst;
     size_t burst_pos = 0;
     bool burst_started = false;
@@ -1815,6 +1854,11 @@ struct Adversary {
             wire.inject_bytes(&b, 1, cursor);
             cursor += bt;
         }
+    }
+    // The station's bytes form one contiguous run from `first` at `bt` spacing, so this is how
+    // many it has put on the wire — what the case needs to acknowledge its own overshoot (#148).
+    size_t injected() const {
+        return static_cast<size_t>((cursor - first) / bt);
     }
 };
 
@@ -1905,6 +1949,13 @@ TEST_CASE("a transaction under FLAG-delimited babble that also rides the T_resp 
     // hold hides inside the poll latency and the smaller figure happens to hold too).
     if (cadence == 1)
         REQUIRE(t - begin_at > flag_free_bound);
+    // #148: adv.fill(t + 2 * B) runs the station two byte times past every poll, so the last
+    // two of its bytes are never due at any poll this case makes — deliberately, so that the
+    // wire is occupied at every instant the engine can observe. Acknowledged at the count the
+    // adversary's own cursor implies.
+    const size_t tail = injected_tail(adv.injected(), Adversary::first, t, rate);
+    REQUIRE(tail == 2);
+    REQUIRE(wire.take_pending_injected() == tail);
 }
 
 TEST_CASE("the T_resp in-flight hold is at most one worst-case frame: a frame that opens 1 us "
@@ -2167,9 +2218,20 @@ TEST_CASE("a stream that overruns the Deframer stops holding the T_resp timeout 
         filler.push_back(0x5A); // contiguous, never idle
     wire.inject_bytes(filler.data(), filler.size(), resp_open + byte_us());
 
-    for (uint64_t t = byte_us(); t <= overrun_at + 2 * byte_us(); t += byte_us())
+    uint64_t last_poll = 0;
+    for (uint64_t t = byte_us(); t <= overrun_at + 2 * byte_us(); t += byte_us()) {
         wire.advance_to(t, master);
+        last_poll = t;
+    }
     REQUIRE(master.stats(dst).timeouts == 1); // released by in_frame(), not by the cap
+    // #148: the case stops two byte times past the abort and the filler deliberately runs on to
+    // within two byte times of the TIME cap — that separation is the claim (the timeout fired at
+    // the abort, strictly before the cap could release it), so the filler beyond the last poll
+    // must still be queued. Acknowledged at that count; the opening FLAG and everything up to
+    // last_poll was consumed.
+    const size_t tail = injected_tail(filler.size(), resp_open + byte_us(), last_poll);
+    REQUIRE(tail > 0);
+    REQUIRE(wire.take_pending_injected() == tail);
 }
 
 TEST_CASE("a transaction under one byte per superframe poll, with a hostile FLAG opened inside "
@@ -2295,7 +2357,8 @@ TEST_CASE("a set_bit_rate() during the deferral re-scales the courtesy cap at on
     // wrong reason).
     master.set_bit_rate(omgp::TRUNK_bit_rate);
     std::vector<uint8_t> fast_babble(400, 0x5A);
-    wire.inject_bytes(fast_babble.data(), fast_babble.size(), t + 1);
+    const uint64_t fast_start = t + 1;
+    wire.inject_bytes(fast_babble.data(), fast_babble.size(), fast_start);
 
     t += omgp::TRUNK_T_poll_us;
     MasterEvent ev = wire.advance_to(t, master);
@@ -2303,6 +2366,17 @@ TEST_CASE("a set_bit_rate() during the deferral re-scales the courtesy cap at on
     REQUIRE(wire.transcript(0).tx_start_us == t);
     REQUIRE(ev.kind != MasterEvent::Failed);
     REQUIRE(master.busy());
+    // #148: both babbles are deliberately supplied past the transmitting poll — the request goes
+    // out while the wire is still busy, which is the point — so each leaves a tail. The slow one
+    // was injected while the wire was at the fallback rate, so its bytes are spaced at
+    // slow_byte; the fast one at TRUNK_bit_rate (mock_wire.hpp: inject_bytes() spaces at the
+    // wire's rate AT THE TIME OF THE CALL). Acknowledged as the sum of the two.
+    const size_t slow_tail =
+        injected_tail(slow_babble.size(), babble_start, t, omgp::TRUNK_bit_rate_fallback);
+    const size_t fast_tail = injected_tail(fast_babble.size(), fast_start, t);
+    REQUIRE(slow_tail > 0);
+    REQUIRE(fast_tail > 0);
+    REQUIRE(wire.take_pending_injected() == slow_tail + fast_tail);
 }
 
 // --- No inference from elapsed time: an idle bus polled at the superframe cadence must still
@@ -2372,6 +2446,8 @@ struct StaleAnswerRig {
     Step silence[3] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
     uint64_t B = byte_us(), n_req = 0, n_retry = 0, d0 = 0, cap = 0, retry_window_start = 0;
     uint64_t stale_start = 0, stale_end = 0;
+    size_t stale_bytes = 0, filler_bytes = 0; // what build() put on the wire, for #148
+    uint64_t filler_start = 0;
 
     // stale_end_after_window_start: where the stale answer's LAST byte lands relative to the
     // retry's window start (inside it, or past its deadline).
@@ -2400,11 +2476,14 @@ struct StaleAnswerRig {
         REQUIRE(stale_start < cap);
         // FLAG-free filler from the deferred instant up to the stale answer keeps the wire busy
         // so the retry is forced out by the cap rather than let out early by a quiet wire.
+        filler_start = defer_origin;
         for (uint64_t u = defer_origin; u < stale_start; u += B) {
             const uint8_t filler = 0x5A;
             wire.inject_bytes(&filler, 1, u);
+            ++filler_bytes;
         }
         wire.inject_bytes(stale.data(), stale.size(), stale_start);
+        stale_bytes = stale.size();
     }
 };
 
@@ -2460,6 +2539,14 @@ TEST_CASE("a frame that opened before this attempt's tx_end does not hold its T_
     REQUIRE(r.stale_start < r.retry_window_start);
     REQUIRE(r.stale_end > deadline);
     REQUIRE(r.master.stats(r.dst).timeouts == 2);
+    // #148: the stale answer is built to be STILL ARRIVING when the retry's window closes
+    // (r.stale_end > deadline, just asserted) and the case stops at that deadline — so the rest
+    // of that frame is necessarily still queued. Acknowledged at exactly that count: the tail of
+    // the stale answer, and nothing of the filler, which ran out before it began.
+    const size_t tail = injected_tail(r.stale_bytes, r.stale_start, deadline);
+    REQUIRE(tail > 0);
+    REQUIRE(injected_tail(r.filler_bytes, r.filler_start, deadline) == 0);
+    REQUIRE(r.wire.take_pending_injected() == tail);
 }
 
 // --- US2 AC6 (response-bit-clear sub-case): a frame matching src/seq/dst but with the
@@ -3928,6 +4015,12 @@ TEST_CASE("begin() one microsecond after another station's opening FLAG, with on
     const uint8_t payload[] = {0x33};
     REQUIRE(master.begin(0x05, payload, sizeof payload) == Status::Ok);
     REQUIRE(wire.transcript_size() == 0);
+    // #148: only the opening FLAG was ever due, so begin()'s drain could take that byte and no
+    // other — the rest of the frame is still on the wire when the case ends, deliberately (its
+    // whole point is that ONE byte is activity enough). Acknowledged, and the count is itself
+    // the assertion that the drain took exactly the byte that was due and did not reach ahead
+    // of the clock for the rest.
+    REQUIRE(wire.take_pending_injected() == other.size() - 1);
 }
 
 TEST_CASE("a frame drained by begin()'s own wire-draining precondition is counted exactly as an "
@@ -3994,6 +4087,10 @@ TEST_CASE("begin() refused with Busy does not drain the wire: a pending foreign 
     for (uint8_t a = 0; a < kAddrCount; ++a)
         total += master.stats(a).discards;
     REQUIRE(total == 0); // a Busy refusal must not have drained/discarded anything
+    // #148: and the frame is still THERE, byte for byte, "left for the next poll()" as the case
+    // name says. discards == 0 alone would also hold if the refusal had drained the wire and
+    // thrown the bytes away; this is the half of the claim the counter cannot make.
+    REQUIRE(wire.take_pending_injected() == other.size());
 }
 
 TEST_CASE("begin() refused with Busy while a genuine in-window response is already due does "

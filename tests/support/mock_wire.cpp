@@ -151,6 +151,18 @@ MockWire::~MockWire() {
     // would risk std::terminate if already unwinding, so this reports rather than aborts.
     INFO((fault_ != nullptr ? fault_ : ""));
     CHECK(fault_ == nullptr);
+    // #148: injected bytes the engine never consumed. A case that plants a fault with
+    // inject_bytes() and lets the wire die before receive() releases those bytes asserted
+    // nothing about the fault it named, while passing (contracts/mock-wire.md "Scheduling":
+    // the no-silent-loss rule its capacity bullet states for DROPPED bytes, extended to
+    // undelivered ones). Non-throwing for the same reason as the fault_ drain above — a
+    // destructor must not throw while unwinding. take_pending_injected() is how a case that
+    // means to leave residue says so; the count is in the message either way.
+    INFO("MockWire: " << injected_pending_
+                      << " injected RX byte(s) never delivered to the engine (inject_bytes() "
+                         "residue; advance far enough to consume them, or acknowledge with "
+                         "take_pending_injected())");
+    CHECK(injected_pending_ == 0);
 }
 
 void MockWire::set_script(uint8_t node, const Step* steps, size_t count) {
@@ -190,7 +202,7 @@ const Step* MockWire::next_step(uint8_t node) {
     return nullptr; // exhausted/unset: default Respond, TRUNK_T_turn_min_us delay
 }
 
-void MockWire::enqueue(uint8_t byte, uint64_t start_us) {
+void MockWire::enqueue(uint8_t byte, uint64_t start_us, bool injected) {
     // contracts/mock-wire.md "Capacity": never a SILENT drop — but this runs on the
     // engine-under-test's call stack (transmit() -> schedule_respond()), so the failure
     // is recorded and REQUIRE'd later, at the test's own advance_to() call, rather than
@@ -198,6 +210,10 @@ void MockWire::enqueue(uint8_t byte, uint64_t start_us) {
     if (rx_count_ >= kRxCapacity) {
         if (fault_ == nullptr)
             fault_ = "MockWire: RX queue capacity exceeded (4 * kMaxWire)";
+        // Returns BEFORE injected_pending_ is bumped (#148): a byte that never reached the
+        // queue is a DROPPED byte, already reported by the fault above, not an undelivered
+        // one. Counting it here too would fail the same byte twice, and would leave residue
+        // the test cannot drain by advancing (it is not on the wire to release).
         return;
     }
     // Insertion-sort by start_us (stable: only strictly-later entries shift right) so
@@ -209,8 +225,10 @@ void MockWire::enqueue(uint8_t byte, uint64_t start_us) {
         rx_queue_[pos] = rx_queue_[pos - 1];
         --pos;
     }
-    rx_queue_[pos] = QueuedByte{byte, start_us};
+    rx_queue_[pos] = QueuedByte{byte, start_us, injected};
     ++rx_count_;
+    if (injected)
+        ++injected_pending_;
 }
 
 void MockWire::record_transcript(const omgp::link::FrameFields& f, uint64_t tx_start_us) {
@@ -233,9 +251,10 @@ void MockWire::record_transcript(const omgp::link::FrameFields& f, uint64_t tx_s
     rec.tx_start_us = tx_start_us;
 }
 
-void MockWire::enqueue_frame(const uint8_t* buf, size_t written, uint64_t t0) {
+void MockWire::enqueue_frame(const uint8_t* buf, size_t written, uint64_t t0, bool injected) {
     for (size_t i = 0; i < written; ++i)
-        enqueue(buf[i], t0 + static_cast<uint64_t>(i) * omgp::link::byte_time_us(bit_rate_));
+        enqueue(buf[i], t0 + static_cast<uint64_t>(i) * omgp::link::byte_time_us(bit_rate_),
+                injected);
 }
 
 void MockWire::schedule_respond(const omgp::link::FrameFields& request, uint64_t tx_end,
@@ -314,7 +333,9 @@ void MockWire::inject_bytes(const uint8_t* bytes, size_t n, uint64_t start_us) {
     // sort), so injected bytes interleave with any scripted traffic in start-instant order.
     // No parser_, no transcript, no next_step: this is raw wire from another station, not a
     // request MockWire should answer.
-    enqueue_frame(bytes, n, start_us);
+    // injected = true: these bytes, and only these, are the ones ~MockWire() requires a case
+    // to have consumed or acknowledged (#148).
+    enqueue_frame(bytes, n, start_us, /*injected=*/true);
 }
 
 uint64_t MockWire::transmit(const uint8_t* bytes, size_t n, uint64_t now_us) {
@@ -417,6 +438,12 @@ bool MockWire::receive(uint8_t& byte, uint64_t& start_us) {
         return false; // "in the future": stays queued (byte-wire-and-clock.md)
     byte = front.byte;
     start_us = front.start_us;
+    // Delivered, so it is no longer outstanding (#148). Guarded rather than an unconditional
+    // decrement: take_pending_injected() clears the flags of bytes still queued, so a byte
+    // released after an acknowledgement arrives here with injected == false and the count
+    // cannot wrap below zero.
+    if (front.injected && injected_pending_ > 0)
+        --injected_pending_;
     for (size_t i = 1; i < rx_count_; ++i)
         rx_queue_[i - 1] = rx_queue_[i];
     --rx_count_;
@@ -429,6 +456,23 @@ uint32_t MockWire::bit_rate() const {
 
 void MockWire::set_bit_rate(uint32_t bps) {
     bit_rate_ = bps;
+}
+
+size_t MockWire::pending_injected() const {
+    return injected_pending_;
+}
+
+size_t MockWire::take_pending_injected() {
+    const size_t n = injected_pending_;
+    injected_pending_ = 0;
+    // Clear the per-byte flags too, not just the total: the bytes stay queued and stay
+    // releasable, and a later receive() of one of them must not take the count below zero
+    // (receive() guards that as well — this is the other half of the same invariant). Bytes
+    // injected AFTER this call are tracked again from zero, so an acknowledgement covers the
+    // residue outstanding when it was made and nothing later.
+    for (size_t i = 0; i < rx_count_; ++i)
+        rx_queue_[i].injected = false;
+    return n;
 }
 
 const char* MockWire::take_fault() {

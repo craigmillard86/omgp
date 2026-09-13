@@ -1026,22 +1026,24 @@ TEST_CASE("requests arriving faster than poll() is called queue up behind the he
     const uint64_t poll_period = 1000, flood_period = 300, host_at = 8000;
     uint64_t next_flood = 0, host_end = 0;
     int flooded = 0;
+    size_t offered_bytes = 0; // every byte put on the wire, for the #148 acknowledgement below
     bool host_sent = false;
     for (uint64_t t = 0; t <= 20 * poll_period; t += poll_period) {
         // Everything the other station will have put on the bus before the next poll.
         while (next_flood < t + poll_period) {
-            inject_request(wire,
-                           request_bytes(kMyAddr, kOther, false,
-                                         static_cast<uint8_t>(flooded & 0x0F), flood_payload,
-                                         sizeof flood_payload),
-                           next_flood);
+            const auto req =
+                request_bytes(kMyAddr, kOther, false, static_cast<uint8_t>(flooded & 0x0F),
+                              flood_payload, sizeof flood_payload);
+            inject_request(wire, req, next_flood);
+            offered_bytes += req.size();
             ++flooded;
             next_flood += flood_period;
         }
         if (!host_sent && t >= host_at) {
-            host_end = inject_request(
-                wire, request_bytes(kMyAddr, kPeer, false, 9, host_payload, sizeof host_payload),
-                t);
+            const auto req =
+                request_bytes(kMyAddr, kPeer, false, 9, host_payload, sizeof host_payload);
+            host_end = inject_request(wire, req, t);
+            offered_bytes += req.size();
             host_sent = true;
         }
         wire.advance_to(t, responder);
@@ -1092,6 +1094,15 @@ TEST_CASE("requests arriving faster than poll() is called queue up behind the he
     REQUIRE(flooded - handler.calls == 63);
     REQUIRE(responder.stats().discards == 0);
     CHECK(host_end + omgp::TRUNK_T_resp_us < 20 * poll_period); // the host gave up long ago
+    // #148: those 63 unread requests ARE undelivered injected bytes -- the residue ~MockWire()
+    // fails a case for leaving behind. Here it is not an unexamined fault but the observable
+    // this cell exists to pin, so it is acknowledged explicitly. Bounded, not exact: the count
+    // depends on where in the queue the engine's drain stopped, which no test-side timeline can
+    // compute -- but it cannot be less than one byte for each unread request, and it cannot
+    // exceed what was offered. (Measured at this head: 558 bytes of 866 offered.)
+    const size_t left = wire.take_pending_injected();
+    CHECK(left >= static_cast<size_t>(flooded - handler.calls));
+    CHECK(left < offered_bytes);
 }
 
 // --- red team @71caba0 finding 1 (BLOCKING, HIGH): listen before transmitting ------------
@@ -1205,6 +1216,13 @@ TEST_CASE("the wait for an idle bus is bounded: a station occupying the wire wit
     REQUIRE(tx == cap);
     REQUIRE(tx < babble_end); // sent while the babble was still going, not after it stopped
     REQUIRE(responder.stats().late_responses == 1);
+    // #148: the loop stops at the poll that transmitted (tx), and the noise deliberately runs
+    // past it -- "sent while the babble was still going" is the assertion right above, so the
+    // rest of the noise MUST still be queued. Acknowledged at the count the case's own timeline
+    // gives: bytes at babble_start, +byte_us, ... are due at tx, the remainder is not.
+    const size_t drained = static_cast<size_t>((tx - babble_start) / byte_us()) + 1;
+    REQUIRE(drained < noise.size());
+    REQUIRE(wire.take_pending_injected() == noise.size() - drained);
 }
 
 TEST_CASE("a request that completes while a late response waits for the bus is held, not "
