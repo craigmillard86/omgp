@@ -52,6 +52,11 @@ of PR #{{PR}} at head
    stale claim) IS yours to fix: correct the body with
    `gh pr edit {{PR}} --body-file <file>` and record what you
    changed under (a). Never change the title, base or labels.
+   A description edit does not move the head, and the reviewers
+   re-read only on a push — so after correcting the body, push
+   an empty commit (`git commit --allow-empty -m "docs(pr):
+   correct the description (Refs #<task issue>)"`) so the
+   corrected body is reviewed and the run counts as production.
    Spec ambiguity is recorded in docs/OPEN-QUESTIONS.md, never
    resolved in a code comment.
 4. Run ./pipeline.sh (the stages your change touches, then the

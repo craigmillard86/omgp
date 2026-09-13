@@ -230,6 +230,14 @@ async function dropLabel(github, owner, repo, number, name, core) {
 async function finalize({ github, context, core, env }) {
   const { owner, repo } = context.repo;
   const kind = env.KIND;
+  // Mirror the workflows' own early return, so the module is right even if the glue is not: a
+  // run that produced, did not error, is not comment-only and not partial has nothing to
+  // finalize. Compared against the literal 'true' — the workflow sends the STRING 'false' on
+  // every ordinary run, and 'false' is truthy (round-1 red team on #466).
+  if (env.NOOP === 'false' && env.ONLY_COMMENT !== 'true' && env.PARTIAL !== 'true') {
+    core.notice('agent-noop: production established — nothing to finalize');
+    return;
+  }
   const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
   // AC3 asks for the per-attempt figures, and the env used to carry only the LAST attempt's while
   // the comment said "per-attempt" (round-2 review). Report each attempt that ran.
@@ -283,7 +291,10 @@ async function finalize({ github, context, core, env }) {
 
   const pr = Number(env.PR);
   const label = `review-fix-${env.ATTEMPT}`;
-  if (env.ONLY_COMMENT === 'true') {
+  // Only a run that did NOT error: is_error is a no-op whatever else is true (see the header), so
+  // an errored comment-only run falls through to the produced-then-errored branch below, which
+  // fails loudly and says it errored (round-1 review on #466).
+  if (env.ONLY_COMMENT === 'true' && env.NOOP === 'false') {
     // The fixer answered — a rebuttal, or a finding it cannot reach — and pushed nothing. That is
     // what the prompt tells it to do, so the job does not fail and the attempt stays spent; but
     // the loop cannot advance from here on its own, and every other terminal state applies
@@ -294,7 +305,7 @@ async function finalize({ github, context, core, env }) {
     await github.rest.issues.createComment({
       owner, repo, issue_number: pr,
       body: `🧑 Review-fix answered without a commit (${spent}).\n\n${why}\n\n` +
-        `The fixer's comment above is a rebuttal or a finding it could not act on. No new head means no new review, so the loop stops here: ` +
+        `The fixer's comment above is a rebuttal, a finding it could not act on, or a description-only correction that was not followed by the empty commit its prompt asks for. No new head means no new review, so the loop stops here: ` +
         `${esc ? '`needs-human` is applied' : '⚠️ `needs-human` could NOT be applied — apply it by hand'}. Rule on the rebuttal, or push the change it asked for, then remove the label. ` +
         `\`${label}\` stays: the attempt was spent. Job log: ${runUrl}`});
     core.notice(`agent-noop: review-fix on #${pr} answered without a commit — needs-human ${esc ? 'applied' : 'NOT applied'}; attempt ${label} spent (#463).`);

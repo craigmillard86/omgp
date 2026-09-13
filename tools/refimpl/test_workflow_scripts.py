@@ -636,6 +636,35 @@ def test_rebuttal_only_fix_run_is_escalated_and_the_fixer_may_edit_the_body():
             assert banned not in granted, (st.get("id"), banned)
     prompt = (ROOT / ".github" / "agent-prompts" / "review-fix.md").read_text()
     assert "gh pr edit" in prompt, "review-fix.md must tell the fixer it may correct the PR body"
+    # Round-1 red team on #466, finding 5: a body edit does not move the head, so on its own the
+    # run the grant enables is the run the escalation catches. The prompt must make the fixer
+    # push an empty commit after a body-only correction, so the reviewers re-read it.
+    assert "--allow-empty" in prompt, "after a body-only correction the fixer must push an empty commit"
+
+
+def test_review_fix_finalize_glue_calls_finalize_on_a_comment_only_run(tmp_path):
+    """Round-1 red team on #466, finding 4: the wiring test asserted the literal ONLY_COMMENT in
+    the finalize step, not the condition — inverting `!== 'true'` to `=== 'true'` survived the
+    suite with the whole change silently undone. So: EXECUTE the three-line glue under node with
+    a stub module, for the three (NOOP, ONLY_COMMENT) shapes the workflow can send."""
+    if shutil.which("node") is None:
+        pytest.skip("node not present")
+    script = _script("review-fix.yml", "fix", "finalize")
+    stub = tmp_path / "agent-noop.js"
+    stub.write_text("module.exports = { finalize: async () => { process.stdout.write('FINALIZE_CALLED'); } };")
+    runner = tmp_path / "run.js"
+    runner.write_text(
+        "const S = process.argv[2]; const AF = Object.getPrototypeOf(async function(){}).constructor;\n"
+        "(async () => { await new AF('github','context','core','require', S)({}, {}, {notice(){},warning(){}}, require); })();")
+    def calls(noop, only):
+        env = dict(os.environ, RUNNER_TEMP=str(tmp_path), NOOP=noop, ONLY_COMMENT=only, KIND="fix", PR="1")
+        r = subprocess.run(["node", str(runner), script], capture_output=True, text=True, env=env, timeout=30)
+        assert r.returncode == 0, r.stderr
+        return "FINALIZE_CALLED" in r.stdout
+    assert calls("false", "true"), "a comment-only run must reach finalize (it is escalated)"
+    assert not calls("false", "false"), "an ordinary produced run must return early"
+    assert calls("true", "false"), "a no-op run must reach finalize (it is released)"
+    assert calls("true", "true"), "an errored comment-only run must reach finalize (it fails loudly)"
     # The implement path has no comment-only outcome; the signal must not leak into dispatch.
     dwf = yaml.safe_load((ROOT / ".github" / "workflows" / "agent-dispatch.yml").read_text())
     denv = {s.get("id"): s for s in dwf["jobs"]["implement"]["steps"] if s.get("id")}["finalize"].get("env", {})

@@ -417,7 +417,7 @@ const during = '2026-09-12T10:00:30Z';
   r = await detect({ ...w, env: { KIND: 'fix', PR: '452', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, EXEC_FILE: execFile({ num_turns: 26 }) } });
   check('fix: a silent run is a no-op, not only_comment', r.only_comment === false && r.noop === true);
   w = world({ labels: ['agent-authored', 'risk:t0', 'review-fix-2'] });
-  await finalize({ ...w, env: { KIND: 'fix', PR: '452', ATTEMPT: '2', ATTEMPTS: '1', TURNS: '25', DENIALS: 'null', PRODUCED: 'true', ONLY_COMMENT: 'true',
+  await finalize({ ...w, env: { KIND: 'fix', PR: '452', ATTEMPT: '2', ATTEMPTS: '1', TURNS: '25', DENIALS: 'null', NOOP: 'false', PRODUCED: 'true', ONLY_COMMENT: 'true',
     REASON: 'the fixer commented during the run' } });
   check('fix finalize: a comment-only run escalates needs-human', w.state.labels.includes('needs-human'));
   check('fix finalize: ...says the fixer answered without a commit', said(w, /comment:.*without a commit/i));
@@ -436,6 +436,22 @@ const during = '2026-09-12T10:00:30Z';
   check('fix finalize: an ERRORED comment-only run still fails the job', typeof w.outputs.__failed === 'string');
   check('fix finalize: ...and its headline says it errored, not that it answered', said(w, /comment:.*errored/i) && !said(w, /comment:.*answered without a commit/i));
   check('fix finalize: ...and still escalates', w.state.labels.includes('needs-human'));
+  // Round-1 red team on #466: every new case passed ONLY_COMMENT 'true'; none passed the literal
+  // 'false' the workflow sends on every ordinary run, so `if (env.ONLY_COMMENT)` (truthy 'false')
+  // survived the suite — a run that produced NOTHING would keep its attempt and exit green: #361.
+  w = world({ labels: ['agent-authored', 'review-fix-1'] });
+  await finalize({ ...w, env: { KIND: 'fix', PR: '452', ATTEMPT: '1', ATTEMPTS: '1', TURNS: '26', DENIALS: '4', NOOP: 'true', PRODUCED: 'false', ONLY_COMMENT: 'false',
+    REASON: 'head unchanged at aaaaaaa and the fixer said nothing' } });
+  check('fix finalize: ONLY_COMMENT="false" (the ordinary value) is not comment-only — the attempt is returned', w.log.includes('-review-fix-1') && said(w, /comment:.*returned/i));
+  check('fix finalize: ...and the job fails, as #361 requires', typeof w.outputs.__failed === 'string');
+  // ...and the ordinary PRODUCED shape with the string 'false': finalize does nothing at all —
+  // no label, no comment, no failure. `if (env.ONLY_COMMENT)` would escalate every such run.
+  w = world({ labels: ['agent-authored', 'review-fix-1'] });
+  await finalize({ ...w, env: { KIND: 'fix', PR: '452', ATTEMPT: '1', ATTEMPTS: '1', TURNS: '40', DENIALS: '0', NOOP: 'false', PRODUCED: 'true', ONLY_COMMENT: 'false', REASON: 'head moved from aaaaaaa to bbbbbbb' } });
+  check('fix finalize: a produced, non-errored, non-comment-only run touches nothing', !w.state.labels.includes('needs-human') && w.state.labels.includes('review-fix-1') && !said(w, /comment:/) && w.outputs.__failed === undefined);
+  w = world({ labels: ['task', 'in-progress'] });
+  await finalize({ ...w, env: { KIND: 'implement', ISSUE: '58', ATTEMPTS: '1', TURNS: '40', DENIALS: '0', NOOP: 'false', PRODUCED: 'true', PARTIAL: 'false', REASON: 'an open PR on task/58 was created or pushed to by this run' } });
+  check('implement finalize: a produced, non-partial dispatch touches nothing', w.state.labels.includes('in-progress') && !said(w, /comment:/) && w.outputs.__failed === undefined);
 
   for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
   console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);
