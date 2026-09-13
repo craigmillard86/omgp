@@ -93,7 +93,7 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     // open_ is still false here (the Busy check above already returned otherwise), so this
     // drain runs with no transaction awaiting a response: any delivered/discarded frame is
     // accounted exactly as an equivalent poll() with nothing open would (data-model.md §4
-    // "Receive path"), charged to the frame's own claimed source, not to the dst_/seq_ this
+    // "Receive path"), counted on the bus counter (#144), not against the dst_/seq_ this
     // call is about to assign.
     MasterEvent discard_event{}; // unused: no transaction is AwaitResponse yet, so this drain
                                  // can only discard/deliver-as-unsolicited, never conclude one
@@ -409,11 +409,29 @@ void Master::drain_wire(MasterEvent& event) {
                 continue;
             }
             // A CRC-bad frame outside any open attempt's own window (or with no
-            // transaction open at all) is not attributable to a specific dst_ — the
-            // Deframer's own stats() already counts it (PR #137 review, MEDIUM: this branch
-            // used to end the attempt unconditionally, even for a stray CRC failure that had
-            // nothing to do with the open transaction). Its bus activity is already recorded
-            // by the unconditional last_activity_/last_rx_us_ update above.
+            // transaction open at all) is not attributable to a specific dst_ (PR #137
+            // review, MEDIUM: this branch used to end the attempt unconditionally, even for
+            // a stray CRC failure that had nothing to do with the open transaction). It
+            // never decodes, so there is no claimed src either, and the Deframer's own
+            // stats() are not visible above this engine — so before #144 it moved no counter
+            // this layer exposes and a rig could corrupt every frame between transactions
+            // with every counter reading zero (docs/OPEN-QUESTIONS.md 2026-09-07, ruled
+            // 2026-09-11: "count it at bus level"). It is bus-level evidence, and counted as
+            // such; `crc_failures` stays per node, for a node's own window. Its bus activity
+            // is already recorded by the unconditional last_activity_/last_rx_us_ update
+            // above.
+            //
+            // Note the asymmetry with the delivered-frame discard below, which charges dst_
+            // whenever `awaiting`, window or not (red team @25545f5 finding 1 — the two
+            // branches disagree in the reachable `awaiting && !in_window` state, and the
+            // documents used to describe both as "discarded while that address's transaction
+            // is awaiting"). It is deliberate, and it is what each branch has to work with: a
+            // delivered frame arrives during a transaction THIS engine opened, so there is an
+            // address it may charge; a corrupt frame decodes to nothing, so the only thing
+            // that could attribute it is timing — its window — and outside it there is
+            // nothing left. Pinned by test_link_master "while dst's transaction is awaiting
+            // but the frame opened outside its window ...".
+            bus_stats_.discards++;
             continue;
         }
         if (!delivered)
@@ -443,25 +461,43 @@ void Master::drain_wire(MasterEvent& event) {
         // Wrong src/dst/seq/response-bit, a matching frame whose opening instant fell
         // outside the window, or no transaction open at all: discarded silently (trunk
         // §4), counted (FR-011), and does not end the attempt (data-model.md §4). Charged
-        // to dst_ only while dst_'s own response window is running — spec US2 AC6 scopes
-        // the per-destination counter to frames "arriving during an open response window".
+        // to dst_ only while dst_'s own transaction is awaiting a response — FR-011a's
+        // per-address block means "a DECODED frame discarded during that address's own
+        // transaction" and nothing else (PR #137 review @3a15d29, LOW, which narrowed this
+        // from the whole open transaction to `awaiting`; the "decoded" half is the CRC
+        // branch's, above — a corrupt frame never reaches here and is never charged to an
+        // address's `discards`).
+        //
         // Otherwise (gap-deferred before a first or retried transmission, or no transaction
-        // at all) there is no window to attribute it to, so the frame's own claimed source
-        // is charged instead (PR #137 review @3a15d29, LOW; bounds-checked: an intact
-        // frame's src is wire-derived and can claim any byte 0x00..0xFE). A claimed src of
-        // 0x10..0xFE has no AddrStats slot and is counted NOWHERE — FR-011 says every discard
-        // is counted, FR-011a's block is per address; recorded, not resolved here
-        // (docs/OPEN-QUESTIONS.md 2026-09-06 "claimed src is out of range"; #138 item 3).
+        // at all) there is no window to attribute it to, and it is counted per bus (#144;
+        // maintainer ruling 2026-09-11, "count it at bus level"). It used to be charged to
+        // the frame's OWN claimed src when that was in range, which had two defects, both
+        // recorded in docs/OPEN-QUESTIONS.md 2026-09-06 and both closed by this counter: a
+        // claimed src of 0x10..0xFE has no AddrStats slot and so was counted nowhere at all,
+        // against FR-011's unconditional "MUST be counted"; and `src` is wire-derived and
+        // unauthenticated (the Deframer refuses only dst == 0xFF, trunk §5), so any station
+        // could inflate an innocent node's discards by claiming its address while the host
+        // was idle.
+        //
+        // What this if/else establishes, true by construction of it: AddrStats::discards is
+        // written only for dst_ — the address whose own request this engine transmitted and is
+        // awaiting an answer from — and never from anything the wire said, because the
+        // wire-derived f.src indexes nothing here. So no address is charged for a frame merely
+        // because that frame claimed its address. Demonstrated by test_link_master "an
+        // idle-time discard claiming an in-range source ..." and "... a source well past
+        // kAddrCount ...".
+        //
+        // What it does NOT establish (red team @722e859 finding 1, correcting an earlier
+        // wording of this comment that claimed the wider property): it is NOT true that no
+        // address is charged for a frame it did not send. While dst_'s transaction is
+        // awaiting, a discarded frame is charged to dst_ whoever actually sent it — a third
+        // station's frame under its own src lands on dst_. That attribution predates #144 and
+        // the 2026-09-11 ruling leaves it alone; it is pinned by test_link_master "inside
+        // dst's window, a THIRD station's frame is charged to dst ...".
         if (awaiting)
             stats_[dst_].discards++;
-        // `<=` here differs only at f.src == kAddrCount, where it writes one AddrStats past the
-        // table — undefined behaviour with no defined observable to assert on. The native
-        // preset's ASan catches it (test "an unsolicited frame while idle whose claimed source
-        // is exactly kAddrCount"); the mutation build runs with sanitizers off (tools/mutate.sh),
-        // so that case cannot kill the mutant there.
-        // mutant-ok(accepted, cxx_lt_to_le): only an out-of-bounds write differs; ASan-only.
-        else if (f.src < kAddrCount)
-            stats_[f.src].discards++;
+        else
+            bus_stats_.discards++;
         // This frame's bus activity (for the T_gap rule, data-model.md §4 "Gap") is already
         // recorded by the unconditional last_activity_ update at the top of the loop, which
         // covers every received byte rather than only the outcomes that used to have their own

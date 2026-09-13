@@ -230,10 +230,34 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
 
 ```
 AddrStats { u32 transactions, retries, timeouts, crc_failures, discards, replays_served, late_responses }   × 16
-BusStats  { u32 rate_changes, bus_faults }
+BusStats  { u32 rate_changes, bus_faults, discards }
 ```
 Readable via `stats(addr)` / `bus_stats()`, `reset_stats()`; incremented at the point the
 event is decided (e.g. `retries` when the retry frame is handed to the wire).
+
+`AddrStats::discards` counts **decoded** frames — those that passed CRC and then failed the
+acceptance screen — discarded while that address's own transaction is awaiting a response.
+`BusStats::discards` counts every other frame-level discard the Master decides: a decoded
+frame that fails the screen with no transaction awaiting, and a CRC-failed frame that did
+not open inside an awaiting transaction's window.
+
+The split is by what the engine has to attribute the frame with, and the two paths differ on
+purpose (they disagree in the reachable `awaiting`-but-out-of-window state, pinned by
+`test_link_master.cpp` "while dst's transaction is awaiting but the frame opened outside its
+window …"). A decoded frame arrives during a transaction the host itself opened, so there is
+an address it may charge — `dst`, the address the host addressed, whoever actually sent the
+frame; its own `src` is wire-derived and unauthenticated (trunk §5 reserves only `0xFF`) and
+so is never used, and with no transaction awaiting there is nothing else to charge. A
+CRC-failed frame decodes to nothing, so the only thing that could attribute it is timing:
+inside the awaiting address's window it is that node's `crc_failures` (never its `discards`),
+and outside it there is nothing left to attribute it by.
+*(Ruled 2026-09-11, `OPEN-QUESTIONS.md` "Maintainer rulings … 2026-09-11" item 8 and the
+maintainer's comment on #144, settling the 2026-09-06 "claimed src is out of range" and
+"idle-time discard is charged to the frame's CLAIMED in-range src" entries and the
+2026-09-07 "a CRC-corrupt frame arriving with no transaction open moves no counter at all".
+Implementation: #144. Structural Deframer discards — `BadLength`, `BadEscape`, `TooLong`,
+`ReservedAddress` — are counted in `DeframerStats` only and remain invisible above the
+engine; that residue is a separate open entry, dated 2026-09-13.)*
 
 ## 9. Notification kinds (HealthListener)
 

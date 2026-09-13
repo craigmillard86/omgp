@@ -1002,7 +1002,11 @@ TEST_CASE("a same-seq response that arrived just after attempt 0's window closed
     // no retry on the wire until a full T_gap of idle has elapsed after it.
     ev = wire.advance_to(stale_full_end, master);
     REQUIRE(ev.kind == MasterEvent::None);
-    REQUIRE(master.stats(dst).discards == 1); // the stale same-seq frame, correctly discarded
+    // The stale same-seq frame, correctly discarded. attempt 0 has already timed out, so the
+    // transaction is PendingTransmit and no response window is open: the discard is
+    // unattributable and lands on the bus counter, not on dst (#144, ruling 2026-09-11).
+    REQUIRE(master.bus_stats().discards == 1);
+    REQUIRE(master.stats(dst).discards == 0);
     REQUIRE(wire.transcript_size() == 1);
 
     // T_gap after the stale frame's last byte: the retry finally transmits, same seq, retry set.
@@ -2626,6 +2630,13 @@ TEST_CASE("a structurally-discarded frame updates last_activity, so a following 
     // structurally, but recorded as bus activity by the fix.
     wire.advance_to(g_end, master);
     REQUIRE(master.stats(omgp::ADDR_host).discards == 0); // not attributed to any dst_ (idle)
+    // ...and not on the bus counter either: #144's bus-level counter covers frame-level
+    // discards the Master itself decides (unattributable delivered frames and bad CRCs).
+    // A STRUCTURAL discard never gets that far — the Deframer drops it and counts it in its
+    // own DeframerStats, which Master does not expose. Pinned as the scope boundary of the
+    // 2026-09-11 ruling, not asserted as the desired end state (docs/OPEN-QUESTIONS.md
+    // 2026-09-13 "structural discards are still invisible above the Deframer").
+    REQUIRE(master.bus_stats().discards == 0);
 
     const uint8_t payload[] = {0x77};
     REQUIRE(master.begin(0x06, payload, sizeof payload) == Status::Ok);
@@ -3087,6 +3098,7 @@ TEST_CASE("the engine makes no progress without poll(); repolling at an unchange
         REQUIRE(s.late_responses == stats0.late_responses);
         REQUIRE(master.bus_stats().rate_changes == bus0.rate_changes);
         REQUIRE(master.bus_stats().bus_faults == bus0.bus_faults);
+        REQUIRE(master.bus_stats().discards == bus0.discards);
     };
 
     MasterEvent ev1 = master.poll(clock.now_us());
@@ -3189,8 +3201,8 @@ TEST_CASE("the very next begin() after a Failed transaction whose every attempt'
 // --- FR-011: frames arriving while no transaction is open must still be discarded and --
 // counted, not silently absorbed ---------------------------------------------------------
 
-TEST_CASE("a frame arriving while no transaction is open at all is discarded and counted "
-          "against its own claimed source",
+TEST_CASE("a frame arriving while no transaction is open at all is discarded and counted on "
+          "the bus, not against the source it claims",
           "[link]") {
     // PR #137 review, MEDIUM: poll()'s drain loop used to be gated on
     // open_ && sub_phase_ == AwaitResponse, so bytes arriving while fully idle were never
@@ -3220,10 +3232,13 @@ TEST_CASE("a frame arriving while no transaction is open at all is discarded and
     const uint64_t full_end =
         forged_tx_end + static_cast<uint64_t>(unsolicited_bytes.size()) * byte_us();
 
-    const uint32_t discards_before = master.stats(forged_dst_node).discards;
+    const uint32_t bus_discards_before = master.bus_stats().discards;
     MasterEvent ev = wire.advance_to(full_end, master);
     REQUIRE(ev.kind == MasterEvent::None);
-    REQUIRE(master.stats(forged_dst_node).discards == discards_before + 1);
+    // No transaction is open, so the frame is unattributable and counted at bus level — not
+    // against the address it claims to come from (#144, ruling 2026-09-11).
+    REQUIRE(master.bus_stats().discards == bus_discards_before + 1);
+    REQUIRE(master.stats(forged_dst_node).discards == 0);
     REQUIRE_FALSE(master.busy());
 }
 
@@ -3460,15 +3475,19 @@ TEST_CASE("frame_arriving() follows the last byte actually received, not last_ac
     REQUIRE(master.stats(dst).timeouts == 1);
 }
 
-// --- discards attribution: dst only while dst's response window is open (spec US2 AC6) ----
+// --- discards attribution: dst only while dst's own transaction is awaiting a response; ---
+// --- everything else is bus-level (FR-011/FR-011a; #144, ruling 2026-09-11) ---------------
 
 TEST_CASE("a third station's frame delivered while a transaction is gap-deferred, not awaiting "
-          "a response, is charged to its own claimed source, not to the deferred transaction's dst",
+          "a response, is charged to the bus, not to the deferred transaction's dst and not to "
+          "the source it claims",
           "[link]") {
     // PR #137 review @3a15d29, LOW: `if (open_) stats_[dst_].discards++` charged every
     // delivered-but-unaccepted frame to dst_ for the whole PendingTransmit phase too, when dst_
-    // had no response window running. spec US2 AC6 scopes the per-destination counter to
-    // frames "arriving during an open response window".
+    // had no response window running. FR-011/FR-011a require the discard to be counted; with no
+    // window open there is no address it may be charged to, so it is counted per bus (#144,
+    // maintainer ruling 2026-09-11). Until that ruling this case asserted `stats(other_src)`,
+    // the frame's own claimed — and unauthenticated — source.
     FakeClock clock;
     MockWire wire(clock);
     Master master(wire, clock, omgp::ADDR_host);
@@ -3491,8 +3510,9 @@ TEST_CASE("a third station's frame delivered while a transaction is gap-deferred
     // The frame completes while the transaction is still PendingTransmit.
     wire.advance_to(other_end, master);
     REQUIRE(wire.transcript_size() == 0);
-    REQUIRE(master.stats(other_src).discards == 1);
-    REQUIRE(master.stats(dst).discards == 0);
+    REQUIRE(master.bus_stats().discards == 1);
+    REQUIRE(master.stats(other_src).discards == 0); // not the claimed source
+    REQUIRE(master.stats(dst).discards == 0);       // not the deferred transaction's dst
     // ...and the deferred transmission then follows the frame by exactly T_gap.
     wire.advance_to(other_end + omgp::TRUNK_T_gap_us, master);
     REQUIRE(wire.transcript_size() == 1);
@@ -3500,16 +3520,17 @@ TEST_CASE("a third station's frame delivered while a transaction is gap-deferred
 }
 
 TEST_CASE("an unsolicited frame while idle whose claimed source is exactly kAddrCount is "
-          "discarded without touching any in-range record or the bus statistics",
+          "counted on the bus without touching any in-range record",
           "[link]") {
-    // Idle-path attribution indexes stats_ by the frame's own wire-derived src, guarded by
-    // `f.src < kAddrCount`. kAddrCount itself is the first out-of-range index: with the guard
-    // off by one this write would land past the table (ASan in the native preset). Every
-    // in-range record and the bus record are asserted untouched. That the frame is then
-    // counted NOWHERE is what FR-011 ("MUST be counted") and FR-011a ("per trunk address")
-    // cannot both give for an out-of-range src; this case pins the bounds behaviour, not
-    // that outcome as correct (docs/OPEN-QUESTIONS.md 2026-09-06 "claimed src is out of
-    // range"; PR #137 review @5a458c2). A bus-level counter (#138) would change one line here.
+    // kAddrCount is the first index past the AddrStats table, and the idle path used to index
+    // that table by the frame's own wire-derived src (guarded by `f.src < kAddrCount`), so an
+    // off-by-one guard wrote past it — ASan in the native preset. Every in-range record is
+    // still asserted untouched here, which now holds by construction of the idle path rather
+    // than by a bounds guard: no address is indexed at all. What used to be an FR-011 gap —
+    // the frame counted NOWHERE, because FR-011 ("MUST be counted") and FR-011a ("per trunk
+    // address") cannot both be met for an out-of-range src — is closed by the bus counter
+    // (#144, ruling 2026-09-11; docs/OPEN-QUESTIONS.md 2026-09-06 "claimed src is out of
+    // range"; PR #137 review @5a458c2).
     FakeClock clock;
     MockWire wire(clock);
     Master master(wire, clock, omgp::ADDR_host);
@@ -3528,8 +3549,268 @@ TEST_CASE("an unsolicited frame while idle whose claimed source is exactly kAddr
         CAPTURE(a);
         REQUIRE(master.stats(a).discards == 0);
     }
+    REQUIRE(master.bus_stats().discards == 1); // counted, per bus (FR-011)
     REQUIRE(master.bus_stats().rate_changes == 0);
     REQUIRE(master.bus_stats().bus_faults == 0);
+}
+
+// The six cases below are #144's own, in order: the forgeable half of the old attribution (a
+// claimed src in range); its out-of-range half (a claimed src with no AddrStats slot, counted
+// nowhere before the ruling); the in-window case the ruling deliberately leaves alone; (red
+// team @722e859 finding 1) the boundary of what that in-window branch proves — the sender of
+// an in-window discard is not what the per-address counter follows; the 2026-09-07 CRC entry,
+// a corrupt frame with no transaction open, which moved no counter this layer exposes at all;
+// and (red team @25545f5 finding 1) the split's real criterion, pinned in the one engine state
+// where the two discard paths disagree: `awaiting` but out of window.
+
+TEST_CASE("an idle-time discard claiming an in-range source is counted on the bus and leaves "
+          "every per-address record alone: no address is charged for a frame merely because "
+          "that frame claimed its address",
+          "[link]") {
+    // The forgeable half (docs/OPEN-QUESTIONS.md 2026-09-06 "an idle-time discard is charged
+    // to the frame's CLAIMED in-range src"). `src` is wire-derived and unauthenticated —
+    // trunk §5 reserves only 0xFF — so before #144 any station could inflate an innocent
+    // node's `discards` by claiming its address while the host was idle. Node 0x03 here never
+    // transmitted.
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+    REQUIRE_FALSE(master.busy());
+    REQUIRE(master.bus_stats().discards == 0); // a fresh Master starts at zero
+
+    const uint8_t impersonated = 0x03;
+    const uint8_t body[] = {0xAB};
+    const std::vector<uint8_t> forged =
+        encode_expected(omgp::ADDR_host, impersonated, true, false, 0, body, sizeof body);
+    const uint64_t start = 700;
+    wire.inject_bytes(forged.data(), forged.size(), start);
+    const MasterEvent ev = wire.advance_to(start + forged.size() * byte_us(), master);
+
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE_FALSE(master.busy());
+    REQUIRE(master.bus_stats().discards == 1);
+    for (uint8_t a = 0; a < kAddrCount; ++a) {
+        CAPTURE(a);
+        REQUIRE(master.stats(a).discards == 0);
+    }
+}
+
+TEST_CASE("an idle-time discard claiming a source well past kAddrCount is counted on the bus "
+          "and writes no AddrStats entry",
+          "[link]") {
+    // The out-of-range half (docs/OPEN-QUESTIONS.md 2026-09-06 "claimed src is out of range"):
+    // 0x40 is a syntactically valid trunk source the Deframer delivers intact and the
+    // kAddrCount-entry table has no slot for. Run under the native preset's ASan, so a write
+    // at stats_[0x40] fails here rather than passing silently.
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t body[] = {0x5A};
+    const std::vector<uint8_t> stray =
+        encode_expected(omgp::ADDR_host, 0x40, true, false, 0, body, sizeof body);
+    const uint64_t start = 900;
+    wire.inject_bytes(stray.data(), stray.size(), start);
+    const MasterEvent ev = wire.advance_to(start + stray.size() * byte_us(), master);
+
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE(master.bus_stats().discards == 1);
+    // NOT evidence, and kept only so the accessor's contract is exercised: stats() returns a
+    // static zeroed sentinel for addr >= kAddrCount (link/master.cpp:46), so this line reads 0
+    // whatever drain_wire() wrote. What detects an out-of-range write is ASan on the write
+    // itself, plus the in-range loop below.
+    REQUIRE(master.stats(0x40).discards == 0);
+    for (uint8_t a = 0; a < kAddrCount; ++a) {
+        CAPTURE(a);
+        REQUIRE(master.stats(a).discards == 0);
+    }
+}
+
+TEST_CASE("a frame discarded while dst's own transaction is awaiting a response is still "
+          "charged to dst, and does not move the bus counter",
+          "[link]") {
+    // The other side of the ruling: AddrStats::discards keeps meaning "discarded during that
+    // address's own transaction". Only the unattributable case moved (#144).
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x02;
+    const Step silence[] = {{dst, Kind::Silence}};
+    wire.set_script(dst, silence, 1);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t payload[] = {0x11};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
+
+    // A frame inside dst's window that fails the acceptance screen (wrong seq), so it is
+    // discarded while the transaction is still awaiting dst's answer.
+    const std::vector<uint8_t> wrong_seq =
+        encode_expected(omgp::ADDR_host, dst, true, false, 0x07, payload, sizeof payload);
+    const uint64_t open_at = tx_end + 10;
+    REQUIRE(open_at < tx_end + omgp::TRUNK_T_resp_us);
+    wire.inject_bytes(wrong_seq.data(), wrong_seq.size(), open_at);
+    const MasterEvent ev = wire.advance_to(open_at + wrong_seq.size() * byte_us(), master);
+
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE(master.busy()); // the window keeps running (US2 AC6)
+    REQUIRE(master.stats(dst).discards == 1);
+    REQUIRE(master.bus_stats().discards == 0);
+}
+
+TEST_CASE("inside dst's window, a THIRD station's frame is charged to dst — the per-address "
+          "counter follows the open transaction, not the sender",
+          "[link]") {
+    // The boundary of what the `awaiting` branch establishes, pinned so the claim above it
+    // cannot be read wider than it is (red team @722e859 finding 1). `stats_[dst_].discards`
+    // is written for the address whose own transaction is awaiting an answer, whoever put the
+    // discarded frame on the wire: station 0x07 below sends under its OWN src — no forgery —
+    // and node 0x02, which transmitted nothing, carries the count.
+    //
+    // Pinned as today's observable, not asserted as desired. That a babbler can inflate the
+    // currently-polled node's `discards` this way predates #144, is the half the 2026-09-11
+    // ruling deliberately leaves alone, and is diagnostic-only while nothing reads the counter
+    // (a control — the current contents of `core/` — not a guarantee).
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x02;      // the node being polled
+    const uint8_t attacker = 0x07; // a different station entirely
+    const Step silence[] = {{dst, Kind::Silence}};
+    wire.set_script(dst, silence, 1);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    const uint8_t payload[] = {0x11};
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end =
+        static_cast<uint64_t>(request_bytes(dst, 0, false, payload, sizeof payload).size()) *
+        byte_us();
+
+    const uint8_t body[] = {0xEE};
+    const std::vector<uint8_t> other =
+        encode_expected(omgp::ADDR_host, attacker, true, false, 0, body, sizeof body);
+    const uint64_t open_at = tx_end + 10;
+    REQUIRE(open_at < tx_end + omgp::TRUNK_T_resp_us);
+    wire.inject_bytes(other.data(), other.size(), open_at);
+    const MasterEvent ev = wire.advance_to(open_at + other.size() * byte_us(), master);
+
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE(master.busy()); // the window keeps running (US2 AC6)
+    REQUIRE(master.stats(dst).discards == 1);
+    REQUIRE(master.stats(attacker).discards == 0); // the actual sender is not charged
+    REQUIRE(master.bus_stats().discards == 0);     // and it is not unattributable either
+}
+
+TEST_CASE("a CRC-corrupt frame arriving with no transaction open is counted on the bus, "
+          "against no node",
+          "[link]") {
+    // docs/OPEN-QUESTIONS.md 2026-09-07 "a CRC-corrupt frame arriving with no transaction open
+    // moves no counter at all" — ruled 2026-09-11: count it at bus level. A corrupt frame
+    // never decodes, so there is no `src` to charge it to; that is exactly why it is bus-level
+    // evidence. Before the ruling a rig could corrupt every frame between transactions with
+    // every counter reading zero.
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+    REQUIRE_FALSE(master.busy());
+
+    const uint8_t node = 0x05;
+    const uint8_t body[] = {0x01, 0x02};
+    uint8_t buf[kMaxWire];
+    const size_t n = omgp_test::encode_crc_corrupted(
+        FrameFields{omgp::ADDR_host, node, /*response=*/true, /*retry=*/false, /*seq=*/0,
+                    static_cast<uint8_t>(sizeof body), body},
+        buf, sizeof buf);
+    REQUIRE(n > 0);
+    const uint64_t start = 1200;
+    wire.inject_bytes(buf, n, start);
+    const MasterEvent ev = wire.advance_to(start + n * byte_us(), master);
+
+    REQUIRE(ev.kind == MasterEvent::None);
+    REQUIRE_FALSE(master.busy());
+    REQUIRE(master.bus_stats().discards == 1);
+    for (uint8_t a = 0; a < kAddrCount; ++a) {
+        CAPTURE(a);
+        REQUIRE(master.stats(a).discards == 0);
+        REQUIRE(master.stats(a).crc_failures == 0); // never a node's failure: it has no source
+    }
+}
+
+TEST_CASE("while dst's transaction is awaiting but the frame opened outside its window, a "
+          "DECODED discard is charged to dst and a CRC-failed one goes to the bus: the split "
+          "follows decodability, not `awaiting`",
+          "[link][timing:T_resp]") {
+    // Red team @25545f5 finding 1. Both branches of drain_wire() are entered in the SAME
+    // engine state here — `awaiting` true, `in_window` false — and they route to different
+    // counters, so "discarded while that address's own transaction is awaiting a response"
+    // does not by itself decide where a discard lands. What decides it is whether the frame
+    // DECODED:
+    //   * a decoded frame that fails the acceptance screen is charged to dst_, the address
+    //     whose request this engine transmitted (window or not — the screen rejects it either
+    //     way, and the transaction that gives it an address is still open);
+    //   * a CRC-failed frame never decodes, so nothing in it can attribute it; the only thing
+    //     that could is TIMING — opening inside the awaiting address's window, where it is
+    //     that node's `crc_failures` (not `discards`) and ends the attempt at once. Outside
+    //     that window there is nothing left to attribute it by, so it is bus-level evidence.
+    // Pinned as today's observable and as the meaning of the two counters; the documents
+    // (data-model.md §8, contracts/link-cpp.md, link_types.hpp) are worded from this case.
+    //
+    // Both halves use the coarse-poll cadence of "a CRC-failed frame opening EXACTLY at the
+    // deadline …" above: one poll() drains the whole frame before its own timeout branch
+    // runs, so `awaiting` is still true when the closing FLAG lands.
+    const uint8_t payload[] = {0x5A};
+
+    SECTION("the CRC-failed half lands on the bus, against no node") {
+        FakeClock clock;
+        MockWire wire(clock);
+        const uint8_t dst = 0x07;
+        const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+        wire.set_script(dst, silence, 3);
+        Master master(wire, clock, omgp::ADDR_host);
+
+        REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+        const uint64_t tx_end =
+            wire.transcript(0).tx_start_us +
+            request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us();
+        const uint64_t deadline = tx_end + omgp::TRUNK_T_resp_us;
+
+        const std::vector<uint8_t> bad = crc_bad_response(dst, 0, payload, sizeof payload);
+        wire.inject_bytes(bad.data(), bad.size(), deadline); // opening FLAG AT deadline_
+        const MasterEvent ev =
+            wire.advance_to(deadline + bad.size() * byte_us() + byte_us(), master);
+
+        REQUIRE(ev.kind == MasterEvent::None); // the attempt timed out, retries remain
+        REQUIRE(master.bus_stats().discards == 1);
+        REQUIRE(master.stats(dst).discards == 0);     // not the polled node's discard ...
+        REQUIRE(master.stats(dst).crc_failures == 0); // ... nor its CRC failure: not its window
+    }
+
+    SECTION("the decoded half is charged to dst, in the same state") {
+        FakeClock clock;
+        MockWire wire(clock);
+        const uint8_t dst = 0x07;
+        const Step silence[] = {{dst, Kind::Silence}, {dst, Kind::Silence}, {dst, Kind::Silence}};
+        wire.set_script(dst, silence, 3);
+        Master master(wire, clock, omgp::ADDR_host);
+
+        REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+        const uint64_t tx_end =
+            wire.transcript(0).tx_start_us +
+            request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us();
+        const uint64_t deadline = tx_end + omgp::TRUNK_T_resp_us;
+
+        // Intact, and rejected by the acceptance screen on seq alone.
+        const std::vector<uint8_t> wrong_seq =
+            encode_expected(omgp::ADDR_host, dst, true, false, 0x07, payload, sizeof payload);
+        wire.inject_bytes(wrong_seq.data(), wrong_seq.size(), deadline);
+        const MasterEvent ev =
+            wire.advance_to(deadline + wrong_seq.size() * byte_us() + byte_us(), master);
+
+        REQUIRE(ev.kind == MasterEvent::None);
+        REQUIRE(master.stats(dst).discards == 1); // charged to dst, though out of window
+        REQUIRE(master.bus_stats().discards == 0);
+        REQUIRE(master.stats(dst).crc_failures == 0);
+    }
 }
 
 // --- trunk §3: a response whose start bit lands EXACTLY at tx_end is inside the window and --
@@ -3753,6 +4034,10 @@ TEST_CASE("a second CRC-failed frame in the T_gap after an in-window CRC failure
 
     // Pristine: the concluded attempt is not re-concluded. Without `awaiting`: 2.
     REQUIRE(master.stats(dst).crc_failures == 1);
+    // Where it DOES land: the gap's corrupt frame has no attributable address, so it is
+    // counted per bus (#144; red team @25545f5 finding 1 — this increment was unpinned here).
+    REQUIRE(master.bus_stats().discards == 1);
+    REQUIRE(master.stats(dst).discards == 0);
     REQUIRE(master.attempts() == 1); // no extra retry consumed
 
     // Positive control (PR #142 review @9632347, LOW): the injected frame's last byte lands
@@ -3845,6 +4130,10 @@ TEST_CASE("a CRC-failed frame opening EXACTLY at the deadline, drained by one co
     MasterEvent ev = wire.advance_to(bad_end + byte_us(), master);
     REQUIRE(ev.kind == MasterEvent::None);        // attempt 0 timed out, retries remain
     REQUIRE(master.stats(dst).crc_failures == 0); // `<=`: 1 — charged to the polled node
+    // Not "counted nowhere" either: outside the window it is unattributable, so it is bus
+    // evidence (#144; red team @25545f5 finding 1 — this increment was unpinned here).
+    REQUIRE(master.bus_stats().discards == 1);
+    REQUIRE(master.stats(dst).discards == 0);
     REQUIRE(master.stats(dst).timeouts == 1);
     REQUIRE(master.attempts() == 1);
     REQUIRE(master.busy());
@@ -3933,12 +4222,26 @@ TEST_CASE("reset_stats() clears every per-address counter and the bus counters",
     for (uint64_t t = 0; t <= 10 * omgp::TRUNK_T_poll_us && master.busy(); t += 10)
         ev = wire.advance_to(t, master);
     REQUIRE(ev.kind == MasterEvent::Failed);
+
+    // A stray frame while idle, so the bus discard counter (#144) is nonzero too — otherwise
+    // this case would assert the reset of a counter that was already zero. Injected before
+    // the rate change below: inject_bytes() releases bytes one byte time apart at the rate
+    // then in force, and byte_us() here is the default rate's.
+    const uint8_t stray_body[] = {0x01};
+    const std::vector<uint8_t> stray =
+        encode_expected(omgp::ADDR_host, 0x09, true, false, 0, stray_body, sizeof stray_body);
+    const uint64_t stray_start = clock.now_us() + omgp::TRUNK_T_gap_us;
+    wire.inject_bytes(stray.data(), stray.size(), stray_start);
+    wire.advance_to(stray_start + stray.size() * byte_us(), master);
+
     master.set_bit_rate(omgp::TRUNK_bit_rate_fallback);
+
     // Non-vacuity: every counter the reset must clear is nonzero first.
     REQUIRE(master.stats(dst).transactions == 1);
     REQUIRE(master.stats(dst).retries == 2);
     REQUIRE(master.stats(dst).timeouts == 3);
     REQUIRE(master.bus_stats().rate_changes == 1);
+    REQUIRE(master.bus_stats().discards == 1);
 
     master.reset_stats();
     for (uint8_t a = 0; a < kAddrCount; ++a) {
@@ -3954,6 +4257,7 @@ TEST_CASE("reset_stats() clears every per-address counter and the bus counters",
     }
     REQUIRE(master.bus_stats().rate_changes == 0);
     REQUIRE(master.bus_stats().bus_faults == 0);
+    REQUIRE(master.bus_stats().discards == 0);
 }
 
 // --- #138: begin() drains the wire itself, so its own "never transmit into an arriving ------
@@ -4024,8 +4328,8 @@ TEST_CASE("begin() one microsecond after another station's opening FLAG, with on
 }
 
 TEST_CASE("a frame drained by begin()'s own wire-draining precondition is counted exactly as an "
-          "equivalent poll() would count it: no response window is open, so the frame's own "
-          "claimed source is charged, not begin()'s own destination",
+          "equivalent poll() would count it: no response window is open, so the bus counter is "
+          "charged, not begin()'s own destination and not the source the frame claims",
           "[link]") {
     FakeClock clock;
     MockWire wire(clock);
@@ -4046,7 +4350,8 @@ TEST_CASE("a frame drained by begin()'s own wire-draining precondition is counte
     Status st{};
     HEAP_FREE_SCOPE({ st = master.begin(dst, payload, sizeof payload); });
     REQUIRE(st == Status::Ok);
-    REQUIRE(master.stats(0x04).discards == 1); // the frame's own claimed src (FR-011/FR-011a)
+    REQUIRE(master.bus_stats().discards == 1); // unattributable, per bus (FR-011/FR-011a; #144)
+    REQUIRE(master.stats(0x04).discards == 0); // not the frame's own claimed src
     REQUIRE(master.stats(dst).discards == 0);  // not begin()'s own destination
 }
 
@@ -4087,6 +4392,9 @@ TEST_CASE("begin() refused with Busy does not drain the wire: a pending foreign 
     for (uint8_t a = 0; a < kAddrCount; ++a)
         total += master.stats(a).discards;
     REQUIRE(total == 0); // a Busy refusal must not have drained/discarded anything
+    // The bus counter is where a drained-while-idle frame would now land (#144), so without
+    // this the per-address sum above no longer covers the claim this case makes.
+    REQUIRE(master.bus_stats().discards == 0);
     // #148: and the frame is still THERE, byte for byte, "left for the next poll()" as the case
     // name says. discards == 0 alone would also hold if the refusal had drained the wire and
     // thrown the bytes away; this is the half of the claim the counter cannot make.

@@ -116,4 +116,7 @@ TEST_CASE("AddrStats and BusStats have the FR-011a fields, aggregate-initialized
     REQUIRE(a.late_responses == 0);
     REQUIRE(b.rate_changes == 0);
     REQUIRE(b.bus_faults == 0);
+    // #144 (ruling 2026-09-11, "count it at bus level"): frames discarded with no
+    // attributable address — FR-011a's "per bus" block.
+    REQUIRE(b.discards == 0);
 }
