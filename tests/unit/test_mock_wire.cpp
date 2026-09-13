@@ -977,16 +977,20 @@ TEST_CASE("A registered RequestHandler is not invoked for traffic it does not ow
     MockWire wire(clock);
     ScriptedHandler handler;
     handler.set_answer({0x77, 0x78, 0x79});
-    // Registered on BOTH the host address and node 0x01, so each section below would see a
-    // non-zero counter if the corresponding guard in transmit() were removed — the counter is
-    // required to be exactly 0, which is only evidence if the handler was reachable at all.
+    // Registered on BOTH the host address and node 0x01, so the handler is reachable at every
+    // address any section below actually names as a dst — except 0x10, which set_handler()
+    // REQUIREs against (mock_wire.cpp: node < kAddrCount), and where the counter is therefore
+    // NOT the evidence; see that section. Each section names the mechanism that holds its own
+    // counter at 0: they are three different ones, not one guard in transmit().
     wire.set_handler(omgp::ADDR_host, handler);
     wire.set_handler(0x01, handler);
 
     SECTION("a RESPONSE frame transmitted by the engine under test") {
         // What a real Responder puts on the wire: dst == ADDR_host, response bit set. MockWire
         // must not treat it as a request to answer (mock_wire.cpp's `if (view.f.response)
-        // continue;`), so handlers_[ADDR_host] stays untouched.
+        // continue;`), so handlers_[ADDR_host] stays untouched. Held by that early return:
+        // a handler IS registered at ADDR_host, so delete the `continue` and this counter
+        // reads 1 — the 0 is evidence for this guard specifically.
         const uint8_t payload[2] = {0x01, 0x02};
         FrameFields resp{omgp::ADDR_host, 0x01, true, false, 4, 2, payload};
         uint8_t out[kMaxWire];
@@ -997,6 +1001,11 @@ TEST_CASE("A registered RequestHandler is not invoked for traffic it does not ow
     }
 
     SECTION("a request addressed to a different node") {
+        // transmit() does NOT return early here: 0x02 is a valid node address, so the request
+        // reaches schedule_respond() and build_response(), which finds handlers_[0x02] ==
+        // nullptr and emits the no-handler echo. What holds this counter at 0 is the per-node
+        // lookup (mock_wire.cpp: handlers_[request.dst]) — make that lookup answer with any
+        // registered handler rather than this node's and the counter reads 1.
         const std::vector<uint8_t> req = encode_request(0x02, 1, kRequestByte);
         wire.transmit(req.data(), req.size(), 0);
         REQUIRE(handler.invocations == 0);
@@ -1006,15 +1015,30 @@ TEST_CASE("A registered RequestHandler is not invoked for traffic it does not ow
         // docs/trunk-link-layer.md §5: only 0x00..0x0F are node addresses. encode_frame refuses
         // only 0xFF, so 0x10 is encodable — and MockWire answers it with silence plus a fault,
         // never by reaching past the end of handlers_[kAddrCount].
+        //
+        // The counter is NOT the evidence here, and is kept only as the bound on
+        // handlers_[0x10] never being read: set_handler() REQUIREs node < kAddrCount, so no
+        // handler is or can be registered at 0x10, and the counter reads 0 with transmit()'s
+        // dst >= kAddrCount guard deleted exactly as it does with it. What that guard holds is
+        // asserted below instead — delete it and the request resolves to the default Respond,
+        // which records no fault and enqueues a no-handler echo, so the fault REQUIRE fails
+        // (first, ending the section) and the drained-empty one would too.
         const std::vector<uint8_t> req = encode_request(0x10, 1, kRequestByte);
-        wire.transmit(req.data(), req.size(), 0);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
         REQUIRE(handler.invocations == 0);
+        // Taken before advance_to(), which REQUIREs fault_ == nullptr (mock_wire.hpp).
         const char* fault = wire.take_fault();
         REQUIRE(fault != nullptr);
         REQUIRE(std::string(fault).find("kAddrCount") != std::string::npos);
+        wire.advance_to(tx_end + omgp::TRUNK_T_turn_min_us +
+                        100 * byte_time_us(omgp::TRUNK_bit_rate));
+        REQUIRE(drain_all(wire).empty());
     }
 
     SECTION("a Kind::Silence step") {
+        // Held by the Silence arm of transmit()'s switch calling no schedule_*() at all: a
+        // handler IS registered at 0x01, so route this Kind to schedule_respond() and the
+        // counter reads 1 — the 0 is evidence for that arm specifically.
         static const Step silence_step[] = {{0x01, Kind::Silence, 0}};
         wire.set_script(0x01, silence_step, 1);
         const std::vector<uint8_t> req = encode_request(0x01, 1, kRequestByte);
