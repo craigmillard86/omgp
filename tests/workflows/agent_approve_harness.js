@@ -17,7 +17,7 @@ function world({labels = ['agent-authored'], comments = [], reviews = [], files 
     rest: {
       pulls: {
         get: async () => ({data: {number: 7, head: {sha: HEAD}, labels: (world._labels || labels).map(name => ({name}))}}),
-        listFiles: async () => ({data: (world._files || ['tools/refimpl/torture.py']).map(path => ({filename: path}))}),
+        listFiles: async () => ({data: (world._files || ['tools/refimpl/torture.py']).map(f => typeof f === 'string' ? {filename: f} : f)}),
         listReviews: async () => ({data: reviews}),
         dismissReview: async ({review_id}) => log.push(`dismiss#${review_id}`),
         createReview: async ({event, commit_id, body}) => log.push(`review ${event} @${commit_id.slice(0, 4)}: ${body.replace(/\n+/g, ' ').slice(0, 200)}`),
@@ -149,6 +149,12 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
   w = world({comments: [clean('review')], files: ['docs/GOVERNANCE.md', 'tools/x.py']});
   await approve(w, {tier: 'risk:t0'});
   check('a changed CODEOWNERS-listed file (exact pattern) -> not approved, file named', !approved(w) && w.log.some(l => /notice.*GOVERNANCE/.test(l)));
+  // Round-6 red team + review on #420: the check mapped only `f.filename`, so renaming an owned
+  // file to an unowned path (one entry, old path in previous_filename, possibly with a patch)
+  // walked it — the same shape as agent-merge's check and risk-score's `paths`.
+  w = world({comments: [clean('review')], files: [{filename: 'docs/governance-archive.md', previous_filename: 'docs/GOVERNANCE.md', status: 'renamed'}]});
+  await approve(w, {tier: 'risk:t0'});
+  check('renaming a CODEOWNERS-listed file away -> not approved, old path named', !approved(w) && w.log.some(l => /notice.*GOVERNANCE/.test(l)));
   // The ** branch of ownedBy(), against a SYNTHETIC CODEOWNERS. On 2026-09-12 the real file's
   // only ** pattern (/specs/**/tasks.md) was removed: branch protection was using it to refuse
   // the very merge GOVERNANCE §1 sanctions (#342 died on `405 Waiting on code owner review`).

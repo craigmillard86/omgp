@@ -76,7 +76,7 @@ const tierOf = w => (w.applied.find(l => /^risk:t[0-3]$/.test(l)) || '').replace
 
   // ...but ADDING a Python test must stay cheap, or the rule punishes new coverage.
   w = world([F('tools/refimpl/test_new_thing.py', 80, 0, 'added')]); await run(w);
-  check('adding a Python test is not escalated', Number(tierOf(w)) <= 1);
+  check('adding a Python test is not escalated', ['0', '1'].includes(tierOf(w)));
 
   // --- round 2: a rename removes a test from the suite exactly as much as `git rm` does -------
   // `removedTests` matches f.filename and requires deletions > 0. GitHub reports a pure rename as
@@ -93,10 +93,10 @@ const tierOf = w => (w.applied.find(l => /^risk:t[0-3]$/.test(l)) || '').replace
 
   // ...but a rename that KEEPS the file in the suite is ordinary refactoring, not a reduction.
   w = world([R('tools/refimpl/test_agent_noop2.py', 'tools/refimpl/test_agent_noop.py')]); await run(w);
-  check('renaming a test that stays a test is not escalated', Number(tierOf(w)) <= 1);
+  check('renaming a test that stays a test is not escalated', ['0', '1'].includes(tierOf(w)));
 
   w = world([R('tests/unit/test_link_loop2.cpp', 'tests/unit/test_link_loop.cpp')]); await run(w);
-  check('renaming a C++ test that stays a test is not escalated', Number(tierOf(w)) <= 1);
+  check('renaming a C++ test that stays a test is not escalated', ['0', '1'].includes(tierOf(w)));
 
   // --- round-6 red team on #420: a RENAME walked the path rules -------------------------------
   // `paths` mapped only `f.filename`; GitHub reports a rename as ONE entry whose filename is the
