@@ -511,7 +511,12 @@ const during = '2026-09-12T10:00:30Z';
   check('closingRefs: owner/repo#n for THIS repo is kept as spelled — a form change is a change', closingRefs('resolved o/r#12', 'o', 'r') === 'resolved o/r#12');
   check('closingRefs: the issue URL is kept as spelled', closingRefs('Closes https://github.com/o/r/issues/12', 'o', 'r') === 'Closes https://github.com/o/r/issues/12');
   check('closingRefs: a cross-repo reference under the SAME owner counts', closingRefs('closes o/other#5', 'o', 'r') === 'closes o/other#5');
-  check('closingRefs: a path-like `a/b#n` under another owner is prose, not a reference', closingRefs('this also fixes core/scheduler#3 in passing', 'o', 'r') === '');
+  // Round-5 red team: GitHub honours `owner/repo#n` across owners, and the URL form was already
+  // counted for any owner, so the owner filter was a self-contradictory blind spot. Any
+  // `owner/repo#n` after a closing keyword counts — the loud direction; the prompt forbids
+  // adding closing keywords, and a prose false positive costs one escalation, not a lost close.
+  check('closingRefs: a cross-owner `owner/repo#n` counts, like the URL form', closingRefs('Closes x/y#1', 'o', 'r') === 'Closes x/y#1');
+  check('closingRefs: `fixes core/scheduler#3` in prose therefore counts too (documented false positive, loud)', closingRefs('this also fixes core/scheduler#3 in passing', 'o', 'r') === 'fixes core/scheduler#3');
   check('closingRefs: whitespace runs collapse, so a line wrap is not a change', closingRefs('Closes\n  #12', 'o', 'r') === 'Closes #12');
   check('closingRefs: every keyword, any case, optional colon, colon without a space, emphasised keyword — each spelling is its own element, ordered by number',
     closingRefs('CLOSE #3, closed: #1, Fix #2, fixed GH-10, Resolve #3, **resolves** o/other#5, RESOLVED:#7', 'o', 'r') === 'closed: #1,Fix #2,CLOSE #3,Resolve #3,RESOLVED:#7,fixed GH-10,**resolves** o/other#5');
@@ -520,6 +525,23 @@ const during = '2026-09-12T10:00:30Z';
   check('closingRefs: a reference inside an inline code span is not a reference', closingRefs('the body said `Closes #463` before', 'o', 'r') === '');
   check('closingRefs: a reference inside an HTML comment is not a reference', closingRefs('<!-- Closes #463 -->', 'o', 'r') === '');
   check('closingRefs: an empty body is the empty string', closingRefs('', 'o', 'r') === '');
+  // Round-5 red team, HIGH: stripping markup to a SPACE let `Closes` bind to a `#n` on the far
+  // side of the removed span, so `Closes \`note\` #463` counted — a reference GitHub does not honour,
+  // manufactured by the stripping itself. Removed markup must break the binding.
+  check('closingRefs: an inline code span between keyword and reference breaks the reference', closingRefs('Closes `note` #463', 'o', 'r') === '');
+  check('closingRefs: an HTML comment between keyword and reference breaks the reference', closingRefs('Closes <!-- keep --> #463', 'o', 'r') === '');
+  check('closingRefs: a fenced block between keyword and reference breaks the reference', closingRefs('Closes\n```\nx\n```\n#463', 'o', 'r') === '');
+  // Round-5 red team: CommonMark's other code forms.
+  check('closingRefs: a ~~~ fence is a code block', closingRefs('~~~\nCloses #463\n~~~', 'o', 'r') === '');
+  check('closingRefs: a four-backtick fence is a code block', closingRefs('````\nCloses #463\n````', 'o', 'r') === '');
+  check('closingRefs: an indented (4-space) code block is a code block', closingRefs('text\n\n    Closes #463\n', 'o', 'r') === '');
+  // Round-5 red team: the markdown-link target carries the meaning; it is part of the spelling
+  // (round 5 review) and the release path trusts it only when it agrees with the display text.
+  check('closingRefs: a link whose target disagrees with its text is a different spelling', closingRefs('Closes [#463](https://github.com/o/r/issues/999)', 'o', 'r') === 'Closes [#463](https://github.com/o/r/issues/999)');
+  check('closingIssues: a link whose target is this repo\'s issue of the SAME number releases it', closingIssues('Closes [#463](https://github.com/o/r/issues/463)', 'o', 'r').join(',') === '463');
+  check('closingIssues: a link whose target disagrees with its text releases nothing', closingIssues('Closes [#463](https://github.com/o/r/issues/999)', 'o', 'r').join(',') === '');
+  check('closingIssues: a link to another repo\'s issue releases nothing here', closingIssues('Closes [#7](https://github.com/x/y/issues/7)', 'o', 'r').join(',') === '');
+  check('closingIssues: a cross-owner owner/repo#n releases nothing here', closingIssues('Closes x/y#1', 'o', 'r').join(',') === '');
   check('closingIssues: same-repo forms canonicalise to numbers for the release paths', closingIssues('Closes #7\nfixes GH-12\ncloses o/r#3\ncloses O/R#4\nresolves https://github.com/o/r/issues/9\ncloses o/other#5', 'o', 'r').join(',') === '3,4,7,9,12');
   w = world({ head: 'b'.repeat(40), body: 'Closes #470\nCloses o/r#465' });
   r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #465,Closes #470', EXEC_FILE: execFile({ num_turns: 30 }) } });
