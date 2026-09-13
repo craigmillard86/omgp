@@ -116,20 +116,29 @@ const SENTINEL = ' ¶ ';
 function stripMarkup(t) {
   const lines = String(t || '').split('\n');
   const out = [];
-  let fence = null, prevBlank = true, inList = false;
+  let fence = null, prevBlank = true, inList = false, inIndented = false;
   for (const line of lines) {
     const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
     if (fence) {
-      if (open && open[1][0] === fence.ch && open[1].length >= fence.len && /^ {0,3}(`{3,}|~{3,})\s*$/.test(line)) fence = null;
+      if (open && open[1][0] === fence.ch && open[1].length >= fence.len && /^ {0,3}(`{3,}|~{3,})\s*$/.test(line)) { fence = null; prevBlank = true; }
       out.push(SENTINEL); continue;
     }
-    if (open) { fence = { ch: open[1][0], len: open[1].length }; out.push(SENTINEL); prevBlank = false; continue; }
+    if (open) { fence = { ch: open[1][0], len: open[1].length }; inIndented = false; out.push(SENTINEL); prevBlank = false; continue; }
     const blank = /^\s*$/.test(line);
-    const listItem = /^\s{0,3}(?:[-*+]|\d+[.)])\s+/.test(line);
+    const indented = /^(?: {4}|\t)/.test(line);
+    // An indented code block runs until a non-indented, non-blank line (blank lines inside it
+    // belong to it). Round 6 stripped only its first line (round-7 red team on #466).
+    if (inIndented) {
+      if (indented || blank) { out.push(SENTINEL); prevBlank = blank; continue; }
+      inIndented = false;
+    }
+    const thematic = /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line);
+    const listItem = !thematic && /^\s{0,3}(?:[-*+]|\d+[.)])\s+/.test(line);
+    if (thematic) { inList = false; out.push(line); prevBlank = true; continue; }   // ends a paragraph, like a blank line
     if (listItem) inList = true;
     else if (blank) { /* a blank line keeps list context until a non-indented, non-list line */ }
     else if (!/^(?: {2,}|\t)/.test(line)) inList = false;
-    if (/^(?: {4}|\t)/.test(line) && prevBlank && !inList) { out.push(SENTINEL); prevBlank = false; continue; }   // indented code
+    if (indented && prevBlank && !inList) { inIndented = true; out.push(SENTINEL); prevBlank = false; continue; }   // indented code
     out.push(line);
     prevBlank = blank;
   }
