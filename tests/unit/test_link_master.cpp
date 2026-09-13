@@ -3114,8 +3114,8 @@ TEST_CASE("the very next begin() after a Failed transaction whose every attempt'
 // --- FR-011: frames arriving while no transaction is open must still be discarded and --
 // counted, not silently absorbed ---------------------------------------------------------
 
-TEST_CASE("a frame arriving while no transaction is open at all is discarded and counted "
-          "against its own claimed source",
+TEST_CASE("a frame arriving while no transaction is open at all is discarded and counted on "
+          "the bus, not against the source it claims",
           "[link]") {
     // PR #137 review, MEDIUM: poll()'s drain loop used to be gated on
     // open_ && sub_phase_ == AwaitResponse, so bytes arriving while fully idle were never
