@@ -113,7 +113,12 @@ const isFixer = body => FIXER_MARK.test(unwrap((body || '').split('\n').find(l =
 // wraps a live reference in code leaves that issue open — visible in the issue, recoverable by
 // a human, forbidden by the prompt, and closed by the follow-up that closes raw-referenced
 // issues on any merge. On the autonomous path agent-merge closes from the raw view regardless.
-const CLOSING = /(?<![\w*_])[*_]{0,2}(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[*_]{0,2}\s*:?\s*(?:<?(https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+))>?|\[#(\d+)\]\(([^)]*)\)|([\w.-]+)\/([\w.-]+)#(\d+)|GH-(\d+)|#(\d+))(?![\w-])/gi;
+// For the `KEYWORD #n` form this must read AT LEAST what agent-merge.yml's release/close regex
+// reads (`\b KEYWORD \s+ #(\d+)`, no trailing restriction): a trailing-character lookahead and a
+// two-character emphasis cap made `fixes #131-followup` and `***fixes #131***` invisible here and
+// live for agent-merge (round-10 red team on #466). Pinned as a superset property by
+// test_reference_guard_reads_at_least_what_agent_merge_reads, against agent-merge's own literal.
+const CLOSING = /(?<![\w*_])[*_]*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[*_]*\s*:?\s*(?:<?(https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+))>?|\[#(\d+)\]\(([^)]*)\)|([\w.-]+)\/([\w.-]+)#(\d+)|GH-(\d+)|#(\d+))/gi;
 const ISSUE_URL = /^https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)\/?$/i;
 function closingMatches(text, owner, repo) {   // the RAW body; no markup is interpreted
   const own = String(owner).toLowerCase(), rep = String(repo).toLowerCase();
@@ -264,9 +269,15 @@ async function detect({ github, context, core, env }) {
       refsDetail = `no closing-reference snapshot from the gate (gate and detector out of step); now: ${show(now)}`;
       core.warning(`agent-noop: ${refsDetail}`);
     } else {
-      const before = snap === 'none' ? '' : asSet(snap.replace(/^raw=/, '').replace(/;gh=.*$/s, ''));   // tolerate the two-view form an older gate wrote
-      refsChanged = before !== now;
-      refsDetail = `as the merge automation reads it — before: ${show(before)}; now: ${show(now)}`;
+      // The gate and this detector ship together and both load from the default branch, so the
+      // snapshot is always this format; anything else is unreadable and fails CLOSED (a shim for an
+      // older two-view format truncated legitimate snapshots — round-10 red team on #466).
+      if (/^raw=|;gh=/.test(snap)) { refsChanged = true; refsDetail = `unreadable closing-reference snapshot '${snap.slice(0, 60)}' (gate and detector out of step)`; }
+      else {
+        const before = snap === 'none' ? '' : asSet(snap);
+        refsChanged = before !== now;
+        refsDetail = `as the merge automation reads it — before: ${show(before)}; now: ${show(now)}`;
+      }
       if (refsChanged) core.warning(`agent-noop: the PR's closing references changed during the run (${refsDetail})`);
     }
     reason = moved ? `head moved from ${before.slice(0, 7)} to ${pr.head.sha.slice(0, 7)}`
