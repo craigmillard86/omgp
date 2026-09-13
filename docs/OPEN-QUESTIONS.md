@@ -3263,6 +3263,135 @@ Three mutants survived the first suite (the `SINCE` window, the `state: 'open'` 
 
 ---
 
+## 2026-09-13 — Ruling recorded: unattributable discards are counted per bus (`BusStats.discards`), implemented in #144
+
+**Context:** the maintainer ruled on 2026-09-11 — in the "Maintainer rulings on the pending
+entries (session of 2026-09-11)" entry above, item 8, and in their own comment on issue #144 —
+that a frame discarded with no attributable address is **counted at bus level**. The field is
+#144's own proposal, `BusStats.discards` (a dedicated `orphan_discards` was named as equally
+inside the ruling; one field is used, because the entries it settles are one question). This
+entry records the ruling against the entries that carry it and states what landed, so the
+answer is findable from each of them.
+
+**Ruling:** option (a) — a frame discarded with no attributable address is counted at bus
+level, in `BusStats.discards`; ratified by the maintainer, 2026-09-11. Stated as a field line
+because the decision has to be *mechanically* findable, not only readable: `docs/GOVERNANCE.md`
+§1 reserves the merge click for any diff that records a ruling in this file, and since the
+2026-09-12 CODEOWNERS amendment only `agent-merge`'s guard enforces it. That guard reads a
+field name at the start of an added line; until this line every decision in the entry lived
+mid-line as `**Ruled: …**`, so the guard never fired and a ruling-recording diff was eligible
+for autonomous merge (round-4 review). **Demonstrated by** reading
+`.github/workflows/agent-merge.yml:199`'s pattern against the entry's added lines — a read of
+the regex, *not* a run of its harness.
+
+**Answers, by appending — the entries below keep their own text and history.** *Scope of the
+ruling, labelled (rule 11): the maintainer's item 8 and their comment on #144 name the
+**2026-09-07** CRC entry explicitly. That the same decision settles the three **2026-09-06**
+entries below is an **inference** by this pull request, not a quoted decision — it follows from
+the maintainer releasing #144, whose acceptance criteria are exactly the claimed-`src`
+attribution and are written "conditional on the ruling selecting option (a)". It is a sound
+reading and the whole feature rests on it, but it is this agent's reading; if the maintainer
+holds the ruling narrower, the two "Ruled: option (a)" lines below are what changes, and the
+code under them with it.*
+
+- **2026-09-06 "a discarded frame whose claimed src is out of range (0x10..0xFE) is counted
+  nowhere; FR-011 says every discard MUST be counted"** — **Ruled: option (a).** Such a frame
+  now increments `bus_stats().discards`.
+- **2026-09-06 "an idle-time discard is charged to the frame's CLAIMED in-range src; nothing
+  authenticates it"** — **Ruled: option (a).** The claimed-src attribution is removed
+  entirely; the in-range half goes to the same bus counter. Option (b) (keep it, document it
+  as unauthenticated) and option (c) (count idle-time discards nowhere) are both rejected.
+- **2026-09-06 "correction to the claimed-src entry above: the counting requirement is
+  FR-011/FR-011a, not AC6"** — its correction stands and is what the amended `spec.md` text
+  rests on; AC6 is not cited.
+- **2026-09-07 "a CRC-corrupt frame arriving with no transaction open moves no counter at
+  all"** — **Ruled: count it at bus level.** A CRC-failed frame outside any open attempt's
+  window increments the same counter. `crc_failures` stays per node.
+
+**What landed (#144):** `BusStats` gains `uint32_t discards`; `Master::drain_wire()` charges
+`stats_[dst_]` only while that address's own transaction is `awaiting`, and everything else to
+`bus_stats_.discards`; `spec.md` FR-011a's per-bus list gains "frames discarded with no
+attributable address"; `data-model.md` §8 and `contracts/link-cpp.md` carry the field and the
+split. `AddrStats::discards` now means "a **decoded** frame discarded during that address's
+own transaction" and nothing else.
+
+**The split's criterion, corrected (red team @25545f5 finding 1).** An earlier revision of
+this entry, and the three documents above, said `AddrStats::discards` counts frames
+"discarded while that address's own transaction is awaiting a response", and justified the
+bus counter with "a discard outside any open response window has no address the engine may
+charge". Neither survives the `awaiting`-but-out-of-window state, which this feature's own
+suite proves reachable: there a CRC-failed frame goes to `bus_stats().discards` while a
+decoded one is charged to `stats(dst).discards`. What decides it is whether the frame
+DECODED — a decoded frame arrives during a transaction this host itself opened, so there is
+an address it may charge; a corrupt frame decodes to nothing and can be attributed only by
+its window, inside which it is `crc_failures` and never `discards`. **Demonstrated by**
+`tests/unit/test_link_master.cpp` "while dst's transaction is awaiting but the frame opened
+outside its window, a DECODED discard is charged to dst and a CRC-failed one goes to the
+bus". The engine's behaviour is unchanged by the correction; only the statements about it
+are. *(Corrected in place, not superseded: the text amended is this entry as added by #144's
+own unmerged commit `722e859`/`25545f5`, part of the pull request under review rather than
+recorded history on `main`. No pre-existing entry is edited.)*
+
+**Claim labels (rule 11).** "No address is charged for a frame merely because that frame
+claimed its address" is **proved by construction** of `drain_wire()`'s if/else: the only
+`AddrStats` write on the discard path is to `dst_`, an address this engine itself addressed;
+the wire-derived `f.src` indexes no table. **Demonstrated by**
+`tests/unit/test_link_master.cpp` "an idle-time discard claiming an in-range source …", "… a
+source well past kAddrCount …" (under ASan), "a frame discarded while dst's own transaction is
+awaiting …" and "a CRC-corrupt frame arriving with no transaction open …". The **wider**
+property "no address is charged for a frame it did not send" is **false and not claimed** (an
+earlier revision of this entry, of the `link/master.cpp` comment and of a test name asserted
+it; red team @722e859 finding 1): while `dst_`'s transaction is awaiting, a discarded frame is
+charged to `dst_` whoever actually sent it, so a third station's frame under its own `src`
+lands on the polled node. That attribution predates #144, the ruling above leaves it alone,
+and it is **demonstrated by** the new case "inside dst's window, a THIRD station's frame is
+charged to dst …". Whether an innocent polled node should carry it is a separate question,
+open only once something consumes the counter. That no *other* code path writes
+`AddrStats::discards` is a **control** — the current contents of `link/` — not a guarantee. That nothing yet *reads* `BusStats::discards` is also a
+control: the counter is diagnostic today, and feeding it into trunk §7 SUSPECT/OFFLINE
+accounting remains a separate, ruling-bearing change (the claimed-src entry's own note).
+
+**Supersedes:** none. **Amends:** none — it records a ruling on the entries named.
+
+---
+
+## 2026-09-13 — structural Deframer discards are still invisible above the engine; #144's bus counter does not cover them
+
+**Context:** #144 (ruling above) closes FR-011's counting gap for the two discard classes
+`Master` itself decides: a decoded frame that fails the acceptance screen with no transaction
+awaiting a response, and a CRC-failed frame outside any awaiting transaction's window. It does **not** cover the
+Deframer's *structural* discards — `Discard::BadLength`, `BadEscape`, `TooLong`,
+`ReservedAddress` (`link/frame.cpp`). Those reach `drain_wire()` as `feed()` returning false
+with no `BadCrc` delta, take the `if (!delivered) continue` path, and are counted only in
+`DeframerStats`, which `Master` does not expose — so a rig emitting structurally malformed
+frames between transactions still reads zero on every counter the layer above can see. Pinned,
+not asserted as desired, by `tests/unit/test_link_master.cpp` "a structurally-discarded frame
+updates last_activity …", which now checks `bus_stats().discards == 0` alongside its existing
+`stats(ADDR_host).discards == 0`.
+
+**Why it may matter:** the 2026-09-07 entry's own argument for counting CRC corruption applies
+unchanged to a garbled length or a dangling escape — "a marginal transceiver, a babbling
+station whose bytes happen to form a bad frame" produces both, and trunk §4 makes discards the
+bus's own health signal. The asymmetry is an artefact of how `Master` observes the Deframer (it
+samples the `BadCrc` cell specifically), not a considered distinction.
+
+**Options:** (a) count every Deframer discard the drain observes at bus level, by comparing the
+*total* of `DeframerStats::discarded[]` across a `feed()` rather than the `BadCrc` cell alone —
+smallest change, keeps the counter's meaning "a frame-level discard with no attributable
+address"; (b) expose `DeframerStats` through `Master` as its own accessor, leaving `BusStats`
+to frame-level decisions — more observable, a contract addition, and two counters a caller must
+add up; (c) leave it: structural garbage is arguably not "a frame" in FR-011's sense, which
+enumerates frames that decode but are not the expected response.
+
+**Recommendation:** (a), as a separate change, because it alters what `bus_stats().discards`
+counts after this repo has begun asserting on it, and because "is a structurally malformed
+burst one discard or several?" (the Deframer can count several across one byte run) needs the
+same human eye as the entry above did. Nothing speculative implemented in #144.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none.
+
+---
+
 ## 2026-09-13 — #463: a comment-only review-fix run is escalated, and the fixer may correct the PR description
 
 **Context:** PR #452 (`task/148`, T0) stalled for 40 minutes on 2026-09-13 and was merged by hand. Its round-2 review had one blocking finding, `[LOW]`, entirely in the PR description. The fixer confirmed it, could not act on it (`gh pr edit` was outside `review-fix.yml`'s allow-list, and that file is outside its bounds), and commented asking for a human. Under #361's detector that comment is production, so the attempt stood and nothing escalated; no new head meant no new review; `agent-merge` reported "review reported findings" every 20 minutes. Every other terminal state in the loop applies `needs-human`; this one only said so in prose.
