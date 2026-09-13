@@ -463,17 +463,23 @@ const during = '2026-09-12T10:00:30Z';
   // may now rewrite the body, so those references are inside its reach. The gate snapshots the
   // set before the run; detect compares after; a change is escalated and fails the job.
   w = world({ head: 'b'.repeat(40), body: 'Fixes bug.\n\nCloses #463' });
-  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '#463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: an unchanged Closes set is not flagged', r.refs_changed === false && w.outputs.refs_changed === 'false');
   w = world({ head: 'b'.repeat(40), body: 'Closes #463\nResolves #1' });
-  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '#463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: an ADDED closing reference is flagged', r.refs_changed === true && w.outputs.refs_changed === 'true');
   w = world({ head: 'b'.repeat(40), body: 'No references any more.' });
-  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '#463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: a REMOVED closing reference is flagged too', r.refs_changed === true);
   w = world({ head: 'b'.repeat(40), body: 'closes #12 and fixes #463' });
-  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '#12,#463', EXEC_FILE: execFile({ num_turns: 30 }) } });
-  check('fix: the comparison is a SET — order and keyword do not matter', r.refs_changed === false);
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'fixes #463,closes #12', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  check('fix: the comparison is a SET — order does not matter', r.refs_changed === false);
+  // Round 5: the keyword and separator DO matter, because agent-merge reads only `KEYWORD<space>#n`.
+  for (const [form, body] of [['Closes:#n', 'Closes:#144'], ['**Closes** #n', '**Closes** #144'], ['Closes [#n](url)', 'Closes [#144](https://github.com/o/r/issues/144)'], ['Fixes #n (keyword changed)', 'Fixes #144']]) {
+    w = world({ head: 'b'.repeat(40), body });
+    r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #144', EXEC_FILE: execFile({ num_turns: 30 }) } });
+    check(`fix: \`Closes #144\` re-spelled as ${form} IS flagged`, r.refs_changed === true);
+  }
   w = world({ head: 'b'.repeat(40), body: 'Closes #1' });
   r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: with no snapshot from the gate the guard cannot judge and does not flag', r.refs_changed === false);
@@ -493,34 +499,37 @@ const during = '2026-09-12T10:00:30Z';
   // and the issue URL, so an ADDED reference in those forms escaped. `closingRefs` is the one
   // implementation the gate (snapshot) and detect (comparison) both call; it canonicalises
   // same-repo references to the bare number and keeps cross-repo ones as `owner/repo#n`.
-  // Round 4 (#466): the guard compares references AS SPELLED. Canonicalising `o/r#465` down to
-  // `465` hid a form change that agent-merge's own parser (`#n` only) acts on, so a fixer could
-  // rewrite `Closes #465` to `Closes o/r#465` unseen and leave in-progress on a closed issue.
-  // Form-preserving sets still grow on an addition, so round 3's coverage is kept. Numbers for
-  // the RELEASE paths come from `closingIssues`, which does canonicalise same-repo forms.
-  check('closingRefs: #n is kept as spelled', closingRefs('Closes #12', 'o', 'r') === '#12');
-  check('closingRefs: GH-n is kept as spelled', closingRefs('fixes GH-12', 'o', 'r') === 'GH-12');
-  check('closingRefs: owner/repo#n for THIS repo is kept as spelled — a form change is a change', closingRefs('resolved o/r#12', 'o', 'r') === 'o/r#12');
-  check('closingRefs: the issue URL is kept as spelled', closingRefs('Closes https://github.com/o/r/issues/12', 'o', 'r') === 'https://github.com/o/r/issues/12');
-  check('closingRefs: a cross-repo reference under the SAME owner counts', closingRefs('closes o/other#5', 'o', 'r') === 'o/other#5');
+  // Round 4 + 5 (#466): the guard compares each reference AS SPELLED — the whole matched
+  // keyword-and-reference text, whitespace collapsed — because agent-merge's own parser reads only
+  // `KEYWORD<space>#n`: folding `o/r#465` to `465` (round 4), or `Closes:#n`, `**Closes** #n` and
+  // `Closes [#n](url)` to `#n` (round 5), hid rewrites that leave in-progress on an issue the merge
+  // should have released. Form-preserving sets still grow on an addition, so round 3's coverage of
+  // GH-n / owner/repo#n / URL additions stands. Numbers for the RELEASE paths come from
+  // `closingIssues`, which canonicalises same-repo forms.
+  check('closingRefs: the whole spelling is the element', closingRefs('Closes #12', 'o', 'r') === 'Closes #12');
+  check('closingRefs: GH-n', closingRefs('fixes GH-12', 'o', 'r') === 'fixes GH-12');
+  check('closingRefs: owner/repo#n for THIS repo is kept as spelled — a form change is a change', closingRefs('resolved o/r#12', 'o', 'r') === 'resolved o/r#12');
+  check('closingRefs: the issue URL is kept as spelled', closingRefs('Closes https://github.com/o/r/issues/12', 'o', 'r') === 'Closes https://github.com/o/r/issues/12');
+  check('closingRefs: a cross-repo reference under the SAME owner counts', closingRefs('closes o/other#5', 'o', 'r') === 'closes o/other#5');
   check('closingRefs: a path-like `a/b#n` under another owner is prose, not a reference', closingRefs('this also fixes core/scheduler#3 in passing', 'o', 'r') === '');
-  check('closingRefs: every keyword, any case, optional colon, colon without a space, emphasised keyword',
-    closingRefs('CLOSE #3, closed: #1, Fix #2, fixed GH-10, Resolve #3, **resolves** o/other#5, RESOLVED:#7', 'o', 'r') === '#1,#2,#3,#7,GH-10,o/other#5');
-  check('closingRefs: a markdown-linked reference and an autolinked URL count', closingRefs('Closes [#134](https://github.com/o/r/issues/134) and fixes <https://github.com/o/r/issues/135>', 'o', 'r') === '#134,https://github.com/o/r/issues/135');
+  check('closingRefs: whitespace runs collapse, so a line wrap is not a change', closingRefs('Closes\n  #12', 'o', 'r') === 'Closes #12');
+  check('closingRefs: every keyword, any case, optional colon, colon without a space, emphasised keyword — each spelling is its own element, ordered by number',
+    closingRefs('CLOSE #3, closed: #1, Fix #2, fixed GH-10, Resolve #3, **resolves** o/other#5, RESOLVED:#7', 'o', 'r') === 'closed: #1,Fix #2,CLOSE #3,Resolve #3,RESOLVED:#7,fixed GH-10,**resolves** o/other#5');
+  check('closingRefs: a markdown-linked reference and an autolinked URL count, as spelled', closingRefs('Closes [#134](https://github.com/o/r/issues/134) and fixes <https://github.com/o/r/issues/135>', 'o', 'r') === 'Closes [#134](https://github.com/o/r/issues/134),fixes <https://github.com/o/r/issues/135>');
   check('closingRefs: a reference inside a fenced code block is not a reference', closingRefs('```\nCloses #463\n```', 'o', 'r') === '');
   check('closingRefs: a reference inside an inline code span is not a reference', closingRefs('the body said `Closes #463` before', 'o', 'r') === '');
   check('closingRefs: a reference inside an HTML comment is not a reference', closingRefs('<!-- Closes #463 -->', 'o', 'r') === '');
   check('closingRefs: an empty body is the empty string', closingRefs('', 'o', 'r') === '');
   check('closingIssues: same-repo forms canonicalise to numbers for the release paths', closingIssues('Closes #7\nfixes GH-12\ncloses o/r#3\ncloses O/R#4\nresolves https://github.com/o/r/issues/9\ncloses o/other#5', 'o', 'r').join(',') === '3,4,7,9,12');
   w = world({ head: 'b'.repeat(40), body: 'Closes #470\nCloses o/r#465' });
-  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '#465,#470', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #465,Closes #470', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: `Closes #465` rewritten as `Closes o/r#465` IS flagged — the form agent-merge reads changed', r.refs_changed === true);
   w = world({ head: 'b'.repeat(40), body: '<!-- Closes #463 -->' });
-  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '#463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: a reference moved into an HTML comment IS flagged as removed', r.refs_changed === true);
   for (const [form, body] of [['GH-n', 'Closes #463\nCloses GH-134'], ['owner/repo#n', 'Closes #463\nfixes o/r#134'], ['issue URL', 'Closes #463\nresolves https://github.com/o/r/issues/134']]) {
     w = world({ head: 'b'.repeat(40), body });
-    r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '#463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+    r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
     check(`fix: a reference ADDED as ${form} is flagged`, r.refs_changed === true && /134/.test(r.refs_detail));
   }
   // [RT-2] Both new finalize branches return; their order was unpinned. A changed reference set
