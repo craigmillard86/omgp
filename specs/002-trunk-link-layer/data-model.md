@@ -201,19 +201,18 @@ rotation (`next_probe(now)`): round-robin over addresses 0x01–0x0F whose state
 UNENROLLED or OFFLINE; returns `{addr, bit_rate}`. *(Amended 2026-09-13, F4.)* While `fault`
 (§7) the candidate set also includes every SUSPECT address, so the alternating-rate probes
 reach the nodes whose silence declared the fault at once rather than only after they age to
-OFFLINE; **at most one probe is outstanding at a time while `fault`** — `next_probe()` returns
-`{addr = 0, …}` ("nothing to issue"; 0x00 is the host and never a target) whenever
-`BusState.outstanding ≠ 0`, i.e. until the previous probe's `on_result` has arrived — so every
-`on_result` during a fault is the outcome of the one probe in flight, and no correlation token
-is needed (round-10 red team on #472); and during a reference pass (§7) `next_probe()` yields
-each enrolled address (state ≠ UNENROLLED) once, in address order, at `TRUNK_bit_rate`,
-without alternating, one at a time under the same rule.
+OFFLINE. Trunk §3 (strict master poll) admits **one transaction at a time** on the wire, and the
+scheduler calls `next_probe()` only when none is outstanding, so every `on_result` is the outcome
+of the last probe issued — no correlation state is needed and none is kept (rounds 9-10 on #472
+specified a matcher for out-of-order outcomes that trunk §3 forbids; withdrawn). During a
+reference pass (§7) `next_probe()` yields each enrolled address (state ≠ UNENROLLED) once, in
+address order, at `TRUNK_bit_rate`, without alternating.
 
 ## 7. Bus state
 
 ```
 BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes; u32 faults;
-           u8 fallback_answerer; u8 ref_pass_left; u8 outstanding }   /* last three added 2026-09-13 (F4, below; 0 = none); implemented by T043 */
+           u8 fallback_answerer; u8 ref_pass_left }   /* last two added 2026-09-13 (F4, below; 0 = none); implemented by T043 */
 ```
 
 - Declare (`fault = true`, `BUS_FAULT` + `ALERT` notifications, `faults++`): evaluated
@@ -229,12 +228,9 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   (its §6 transition is deferred — an ENROLLED node would be status-polled at the reference
   rate it cannot hear, fail into SUSPECT, and the recovery would be re-declared as a fault at
   once), and a **reference pass** starts — `ref_pass_left = |enrolled|` where enrolled =
-  {addr : state ≠ UNENROLLED}. Because at most one probe is outstanding while `fault` (§6), the
-  fallback answer that starts the pass IS the outcome of the only probe in flight: nothing
-  else is outstanding when the pass begins, each pass probe is issued only after the previous
-  outcome arrived, and every `on_result` during the pass is that pass probe's — matched by
-  `outstanding` alone, no rate token (round-10 red team on #472; the round-9 `pass_addr` +
-  rate matcher could not be exact while two transactions to one address could exist).
+  {addr : state ≠ UNENROLLED}. Trunk §3 admits one transaction at a time, so the fallback answer
+  that starts the pass is the outcome of the only transaction there was, nothing is in flight
+  when the pass begins, and every `on_result` during the pass is the pass probe's (§6).
   `ref_pass_left` is decremented by each pass outcome, never when a probe is issued (a
   `tick()` between the last probe and its result must not fire the clear, round-8 red team).
   A valid answer at the reference rate during the pass → clear at the reference rate as above,
@@ -250,8 +246,8 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   a clear at the fallback rate every other enrolled node keeps its SUSPECT/OFFLINE state and
   timers. `rate_changes++` on each change of `bit_rate`. On declare, and on every clear at
   either rate **after the deferred enrolment above has been applied**, `fallback_answerer = 0`
-  and `ref_pass_left = 0` (and `outstanding` is cleared by the outcome that clears) — a clear
-  at the reference rate can fire mid-pass, and a stale pass counter must not survive it; resetting first would lose the answerer the clear still needs
+  and `ref_pass_left = 0` — a clear at the reference rate can fire mid-pass, and a stale pass
+  counter must not survive it; resetting first would lose the answerer the clear still needs
   and re-declare the fault at once (round-8 red team on #472).
   The superseded **Clear** clause read "first `ok` result at any rate while `fault` →
   `fault = false`, `bit_rate` = the rate that got the answer": the answering rate pinned the
@@ -261,9 +257,10 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   use"): a transaction issued at the fallback rate takes `TRUNK_bit_rate / TRUNK_bit_rate_fallback`
   (≈ 8.7×) the time of the same transaction at the reference rate, and the superframe that issues
   it is stretched accordingly — whether that is because `bit_rate` is the fallback rate, or
-  because a fault-time probe (§7, alternation) or a pass probe is issued at a rate other than
-  `bit_rate` (`bit_rate` is assigned only by a clear; during a fault the probe's rate is the
-  probe's own, round-9 red team on #472). One minimal status-poll transaction alone is ≈ 2.4 ms
+  because a fault-time fallback probe (§7, alternation) is issued at the fallback rate while
+  `bit_rate` still reads the reference rate (`bit_rate` is assigned only by a clear; during a
+  fault the probe's rate is the probe's own, round-9 red team on #472). Pass probes are issued at
+  the reference rate and are never stretched. One minimal status-poll transaction alone is ≈ 2.4 ms
   at 115.2 kbit/s, so §6's 2 ms superframe cannot hold one. Implemented where the scheduler
   consumes the probe's `bit_rate` and `bit_rate()` (F3), not in this tracker.
 - No automatic return (ruling 2026-09-13): nodes select their rate by strap or configuration
