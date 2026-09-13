@@ -236,7 +236,7 @@ assert no bus fault.
 **Acceptance Scenarios**:
 
 1. **Given** several ENROLLED nodes, **When** all of them fail per the bus-fault rule
-   (FR-028), **Then** the host declares BUS_FAULT once, raises one alert, and the next
+   (FR-024), **Then** the host declares BUS_FAULT once, raises one alert, and the next
    probes go out at the fallback bit rate.
 2. **Given** several ENROLLED nodes, **When** only some of them fail, **Then** those nodes
    follow the Story 4 state machine and no bus fault is declared.
