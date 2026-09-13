@@ -5,10 +5,10 @@
 // Why this exists (round-1 red team + review on #420). risk-score had NO tests, and its tier is
 // what `agent-approve` and `agent-merge` gate on — so every autonomy decision in the repo rests on
 // an untested regex. The specific hole: `removedTests` is anchored at `^tests/`, so deleting
-// anything under `tools/refimpl/` — including the 436-test Python suite and the floor ratchet that
-// #420 leans on — scored T1, inside `auto_merge_max_tier: 2`, i.e. autonomously mergeable. And a
-// one-line change to the floor datum is `+1/-1`, so `deletions > additions` is false and it scored
-// T0. Both are pinned below.
+// anything under `tools/refimpl/` — the 436-test Python suite that drives every workflow harness
+// — scored T1, inside `auto_merge_max_tier: 2`, i.e. autonomously mergeable. That hole is pinned
+// below. (Round 1 also found a `+1/-1` edit to a floor datum scored T0; the datum was withdrawn
+// with the floor half at 2389c40, so there is no datum case here.)
 'use strict';
 const fs = require('fs');
 const S = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));

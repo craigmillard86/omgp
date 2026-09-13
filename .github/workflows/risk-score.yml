@@ -24,10 +24,9 @@ jobs:
               {owner, repo, pull_number: pr.number, per_page: 100});
             const paths = files.map(f => f.filename);
             const touches = re => paths.some(p => re.test(p));
-            // "Test content" is not only C++ under tests/: tools/refimpl/test_*.py is the 441-test
+            // "Test content" is not only C++ under tests/: tools/refimpl/test_*.py is the 436-test
             // Python suite that drives every workflow harness in this repo (agent-merge,
-            // agent-approve, the story gate, the follow-up filer) and holds the unit-test floor
-            // ratchet. Anchored at ^tests/ alone, deleting any of it scored T1 — inside
+            // agent-approve, the story gate, the follow-up filer). Anchored at ^tests/ alone, deleting any of it scored T1 — inside
             // auto_merge_max_tier, i.e. an agent could delete its own gate's tests and merge that
             // autonomously (round-1 red team on #420, finding 1). Pinned by risk_score_harness.js.
             // Note the rule still cannot punish ADDING tests: it requires deletions > 0.

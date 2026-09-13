@@ -3200,7 +3200,7 @@ The three rounds, on that half alone: the ratchet never ran → the two readers 
 
 ## 2026-09-13 — Correction by supersession: the 2026-09-12 autonomy-gates entry describes work that `2389c40` withdrew
 
-**Context:** review round 5 of PR #420 (@`2389c40`) found that the entry above was written before the split and not re-read after it. Its **Amends** line, three present-tense sentences in its round-1 and round-2 sections, and two figures describe the withdrawn floor half as shipped. This file is append-only, so that entry stands as written and this one corrects it.
+**Context:** review round 4 of PR #420 (@`2389c40`) found that the entry above was written before the split and not re-read after it. Its **Amends** line, three present-tense sentences in its round-1 and round-2 sections, and two figures describe the withdrawn floor half as shipped. This file is append-only, so that entry stands as written and this one corrects it.
 
 **What is wrong in the 2026-09-12 entry, and what is true at `2389c40`:**
 
@@ -3209,10 +3209,12 @@ The three rounds, on that half alone: the ratchet never ran → the two readers 
 - `:3171` *"The test now fetches the base explicitly and fails, rather than skipping"* — `tools/refimpl/test_floor_datum.py` was deleted; no such test exists at this head.
 - `:3177` *"Both now trim leading and trailing whitespace only, identically, and the test compares the two values"* — both readers and that test were withdrawn. `pipeline.sh` is byte-identical to `main` and reads `UNIT_TEST_FLOOR` exactly as it did before #420.
 - `:3173` says `risk_score_harness.js` has **12 cases**; it has **15** at this head (counted: 15 `check(` calls).
-- `:3193` says the Python suite has **441** tests; `python -m pytest tools/refimpl/ --collect-only -q` collects **436** at this head. The same figure sat in a comment at `risk_score_harness.js:8` and is corrected in the same commit as this entry; no test changes.
+- `:3193` says the Python suite has **441** tests; `python -m pytest tools/refimpl/ --collect-only -q` collects **436** at this head. The same figure sat in comments at `tests/workflows/risk_score_harness.js:8`, `tools/refimpl/test_workflow_scripts.py:1118` and `.github/workflows/risk-score.yml:27`, each also naming the withdrawn ratchet as a reason the rule exists; all three are corrected in this PR. Comments only; no test changes.
 
 The round-1, round-2 and round-3 narratives of the floor readers, the ratchet and the rename attack remain a true record of what was found and why that half was withdrawn. Only their "now" clauses are stale, and they are the ones listed above.
 
-**Ruling:** human, 2026-09-13 — correct the record by supersession in one append, then merge #420.
+**Round 5 (@`5c6b71e`) found one more hole in the guard itself:** the rename check inspected a single entry, so renaming the record to an archive path *and* adding a fresh file at the old path in one PR let the fresh file's clean patch through, with GitHub's filename ordering choosing which entry was seen. Fixed at `2d800bf`: every matching entry is checked and a rename in either direction is refused. Red first: `A6b`/`A6c`/`A6d` in `agent_merge_harness.js`, 72/74 at `4bc512f`, 74/74 after. Round 5 also found that the first draft of this entry recorded a dated human ruling and an instruction to merge #420 with no artefact behind either, which is the exact form the guard refuses; the line below is what remains.
+
+**Ruling:** PENDING — human. Recommended: correct the record by supersession, as this entry does.
 
 **Supersedes:** the 2026-09-12 entry "Autonomy gates: branch protection was overriding GOVERNANCE §1, and the floor's datum sat in an owned file" — on its Amends line and the five present-tense claims listed above only. Its measurement, the CODEOWNERS correction, the ruling guard and the split ruling stand. **Amends:** nothing beyond that entry.

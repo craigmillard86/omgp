@@ -1115,7 +1115,7 @@ def test_risk_score_tiering(tmp_path):
     """risk-score decides the tier every autonomy gate reads, and had no tests at all (#420 round 1).
 
     The hole that mattered: `removedTests` is anchored at `^tests/`, so deleting anything under
-    tools/refimpl/ — the 441-test Python suite, including the floor ratchet — scored T1, inside
+    tools/refimpl/ — the 436-test Python suite — scored T1, inside
     auto_merge_max_tier, i.e. autonomously mergeable."""
     f = tmp_path / "scripts.json"
     f.write_text(json.dumps({"score": _script("risk-score.yml", "score")}))
