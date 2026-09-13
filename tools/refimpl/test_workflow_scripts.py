@@ -597,6 +597,10 @@ def test_noop_round3_wiring():
     assert "review-fix({{ATTEMPT}}) @ {{HEAD}}" in prompt, "review-fix.md must tell the fixer to open its comment with the marker"
 
 
+def prompt_text_for_review_fix():
+    return (ROOT / ".github" / "agent-prompts" / "review-fix.md").read_text()
+
+
 def test_rebuttal_only_fix_run_is_escalated_and_the_fixer_may_edit_the_body():
     """#463 (seen on #452): a review-fix run that comments without a commit is production for the
     no-op detector and a dead end for the loop — no new head, no new review, no label. Two pins:
@@ -620,22 +624,39 @@ def test_rebuttal_only_fix_run_is_escalated_and_the_fixer_may_edit_the_body():
         # `review-fix-<n>`), which is the surface agent-merge and the attempt budget READ. The
         # grant is scoped to the one form the prompt sanctions: this PR's number, then
         # --body-file. Checked with the allow-list's own prefix semantics, not by string equality.
+        # Round 2: a trailing `*` spans the rest of the command line, so `--body-file x
+        # --remove-label needs-human` matched the round-1 grant. The grant is now the EXACT
+        # command the prompt dictates — this PR, this file path, nothing after — with no wildcard.
         edit_grants = [g for g in granted if g.startswith("Bash(gh pr edit")]
-        assert edit_grants == ["Bash(gh pr edit ${{ needs.gate.outputs.pr }} --body-file*)"], (
-            st.get("id"), "the fixer's gh pr edit grant must be scoped to <this PR> --body-file", edit_grants)
+        assert edit_grants == ["Bash(gh pr edit ${{ needs.gate.outputs.pr }} --body-file /tmp/pr-body.md)"], (
+            st.get("id"), "the fixer's gh pr edit grant must be the exact sanctioned command", edit_grants)
+        assert not any("*" in g for g in edit_grants), "no wildcard anywhere in the gh pr edit grant"
         pats = [g[5:-1] for g in granted if g.startswith("Bash(")]
         pr = "${{ needs.gate.outputs.pr }}"
         allowed = lambda c: any(fnmatch.fnmatchcase(c, p) for p in pats)
-        assert allowed(f"gh pr edit {pr} --body-file /tmp/b.md"), "the sanctioned body edit must be permitted"
+        assert allowed(f"gh pr edit {pr} --body-file /tmp/pr-body.md"), "the sanctioned body edit must be permitted"
         for c in (f"gh pr edit {pr} --remove-label needs-human", f"gh pr edit {pr} --add-label risk:t0",
                   f"gh pr edit {pr} --remove-label review-fix-1", f"gh pr edit {pr} --base main",
-                  "gh pr edit 999 --body-file /tmp/b.md", f"gh pr edit {pr} --title x --body-file /tmp/b.md"):
+                  "gh pr edit 999 --body-file /tmp/pr-body.md", f"gh pr edit {pr} --title x --body-file /tmp/pr-body.md",
+                  f"gh pr edit {pr} --body-file /tmp/pr-body.md --remove-label needs-human",
+                  f"gh pr edit {pr} --body-file /tmp/pr-body.md --add-label risk:t0 --remove-label risk:t3",
+                  f"gh pr edit {pr} --body-file /tmp/pr-body.md --remove-label review-fix-1",
+                  f"gh pr edit {pr} --body-file /tmp/other.md", f"gh pr edit {pr} --body-file /tmp/pr-body.md;gh pr edit {pr} --base main"):
             assert not allowed(c), (st.get("id"), "must be denied by the allow-list", c)
+    assert "/tmp/pr-body.md" in prompt_text_for_review_fix(), "the prompt must dictate the exact sanctioned command"
+    # The Closes/Fixes/Resolves set the merge gate acts on is snapshotted by the gate and compared
+    # by detect; finalize is told REFS_CHANGED and must not return early on it.
+    assert "closes" in wf["jobs"]["gate"]["outputs"], "the gate must export the body's closing-reference set"
+    denv = by_id["detect"].get("env", {})
+    assert "CLOSES_BEFORE" in denv and "needs.gate.outputs.closes" in str(denv["CLOSES_BEFORE"]), "detect must receive the snapshot"
+    assert "REFS_CHANGED" in env and "steps.detect.outputs.refs_changed" in str(env["REFS_CHANGED"]), "finalize must be told"
+    assert "REFS_CHANGED" in _script("review-fix.yml", "fix", "finalize"), "finalize's early return must not swallow it"
         # ...and still nothing that reaches the approval path.
         for banned in ("Bash(gh pr review*)", "Bash(gh pr merge*)", "Bash(gh api*)", "Bash(gh*)", "Bash(*)"):
             assert banned not in granted, (st.get("id"), banned)
-    prompt = (ROOT / ".github" / "agent-prompts" / "review-fix.md").read_text()
+    prompt = prompt_text_for_review_fix()
     assert "gh pr edit" in prompt, "review-fix.md must tell the fixer it may correct the PR body"
+    assert "Closes" in prompt and "must not" in prompt, "the prompt must forbid touching the closing references"
     # Round-1 red team on #466, finding 5: a body edit does not move the head, so on its own the
     # run the grant enables is the run the escalation catches. The prompt must make the fixer
     # push an empty commit after a body-only correction, so the reviewers re-read it.
@@ -656,8 +677,8 @@ def test_review_fix_finalize_glue_calls_finalize_on_a_comment_only_run(tmp_path)
     runner.write_text(
         "const S = process.argv[2]; const AF = Object.getPrototypeOf(async function(){}).constructor;\n"
         "(async () => { await new AF('github','context','core','require', S)({}, {}, {notice(){},warning(){}}, require); })();")
-    def calls(noop, only):
-        env = dict(os.environ, RUNNER_TEMP=str(tmp_path), NOOP=noop, ONLY_COMMENT=only, KIND="fix", PR="1")
+    def calls(noop, only, refs="false"):
+        env = dict(os.environ, RUNNER_TEMP=str(tmp_path), NOOP=noop, ONLY_COMMENT=only, REFS_CHANGED=refs, KIND="fix", PR="1")
         r = subprocess.run(["node", str(runner), script], capture_output=True, text=True, env=env, timeout=30)
         assert r.returncode == 0, r.stderr
         return "FINALIZE_CALLED" in r.stdout
@@ -665,6 +686,7 @@ def test_review_fix_finalize_glue_calls_finalize_on_a_comment_only_run(tmp_path)
     assert not calls("false", "false"), "an ordinary produced run must return early"
     assert calls("true", "false"), "a no-op run must reach finalize (it is released)"
     assert calls("true", "true"), "an errored comment-only run must reach finalize (it fails loudly)"
+    assert calls("false", "false", "true"), "a run that changed the closing references must reach finalize"
     # The implement path has no comment-only outcome; the signal must not leak into dispatch.
     dwf = yaml.safe_load((ROOT / ".github" / "workflows" / "agent-dispatch.yml").read_text())
     denv = {s.get("id"): s for s in dwf["jobs"]["implement"]["steps"] if s.get("id")}["finalize"].get("env", {})

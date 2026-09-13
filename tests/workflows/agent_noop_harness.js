@@ -22,7 +22,7 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
 
 // A mock of the slice of the API these two functions touch. Label removal 404s when the label is
 // absent, as the real API does — finalize must treat that as a non-event.
-function world({ prs = [], labels = [], comments = [], head = 'a'.repeat(40), labelFails = null, branch = undefined } = {}) {
+function world({ prs = [], labels = [], comments = [], head = 'a'.repeat(40), labelFails = null, branch = undefined, body = 'Closes #463' } = {}) {
   const log = [], outputs = {};
   const state = { labels: [...labels], comments: [...comments], head };
   const github = {
@@ -38,7 +38,7 @@ function world({ prs = [], labels = [], comments = [], head = 'a'.repeat(40), la
       pulls: {
         list: async () => ({ data: prs }),
         listCommits: async () => ({ data: (prs[0] && prs[0].commits) || [] }),
-        get: async () => ({ data: { head: { sha: state.head } } }),
+        get: async () => ({ data: { head: { sha: state.head }, body } }),
       },
       issues: {
         listComments: async () => ({ data: state.comments }),
@@ -425,7 +425,6 @@ const during = '2026-09-12T10:00:30Z';
   check('fix finalize: ...does not fail the job — the fixer did what it was told', w.outputs.__failed === undefined);
   w = world({ labels: ['task', 'in-progress'] });
   await finalize({ ...w, env: { KIND: 'implement', ISSUE: '58', ATTEMPTS: '1', TURNS: '40', DENIALS: '0', PRODUCED: 'true', ONLY_COMMENT: '', REASON: 'an open PR on task/58 was created or pushed to by this run' } });
-  check('implement finalize: ONLY_COMMENT is a fix-path signal; a produced dispatch is still left alone when not errored', true);
   // Round-1 review on #466: the comment-only branch sat before the produced-then-errored branch
   // and never consulted NOOP, so an is_error (or cancelled) run whose only output was a comment
   // exited GREEN with a comment calling the crash a considered rebuttal. is_error is a no-op
@@ -452,6 +451,39 @@ const during = '2026-09-12T10:00:30Z';
   w = world({ labels: ['task', 'in-progress'] });
   await finalize({ ...w, env: { KIND: 'implement', ISSUE: '58', ATTEMPTS: '1', TURNS: '40', DENIALS: '0', NOOP: 'false', PRODUCED: 'true', PARTIAL: 'false', REASON: 'an open PR on task/58 was created or pushed to by this run' } });
   check('implement finalize: a produced, non-partial dispatch touches nothing', w.state.labels.includes('in-progress') && !said(w, /comment:/) && w.outputs.__failed === undefined);
+  // Round-2 (#466): the `PARTIAL !== 'true'` clause of that early return was unpinned — dropping
+  // it survived 98/98 and silently restored #361's AC1 regression (branch pushed, no PR, green).
+  w = world({ labels: ['task', 'in-progress'] });
+  await finalize({ ...w, env: { KIND: 'implement', ISSUE: '58', ATTEMPTS: '1', TURNS: '156', DENIALS: '26', NOOP: 'false', PRODUCED: 'true', PARTIAL: 'true',
+    REASON: 'commits were pushed to task/58 during this run, though no PR was opened' } });
+  check('implement finalize: a PARTIAL run with NOOP=false still speaks and fails', said(w, /comment:.*task\/58/) && typeof w.outputs.__failed === 'string' && w.state.labels.includes('in-progress'));
+
+  // === round 2 (#466): the body grant reaches the Closes/Fixes/Resolves references ==============
+  // agent-merge closes, and the exhaustion path releases, every issue the body names. The fixer
+  // may now rewrite the body, so those references are inside its reach. The gate snapshots the
+  // set before the run; detect compares after; a change is escalated and fails the job.
+  w = world({ head: 'b'.repeat(40), body: 'Fixes bug.\n\nCloses #463' });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  check('fix: an unchanged Closes set is not flagged', r.refs_changed === false && w.outputs.refs_changed === 'false');
+  w = world({ head: 'b'.repeat(40), body: 'Closes #463\nResolves #1' });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  check('fix: an ADDED closing reference is flagged', r.refs_changed === true && w.outputs.refs_changed === 'true');
+  w = world({ head: 'b'.repeat(40), body: 'No references any more.' });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  check('fix: a REMOVED closing reference is flagged too', r.refs_changed === true);
+  w = world({ head: 'b'.repeat(40), body: 'closes #12 and fixes #463' });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '12,463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  check('fix: the comparison is a SET — order and keyword do not matter', r.refs_changed === false);
+  w = world({ head: 'b'.repeat(40), body: 'Closes #1' });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: '', EXEC_FILE: execFile({ num_turns: 30 }) } });
+  check('fix: with no snapshot from the gate the guard cannot judge and does not flag', r.refs_changed === false);
+  w = world({ labels: ['agent-authored', 'risk:t0', 'review-fix-1'] });
+  await finalize({ ...w, env: { KIND: 'fix', PR: '466', ATTEMPT: '1', ATTEMPTS: '1', TURNS: '30', DENIALS: '0', NOOP: 'false', PRODUCED: 'true', ONLY_COMMENT: 'false', REFS_CHANGED: 'true',
+    REASON: 'head moved from aaaaaaa to bbbbbbb' } });
+  check('fix finalize: a changed Closes set escalates needs-human', w.state.labels.includes('needs-human'));
+  check('fix finalize: ...names the references in the comment', said(w, /comment:.*(Closes|closing reference)/i));
+  check('fix finalize: ...and FAILS the job — an agent rewrote text the merge gate acts on', typeof w.outputs.__failed === 'string');
+  check('fix finalize: ...and the attempt stays spent', w.state.labels.includes('review-fix-1'));
 
   for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
   console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);
