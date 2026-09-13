@@ -3260,3 +3260,88 @@ Three mutants survived the first suite (the `SINCE` window, the `state: 'open'` 
 **Judgement added by round 3, stated because it is a control and not a guarantee (rule 11):** the fixer is recognised by a marker its prompt tells it to write. A fixer that ignores the instruction is declared a no-op — escalated, returned, failed — which is the loud direction. The prompt and the detector both load from the default branch, so they cannot drift apart within a run; `test_noop_round3_wiring` pins the literal in both.
 
 **Supersedes:** none.
+
+---
+
+## 2026-09-13 — Ruling recorded: unattributable discards are counted per bus (`BusStats.discards`), implemented in #144
+
+**Context:** the maintainer ruled on 2026-09-11 — in the "Maintainer rulings on the pending
+entries (session of 2026-09-11)" entry above, item 8, and in their own comment on issue #144 —
+that a frame discarded with no attributable address is **counted at bus level**. The field is
+#144's own proposal, `BusStats.discards` (a dedicated `orphan_discards` was named as equally
+inside the ruling; one field is used, because the entries it settles are one question). This
+entry records the ruling against the entries that carry it and states what landed, so the
+answer is findable from each of them.
+
+**Answers, by appending — the entries below keep their own text and history:**
+
+- **2026-09-06 "a discarded frame whose claimed src is out of range (0x10..0xFE) is counted
+  nowhere; FR-011 says every discard MUST be counted"** — **Ruled: option (a).** Such a frame
+  now increments `bus_stats().discards`.
+- **2026-09-06 "an idle-time discard is charged to the frame's CLAIMED in-range src; nothing
+  authenticates it"** — **Ruled: option (a).** The claimed-src attribution is removed
+  entirely; the in-range half goes to the same bus counter. Option (b) (keep it, document it
+  as unauthenticated) and option (c) (count idle-time discards nowhere) are both rejected.
+- **2026-09-06 "correction to the claimed-src entry above: the counting requirement is
+  FR-011/FR-011a, not AC6"** — its correction stands and is what the amended `spec.md` text
+  rests on; AC6 is not cited.
+- **2026-09-07 "a CRC-corrupt frame arriving with no transaction open moves no counter at
+  all"** — **Ruled: count it at bus level.** A CRC-failed frame outside any open attempt's
+  window increments the same counter. `crc_failures` stays per node.
+
+**What landed (#144):** `BusStats` gains `uint32_t discards`; `Master::drain_wire()` charges
+`stats_[dst_]` only while that address's own transaction is `awaiting`, and everything else to
+`bus_stats_.discards`; `spec.md` FR-011a's per-bus list gains "frames discarded with no
+attributable address"; `data-model.md` §8 and `contracts/link-cpp.md` carry the field and the
+split. `AddrStats::discards` now means "discarded during that address's own transaction" and
+nothing else.
+
+**Claim labels (rule 11).** "No address is charged for a frame it did not send" is **proved by
+construction** of `drain_wire()`'s if/else: the only `AddrStats` write on the discard path is
+to `dst_`, an address this engine itself addressed; the wire-derived `f.src` indexes no table.
+**Demonstrated by** `tests/unit/test_link_master.cpp` "an idle-time discard claiming an
+in-range source …", "… a source well past kAddrCount …" (under ASan), "a frame discarded while
+dst's own transaction is awaiting …" and "a CRC-corrupt frame arriving with no transaction
+open …". That no *other* code path writes `AddrStats::discards` is a **control** — the current
+contents of `link/` — not a guarantee. That nothing yet *reads* `BusStats::discards` is also a
+control: the counter is diagnostic today, and feeding it into trunk §7 SUSPECT/OFFLINE
+accounting remains a separate, ruling-bearing change (the claimed-src entry's own note).
+
+**Supersedes:** none. **Amends:** none — it records a ruling on the entries named.
+
+---
+
+## 2026-09-13 — structural Deframer discards are still invisible above the engine; #144's bus counter does not cover them
+
+**Context:** #144 (ruling above) closes FR-011's counting gap for the two discard classes
+`Master` itself decides: a delivered frame that fails the acceptance screen with no window
+open, and a CRC-failed frame outside any open attempt's window. It does **not** cover the
+Deframer's *structural* discards — `Discard::BadLength`, `BadEscape`, `TooLong`,
+`ReservedAddress` (`link/frame.cpp`). Those reach `drain_wire()` as `feed()` returning false
+with no `BadCrc` delta, take the `if (!delivered) continue` path, and are counted only in
+`DeframerStats`, which `Master` does not expose — so a rig emitting structurally malformed
+frames between transactions still reads zero on every counter the layer above can see. Pinned,
+not asserted as desired, by `tests/unit/test_link_master.cpp` "a structurally-discarded frame
+updates last_activity …", which now checks `bus_stats().discards == 0` alongside its existing
+`stats(ADDR_host).discards == 0`.
+
+**Why it may matter:** the 2026-09-07 entry's own argument for counting CRC corruption applies
+unchanged to a garbled length or a dangling escape — "a marginal transceiver, a babbling
+station whose bytes happen to form a bad frame" produces both, and trunk §4 makes discards the
+bus's own health signal. The asymmetry is an artefact of how `Master` observes the Deframer (it
+samples the `BadCrc` cell specifically), not a considered distinction.
+
+**Options:** (a) count every Deframer discard the drain observes at bus level, by comparing the
+*total* of `DeframerStats::discarded[]` across a `feed()` rather than the `BadCrc` cell alone —
+smallest change, keeps the counter's meaning "a frame-level discard with no attributable
+address"; (b) expose `DeframerStats` through `Master` as its own accessor, leaving `BusStats`
+to frame-level decisions — more observable, a contract addition, and two counters a caller must
+add up; (c) leave it: structural garbage is arguably not "a frame" in FR-011's sense, which
+enumerates frames that decode but are not the expected response.
+
+**Recommendation:** (a), as a separate change, because it alters what `bus_stats().discards`
+counts after this repo has begun asserting on it, and because "is a structurally malformed
+burst one discard or several?" (the Deframer can count several across one byte run) needs the
+same human eye as the entry above did. Nothing speculative implemented in #144.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none.
