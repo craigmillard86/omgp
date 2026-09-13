@@ -114,16 +114,21 @@ const isFixer = body => FIXER_MARK.test(unwrap((body || '').split('\n').find(l =
 // a lazy continuation or an indented table row is prose GitHub renders and honours (round 6).
 const SENTINEL = ' ¶ ';
 function stripMarkup(t) {
+  // Fenced blocks and indented code are line-structured; code spans and HTML comments are not.
+  // Fence openers/closers may sit at a list item's content column, so any leading whitespace is
+  // allowed (CommonMark 4.5); a backtick fence's info string may not contain a backtick, so a
+  // line like ```x``` is a code span, not a fence (round-8 red team on #466).
   const lines = String(t || '').split('\n');
   const out = [];
   let fence = null, prevBlank = true, inList = false, inIndented = false;
   for (const line of lines) {
-    const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    const open = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+    const isOpener = open && !(open[1][0] === '`' && open[2].includes('`'));
     if (fence) {
-      if (open && open[1][0] === fence.ch && open[1].length >= fence.len && /^ {0,3}(`{3,}|~{3,})\s*$/.test(line)) { fence = null; prevBlank = true; }
+      if (open && open[1][0] === fence.ch && open[1].length >= fence.len && /^\s*(`{3,}|~{3,})\s*$/.test(line)) { fence = null; prevBlank = true; }
       out.push(SENTINEL); continue;
     }
-    if (open) { fence = { ch: open[1][0], len: open[1].length }; inIndented = false; out.push(SENTINEL); prevBlank = false; continue; }
+    if (isOpener) { fence = { ch: open[1][0], len: open[1].length }; inIndented = false; out.push(SENTINEL); prevBlank = false; continue; }
     const blank = /^\s*$/.test(line);
     const indented = /^(?: {4}|\t)/.test(line);
     // An indented code block runs until a non-indented, non-blank line (blank lines inside it
@@ -143,8 +148,11 @@ function stripMarkup(t) {
     prevBlank = blank;
   }
   return out.join('\n')
-    .replace(/<!--[\s\S]*?-->/g, SENTINEL)
-    .replace(/`[^`\n]*`/g, SENTINEL);
+    // An HTML comment runs to `-->` or, unterminated, to the end of the document (CommonMark 4.6).
+    .replace(/<!--[\s\S]*?(?:-->|$)/g, SENTINEL)
+    // A code span opens with a backtick string of length N and closes with one of the SAME
+    // length not adjacent to another backtick (CommonMark 6.1); an unmatched run is literal.
+    .replace(/(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g, SENTINEL);
 }
 const CLOSING = /(?<![\w*_])[*_]{0,2}(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[*_]{0,2}\s*:?\s*(?:<?(https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+))>?|\[#(\d+)\]\(([^)]*)\)|([\w.-]+)\/([\w.-]+)#(\d+)|GH-(\d+)|#(\d+))(?![\w-])/gi;
 const ISSUE_URL = /^https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)\/?$/i;
