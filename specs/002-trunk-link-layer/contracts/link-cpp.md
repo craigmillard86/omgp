@@ -211,8 +211,11 @@ public:
 Rules: SUSPECT after `TRUNK_suspect_after_failures` consecutive failures; OFFLINE after
 `TRUNK_offline_after_suspect_ms` in SUSPECT without a valid response; any valid response
 → ENROLLED; UNENROLLED never counts; BUS_FAULT when ≥ 1 node is enrolled and all enrolled
-nodes are SUSPECT/OFFLINE (declared once); alternating-rate re-probe; first valid answer
-clears the fault and pins the rate. Each transition notifies exactly once.
+nodes are SUSPECT/OFFLINE (declared once); alternating-rate probes while BUS_FAULT; the first
+valid answer clears the fault and sets the rate that obtained it *(amended 2026-09-13, F4: it
+no longer pins it)* — at the fallback rate the tracker re-probes the reference every
+`TRUNK_T_rate_reprobe_ms`, one live node per probe by its own cursor, and returns when a strict
+majority of live nodes has answered there (data-model §7). Each transition notifies exactly once.
 
 ## What F3/F4 need (interface note, SC-010)
 

@@ -34,7 +34,10 @@ specification.
 - Q: After BUS_FAULT, what is the rate/recovery policy? → A: Alternate enrolment probes
   between the reference and fallback bit rates; the first valid answer clears the fault
   and the rate that obtained it becomes the rate in use (restoring the reference rate
-  later is an L4/human action). Recorded in `docs/OPEN-QUESTIONS.md`.
+  later is an L4/human action). Recorded in `docs/OPEN-QUESTIONS.md`. *(Superseded
+  2026-09-13 by F4, rulings 2026-09-06 and 2026-09-13: restoration is automatic — a
+  reference re-probe every `TRUNK_T_rate_reprobe_ms` and a live-majority return quorum;
+  see FR-026.)*
 - Q: Where does the link layer sit relative to the message-level `OMGPTransport` of Spec
   §42, and does the simulator's `VirtualTransport` run the real L2 engines? → A: Below it.
   The trunk implementation of `OMGPTransport` is the L2 master engine over a **byte-wire**
@@ -460,12 +463,13 @@ assert no bus fault.
   between the reference and the fallback bit rate (one probe at each, in turn); the first
   valid response at either rate MUST clear BUS_FAULT exactly once with a recovery
   notification. *(Amended 2026-09-13: F4, human 2026-09-06, values human 2026-09-13.)* The bit
-  rate is a property of the trunk: the reference rate is in use whenever any enrolled node
-  answers at it, and the host uses the fallback rate only while no enrolled node answers at
-  the reference rate. While at the fallback rate the host MUST re-probe the reference rate
-  every `TRUNK_T_rate_reprobe_ms`, one enrolled node per probe, and MUST return to the
-  reference rate when strictly more than `TRUNK_rate_return_quorum_pct` % of live (ENROLLED)
-  nodes, minimum one, have answered there. The superseded clause read: "the bit rate that
+  rate is a property of the trunk: the host leaves the reference rate only through BUS_FAULT,
+  never while any enrolled node answers at it. Once at the fallback rate the host MUST re-probe
+  the reference rate every `TRUNK_T_rate_reprobe_ms`, one live (ENROLLED) node per probe, and
+  MUST return to the reference rate when strictly more than `TRUNK_rate_return_quorum_pct` %
+  of live nodes, minimum one, have answered there. The return is deliberately stricter than
+  the departure (hysteresis): a single node answering at the reference rate keeps the trunk
+  there but does not by itself bring it back. The superseded clause read: "the bit rate that
   obtained the response MUST become the rate in use until the layer above changes it"
   **(ruling human, 2026-08-29; superseded by F4 in `docs/OPEN-QUESTIONS.md`)**. Per-node health MUST resume normally afterwards: the
   answering node becomes ENROLLED; the others keep their SUSPECT/OFFLINE state and timers
