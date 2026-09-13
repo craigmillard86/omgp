@@ -118,7 +118,7 @@ async function detect({ github, context, core, env }) {
   // is the line that tells a human this was a permissions problem, not an empty backlog.
   core.notice(`agent-noop: ${kind} run — turns=${f.turns} denials=${f.denials} is_error=${f.isError}`);
 
-  let produced = false, partial = false, reason = '';
+  let produced = false, partial = false, onlyComment = false, reason = '';
   const since = Date.parse(env.SINCE || '');
   const sinceKnown = Number.isFinite(since);
   if (!sinceKnown) core.warning('agent-noop: the run start (SINCE) is empty or unparseable — t0 did not run, so nothing can be attributed to this run (fail closed)');
@@ -181,6 +181,10 @@ async function detect({ github, context, core, env }) {
       c.user && c.user.login === 'claude[bot]' && isFixer(c.body) && !isVerdict(c.body) &&
       Date.parse(c.created_at || '') > since);
     produced = moved || spoke;
+    // A comment with no commit is production for THIS check and a dead end for the loop: no new
+    // head, so no new review, so agent-merge says "review reported findings" until a human reads
+    // the comment (#463, seen on #452). finalize turns it into the label humans watch.
+    onlyComment = spoke && !moved;
     reason = moved ? `head moved from ${before.slice(0, 7)} to ${pr.head.sha.slice(0, 7)}`
       : spoke ? 'the fixer commented during the run'
         : !sinceKnown ? `head unchanged at ${before.slice(0, 7)} and the run start is unknown (t0 did not run)`
@@ -202,10 +206,11 @@ async function detect({ github, context, core, env }) {
   // must NOT be retried — re-fixing fixed code is its own hazard.
   core.setOutput('produced', String(produced));
   core.setOutput('partial', String(partial));   // implement only: a branch with no PR
+  core.setOutput('only_comment', String(onlyComment));   // fix only: answered, did not push
   core.setOutput('reason', reason);   // finalize reports THIS, not a hard-coded sentence
   core.setOutput('turns', String(f.turns));
   core.setOutput('denials', String(f.denials));
-  return { noop, produced, partial, turns: f.turns, denials: f.denials, reason };
+  return { noop, produced, partial, only_comment: onlyComment, turns: f.turns, denials: f.denials, reason };
 }
 
 // A label that is already absent is a non-event (404), the same rule review-fix's exhaustion path
@@ -278,6 +283,23 @@ async function finalize({ github, context, core, env }) {
 
   const pr = Number(env.PR);
   const label = `review-fix-${env.ATTEMPT}`;
+  if (env.ONLY_COMMENT === 'true') {
+    // The fixer answered — a rebuttal, or a finding it cannot reach — and pushed nothing. That is
+    // what the prompt tells it to do, so the job does not fail and the attempt stays spent; but
+    // the loop cannot advance from here on its own, and every other terminal state applies
+    // `needs-human`. This one now does too (#463).
+    let esc = true;
+    try { await github.rest.issues.addLabels({ owner, repo, issue_number: pr, labels: ['needs-human'] }); }
+    catch (e) { esc = false; core.warning(`agent-noop: could NOT apply \`needs-human\` to #${pr} (${(e && e.status) || ''}) — apply it by hand`); }
+    await github.rest.issues.createComment({
+      owner, repo, issue_number: pr,
+      body: `🧑 Review-fix answered without a commit (${spent}).\n\n${why}\n\n` +
+        `The fixer's comment above is a rebuttal or a finding it could not act on. No new head means no new review, so the loop stops here: ` +
+        `${esc ? '`needs-human` is applied' : '⚠️ `needs-human` could NOT be applied — apply it by hand'}. Rule on the rebuttal, or push the change it asked for, then remove the label. ` +
+        `\`${label}\` stays: the attempt was spent. Job log: ${runUrl}`});
+    core.notice(`agent-noop: review-fix on #${pr} answered without a commit — needs-human ${esc ? 'applied' : 'NOT applied'}; attempt ${label} spent (#463).`);
+    return;
+  }
   if (produced) {
     // It pushed or commented, then errored: the attempt is SPENT, whatever is_error says. Handing
     // it back understated review_fix_max_attempts on a run that changed the branch (round-3 red team).

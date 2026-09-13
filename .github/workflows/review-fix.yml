@@ -258,6 +258,9 @@ jobs:
             echo "PROMPT_EOF_${GITHUB_RUN_ID}"
           } >> "$GITHUB_OUTPUT"
 
+      # `gh pr edit*` (#463): the round-budget ruling makes a false PR-body claim BLOCKING at every
+      # round, and the fixer was the one agent that could not touch the body — #452 sat for 40
+      # minutes on a stale count in its description. The prompt limits its use to the body.
       - name: Claude Code — address the review findings on the agent's branch
         id: agent                       # the execution file (turns, denials, is_error) is a step output; an id-less step has none
         # Pinned to the commit v1 resolved to on 2026-09-02, not the moving `v1` tag:
@@ -275,7 +278,7 @@ jobs:
           # by test_every_agent_loop_runs_on_opus.
           claude_args: |
             --model claude-opus-5
-            --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Edit,Read,Write,Grep,Glob"
+            --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Bash(gh pr edit*),Edit,Read,Write,Grep,Glob"
 
       # #361. This step used to be `if: failure()`, so it never fired for the runs that mattered:
       # #342's fix produced nothing TWICE while exiting success, each time having already spent an
@@ -330,7 +333,7 @@ jobs:
           prompt: ${{ steps.prompt.outputs.text }}
           claude_args: |
             --model claude-opus-5
-            --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Edit,Read,Write,Grep,Glob"
+            --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Bash(gh pr edit*),Edit,Read,Write,Grep,Glob"
 
       - name: Did the retry produce anything?
         id: detect_retry
@@ -358,6 +361,7 @@ jobs:
           NOOP: ${{ steps.detect_retry.outputs.noop != '' && steps.detect_retry.outputs.noop || steps.detect.outputs.noop }}
           REASON: ${{ steps.detect_retry.outputs.reason != '' && steps.detect_retry.outputs.reason || steps.detect.outputs.reason }}
           PRODUCED: ${{ steps.detect_retry.outputs.produced != '' && steps.detect_retry.outputs.produced || steps.detect.outputs.produced }}
+          ONLY_COMMENT: ${{ steps.detect_retry.outputs.only_comment != '' && steps.detect_retry.outputs.only_comment || steps.detect.outputs.only_comment }}
           ATTEMPTS: ${{ steps.agent_retry.conclusion != 'skipped' && '2' || '1' }}
           FIGURES_1: turns=${{ steps.detect.outputs.turns }}, denials=${{ steps.detect.outputs.denials }}
           FIGURES_2: ${{ steps.agent_retry.conclusion != 'skipped' && format('turns={0}, denials={1}', steps.detect_retry.outputs.turns, steps.detect_retry.outputs.denials) || '' }}
@@ -369,7 +373,9 @@ jobs:
             // An EMPTY noop means `detect` itself failed (missing module, API 403/500, failed
             // checkout). The `if: failure()` step this replaced released on any job failure, so
             // returning here would hold the spent attempt silently — a regression (round-1).
-            if (process.env.NOOP === 'false') return;   // it pushed or it explained itself — the attempt stands
+            // A comment-only run is production (the attempt stands) but the loop cannot advance from
+            // it — finalize applies needs-human so a human reads the answer (#463, seen on #452).
+            if (process.env.NOOP === 'false' && process.env.ONLY_COMMENT !== 'true') return;   // it pushed — the attempt stands
             await m.finalize({github, context, core, env: process.env});
 
       # NO transcript artifact. GOVERNANCE §4b: "This repository is public" — an artifact is
