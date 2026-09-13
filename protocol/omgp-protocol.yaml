@@ -122,12 +122,6 @@ link_trunk:        # trunk spec §9 conformance timing
   retries: 2
   suspect_after_failures: 3
   offline_after_suspect_ms: 1000
-  # F4 (ruling 2026-09-06): the bit rate is a property of the trunk. While at the fallback rate the
-  # host re-probes the reference rate every T_rate_reprobe_ms, ONE enrolled node per probe, and
-  # returns to it when strictly more than rate_return_quorum_pct % of LIVE (ENROLLED) nodes,
-  # minimum one, answer there (rulings 2026-09-13; docs/OPEN-QUESTIONS.md).
-  T_rate_reprobe_ms: 1000
-  rate_return_quorum_pct: 50
 
 module_bus:
   speed_hz: 400000
