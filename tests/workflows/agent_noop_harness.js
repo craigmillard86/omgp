@@ -94,25 +94,28 @@ const during = '2026-09-12T10:00:30Z';
     { type: 'result', subtype: 'success', is_error: false, num_turns: 76, permission_denials_count: 20 }]) } });
   check('implement: array-form execution file is read the same way', r.turns === 76 && r.denials === 20 && r.noop === false);
 
+  // Every implement case passes SINCE: without it the round-3 unknown-start guard answers first
+  // and the case tests nothing but that guard (round-4 red team: three mutants the suite killed
+  // at 2559c21 survived at f996d0b).
   w = world({ prs: [] });
-  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', EXEC_FILE: execFile({ num_turns: 156, permission_denials_count: 26, is_error: false }) } });
-  check('implement: no PR at all is a no-op', r.noop === true);
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: execFile({ num_turns: 156, permission_denials_count: 26, is_error: false }) } });
+  check('implement: no PR at all is a no-op', r.noop === true && /no open PR/.test(r.reason));
   check('implement: a no-op still reports what it burned', r.turns === 156 && r.denials === 26);
 
-  w = world({ prs: [{ head: { ref: 'task/99' } }] });
-  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', EXEC_FILE: execFile({ num_turns: 5 }) } });
-  check('implement: another issue\'s PR does not satisfy this one', r.noop === true);
+  w = world({ prs: [{ head: { ref: 'task/99' }, created_at: during }] });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: execFile({ num_turns: 5 }) } });
+  check('implement: another issue\'s PR does not satisfy this one', r.noop === true && /no open PR/.test(r.reason));
 
-  w = world({ prs: [{ head: { ref: 'task/58' } }] });
-  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', EXEC_FILE: execFile({ num_turns: 3, is_error: true }) } });
-  check('implement: is_error is a no-op even with a PR present', r.noop === true);
+  w = world({ prs: [{ head: { ref: 'task/58' }, created_at: during }] });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: execFile({ num_turns: 3, is_error: true }) } });
+  check('implement: is_error is a no-op even with a PR present', r.noop === true && r.produced === true);
 
-  w = world({ prs: [{ head: { ref: 'task/58' }, state: 'closed' }] });
-  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', EXEC_FILE: execFile({ num_turns: 9 }) } });
-  check('implement: a closed PR does not count as output', r.noop === true);
+  w = world({ prs: [{ head: { ref: 'task/58' }, state: 'closed', created_at: during }] });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: execFile({ num_turns: 9 }) } });
+  check('implement: a closed PR does not count as output', r.noop === true && /no open PR/.test(r.reason));
 
   w = world({ prs: [] });
-  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', EXEC_FILE: '/nonexistent/exec.json' } });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: '/nonexistent/exec.json' } });
   check('implement: an unreadable execution file fails closed to no-op', r.noop === true);
   check('implement: and says so rather than pretending it read figures',
     said(w, /warning:/) && r.turns === null && r.denials === null);
@@ -288,6 +291,11 @@ const during = '2026-09-12T10:00:30Z';
   w = world({ prs: [], branch: null });
   r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: execFile({ num_turns: 9 }) } });
   check('implement: no branch and no PR is still a no-op', r.noop === true);
+  // The branch-push window itself (round-4 red team 1b): a task/<n> branch last pushed BEFORE the
+  // run is a stale branch, not this run's work.
+  w = world({ prs: [], branch: { ref: 'task/58', pushed_during: false } });
+  r = await detect({ ...w, env: { KIND: 'implement', ISSUE: '58', SINCE: T0, EXEC_FILE: execFile({ num_turns: 9 }) } });
+  check('implement: a task/<n> branch last pushed BEFORE the run does not count', r.noop === true && r.produced === false);
 
   // [RT-5] review-fix's prompt tells the fixer to rebut a wrong finding and leave the code, and
   // findings are identified BY their `VERDICT(...)` line — so a compliant rebuttal quotes it.
