@@ -191,7 +191,8 @@ public:
 
 ```cpp
 struct HealthListener { virtual void on_notice(Notice, uint8_t addr) = 0; protected: ~HealthListener() = default; };
-struct Probe { uint8_t addr; uint32_t bit_rate; };
+struct Probe { uint8_t addr; uint32_t bit_rate; };   // addr == 0 (the host): nothing to issue this superframe
+                                                      // — while bus_fault() at most one probe is outstanding (F4, 2026-09-13)
 
 class HealthTracker {
 public:
@@ -203,7 +204,8 @@ public:
                                                                // while bus_fault(): false for every address (F4, 2026-09-13)
     void mark_polled(uint8_t addr, uint64_t now_us);
     Probe next_probe(uint64_t now_us);                         // enrolment rotation; alternates rates while bus_fault(),
-                                                               // except during a reference pass (F4, 2026-09-13)
+                                                               // except during a reference pass; {0, …} while a probe is
+                                                               // outstanding during a fault (F4, 2026-09-13; data-model §6)
     bool bus_fault() const;
     uint32_t bit_rate() const;                                 // rate in use after the last recovery: the reference if any node answered
                                                                // there during the fault, else the fallback; no automatic return (F4;
