@@ -5,7 +5,7 @@
 // Why this exists (round-1 red team + review on #420). risk-score had NO tests, and its tier is
 // what `agent-approve` and `agent-merge` gate on — so every autonomy decision in the repo rests on
 // an untested regex. The specific hole: `removedTests` is anchored at `^tests/`, so deleting
-// anything under `tools/refimpl/` — including the 441-test Python suite and the floor ratchet that
+// anything under `tools/refimpl/` — including the 436-test Python suite and the floor ratchet that
 // #420 leans on — scored T1, inside `auto_merge_max_tier: 2`, i.e. autonomously mergeable. And a
 // one-line change to the floor datum is `+1/-1`, so `deletions > additions` is false and it scored
 // T0. Both are pinned below.

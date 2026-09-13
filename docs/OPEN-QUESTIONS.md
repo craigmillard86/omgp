@@ -3195,3 +3195,24 @@ The three rounds, on that half alone: the ratchet never ran → the two readers 
 **Still true and still stated:** the ruling guard is a control over the recorded FORM, not a guarantee about the file's meaning. Prose that records a decision with no marker is not detectable by any pattern. `docs/OPEN-QUESTIONS.md` also scores T0 by path, and deliberately so — tiering it T3 would re-block every sanctioned agent append behind `needs-human`, which is the friction this entry exists to remove.
 
 **Supersedes:** none. **Amends:** `.github/CODEOWNERS`; `.github/workflows/risk-score.yml`; `docs/GOVERNANCE.md` §1 and §4 (which described those paths as an ownership exception they no longer have, and did not record the ruling guard); SC-008 in `specs/001-protocol-foundation/spec.md`; `specs/001-protocol-foundation/contracts/tooling.md`; `docs/ADDING-AN-OPCODE.md`.
+
+---
+
+## 2026-09-13 — Correction by supersession: the 2026-09-12 autonomy-gates entry describes work that `2389c40` withdrew
+
+**Context:** review round 5 of PR #420 (@`2389c40`) found that the entry above was written before the split and not re-read after it. Its **Amends** line, three present-tense sentences in its round-1 and round-2 sections, and two figures describe the withdrawn floor half as shipped. This file is append-only, so that entry stands as written and this one corrects it.
+
+**What is wrong in the 2026-09-12 entry, and what is true at `2389c40`:**
+
+- `:3197` **Amends** lists SC-008 in `specs/001-protocol-foundation/spec.md`, `specs/001-protocol-foundation/contracts/tooling.md` and `docs/ADDING-AN-OPCODE.md`. None is amended: all three edits were reverted by `2389c40`, and `spec.md` and `ADDING-AN-OPCODE.md` still point at `pipeline.sh`, which is where the floor stays. The line also omits `.github/workflows/agent-merge.yml`, where the ruling guard it records lives. The files #420 changes are exactly: `.github/CODEOWNERS`, `.github/workflows/agent-merge.yml`, `.github/workflows/risk-score.yml`, `docs/GOVERNANCE.md` §1 and §4, this file, and the three harnesses `tests/workflows/agent_approve_harness.js`, `agent_merge_harness.js`, `risk_score_harness.js` with their driver `tools/refimpl/test_workflow_scripts.py`. *Demonstrated by `git diff origin/main...2389c40 --stat`: nine files, none of them `pipeline.sh` or the three specs/docs named.*
+- `:3170` *"the datum scores T2"* — there is no datum. `tests/unit-test-floor.txt` was deleted with the withdrawal. What survives is the rule: `risk-score.yml` counts a deletion, or a rename out of the collected glob, under `tools/refimpl/test_*` as reduced test content.
+- `:3171` *"The test now fetches the base explicitly and fails, rather than skipping"* — `tools/refimpl/test_floor_datum.py` was deleted; no such test exists at this head.
+- `:3177` *"Both now trim leading and trailing whitespace only, identically, and the test compares the two values"* — both readers and that test were withdrawn. `pipeline.sh` is byte-identical to `main` and reads `UNIT_TEST_FLOOR` exactly as it did before #420.
+- `:3173` says `risk_score_harness.js` has **12 cases**; it has **15** at this head (counted: 15 `check(` calls).
+- `:3193` says the Python suite has **441** tests; `python -m pytest tools/refimpl/ --collect-only -q` collects **436** at this head. The same figure sat in a comment at `risk_score_harness.js:8` and is corrected in the same commit as this entry; no test changes.
+
+The round-1, round-2 and round-3 narratives of the floor readers, the ratchet and the rename attack remain a true record of what was found and why that half was withdrawn. Only their "now" clauses are stale, and they are the ones listed above.
+
+**Ruling:** human, 2026-09-13 — correct the record by supersession in one append, then merge #420.
+
+**Supersedes:** the 2026-09-12 entry "Autonomy gates: branch protection was overriding GOVERNANCE §1, and the floor's datum sat in an owned file" — on its Amends line and the five present-tense claims listed above only. Its measurement, the CODEOWNERS correction, the ruling guard and the split ruling stand. **Amends:** nothing beyond that entry.
