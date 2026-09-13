@@ -215,7 +215,8 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   after every `on_result`/`tick`: enrolled = {addr : state ≠ UNENROLLED}; if
   `|enrolled| ≥ 1` and every enrolled node ∈ {SUSPECT, OFFLINE} and `!fault`.
 - While `fault`: `next_probe()` alternates `bit_rate` between reference and fallback per
-  call (starting with the fallback, §7); `rate_changes++` on each change.
+  call (starting with the fallback, §7), except during a reference pass (Clear, below), when
+  every probe goes out at the reference rate; `rate_changes++` on each change.
 - Clear *(amended 2026-09-13: F4 ruling 2026-09-06, ruling 2026-09-13)*: while `fault`, a valid
   answer at the **reference** rate → `fault = false`, `bit_rate = TRUNK_bit_rate`, `BUS_RECOVERED`;
   the answering node → ENROLLED as in §6. A valid answer at the **fallback** rate does not clear

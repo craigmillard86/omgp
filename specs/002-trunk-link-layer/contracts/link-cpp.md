@@ -202,7 +202,8 @@ public:
     bool poll_due(uint8_t addr, uint64_t now_us) const;        // ENROLLED: true; SUSPECT: every 10×T_poll; else false;
                                                                // while bus_fault(): false for every address (F4, 2026-09-13)
     void mark_polled(uint8_t addr, uint64_t now_us);
-    Probe next_probe(uint64_t now_us);                         // enrolment rotation; alternates rates while bus_fault()
+    Probe next_probe(uint64_t now_us);                         // enrolment rotation; alternates rates while bus_fault(),
+                                                               // except during a reference pass (F4, 2026-09-13)
     bool bus_fault() const;
     uint32_t bit_rate() const;                                 // rate in use after the last recovery: the reference if any node answered
                                                                // there during the fault, else the fallback; no automatic return (F4;
@@ -212,10 +213,11 @@ public:
 Rules: SUSPECT after `TRUNK_suspect_after_failures` consecutive failures; OFFLINE after
 `TRUNK_offline_after_suspect_ms` in SUSPECT without a valid response; any valid response
 → ENROLLED; UNENROLLED never counts; BUS_FAULT when ≥ 1 node is enrolled and all enrolled
-nodes are SUSPECT/OFFLINE (declared once); alternating-rate probes while BUS_FAULT; a valid
-answer at the reference rate clears the fault there at once, a valid answer at the fallback rate
-clears it only after a full reference-rate pass draws nothing *(amended 2026-09-13, F4)*; no
-automatic return afterwards (data-model §7). Each transition notifies exactly once.
+nodes are SUSPECT/OFFLINE (declared once); alternating-rate probes while BUS_FAULT except during
+the reference pass; a valid answer at the reference rate clears the fault there at once, a valid
+answer at the fallback rate clears it only after a reference pass — every enrolled address once, at
+the reference rate, without alternating — draws nothing *(amended 2026-09-13, F4)*; no automatic
+return afterwards (data-model §7). Each transition notifies exactly once.
 
 ## What F3/F4 need (interface note, SC-010)
 
