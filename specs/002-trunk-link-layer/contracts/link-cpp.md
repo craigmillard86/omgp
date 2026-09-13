@@ -26,7 +26,7 @@ struct DeframerStats { uint32_t delivered; uint32_t discarded[static_cast<size_t
 enum class HealthState : uint8_t { UNENROLLED, ENROLLED, SUSPECT, OFFLINE };
 enum class Notice : uint8_t { ENROLLED, SUSPECT, OFFLINE, RECOVERED, BUS_FAULT, ALERT, BUS_RECOVERED };
 struct AddrStats { uint32_t transactions, retries, timeouts, crc_failures, discards, replays_served, late_responses; };
-struct BusStats  { uint32_t rate_changes, bus_faults; };
+struct BusStats  { uint32_t rate_changes, bus_faults, discards; };   // discards: no attributable address (#144)
 ```
 
 ## Frame codec (`frame.hpp`) — trunk §4
@@ -98,10 +98,15 @@ Behaviour (tests assert each): a new transaction uses the destination's next 4-b
 sequence; retries reuse it and set `retry`; at most `TRUNK_retries` retries; response
 window `[tx_end, tx_end + TRUNK_T_resp_us)`; a CRC-failed frame in the window ends the
 attempt at once; frames failing any acceptance check are discarded and counted — against
-`dst` while `dst`'s response window is open (spec US2 AC6), otherwise against the frame's own
-claimed `src` when that is in range (a claimed `src` of `0x10..0xFE` is discarded and counted
-nowhere — an FR-011 tension recorded in `docs/OPEN-QUESTIONS.md` 2026-09-06, bus-level counter
-tracked in #138) — and a byte-for-byte drain: `poll()` reads every byte due at
+`dst` while `dst`'s own transaction is awaiting a response, otherwise against
+`BusStats.discards`, which also takes a CRC-failed frame outside any open attempt's window
+(ruling 2026-09-11, `docs/OPEN-QUESTIONS.md`; #144 — it closes the FR-011 tension the
+2026-09-06 entries recorded, where a claimed `src` of `0x10..0xFE` was counted nowhere and an
+in-range one was charged to an unauthenticated wire byte. No address is charged for a frame
+it did not send: true by construction of `drain_wire()`'s if/else, whose only `AddrStats`
+write is to `dst_`; demonstrated by `test_link_master.cpp`'s "an idle-time discard claiming an
+in-range source …" and "… a source well past kAddrCount …") — and a byte-for-byte drain:
+`poll()` reads every byte due at
 `now_us`, including those behind the byte that concluded an attempt; the next transmission
 starts no earlier than `last_activity + TRUNK_T_gap_us`, where `last_activity` is re-read on
 every `poll()` so a byte arriving during the deferral pushes the instant out. `begin()` drains

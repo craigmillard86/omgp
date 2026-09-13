@@ -3998,16 +3998,19 @@ TEST_CASE("reset_stats() clears every per-address counter and the bus counters",
     for (uint64_t t = 0; t <= 10 * omgp::TRUNK_T_poll_us && master.busy(); t += 10)
         ev = wire.advance_to(t, master);
     REQUIRE(ev.kind == MasterEvent::Failed);
-    master.set_bit_rate(omgp::TRUNK_bit_rate_fallback);
 
     // A stray frame while idle, so the bus discard counter (#144) is nonzero too — otherwise
-    // this case would assert the reset of a counter that was already zero.
+    // this case would assert the reset of a counter that was already zero. Injected before
+    // the rate change below: inject_bytes() releases bytes one byte time apart at the rate
+    // then in force, and byte_us() here is the default rate's.
     const uint8_t stray_body[] = {0x01};
     const std::vector<uint8_t> stray =
         encode_expected(omgp::ADDR_host, 0x09, true, false, 0, stray_body, sizeof stray_body);
     const uint64_t stray_start = clock.now_us() + omgp::TRUNK_T_gap_us;
     wire.inject_bytes(stray.data(), stray.size(), stray_start);
     wire.advance_to(stray_start + stray.size() * byte_us(), master);
+
+    master.set_bit_rate(omgp::TRUNK_bit_rate_fallback);
 
     // Non-vacuity: every counter the reset must clear is nonzero first.
     REQUIRE(master.stats(dst).transactions == 1);
