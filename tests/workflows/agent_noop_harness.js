@@ -556,6 +556,19 @@ const during = '2026-09-12T10:00:30Z';
   check('closingRefs: an indented block directly after a fenced block is code', closingRefs('```\nx\n```\n    Closes #463\n', 'o', 'r') === '');
   check('closingRefs: an indented block after a `* * *` thematic break is code, not list content', closingRefs('notes\n\n* * *\n\n    Closes #463\n', 'o', 'r') === '');
   check('closingRefs: the block ends at the first non-indented line', closingRefs('notes\n\n    code\nCloses #463\n', 'o', 'r') === 'Closes #463');
+  // Round-8 red team on #466: three spellings of "this is code" the strip did not know, each of
+  // which let a live reference leave GitHub's honoured set with both views unchanged.
+  check('closingRefs: a DOUBLE-backtick code span is a code span (CommonMark 6.1)', closingRefs('``Closes #463``', 'o', 'r') === '');
+  check('closingRefs: a code span may contain a single backtick when delimited by two', closingRefs('``the old body said `Closes #463` ``', 'o', 'r') === '');
+  check('closingRefs: an unmatched backtick run is literal, not a span', closingRefs('a ` stray, then Closes #463', 'o', 'r') === 'Closes #463');
+  check('closingRefs: a fence indented to a list item\'s content column is a fenced block (CommonMark 4.5)', closingRefs('- note\n\n    ```\n    Closes #463\n    ```\n', 'o', 'r') === '');
+  check('closingRefs: a backtick fence opener may not contain backticks after it — that line is a code span, not a fence', closingRefs('```Closes #463```\nCloses #1', 'o', 'r') === 'Closes #1');
+  check('closingRefs: an unterminated HTML comment runs to the end of the body (CommonMark 4.6)', closingRefs('<!-- Closes #463', 'o', 'r') === '');
+  for (const [form, after] of [['a double-backtick span', '``Closes #463``'], ['a fence inside a list item', '- note\n\n    ```\n    Closes #463\n    ```\n'], ['an unterminated HTML comment', '<!-- Closes #463']]) {
+    w = world({ head: 'b'.repeat(40), body: after });
+    r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=Closes #463;gh=Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
+    check(`fix: a reference wrapped in ${form} is flagged — GitHub stops honouring it`, r.refs_changed === true);
+  }
   w = world({ head: 'b'.repeat(40), body: 'notes\n\n    sample body:\n    Closes #463\n' });
   r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=Closes #463;gh=Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: a reference MOVED to the second line of an indented block is flagged (gh view changed)', r.refs_changed === true);
