@@ -190,8 +190,12 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y cmake ninja-build
           pip install -r tools/requirements.txt   # includes the clang-format pin: a bare ./pipeline.sh reaches stage_quality, which FAILS on CI without it (#135; #167 review)
+      # `always()`: a failed apt/pip/checkout step above used to SKIP this, so SINCE arrived
+      # empty and detection fell open on stale evidence (round-3 red team). The module also fails
+      # closed on an empty SINCE; this makes the normal path record a real start.
       - name: Mark the start of the run
         id: t0
+        if: always()
         run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       # ONE prompt for both the first pass and the retry: two inline copies would drift, and a
       # drifted retry prompt silently changes the agent's instructions on the second pass.
@@ -307,15 +311,18 @@ jobs:
       # Claude side at the time", so retrying immediately re-enters the window that caused them.
       # 60s is deliberately short: it is a settle, not a backoff, and the job's own
       # timeout-minutes still bounds the whole run.
+      # Both retry steps are also gated on the FIRST pass having run: a failure before the prompt
+      # loader skips it and the first Claude step, and the retry would then launch with an EMPTY
+      # prompt and Edit/Write on the branch (round-3 review).
       - name: Settle before retrying
-        if: always() && steps.detect.outputs.produced == 'false' && steps.budget.outputs.n != '' && steps.budget.outputs.n != '0'
+        if: always() && steps.agent.conclusion != 'skipped' && steps.detect.outputs.produced == 'false' && steps.budget.outputs.n != '' && steps.budget.outputs.n != '0'
         run: sleep 60
 
       # #361 AC2. A run that produced nothing is retried once (agent_retry_max, default 1) before
       # the attempt is returned and the PR escalated. Same pinned action and same prompt as above.
       - name: Claude Code — retry the fix
         id: agent_retry
-        if: always() && steps.detect.outputs.produced == 'false' && steps.budget.outputs.n != '' && steps.budget.outputs.n != '0'
+        if: always() && steps.agent.conclusion != 'skipped' && steps.detect.outputs.produced == 'false' && steps.budget.outputs.n != '' && steps.budget.outputs.n != '0'
         uses: anthropics/claude-code-action@8251c103ac8c1d761882c86aba1412c7f583c844   # v1, pinned as above
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -350,6 +357,7 @@ jobs:
           ATTEMPT: ${{ needs.gate.outputs.attempt }}
           NOOP: ${{ steps.detect_retry.outputs.noop != '' && steps.detect_retry.outputs.noop || steps.detect.outputs.noop }}
           REASON: ${{ steps.detect_retry.outputs.reason != '' && steps.detect_retry.outputs.reason || steps.detect.outputs.reason }}
+          PRODUCED: ${{ steps.detect_retry.outputs.produced != '' && steps.detect_retry.outputs.produced || steps.detect.outputs.produced }}
           ATTEMPTS: ${{ steps.agent_retry.conclusion != 'skipped' && '2' || '1' }}
           FIGURES_1: turns=${{ steps.detect.outputs.turns }}, denials=${{ steps.detect.outputs.denials }}
           FIGURES_2: ${{ steps.agent_retry.conclusion != 'skipped' && format('turns={0}, denials={1}', steps.detect_retry.outputs.turns, steps.detect_retry.outputs.denials) || '' }}

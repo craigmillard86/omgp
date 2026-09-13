@@ -25,13 +25,24 @@
 //   implement — an OPEN pull request on `task/<issue>` that this run created or pushed to. A PR
 //               left open by an EARLIER dispatch does not count: #58's claim was released and the
 //               issue re-picked while PR #401 was still open, so a second silent run would have
-//               been vouched for by the first run's work. With no SINCE recorded, it counts.
-//   fix       — the PR head moved, OR claude[bot] said something during the run. review-fix is
-//               explicitly allowed to rebut a finding and change no code (review-fix.yml step 5),
-//               so a comment IS a real outcome. Verdict comments are excluded on ANY line, since
-//               the repo writes them backticked and often with a trailing attribution footer.
+//               been vouched for by the first run's work. Commits pushed to `task/<issue>` with
+//               NO PR also count (#58's own shape: `gh pr create` denied) but are PARTIAL — the
+//               claim is kept and nothing is retried, and finalize still speaks and fails the job,
+//               because AC1 names "a pushed branch AND an opened PR" (round-3 review).
+//   fix       — the PR head moved, OR the FIXER commented during the run. review-fix is explicitly
+//               allowed to rebut a finding and change no code (review-fix.yml step 5), so a comment
+//               IS a real outcome — but only the fixer's. ci-failure-router's auto-fix,
+//               claude-mention and agent-triage all post as claude[bot] on the same PR, so a bare
+//               claude[bot] comment vouched for a 140-turn no-op (round-3 red team). The prompt
+//               tells the fixer to open its comment with `review-fix(<attempt>) @ <head>`, and
+//               that line is what makes a comment the fixer's. Verdict comments are excluded on
+//               ANY line, since the repo writes them backticked and with an attribution footer.
 // `is_error` is a no-op whatever else is true. Missing figures fail closed only where production
 // is UNKNOWN — once established, production is not un-established by an unreadable file.
+// An UNKNOWN run start (SINCE empty: `t0` skipped by an earlier step failure) is likewise an
+// unknown outcome and fails closed — every window test would otherwise fall OPEN and stale
+// evidence (an older PR, a stale branch, attempt 1's comment) would vouch for a run in which no
+// agent ran at all, holding the claim the old `if: failure()` step released (round-3 red team).
 const fs = require('fs');
 
 // claude-code-action's `execution_file` is JSON: either the result record itself or the message
@@ -55,8 +66,11 @@ function readFigures(env, core) {
 // So: any line, unwrapped from backticks/emphasis. This errs toward EXCLUDING a comment — a fixer
 // comment that merely quotes a verdict stops counting as output — which errs toward declaring a
 // no-op. That direction is loud (needs-human, a comment, a failed job), never silent.
-const unwrap = line => (line || '').trim().replace(/^[`*_\s]+/, '').replace(/[`*_\s]+$/, '');
-const isQuoted = line => /^\s*>/.test(line || '');
+// Also strip HTML tags and list markers: `- VERDICT(...)` and `<b>VERDICT(...)</b>` render as a
+// verdict just the same (round-3 red team). A `<blockquote>` is a quote, like `>`.
+const unwrap = line => (line || '').replace(/<[^>]+>/g, '').trim()
+  .replace(/^(?:[-*+]|\d+[.)])\s+/, '').replace(/^[`*_\s]+/, '').replace(/[`*_\s]+$/, '');
+const isQuoted = line => /^\s*(?:>|<blockquote)/i.test(line || '');
 // Round 1 was right to stop matching only the LAST line; stripping `>` as well was the
 // over-correction. review-fix's prompt tells the fixer to rebut a wrong finding and leave the
 // code, and findings are identified BY their `VERDICT(...)` line — so a compliant rebuttal quotes
@@ -65,6 +79,11 @@ const isQuoted = line => /^\s*>/.test(line || '');
 // it was told (round-2 red team). A quoted line is someone being quoted; an unquoted one is the
 // comment's own verdict.
 const isVerdict = body => (body || '').split('\n').some(l => !isQuoted(l) && /^VERDICT\([^)]*\):/.test(unwrap(l)));
+// The fixer's marker: the first non-empty line of its comment, as review-fix.md step 5 instructs.
+// CONTROL, NOT GUARANTEE (rule 11): a fixer that ignores the instruction is declared a no-op, which
+// is the loud direction (needs-human, a comment, a failed job), never silent.
+const FIXER_MARK = /^review-fix\(\d+\) @ [0-9a-f]{7,40}\b/i;
+const isFixer = body => FIXER_MARK.test(unwrap((body || '').split('\n').find(l => l.trim()) || ''));
 
 // How many times a no-op run may be retried in-job before the claim is released (#361 AC2).
 // Read at RUN time from the DEFAULT-branch config, like every other knob here, so retuning it
@@ -99,10 +118,14 @@ async function detect({ github, context, core, env }) {
   // is the line that tells a human this was a permissions problem, not an empty backlog.
   core.notice(`agent-noop: ${kind} run — turns=${f.turns} denials=${f.denials} is_error=${f.isError}`);
 
-  let produced = false, reason = '';
-  if (kind === 'implement') {
+  let produced = false, partial = false, reason = '';
+  const since = Date.parse(env.SINCE || '');
+  const sinceKnown = Number.isFinite(since);
+  if (!sinceKnown) core.warning('agent-noop: the run start (SINCE) is empty or unparseable — t0 did not run, so nothing can be attributed to this run (fail closed)');
+  if (kind === 'implement' && !sinceKnown) {
+    reason = 'the run start is unknown (t0 did not run, so an earlier step failed) — nothing can be attributed to this run';
+  } else if (kind === 'implement') {
     const issue = String(env.ISSUE || '').trim();
-    const since = Date.parse(env.SINCE || '');
     const prs = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', per_page: 100 });
     const mine = prs.filter(p => p && p.state !== 'closed' && p.head && p.head.ref === `task/${issue}`);
 
@@ -119,7 +142,7 @@ async function detect({ github, context, core, env }) {
       } catch (e) { return NaN; }
     };
     for (const p of mine) {
-      if (!Number.isFinite(since) || Date.parse(p.created_at || '') > since) { produced = true; break; }
+      if (Date.parse(p.created_at || '') > since) { produced = true; break; }
       const pushed = await lastPush(p);
       if (Number.isFinite(pushed) && pushed > since) { produced = true; break; }
     }
@@ -136,8 +159,9 @@ async function detect({ github, context, core, env }) {
       try {
         const br = (await github.rest.repos.getBranch({ owner, repo, branch: `task/${issue}` })).data;
         const when = Date.parse(((((br || {}).commit || {}).commit || {}).committer || {}).date || '');
-        if (!Number.isFinite(since) || (Number.isFinite(when) && when > since)) {
+        if (Number.isFinite(when) && when > since) {
           produced = true;
+          partial = true;   // kept, not retried — but finalize still speaks and fails (round-3 review)
           reason = `commits were pushed to task/${issue} during this run, though no PR was opened — check whether \`gh pr create\` was denied`;
         }
       } catch (e) { /* 404: no such branch, so nothing was pushed */ }
@@ -147,16 +171,20 @@ async function detect({ github, context, core, env }) {
     const before = String(env.HEAD_BEFORE || '').trim();
     const pr = (await github.rest.pulls.get({ owner, repo, pull_number: number })).data;
     const moved = !!before && pr.head.sha !== before;
-    // Only comments made DURING this run count; the verdict that triggered the run predates it.
-    const since = Date.parse(env.SINCE || '');
-    const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 });
+    // Only the FIXER's comments, made DURING this run, count; the verdict that triggered the run
+    // predates it, and other claude[bot] workflows are not the fixer. A moved head needs no
+    // window: HEAD_BEFORE comes from the gate, so the comparison stands even with SINCE unknown.
+    const comments = sinceKnown
+      ? await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 })
+      : [];
     const spoke = comments.some(c =>
-      c.user && c.user.login === 'claude[bot]' && !isVerdict(c.body) &&
-      (!Number.isFinite(since) || Date.parse(c.created_at || '') > since));
+      c.user && c.user.login === 'claude[bot]' && isFixer(c.body) && !isVerdict(c.body) &&
+      Date.parse(c.created_at || '') > since);
     produced = moved || spoke;
     reason = moved ? `head moved from ${before.slice(0, 7)} to ${pr.head.sha.slice(0, 7)}`
-      : spoke ? 'claude[bot] commented during the run'
-        : `head unchanged at ${before.slice(0, 7)} and claude[bot] said nothing`;
+      : spoke ? 'the fixer commented during the run'
+        : !sinceKnown ? `head unchanged at ${before.slice(0, 7)} and the run start is unknown (t0 did not run)`
+          : `head unchanged at ${before.slice(0, 7)} and the fixer said nothing`;
   }
 
   // `!f.ok ||` used to short-circuit here, so a cancelled or timed-out run — both steps are
@@ -173,10 +201,11 @@ async function detect({ github, context, core, env }) {
   // retry-or-not (round-2 review). A review-fix run that pushed and then errored is a no-op that
   // must NOT be retried — re-fixing fixed code is its own hazard.
   core.setOutput('produced', String(produced));
+  core.setOutput('partial', String(partial));   // implement only: a branch with no PR
   core.setOutput('reason', reason);   // finalize reports THIS, not a hard-coded sentence
   core.setOutput('turns', String(f.turns));
   core.setOutput('denials', String(f.denials));
-  return { noop, produced, turns: f.turns, denials: f.denials, reason };
+  return { noop, produced, partial, turns: f.turns, denials: f.denials, reason };
 }
 
 // A label that is already absent is a non-event (404), the same rule review-fix's exhaustion path
@@ -210,6 +239,27 @@ async function finalize({ github, context, core, env }) {
     absent: 'was not present',
     failed: 'could NOT be released — do it by hand',
   };
+  // Production established and then is_error, or a branch with no PR: the work EXISTS, so the
+  // claim/attempt stays with it. Releasing it under a live PR — and saying "produced nothing" over
+  // a `Detected:` line that says a PR was opened — was round 3's finding, twice. Still loud: a
+  // comment and a failed job, never a green exit.
+  const produced = env.PRODUCED === 'true';
+  const partial = env.PARTIAL === 'true';
+
+  if (kind === 'implement' && produced) {
+    const n = Number(env.ISSUE);
+    const headline = partial
+      ? `⚠️ Dispatch pushed \`task/${n}\` but opened no PR, after ${spent}.`
+      : `🛑 Dispatch errored AFTER producing output, after ${spent}.`;
+    await github.rest.issues.createComment({
+      owner, repo, issue_number: n,
+      body: `${headline}\n\n${why}\n\n` +
+        `The \`in-progress\` claim is KEPT: the work exists on the branch and releasing it would let the next dispatch start over on top of it. ` +
+        `${partial ? 'Open the PR by hand, or push the branch away and remove `in-progress` to re-dispatch. A high denial count usually means `gh pr create` hit the allow-list. ' : 'Read the run before deciding whether to re-dispatch. '}` +
+        `The per-attempt figures are above and in the job log: ${runUrl}`});
+    core.setFailed(`agent-noop: dispatch for #${n} ${partial ? 'pushed a branch but opened no PR' : 'errored after producing output'} after ${spent} — ${env.REASON || ''}; claim kept, job failed so this is not silent (#361).`);
+    return;
+  }
 
   if (kind === 'implement') {
     const n = Number(env.ISSUE);
@@ -227,9 +277,24 @@ async function finalize({ github, context, core, env }) {
   }
 
   const pr = Number(env.PR);
+  const label = `review-fix-${env.ATTEMPT}`;
+  if (produced) {
+    // It pushed or commented, then errored: the attempt is SPENT, whatever is_error says. Handing
+    // it back understated review_fix_max_attempts on a run that changed the branch (round-3 red team).
+    let esc = true;
+    try { await github.rest.issues.addLabels({ owner, repo, issue_number: pr, labels: ['needs-human'] }); }
+    catch (e) { esc = false; core.warning(`agent-noop: could NOT apply \`needs-human\` to #${pr} (${(e && e.status) || ''}) — apply it by hand`); }
+    await github.rest.issues.createComment({
+      owner, repo, issue_number: pr,
+      body: `🛑 Review-fix errored AFTER producing output, after ${spent}.\n\n${why}\n\n` +
+        `\`${label}\` stays: this attempt is **spent** — it changed the branch or commented before erroring, so it counts against \`review_fix_max_attempts\`. ` +
+        `${esc ? '`needs-human` is applied' : '⚠️ `needs-human` could NOT be applied — apply it by hand'}: read the run before letting the loop continue.\n\n` +
+        `The per-attempt figures are above and in the job log: ${runUrl}`});
+    core.setFailed(`agent-noop: review-fix on #${pr} errored after producing output after ${spent} — ${env.REASON || ''}; attempt spent, needs-human ${esc ? 'applied' : 'NOT applied'}, job failed (#361).`);
+    return;
+  }
   // The gate applies `review-fix-<n>` BEFORE this job runs (review-fix.yml:161), so a run that
   // produced nothing has already spent one of the four attempts. Hand it back.
-  const label = `review-fix-${env.ATTEMPT}`;
   const attempt = await dropLabel(github, owner, repo, pr, label, core);
   // Unguarded, a 403 here aborted before the comment below — losing both the escalation and the
   // explanation on the one path whose entire purpose is not being silent (round-1 review).
@@ -248,4 +313,4 @@ async function finalize({ github, context, core, env }) {
   core.setFailed(`agent-noop: review-fix on #${pr} produced nothing after ${spent} — ${env.REASON || 'no output'}; attempt ${attempt}, needs-human ${escalated ? 'applied' : 'NOT applied'}, job failed (#361).`);
 }
 
-module.exports = { detect, finalize, readFigures, isVerdict, retryBudget };
+module.exports = { detect, finalize, readFigures, isVerdict, isFixer, retryBudget };

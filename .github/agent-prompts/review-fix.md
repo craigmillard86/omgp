@@ -53,7 +53,11 @@ of PR #{{PR}} at head
    full local set) until green BEFORE pushing. Commit with
    `Refs #<task issue>` and push to this branch — the push
    re-runs review and CI.
-5. Comment on the PR with `gh pr comment`, containing exactly:
+5. Comment on the PR with `gh pr comment`. Its FIRST line must be
+   exactly `review-fix({{ATTEMPT}}) @ {{HEAD}}` — the no-op
+   detector recognises your comment by that line; without it a
+   rebuttal-only run is judged to have produced nothing. Then,
+   containing exactly:
    (a) each finding you FIXED, with file:line and what changed;
    (b) each finding you judged a FOLLOW-UP (out of scope), with
    the proposed issue title so a human can file it — the

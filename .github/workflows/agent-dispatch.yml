@@ -99,8 +99,12 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y cmake ninja-build
           pip install -r tools/requirements.txt   # includes the clang-format pin: a bare ./pipeline.sh reaches stage_quality, which FAILS on CI without it (#135; #167 review)
+      # `always()`: a failed apt/pip/checkout step above used to SKIP this, so SINCE arrived
+      # empty and detection fell open on stale evidence (round-3 red team). The module also fails
+      # closed on an empty SINCE; this makes the normal path record a real start.
       - name: Mark the start of the run
         id: t0
+        if: always()
         run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       # ONE prompt, read from a file, used by both the first pass and the retry. Two inline
@@ -194,8 +198,11 @@ jobs:
       # Claude side at the time", so retrying immediately re-enters the window that caused them.
       # 60s is deliberately short: it is a settle, not a backoff, and the job's own
       # timeout-minutes still bounds the whole run.
+      # Both retry steps are also gated on the FIRST pass having run: a failure before the prompt
+      # loader skips it and the first Claude step, and the retry would then launch with an EMPTY
+      # prompt and Edit/Write on the branch (round-3 review).
       - name: Settle before retrying
-        if: always() && steps.detect.outputs.produced == 'false' && steps.budget.outputs.n != '' && steps.budget.outputs.n != '0'
+        if: always() && steps.agent.conclusion != 'skipped' && steps.detect.outputs.produced == 'false' && steps.budget.outputs.n != '' && steps.budget.outputs.n != '0'
         run: sleep 60
 
       # #361 AC2. A no-op is retried once (agent_retry_max, default 1) before the claim is
@@ -203,7 +210,7 @@ jobs:
       # it reads the same prompt, so the two passes cannot diverge.
       - name: Claude Code — retry the task
         id: agent_retry
-        if: always() && steps.detect.outputs.produced == 'false' && steps.budget.outputs.n != '' && steps.budget.outputs.n != '0'
+        if: always() && steps.agent.conclusion != 'skipped' && steps.detect.outputs.produced == 'false' && steps.budget.outputs.n != '' && steps.budget.outputs.n != '0'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -236,6 +243,8 @@ jobs:
           ISSUE: ${{ needs.pick.outputs.issue }}
           NOOP: ${{ steps.detect_retry.outputs.noop != '' && steps.detect_retry.outputs.noop || steps.detect.outputs.noop }}
           REASON: ${{ steps.detect_retry.outputs.reason != '' && steps.detect_retry.outputs.reason || steps.detect.outputs.reason }}
+          PRODUCED: ${{ steps.detect_retry.outputs.produced != '' && steps.detect_retry.outputs.produced || steps.detect.outputs.produced }}
+          PARTIAL: ${{ steps.detect_retry.outputs.partial != '' && steps.detect_retry.outputs.partial || steps.detect.outputs.partial }}
           ATTEMPTS: ${{ steps.agent_retry.conclusion != 'skipped' && '2' || '1' }}
           FIGURES_1: turns=${{ steps.detect.outputs.turns }}, denials=${{ steps.detect.outputs.denials }}
           FIGURES_2: ${{ steps.agent_retry.conclusion != 'skipped' && format('turns={0}, denials={1}', steps.detect_retry.outputs.turns, steps.detect_retry.outputs.denials) || '' }}
@@ -248,7 +257,9 @@ jobs:
             // checkout. The step this replaced was `if: failure()` and released the claim on any
             // job failure, so returning here would be a REGRESSION: the claim would sit held with
             // nothing said (round-1 red team + review). Unknown fails closed, like readFigures.
-            if (process.env.NOOP === 'false') return;   // production established — nothing to release
+            // A PARTIAL run (branch pushed, no PR) is produced — kept, not retried — but not green:
+            // finalize still comments and fails the job (round-3 review).
+            if (process.env.NOOP === 'false' && process.env.PARTIAL !== 'true') return;   // production established — nothing to release
             await m.finalize({github, context, core, env: process.env});
 
       # NO transcript artifact. GOVERNANCE §4b: "This repository is public", so an artifact is
