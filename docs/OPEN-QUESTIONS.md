@@ -3273,6 +3273,12 @@ Three mutants survived the first suite (the `SINCE` window, the `state: 'open'` 
 
 **What this does not do:** it does not judge the rebuttal. A comment-only run is escalated whether the fixer was right or wrong; the human rules. `gh pr edit` can also change title, base and labels — the restriction to the body is in the prompt, a control, not a guarantee (rule 11); the approval path (`gh pr review`, `gh pr merge`, `gh api`) stays ungranted, pinned by the same test.
 
+**Corrected after adversarial round 1 (@`ce5ccb1`).** Five findings between the review and the red team, all correct, two of them regressions this change introduced:
+- *The grant was a prefix glob over a verb that is not body-only.* `Bash(gh pr edit*)` permitted `--remove-label needs-human`, `--add-label risk:t0`, `--remove-label review-fix-<n>` and `--base` — the label surface `agent-merge` and the attempt budget read, so the fixer could clear the very escalation this entry adds. The grant is now `Bash(gh pr edit <this PR> --body-file*)`, and the wiring test checks the allow-list's own prefix semantics against each of those forms. The prompt fixes the argument order.
+- *The comment-only branch swallowed `is_error`.* It ran before the produced-then-errored branch and never consulted `noop`, so an errored or cancelled run whose only output was a comment exited green with a comment calling the crash a considered answer. It now requires `noop == false`; an errored one fails loudly as before.
+- *`finalize` had no case for the string `'false'`* the workflow sends on every ordinary run, and the workflow's three-line guard was pinned as a literal, not a condition. `finalize` now mirrors the guard explicitly, cases pass `'false'`, and the guard is executed under node for all four shapes.
+- *A body-only correction could not succeed autonomously* — a body edit does not move the head, so the run the grant enables was the run the escalation catches. The prompt now has the fixer push an empty commit after correcting the body, so the reviewers re-read it and the run counts as production. Whether a reviewer then passes it is the reviewer's call, as before.
+
 **Ruling:** PENDING — human. Recommended: adopt both. The allow-list widening is a workflow edit (T3); the maintainer's merge of the PR carrying this entry is the ruling.
 
 **Supersedes:** none. **Amends:** `.github/workflows/review-fix.yml`; `.github/agent-prompts/review-fix.md`; `tools/ci/agent-noop.js`.
