@@ -170,7 +170,8 @@ jobs:
             // Snapshot the closing references the merge gate acts on: the fixer may now edit the body
             // (#463), and detect compares this against the body after the run — with the SAME
             // function, loaded from this job's default-branch checkout (no Claude step runs here).
-            const closesBefore = noop.closingRefs(pr.body || '', owner, repo) || 'none';
+            // Both views: what agent-merge reads (raw) and what GitHub honours (stripped); `none` when empty.
+            const closesBefore = (noop.closingRefsRaw(pr.body || '', owner, repo) || noop.closingRefs(pr.body || '', owner, repo)) ? noop.closingViews(pr.body || '', owner, repo) : 'none';
             return out('yes', {pr: number, branch: pr.head.ref, head, attempt: n, kinds: kinds.join(','), closes: closesBefore});
 
   fix:

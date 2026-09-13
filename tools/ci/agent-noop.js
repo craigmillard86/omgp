@@ -101,26 +101,37 @@ const isFixer = body => FIXER_MARK.test(unwrap((body || '').split('\n').find(l =
 // `o/r#465` to `465` (round 4), or `Closes:#n`, `**Closes** #n` and `Closes [#n](url)` to `#n`
 // (round 5), hid rewrites that leave in-progress on an issue the merge should have released.
 // `closingIssues` canonicalises same-repo forms to numbers for the RELEASE paths.
-// Markup GitHub does not honour a reference inside: fenced code (``` or ~~~, three or more, matching
-// closer), indented code (4 spaces / a tab), inline code spans, HTML comments. Each is replaced by a
-// SENTINEL that the keyword/reference separator cannot span — replacing it with a space let
-// `Closes` bind to a `#n` on the far side of the removed span, a reference that exists only
-// because the markup was removed (round-5 red team on #466). The pilcrow is a printable
-// non-word, non-space character no reference form contains.
+// Two consumers read the closing references, with two parsers. GitHub's auto-close ignores a
+// reference inside code (fenced, indented, inline) or an HTML comment. agent-merge's release/close
+// path (`agent-merge.yml`) and this workflow's exhaustion release regex the RAW body with no
+// stripping at all, so a reference inside a fence or a comment — invisible in the rendered body —
+// is a live instruction to the merge automation (round-6 red team on #466). The guard therefore
+// compares TWO views and a change in either is a change: `closingRefsRaw` (what agent-merge
+// reads) and `closingRefs` (what GitHub honours, after stripping). Stripping replaces removed
+// markup with a SENTINEL the keyword/reference separator cannot span, so `Closes` never binds to
+// a `#n` on the far side of a removed span (round-5 red team). Indented lines are code only where
+// CommonMark says so — after a blank line, and not list-item content — since a nested list item,
+// a lazy continuation or an indented table row is prose GitHub renders and honours (round 6).
 const SENTINEL = ' ¶ ';
 function stripMarkup(t) {
   const lines = String(t || '').split('\n');
   const out = [];
-  let fence = null;   // {ch, len} while inside a fenced block
+  let fence = null, prevBlank = true, inList = false;
   for (const line of lines) {
     const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
     if (fence) {
       if (open && open[1][0] === fence.ch && open[1].length >= fence.len && /^ {0,3}(`{3,}|~{3,})\s*$/.test(line)) fence = null;
       out.push(SENTINEL); continue;
     }
-    if (open) { fence = { ch: open[1][0], len: open[1].length }; out.push(SENTINEL); continue; }
-    if (/^(?: {4}|\t)/.test(line)) { out.push(SENTINEL); continue; }   // indented code
+    if (open) { fence = { ch: open[1][0], len: open[1].length }; out.push(SENTINEL); prevBlank = false; continue; }
+    const blank = /^\s*$/.test(line);
+    const listItem = /^\s{0,3}(?:[-*+]|\d+[.)])\s+/.test(line);
+    if (listItem) inList = true;
+    else if (blank) { /* a blank line keeps list context until a non-indented, non-list line */ }
+    else if (!/^(?: {2,}|\t)/.test(line)) inList = false;
+    if (/^(?: {4}|\t)/.test(line) && prevBlank && !inList) { out.push(SENTINEL); prevBlank = false; continue; }   // indented code
     out.push(line);
+    prevBlank = blank;
   }
   return out.join('\n')
     .replace(/<!--[\s\S]*?-->/g, SENTINEL)
@@ -128,11 +139,11 @@ function stripMarkup(t) {
 }
 const CLOSING = /(?<![\w*_])[*_]{0,2}(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[*_]{0,2}\s*:?\s*(?:<?(https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+))>?|\[#(\d+)\]\(([^)]*)\)|([\w.-]+)\/([\w.-]+)#(\d+)|GH-(\d+)|#(\d+))(?![\w-])/gi;
 const ISSUE_URL = /^https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)\/?$/i;
-function closingMatches(body, owner, repo) {
+function closingMatches(text, owner, repo) {
   const own = String(owner).toLowerCase(), rep = String(repo).toLowerCase();
   const sameRepo = (o, r) => o.toLowerCase() === own && r.toLowerCase() === rep;
   const out = [];
-  for (const m of stripMarkup(body).matchAll(CLOSING)) {
+  for (const m of String(text || '').matchAll(CLOSING)) {
     const spelled = m[0].replace(/\s+/g, ' ');
     if (m[1]) out.push({ spelled, kind: 2, num: Number(m[4]), same: sameRepo(m[2], m[3]) });
     else if (m[5]) {
@@ -149,12 +160,19 @@ function closingMatches(body, owner, repo) {
   }
   return out;
 }
-function closingRefs(body, owner, repo) {
-  const seen = new Set(), items = [];
-  for (const it of closingMatches(body, owner, repo)) { if (!seen.has(it.spelled)) { seen.add(it.spelled); items.push(it); } }
-  items.sort((x, y) => x.kind - y.kind || x.num - y.num || (x.spelled < y.spelled ? -1 : x.spelled > y.spelled ? 1 : 0));
-  return items.map(i => i.spelled).join(',');
+function joinSpelled(items) {
+  const seen = new Set(), uniq = [];
+  for (const it of items) { if (!seen.has(it.spelled)) { seen.add(it.spelled); uniq.push(it); } }
+  uniq.sort((x, y) => x.kind - y.kind || x.num - y.num || (x.spelled < y.spelled ? -1 : x.spelled > y.spelled ? 1 : 0));
+  return uniq.map(i => i.spelled).join(',');
 }
+// What agent-merge reads: the raw body.
+function closingRefsRaw(body, owner, repo) { return joinSpelled(closingMatches(body, owner, repo)); }
+function closingRefs(body, owner, repo) { return joinSpelled(closingMatches(stripMarkup(body), owner, repo)); }
+// Both views, in the form the gate exports and detect compares.
+function closingViews(body, owner, repo) { return `raw=${closingRefsRaw(body, owner, repo)};gh=${closingRefs(body, owner, repo)}`; }
+// The release paths (this workflow's exhaustion release; agent-merge's own) act on what they can
+// PARSE, which is the raw body — so the numbers come from the raw view, same-repo forms only.
 function closingIssues(body, owner, repo) {
   return [...new Set(closingMatches(body, owner, repo).filter(i => i.same).map(i => i.num))].sort((x, y) => x - y);
 }
@@ -264,13 +282,23 @@ async function detect({ github, context, core, env }) {
     // snapshots that set before the run (`none` when empty; '' means an older gate that did not);
     // a change is escalated and the job failed (round-2 review + red team on #466).
     const snap = String(env.CLOSES_BEFORE || '').trim();
-    if (snap) {
-      const asSet = t => [...new Set(String(t || '').split(',').map(x => x.trim()).filter(Boolean))].sort().join(',');
-      const beforeSet = snap === 'none' ? '' : asSet(snap);   // the gate wrote it with closingRefs, so it is in the same spelled form
-      const nowSet = asSet(closingRefs(pr.body, owner, repo));
-      refsChanged = beforeSet !== nowSet;
-      const show = s => s ? s.split(',').join(', ') : 'none';
-      refsDetail = `before: ${show(beforeSet)}; now: ${show(nowSet)}`;
+    const asSet = t => [...new Set(String(t || '').split(',').map(x => x.trim()).filter(Boolean))].sort().join(',');
+    const parseViews = v => { const m = /^raw=(.*);gh=(.*)$/s.exec(v); return m ? { raw: asSet(m[1]), gh: asSet(m[2]) } : null; };
+    const now = parseViews(closingViews(pr.body, owner, repo));
+    const show = t => t ? t.split(',').join(', ') : 'none';
+    if (!snap) {
+      // No snapshot means a gate older than this detector. The guard fails CLOSED: it cannot
+      // judge, so it escalates rather than letting a body rewrite through unseen (round-6 red team).
+      refsChanged = true;
+      refsDetail = `no closing-reference snapshot from the gate (gate and detector out of step); now: ${show(now.raw)}`;
+      core.warning(`agent-noop: ${refsDetail}`);
+    } else {
+      const before = snap === 'none' ? { raw: '', gh: '' } : parseViews(snap);
+      if (!before) { refsChanged = true; refsDetail = `unreadable snapshot '${snap.slice(0, 80)}'`; }
+      else {
+        refsChanged = before.raw !== now.raw || before.gh !== now.gh;
+        refsDetail = `as agent-merge reads it — before: ${show(before.raw)}; now: ${show(now.raw)} · as GitHub honours it — before: ${show(before.gh)}; now: ${show(now.gh)}`;
+      }
       if (refsChanged) core.warning(`agent-noop: the PR's closing references changed during the run (${refsDetail})`);
     }
     reason = moved ? `head moved from ${before.slice(0, 7)} to ${pr.head.sha.slice(0, 7)}`
@@ -451,4 +479,4 @@ async function finalize({ github, context, core, env }) {
   core.setFailed(`agent-noop: review-fix on #${pr} produced nothing after ${spent} — ${env.REASON || 'no output'}; attempt ${attempt}, needs-human ${escalated ? 'applied' : 'NOT applied'}, job failed (#361).`);
 }
 
-module.exports = { detect, finalize, readFigures, isVerdict, isFixer, retryBudget, closingRefs, closingIssues };
+module.exports = { detect, finalize, readFigures, isVerdict, isFixer, retryBudget, closingRefs, closingRefsRaw, closingViews, closingIssues };
