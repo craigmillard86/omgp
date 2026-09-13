@@ -273,6 +273,13 @@ const said = (w, re) => w.log.some(l => re.test(l));
     check(`CODEOWNERS: ${name} (${f}) is never auto-merged`, !mergedIt(w) && said(w, /CODEOWNERS-owned path/));
   }
 
+  // Round-6 red team on #420: the owned-path check mapped only `f.filename`, so renaming an
+  // owned file to an unowned path (one entry, old path in previous_filename) walked it.
+  w = world({prs: [PR(['agent-authored', 'risk:t1'])], comments: {94: clean(HEAD)},
+             files: {94: [{filename: 'docs/governance-archive.md', previous_filename: 'docs/GOVERNANCE.md', status: 'renamed'}]}});
+  await run(w);
+  check('CODEOWNERS: renaming an owned file away is never auto-merged', !mergedIt(w) && said(w, /CODEOWNERS-owned path/));
+
   // --- verdict discipline (identical rule to agent-approve) ---
   w = world({prs: [PR(['agent-authored', 'risk:t1'])], comments: {94: []}});
   await run(w);

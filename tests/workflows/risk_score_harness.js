@@ -98,6 +98,17 @@ const tierOf = w => (w.applied.find(l => /^risk:t[0-3]$/.test(l)) || '').replace
   w = world([R('tests/unit/test_link_loop2.cpp', 'tests/unit/test_link_loop.cpp')]); await run(w);
   check('renaming a C++ test that stays a test is not escalated', Number(tierOf(w)) <= 1);
 
+  // --- round-6 red team on #420: a RENAME walked the path rules -------------------------------
+  // `paths` mapped only `f.filename`; GitHub reports a rename as ONE entry whose filename is the
+  // NEW path and whose previous_filename is the old one, and it may carry a patch (move + edit).
+  // So renaming docs/GOVERNANCE.md to an unowned path scored T0 by path. Both paths count.
+  w = world([R('docs/governance-archive.md', 'docs/GOVERNANCE.md')]); await run(w);
+  check('renaming a governance artefact away -> T3', tierOf(w) === '3');
+  w = world([Object.assign(R('tests/archive/v1.json', 'tests/vectors/v1.json'), {patch: '@@\n-x\n+y\n', additions: 1, deletions: 1})]); await run(w);
+  check('moving AND editing a golden vector -> T3', tierOf(w) === '3');
+  w = world([R('sim/master_old.cpp', 'link/master.cpp')]); await run(w);
+  check('renaming portable protocol-critical code away -> T2', tierOf(w) === '2');
+
   for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
   console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);
 })();
