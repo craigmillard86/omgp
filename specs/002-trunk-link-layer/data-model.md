@@ -243,14 +243,15 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   and `ref_pass_left = 0` — a clear at the reference rate can fire mid-pass, and a stale pass
   counter must not survive it; resetting first would lose the answerer the clear still needs
   and re-declare the fault at once (round-8 red team on #472).
+  The superseded **Clear** clause read "first `ok` result at any rate while `fault` →
+  `fault = false`, `bit_rate` = the rate that got the answer": the answering rate pinned the
+  trunk, so one node strapped at the fallback rate could downgrade a reference-rate rig (#110
+  F4).
 - Rate in use and the schedule (F4, 2026-09-06: "`T_poll` and the §6 budget derive from the
   rate in use"): while `bit_rate == TRUNK_bit_rate_fallback` the superframe period and the §6
   budget are those of `trunk §6` scaled by `TRUNK_bit_rate / TRUNK_bit_rate_fallback` (≈ 8.7×,
   ≈ 17.4 ms), since one minimal status-poll transaction alone is ≈ 2.4 ms at 115.2 kbit/s.
-  Implemented where the scheduler consumes `bit_rate()` (F3), not in this tracker. The superseded clause read "first `ok` result at any rate while `fault`
-  → `fault = false`, `bit_rate` = the rate that got the answer": the answering rate pinned the
-  trunk, so one node strapped at the fallback rate could downgrade a reference-rate rig
-  (#110 F4).
+  Implemented where the scheduler consumes `bit_rate()` (F3), not in this tracker.
 - No automatic return (ruling 2026-09-13): nodes select their rate by strap or configuration
   (trunk §2) and cannot hear a probe at the other rate, so once `!fault` the rate in use stands
   until the layer above or a human changes it. The fallback rate is a bring-up rate. A
