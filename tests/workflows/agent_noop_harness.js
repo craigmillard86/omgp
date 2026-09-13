@@ -541,6 +541,26 @@ const during = '2026-09-12T10:00:30Z';
   check('closingRefs: a reference inside an HTML comment counts', closingRefs('<!-- Closes #463 -->', 'o', 'r') === 'Closes #463');
   check('closingRefs: a reference in a nested list item counts', closingRefs('- a\n    - Closes #999', 'o', 'r') === 'Closes #999');
   check('closingRefs: nothing binds across a code span either way — no markup is interpreted', closingRefs('Closes `x` #1', 'o', 'r') === '');
+  // Round-10 red team on #466: the guard's parser was NARROWER than agent-merge's for `KEYWORD #n`
+  // — a trailing-character restriction and a two-character emphasis cap — so `fixes #131-followup`
+  // and `***fixes #131***` were live instructions to agent-merge (which closes #131 on merge) and
+  // invisible to the guard. For the `#n` form the guard must read at least what agent-merge reads.
+  check('closingRefs: `#n` followed by a hyphen counts, as agent-merge reads it', closingRefs('Also fixes #131-followup in passing.', 'o', 'r') === 'fixes #131');
+  check('closingRefs: `#n` followed by an underscore counts', closingRefs('resolves #131_x', 'o', 'r') === 'resolves #131');
+  check('closingRefs: `#n` followed by letters counts', closingRefs('closes #131abc', 'o', 'r') === 'closes #131');
+  check('closingRefs: any run of emphasis markers before the keyword', closingRefs('***fixes #131*** — noted.', 'o', 'r') === '***fixes #131');
+  for (const [form, before, after] of [
+    ['a hyphen suffix', 'Closes #463', 'Closes #463\n\nAlso fixes #131-followup in passing.'],
+    ['an underscore suffix', 'Closes #463', 'Closes #463\n\nresolves #131_x'],
+    ['triple emphasis', 'Closes #463', 'Closes #463\n\n***fixes #131*** — noted.'],
+  ]) {
+    w = world({ head: 'b'.repeat(40), body: after });
+    r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: closingRefs(before, 'o', 'r'), EXEC_FILE: execFile({ num_turns: 30 }) } });
+    check(`fix: a reference ADDED with ${form} is flagged — agent-merge would close it`, r.refs_changed === true);
+  }
+  w = world({ head: 'b'.repeat(40), body: 'Closes #463' });
+  r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: closingRefs('Closes #463\nresolves #131-a', 'o', 'r'), EXEC_FILE: execFile({ num_turns: 30 }) } });
+  check('fix: a reference REMOVED that agent-merge read (`resolves #131-a`) is flagged', r.refs_changed === true);
   for (const [form, after] of [['a nested list item', 'Closes #463\n- a\n    - Closes #999'], ['an HTML comment', 'Closes #463\n\n<!-- Closes #999 -->'], ['a fenced block', 'Closes #463\n\n```\nCloses #999\n```'], ['a code span', 'Closes #463\n\nthe old body said `Closes #999`']]) {
     w = world({ head: 'b'.repeat(40), body: after });
     r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
@@ -551,7 +571,7 @@ const during = '2026-09-12T10:00:30Z';
   check('fix: a reference MOVED into a fence is NOT flagged — the automation still reads it; GitHub\'s renderer is the stated residual', r.refs_changed === false);
   w = world({ head: 'b'.repeat(40), body: 'Closes #463' });
   r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'raw=Closes #463;gh=Closes #463', EXEC_FILE: execFile({ num_turns: 30 }) } });
-  check('fix: a two-view snapshot from an older gate is read by its raw half', r.refs_changed === false);
+  check('fix: a snapshot in a format this detector does not write is unreadable and fails CLOSED (no shim)', r.refs_changed === true && /unreadable|snapshot/i.test(r.refs_detail));
   w = world({ head: 'b'.repeat(40), body: 'Closes #470\nCloses o/r#465' });
   r = await detect({ ...w, env: { KIND: 'fix', PR: '466', HEAD_BEFORE: 'a'.repeat(40), SINCE: T0, CLOSES_BEFORE: 'Closes #465,Closes #470', EXEC_FILE: execFile({ num_turns: 30 }) } });
   check('fix: `Closes #465` rewritten as `Closes o/r#465` IS flagged — the form agent-merge reads changed', r.refs_changed === true);

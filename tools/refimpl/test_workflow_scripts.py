@@ -669,6 +669,41 @@ def test_rebuttal_only_fix_run_is_escalated_and_the_fixer_may_edit_the_body():
     assert "--allow-empty" in prompt, "after a body-only correction the fixer must push an empty commit"
 
 
+def test_reference_guard_reads_at_least_what_agent_merge_reads(tmp_path):
+    """Round-10 red team on #466: the guard's `KEYWORD #n` parser was narrower than agent-merge's
+    (`agent-merge.yml`'s release/close regex), so a body edit could add or remove a reference the
+    merge automation acts on while the guard said "unchanged". Pin the property, not a spelling:
+    extract agent-merge's literal regex from its workflow and check, on a corpus of awkward bodies,
+    that the guard's same-repo issue set is a SUPERSET of what that regex finds."""
+    if shutil.which("node") is None:
+        pytest.skip("node not present")
+    merge_src = (ROOT / ".github" / "workflows" / "agent-merge.yml").read_text()
+    m = re.search(r"matchAll\((/\\b\(\?:close\[sd\]\?\|fix\(\?:e\[sd\]\)\?\|resolve\[sd\]\?\)[^/]*/gi)\)", merge_src)
+    assert m, "agent-merge.yml's closing-reference regex not found where expected"
+    merge_re = m.group(1)
+    corpus = [
+        "Closes #463", "Also fixes #131-followup in passing.", "resolves #131_x", "closes #131abc",
+        "***fixes #131*** — noted.", "**Closes** #12", "Closes:#12", "closes:  #12", "Fixes #1, fixes #2\nResolved #3",
+        "```\nCloses #7\n```", "<!-- Closes #8 -->", "- a\n    - Closes #9", "text\n\n    Closes #10",
+        "Closes #11\nfixes GH-12\ncloses o/r#13\nresolves https://github.com/o/r/issues/14",
+    ]
+    runner = tmp_path / "cmp.js"
+    runner.write_text(
+        "const noop = require(process.argv[2]); const bodies = JSON.parse(process.argv[3]);\n"
+        "const mergeRe = " + merge_re + ";\n"
+        "let bad = [];\n"
+        "for (const b of bodies) {\n"
+        "  const merge = [...new Set([...b.matchAll(mergeRe)].map(x => Number(x[1])))];\n"
+        "  const guard = new Set(noop.closingIssues(b, 'o', 'r'));\n"
+        "  for (const n of merge) if (!guard.has(n)) bad.push(JSON.stringify(b) + ' -> agent-merge sees #' + n + ', guard does not');\n"
+        "}\n"
+        "console.log(bad.length ? bad.join('\\n') : 'SUPERSET');\n")
+    r = subprocess.run(["node", str(runner), str(ROOT / "tools" / "ci" / "agent-noop.js"), json.dumps(corpus)],
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "SUPERSET", r.stdout
+
+
 def test_review_fix_finalize_glue_calls_finalize_on_a_comment_only_run(tmp_path):
     """Round-1 red team on #466, finding 4: the wiring test asserted the literal ONLY_COMMENT in
     the finalize step, not the condition — inverting `!== 'true'` to `=== 'true'` survived the
