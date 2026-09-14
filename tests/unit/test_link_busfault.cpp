@@ -71,6 +71,10 @@ struct RecordingListener : HealthListener {
 constexpr uint8_t kNodeA = omgp::ADDR_backplane_min;     // 0x01
 constexpr uint8_t kNodeB = omgp::ADDR_backplane_min + 1; // 0x02
 constexpr uint8_t kNodeC = omgp::ADDR_backplane_min + 2; // 0x03
+// Never enrolled by ThreeNodeRig: the enrolment rotation probes it, the reference pass (which
+// covers only addresses that have ever answered) skips it, so a probe to it can stay
+// outstanding across a whole episode.
+constexpr uint8_t kNodeD = omgp::ADDR_backplane_min + 3; // 0x04
 
 // data-model.md §9: a bus-level notice carries addr 0, never a node address.
 constexpr uint8_t kBusAddr = 0;
@@ -491,6 +495,97 @@ TEST_CASE("a new episode at the fallback rate reads a pre-declare poll's answer 
     REQUIRE_FALSE(tracker.bus_fault());
     REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
     REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED);
+    REQUIRE(tracker.bus_stats().bus_faults == 2);
+}
+
+TEST_CASE("an outcome outstanding across an episode boundary is read at its own probe's rate",
+          "[timing:bit_rate_fallback]") {
+    // The per-episode reset must not overwrite the record of a probe whose outcome has NOT yet
+    // arrived: there the bit is the only correct record in the system. The two "a new episode
+    // ..." cases above drive an outcome for an address the new episode has not probed, but
+    // never one whose probe was still outstanding when the episode turned over (red team round
+    // 6 on #530, finding 1).
+    //
+    // Upward direction: C is probed at the FALLBACK rate in episode 1, episode 1 clears at the
+    // reference rate on another node's answer, episode 2 is declared, and only then does C's
+    // probe answer. Reset to the rate in use, that answer reads as a reference-rate one and
+    // clears episode 2 at 1 Mbit — enrolling C at a rate it has just demonstrated it cannot
+    // hear, which is the declare/clear oscillation §7's deferral exists to prevent.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    ThreeNodeRig::build(tracker);
+    // Three probes issued before any of them is answered — F3 obligation 2 is one call per
+    // probe issued, not one outcome before the next call, and the alternation makes the third
+    // a fallback-rate one (see the "an extra next_probe() call ..." cases above).
+    const Probe p1 = tracker.next_probe(0);
+    const Probe p2 = tracker.next_probe(0);
+    const Probe p3 = tracker.next_probe(0);
+    REQUIRE(p1.addr == kNodeA);
+    REQUIRE(p1.bit_rate == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(p2.addr == kNodeB);
+    REQUIRE(p2.bit_rate == omgp::TRUNK_bit_rate);
+    REQUIRE(p3.addr == kNodeC);
+    REQUIRE(p3.bit_rate == omgp::TRUNK_bit_rate_fallback); // C's outcome is left outstanding
+
+    tracker.on_result(kNodeB, true, 5'000); // p2 answers: episode 1 clears at the reference rate
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+
+    fail_to_suspect(tracker, kNodeB, 10'000); // B stops answering: episode 2
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+
+    tracker.on_result(kNodeC, true, 10'001); // p3's outcome at last — a FALLBACK-rate probe's
+
+    REQUIRE(tracker.bus_fault());                           // §7: it clears nothing on its own…
+    REQUIRE(tracker.state(kNodeC) == HealthState::SUSPECT); // …and its §6 transition is deferred
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);    // no clear, so no rate decided yet
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);    // still only episode 1's
+    REQUIRE(tracker.bus_stats().bus_faults == 2);
+}
+
+TEST_CASE("an outstanding reference-rate probe answered in the next episode still clears at once",
+          "[timing:bit_rate_fallback]") {
+    // The other direction of the same reset, on an episode whose rate in use is the FALLBACK
+    // one: D is probed at the reference rate in episode 1 and answers only in episode 2. Reset
+    // to the rate in use, that answer reads as a fallback-rate one, so instead of clearing at
+    // once (FR-026) the trunk runs a reference pass and stays pinned at 115 200 with no
+    // automatic return (ruling 2026-09-13).
+    //
+    // D is never enrolled, which is what keeps its probe outstanding across the boundary: the
+    // reference pass that ends episode 1 covers only addresses that have answered, so nothing
+    // in between delivers an outcome for D.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    ThreeNodeRig::build(tracker);
+    const Probe d = probe_until(tracker, kNodeD, omgp::TRUNK_bit_rate);
+    REQUIRE(d.addr == kNodeD); // outcome deliberately left outstanding
+
+    probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate_fallback);
+    tracker.on_result(kNodeC, true, 10'000); // a fallback-rate answer: the pass starts
+    uint64_t t = 11'000;
+    for (int i = 0; i < 3; ++i) { // the pass covers A, B and C only, and draws nothing
+        const Probe p = tracker.next_probe(0);
+        REQUIRE(p.addr != kNodeD);
+        tracker.on_result(p.addr, false, t += 1'000);
+    }
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback); // the rate in use from here
+    REQUIRE(tracker.state(kNodeD) == HealthState::UNENROLLED);
+
+    fail_to_suspect(tracker, kNodeC, 20'000); // C stops answering: episode 2
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+
+    tracker.on_result(kNodeD, true, 20'001); // D's outcome at last — a REFERENCE-rate probe's
+
+    REQUIRE_FALSE(tracker.bus_fault());                      // FR-026: it clears at once…
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);     // …at the reference rate
+    REQUIRE(tracker.state(kNodeD) == HealthState::ENROLLED); // applied, not deferred to a pass
     REQUIRE(tracker.bus_stats().bus_faults == 2);
 }
 
