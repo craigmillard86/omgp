@@ -213,8 +213,13 @@ public:
                                                                // data-model §7, amended 2026-09-13) or by set_bit_rate() below
     void set_bit_rate(uint32_t bps);                           // the layer above's selection — bring-up AT the fallback rate, or
                                                                // restoring the reference rate (ruling 2026-09-14): assigns the rate
-                                                               // bit_rate() reports and enrolment probes are issued at; never a
-                                                               // clear, changes no node state. Called in the same step as
+                                                               // bit_rate() reports and, while !bus_fault(), the rate enrolment
+                                                               // probes are issued at (during a fault the probe's rate is the
+                                                               // probe's own: alternation and the reference pass, data-model §7).
+                                                               // Never a clear, changes no node state. Refused (not assigned) on
+                                                               // exactly Master::set_bit_rate's rule — bps == 0 or bps > 10 Mb/s,
+                                                               // byte_time_us(bps) would be 0 — so a refused rate leaves BOTH
+                                                               // unchanged (round-2 red team on #523). Called in the same step as
                                                                // Master::set_bit_rate ("What F3/F4 need", obligation 3). T043
 };
 ```
@@ -250,3 +255,7 @@ Three obligations on F3 that the health tracker's rate rules (data-model §7, F4
    a pass-through to the wire and does not reach the tracker; a tracker left at the reference
    rate would issue the next enrolment probe at it (undoing the bring-up) and budget every
    superframe ≈ 8.7× too short — demonstrated by the round-1 red team on #523 with a stub wire.
+   "In step" holds because both setters refuse the same arguments (`bps == 0`, `bps > 10 Mb/s`)
+   and neither reports acceptance: a refused rate changes neither, an accepted rate changes both
+   (round-2 red team on #523 — with a refusal rule on one side only, every refused argument put
+   the two out of step and left the tracker holding a rate whose `byte_time_us` is 0).
