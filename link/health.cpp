@@ -37,7 +37,8 @@ constexpr bool is_node_addr(uint8_t addr) {
 } // namespace
 
 HealthTracker::HealthTracker(Clock& clock, HealthListener& listener)
-    : clock_(clock), listener_(listener), records_{}, next_probe_addr_(omgp::ADDR_backplane_max) {
+    : clock_(clock), listener_(listener), records_{}, next_probe_addr_(omgp::ADDR_backplane_max),
+      stats_{} {
     (void)clock_; // discarded read: see the clock_ declaration comment in health.hpp
 }
 
@@ -171,6 +172,10 @@ bool HealthTracker::bus_fault() const {
 
 uint32_t HealthTracker::bit_rate() const {
     return omgp::TRUNK_bit_rate; // T043 (US5) pins the recovered rate; stubbed per T038.
+}
+
+const BusStats& HealthTracker::bus_stats() const {
+    return stats_; // zeroed until T043 (US5) decides a rate change or a bus fault.
 }
 
 } // namespace link

@@ -59,6 +59,12 @@ class HealthTracker {
 
     bool bus_fault() const;
     uint32_t bit_rate() const;
+    // Bus-level counters (data-model.md §8): `rate_changes` and `bus_faults` as decided by
+    // this tracker; `BusStats::discards` is the Master engine's field and is never written
+    // here. The counters are what T041's tests read; the events that move them are T043, so
+    // this returns the zeroed block until then (contracts/link-cpp.md "Health tracker" is
+    // amended for the accessor in the same PR, pending a ruling).
+    const BusStats& bus_stats() const;
 
   private:
     // data-model §6 also lists `ever_answered`; omitted until a transition rule reads it
@@ -84,6 +90,7 @@ class HealthTracker {
     HealthListener& listener_;
     HealthRecord records_[kAddrCount];
     uint8_t next_probe_addr_;
+    BusStats stats_;
 };
 
 } // namespace link
