@@ -51,6 +51,18 @@ static_assert(kAddrCount <= 16, // literal-ok: the bit width of that uint16_t fi
 constexpr uint16_t probe_bit(uint8_t addr) {
     return static_cast<uint16_t>(1u << addr);
 }
+// How long a probe can be outstanding, measured from its issue (next_probe's now_us): the
+// request's own transmission, the in-flight hold of one worst-case frame, and the response
+// window, all at the slowest rate (contracts/link-cpp.md "Behaviour": the window is
+// [tx_end, tx_end + T_resp) and the hold extends it by max_frame; trunk §3/§9). Spec symbols
+// only (CLAUDE.md rule 4): 2 x kMaxWire x byte_time_us(TRUNK_bit_rate_fallback) + TRUNK_T_resp_us
+// ≈ 24.6 ms. One bound for both rates — a reference-rate probe is written off later than it
+// need be, never earlier; the harm the bound exists for (an abandoned record frozen for ever)
+// is on the long side. The epoch is the issue instant, so a probe ISSUED but never transmitted
+// is covered too (round-9 red team on #530, finding 1).
+constexpr uint64_t kOutcomeWindowUs =
+    2ull * kMaxWire * byte_time_us(omgp::TRUNK_bit_rate_fallback) + omgp::TRUNK_T_resp_us;
+
 // Every address's bit at once, for evaluate_declare()'s per-episode reset. Derived from
 // kAddrCount rather than written as a mask, so it stays the whole field if the address space
 // grows — up to the width the static_assert above holds it to.
@@ -418,14 +430,18 @@ void HealthTracker::note_probe(uint8_t addr, uint32_t bit_rate, uint64_t now_us)
     // …and the record is owed an outcome from here until on_result reads it — or until the
     // outcome window closes. That is what exempts this address from evaluate_declare()'s
     // per-episode reset (health.hpp, BusState::probe_live; red team round 6 on #530, finding
-    // 1), for TRUNK_T_resp_us from now (round 7, finding 1: unbounded, an abandoned probe
-    // froze the record for ever). One timestamp for the set, not one per address: under F3
-    // obligation 1 one transaction is on the wire at a time, so the newest probe's issue
-    // instant bounds every live bit; with the obligation violated the window is measured from
-    // the newest probe, which can only KEEP an older stale bit alive for one more window,
-    // never drop a live one early.
-    bus_.probe_live = static_cast<uint16_t>(bus_.probe_live | probe_bit(addr));
-    bus_.probe_live_us = now_us;
+    // 1), for kOutcomeWindowUs from now (round 7, finding 1: unbounded, an abandoned probe
+    // froze the record for ever; round 9: per address, and the whole transaction's window,
+    // not T_resp from issue). The stamp is this address's own: a single stamp for the set was
+    // re-armed by every later probe to any other address.
+    // Only the newest handout is live: F3 obligation 1 puts one transaction on the wire at a
+    // time, so a handout to any address means the previous probe's transaction is over — its
+    // outcome was consumed, or it was abandoned and will never be read. A live bit that
+    // survived a later handout is exactly the abandoned record round 7 and round 9 (finding 2:
+    // an unrelated discovery probe kept it alive) describe. The time bound below is for the
+    // other case: an abandoned probe with no later handout at all.
+    bus_.probe_live = probe_bit(addr);
+    records_[addr].probe_issued_us = now_us;
 }
 
 void HealthTracker::evaluate_declare(uint64_t now_us) {
@@ -498,13 +514,18 @@ void HealthTracker::evaluate_declare(uint64_t now_us) {
     // All four combinations are DEMONSTRATED, one case each, by the two "a new episode ..." and
     // two "... outstanding across an episode boundary" / "... answered in the next episode"
     // cases in tests/unit/test_link_busfault.cpp.
-    // …and only while that probe can still be answered (health.hpp, probe_live_us): past
-    // TRUNK_T_resp_us the outcome is not coming, the record is owed nothing, and honouring it
-    // would freeze a dead frame's rate into this and every later episode (round 7, finding 1).
-    // Demonstrated by "an abandoned probe does not freeze its address's rate record" in
-    // tests/unit/test_link_busfault.cpp; the in-window half by the two boundary cases above.
-    if (elapsed_us(now_us, bus_.probe_live_us) > omgp::TRUNK_T_resp_us)
-        bus_.probe_live = 0;
+    // …and only while that probe can still be answered (HealthRecord::probe_issued_us): past
+    // kOutcomeWindowUs the outcome is not coming, the record is owed nothing, and honouring it
+    // would freeze a dead frame's rate into this and every later episode (round 7, finding 1;
+    // round 9: judged per address against the slowest transaction's whole window, because a
+    // bound of T_resp from issue wrote off every fallback-rate probe older than 200 us — its
+    // request alone takes longer — and one stamp for the set was re-armed by any later probe).
+    // Demonstrated by the abandoned-probe, sweep and discovery-probe cases in
+    // tests/unit/test_link_busfault.cpp; the in-window half by the two boundary cases.
+    for (uint8_t a = omgp::ADDR_backplane_min; a <= omgp::ADDR_backplane_max; ++a)
+        if ((bus_.probe_live & probe_bit(a)) != 0 &&
+            elapsed_us(now_us, records_[a].probe_issued_us) > kOutcomeWindowUs)
+            bus_.probe_live = static_cast<uint16_t>(bus_.probe_live & ~probe_bit(a));
     const uint16_t in_use = bus_.bit_rate == omgp::TRUNK_bit_rate_fallback ? kAllProbeBits : 0;
     bus_.probe_fallback = static_cast<uint16_t>((bus_.probe_fallback & bus_.probe_live) |
                                                 (in_use & ~bus_.probe_live));

@@ -91,6 +91,11 @@ class HealthTracker {
         uint8_t consecutive_failures = 0;
         uint64_t suspect_since_us = 0;
         uint64_t last_poll_us = 0;
+        // When the last probe to this address went out (next_probe's now_us): the epoch of the
+        // outstanding-probe exemption's outcome window (BusState::probe_live). Per address —
+        // one stamp for the whole set was re-armed by every later probe to ANY address, so a
+        // discovery probe kept an abandoned probe's record alive (round-9 red team on #530).
+        uint64_t probe_issued_us = 0;
     };
 
     // Bus state (data-model.md §7). `rate_changes`/`faults` of the data model's BusState live
@@ -142,21 +147,27 @@ class HealthTracker {
         // that address keeps its bit across the boundary (red team round 6 on #530, finding
         // 1). Not a data-model.md §7 field; like probe_fallback it exists only because
         // on_result carries no rate.
-        // BOUNDED by the outcome window (round-7 red team on #530, finding 1): a probe's
-        // outcome — answer or timeout — reaches on_result within TRUNK_T_resp_us of its
-        // issue (contracts/link-cpp.md, byte-wire-and-clock.md), so a bit older than that
-        // owes this layer nothing: its probe was dropped at L2, abandoned at a superframe
-        // boundary, or its timeout never reported. Unbounded, one such probe exempted its
-        // address from the reset in EVERY later episode and a later reference-rate answer
-        // from it was read at the stale fallback bit — the fault did not clear at the
-        // reference rate and the trunk pinned at the fallback one. evaluate_declare()
-        // therefore honours these bits only while now - probe_live_us <= TRUNK_T_resp_us
-        // and drops them otherwise. A re-declare needs >= TRUNK_suspect_after_failures
-        // polls of every enrolled node, longer than one outcome window, so the exemption
-        // is reachable only by a declare that follows a clear inside one window — the two
-        // "... across an episode boundary" cases in tests/unit/test_link_busfault.cpp.
+        // BOUNDED by the outcome window (round-7 red team on #530, finding 1; bound corrected
+        // round 9): a probe's outcome — answer or timeout — reaches on_result within the
+        // transaction's request, in-flight hold and response window of its ISSUE
+        // (contracts/link-cpp.md "Behaviour": the window is [tx_end, tx_end + T_resp), the
+        // hold extends it by one worst-case frame), which health.cpp's kOutcomeWindowUs
+        // bounds at the slowest rate for every probe. A bit older than that owes this layer
+        // nothing: its probe was dropped at L2, abandoned at a superframe boundary, or its
+        // timeout never reported. Unbounded, one such probe exempted its address from the
+        // reset in EVERY later episode and a later reference-rate answer from it was read
+        // at the stale fallback bit — the fault did not clear at the reference rate and the
+        // trunk pinned at the fallback one. evaluate_declare() therefore honours each bit
+        // only while now - HealthRecord::probe_issued_us <= kOutcomeWindowUs and drops it
+        // otherwise. Round 7's first bound — T_resp measured from issue, one stamp for the
+        // set — was shorter than a fallback-rate request's own transmission and re-armed by
+        // any later probe; both corrected round 9. Demonstrated by the sweep, the
+        // discovery-probe and the abandoned-probe cases in tests/unit/test_link_busfault.cpp;
+        // the in-window half by the "... across an episode boundary" case. And at most ONE
+        // bit is set: a handout to any address supersedes every earlier live bit, because
+        // under F3 obligation 1 one transaction is on the wire at a time — a probe still
+        // "live" after a later handout is an abandoned record (round 9, finding 2).
         uint16_t probe_live = 0;
-        uint64_t probe_live_us = 0; // when the most recent probe went out (next_probe's now_us)
     };
 
     void notify(Notice notice, uint8_t addr);

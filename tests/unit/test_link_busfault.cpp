@@ -572,9 +572,11 @@ TEST_CASE("an abandoned probe does not freeze its address's rate record: the out
 
     ThreeNodeRig::build(tracker);
     REQUIRE(tracker.bus_fault());
-    REQUIRE(probe_until(tracker, kNodeA, omgp::TRUNK_bit_rate_fallback).addr == kNodeA); // t = 0
-    REQUIRE(probe_until(tracker, kNodeB, omgp::TRUNK_bit_rate).addr == kNodeB); // never answered: A
-    tracker.on_result(kNodeB, true, 6'000); // episode 1 clears at the reference rate
+    const Probe a = tracker.next_probe(0); // A @ fallback, t = 0 — never answered, and no later
+    REQUIRE(a.addr == kNodeA);             // handout supersedes it: only time can write it off
+    REQUIRE(a.bit_rate == omgp::TRUNK_bit_rate_fallback);
+    tracker.on_result(kNodeB, true, 6'000); // B's answer (a pre-declare poll's, read at the rate
+                                            // in use): episode 1 clears at the reference rate
     REQUIRE_FALSE(tracker.bus_fault());
     REQUIRE(tracker.state(kNodeA) == HealthState::SUSPECT);
 
@@ -618,8 +620,9 @@ TEST_CASE("an outstanding fallback-rate probe is deferred at any age inside the 
         fail_to_suspect(tracker, kNodeB, 30'000); // episode 2
         REQUIRE(tracker.bus_fault());
         tracker.on_result(kNodeC, true, 30'001); // p3's fallback answer, inside its window
-        REQUIRE(tracker.bus_fault());                           // deferred, not a clear at 1 Mbit
-        REQUIRE(tracker.state(kNodeC) == HealthState::SUSPECT); // not enrolled at a rate it cannot hear
+        REQUIRE(tracker.bus_fault());            // deferred, not a clear at 1 Mbit
+        REQUIRE(tracker.state(kNodeC) ==
+                HealthState::SUSPECT); // not enrolled at a rate it cannot hear
     }
 }
 
@@ -634,7 +637,8 @@ TEST_CASE("an unrelated discovery probe does not keep an abandoned probe's recor
     RecordingListener listener;
     HealthTracker tracker(clock, listener);
     ThreeNodeRig::build(tracker);
-    REQUIRE(probe_until(tracker, kNodeA, omgp::TRUNK_bit_rate_fallback).addr == kNodeA); // t = 0, abandoned
+    REQUIRE(probe_until(tracker, kNodeA, omgp::TRUNK_bit_rate_fallback).addr ==
+            kNodeA); // t = 0, abandoned
     REQUIRE(probe_until(tracker, kNodeB, omgp::TRUNK_bit_rate).addr == kNodeB);
     tracker.on_result(kNodeB, true, 6'000); // episode 1 clears at the reference rate
     REQUIRE_FALSE(tracker.bus_fault());
@@ -644,13 +648,25 @@ TEST_CASE("an unrelated discovery probe does not keep an abandoned probe's recor
     fail_to_suspect(tracker, kNodeB, 50'000); // episode 2, 50 ms after A's probe
     REQUIRE(tracker.bus_fault());
     tracker.on_result(kNodeA, true, 50'001); // a REFERENCE-rate answer (a pre-declare poll's)
-    REQUIRE_FALSE(tracker.bus_fault());                      // FR-026: clears at once
+    REQUIRE_FALSE(tracker.bus_fault());      // FR-026: clears at once
     REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
     REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED);
 }
 
-TEST_CASE("an outstanding reference-rate probe answered in the next episode still clears at once",
-          "[timing:bit_rate_fallback]") {
+TEST_CASE(
+    "a probe superseded by later handouts is read at the rate in use, not at its own stale rate",
+    "[timing:bit_rate_fallback]") {
+    // Round 6 wrote this case as "an outstanding reference-rate probe answered in the next
+    // episode still clears at once": D's reference-rate probe stayed live while three pass
+    // probes went out and a fallback clear happened, and its answer, arriving in episode 2 at
+    // the fallback rate in use, was read at D's own rate and cleared the fault at 1 Mbit.
+    // Round 9 made that unreachable on purpose: a handout to any address supersedes every
+    // earlier live bit (F3 obligation 1, one transaction at a time — three pass probes after
+    // D's means D's transaction is over), so at the episode-2 declare D's bit is reset to the
+    // rate in use, and D's late answer is read as a FALLBACK one: recorded and deferred to a
+    // pass, never an enrolment at a rate D has not demonstrated in this episode. The safe
+    // direction: D is a real reference-rate node and the pass will probe it at the reference
+    // rate and clear there; the old reading enrolled on a frame the tracker had written off.
     // The other direction of the same reset, on an episode whose rate in use is the FALLBACK
     // one: D is probed at the reference rate in episode 1 and answers only in episode 2. Reset
     // to the rate in use, that answer reads as a fallback-rate one, so instead of clearing at
@@ -691,12 +707,14 @@ TEST_CASE("an outstanding reference-rate probe answered in the next episode stil
     REQUIRE(tracker.bus_fault());
     REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
 
-    tracker.on_result(kNodeD, true, 20'001); // D's outcome at last — a REFERENCE-rate probe's (20 ms old: inside the window)
+    tracker.on_result(kNodeD, true, 20'001); // D's outcome at last — its probe long superseded
 
-    REQUIRE_FALSE(tracker.bus_fault());                      // FR-026: it clears at once…
-    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);     // …at the reference rate
-    REQUIRE(tracker.state(kNodeD) == HealthState::ENROLLED); // applied, not deferred to a pass
+    REQUIRE(tracker.bus_fault()); // read at the rate in use (fallback):
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback); // no clear, no rate decided
+    REQUIRE(tracker.state(kNodeD) == HealthState::UNENROLLED); // deferred, not enrolled at 1 Mbit
     REQUIRE(tracker.bus_stats().bus_faults == 2);
+    // …and the pass it started reaches D at the reference rate, where it answers and clears.
+    REQUIRE(tracker.next_probe(20'002).bit_rate == omgp::TRUNK_bit_rate);
 }
 
 // --------------------------------------------------- clear at the reference rate (FR-026) --
