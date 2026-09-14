@@ -191,7 +191,7 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
         clear_fault(omgp::TRUNK_bit_rate_fallback, now_us);
     }
 
-    evaluate_declare();
+    evaluate_declare(now_us);
 }
 
 void HealthTracker::apply_result(uint8_t addr, bool ok, uint64_t now_us) {
@@ -256,7 +256,7 @@ void HealthTracker::tick(uint64_t now_us) {
     // survives by construction rather than for want of a test. (`statement_deletion` named a
     // mutator Mull has no such name for, so the label covered nothing and the survivor came
     // back unlabelled; `cxx_remove_void_call` is Mull's own name for this mutation.)
-    evaluate_declare(); // mutant-ok(equivalent, cxx_remove_void_call): see above
+    evaluate_declare(now_us); // mutant-ok(equivalent, cxx_remove_void_call): see above
 }
 
 HealthState HealthTracker::state(uint8_t addr) const {
@@ -304,7 +304,7 @@ uint8_t HealthTracker::next_backplane_addr(uint8_t addr) const {
                                 omgp::ADDR_backplane_min);
 }
 
-Probe HealthTracker::pass_probe() {
+Probe HealthTracker::pass_probe(uint64_t now_us) {
     // trunk §7 reference pass: every enrolled address once, in address order, at the
     // reference rate, without alternating (data-model.md §6/§7, amended 2026-09-13).
     if (bus_.pass_addr != 0) {
@@ -341,7 +341,7 @@ Probe HealthTracker::pass_probe() {
         if (records_[addr].state != HealthState::UNENROLLED) { // enrolled: ever answered
             bus_.pass_addr = addr;
             note_wire_rate(omgp::TRUNK_bit_rate);
-            note_probe(addr, omgp::TRUNK_bit_rate);
+            note_probe(addr, omgp::TRUNK_bit_rate, now_us);
             return Probe{addr, omgp::TRUNK_bit_rate};
         }
     }
@@ -354,9 +354,9 @@ Probe HealthTracker::pass_probe() {
     return Probe{omgp::ADDR_host, omgp::TRUNK_bit_rate};
 }
 
-Probe HealthTracker::next_probe(uint64_t /*now_us*/) {
+Probe HealthTracker::next_probe(uint64_t now_us) {
     if (bus_.fault && bus_.ref_pass_left > 0)
-        return pass_probe();
+        return pass_probe(now_us);
 
     // trunk §7 / FR-025: while faulted the probes alternate, STARTING at the fallback rate;
     // data-model.md §7 keeps `bus_.bit_rate` untouched until a clear, so a fault-time probe's
@@ -378,7 +378,7 @@ Probe HealthTracker::next_probe(uint64_t /*now_us*/) {
         const HealthState s = records_[next_probe_addr_].state;
         if (s == HealthState::UNENROLLED || s == HealthState::OFFLINE ||
             (bus_.fault && s == HealthState::SUSPECT)) {
-            note_probe(next_probe_addr_, rate);
+            note_probe(next_probe_addr_, rate, now_us);
             return Probe{next_probe_addr_, rate};
         }
     }
@@ -401,7 +401,7 @@ void HealthTracker::note_wire_rate(uint32_t bit_rate) {
     ++stats_.rate_changes;
 }
 
-void HealthTracker::note_probe(uint8_t addr, uint32_t bit_rate) {
+void HealthTracker::note_probe(uint8_t addr, uint32_t bit_rate, uint64_t now_us) {
     // data-model.md §7 needs "a valid answer at the reference rate" told from one at the
     // fallback rate, and on_result carries no rate — so each probe leaves the rate it went out
     // at on its own address (health.hpp, BusState::probe_fallback). Per address, because the
@@ -415,13 +415,20 @@ void HealthTracker::note_probe(uint8_t addr, uint32_t bit_rate) {
         bus_.probe_fallback = static_cast<uint16_t>(bus_.probe_fallback | probe_bit(addr));
     else
         bus_.probe_fallback = static_cast<uint16_t>(bus_.probe_fallback & ~probe_bit(addr));
-    // …and the record is owed an outcome from here until on_result reads it. That is what
-    // exempts this address from evaluate_declare()'s per-episode reset (health.hpp,
-    // BusState::probe_live; red team round 6 on #530, finding 1).
+    // …and the record is owed an outcome from here until on_result reads it — or until the
+    // outcome window closes. That is what exempts this address from evaluate_declare()'s
+    // per-episode reset (health.hpp, BusState::probe_live; red team round 6 on #530, finding
+    // 1), for TRUNK_T_resp_us from now (round 7, finding 1: unbounded, an abandoned probe
+    // froze the record for ever). One timestamp for the set, not one per address: under F3
+    // obligation 1 one transaction is on the wire at a time, so the newest probe's issue
+    // instant bounds every live bit; with the obligation violated the window is measured from
+    // the newest probe, which can only KEEP an older stale bit alive for one more window,
+    // never drop a live one early.
     bus_.probe_live = static_cast<uint16_t>(bus_.probe_live | probe_bit(addr));
+    bus_.probe_live_us = now_us;
 }
 
-void HealthTracker::evaluate_declare() {
+void HealthTracker::evaluate_declare(uint64_t now_us) {
     // trunk §7 / data-model.md §7: declare when at least one node is enrolled (has ever
     // answered — FR-023) and every enrolled node is SUSPECT or OFFLINE. A single enrolled
     // node counts as all (ruling Q2, human 2026-08-29).
@@ -491,6 +498,13 @@ void HealthTracker::evaluate_declare() {
     // All four combinations are DEMONSTRATED, one case each, by the two "a new episode ..." and
     // two "... outstanding across an episode boundary" / "... answered in the next episode"
     // cases in tests/unit/test_link_busfault.cpp.
+    // …and only while that probe can still be answered (health.hpp, probe_live_us): past
+    // TRUNK_T_resp_us the outcome is not coming, the record is owed nothing, and honouring it
+    // would freeze a dead frame's rate into this and every later episode (round 7, finding 1).
+    // Demonstrated by "an abandoned probe does not freeze its address's rate record" in
+    // tests/unit/test_link_busfault.cpp; the in-window half by the two boundary cases above.
+    if (elapsed_us(now_us, bus_.probe_live_us) > omgp::TRUNK_T_resp_us)
+        bus_.probe_live = 0;
     const uint16_t in_use = bus_.bit_rate == omgp::TRUNK_bit_rate_fallback ? kAllProbeBits : 0;
     bus_.probe_fallback = static_cast<uint16_t>((bus_.probe_fallback & bus_.probe_live) |
                                                 (in_use & ~bus_.probe_live));

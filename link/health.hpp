@@ -142,17 +142,32 @@ class HealthTracker {
         // that address keeps its bit across the boundary (red team round 6 on #530, finding
         // 1). Not a data-model.md §7 field; like probe_fallback it exists only because
         // on_result carries no rate.
+        // BOUNDED by the outcome window (round-7 red team on #530, finding 1): a probe's
+        // outcome — answer or timeout — reaches on_result within TRUNK_T_resp_us of its
+        // issue (contracts/link-cpp.md, byte-wire-and-clock.md), so a bit older than that
+        // owes this layer nothing: its probe was dropped at L2, abandoned at a superframe
+        // boundary, or its timeout never reported. Unbounded, one such probe exempted its
+        // address from the reset in EVERY later episode and a later reference-rate answer
+        // from it was read at the stale fallback bit — the fault did not clear at the
+        // reference rate and the trunk pinned at the fallback one. evaluate_declare()
+        // therefore honours these bits only while now - probe_live_us <= TRUNK_T_resp_us
+        // and drops them otherwise. A re-declare needs >= TRUNK_suspect_after_failures
+        // polls of every enrolled node, longer than one outcome window, so the exemption
+        // is reachable only by a declare that follows a clear inside one window — the two
+        // "... across an episode boundary" cases in tests/unit/test_link_busfault.cpp.
         uint16_t probe_live = 0;
+        uint64_t probe_live_us = 0; // when the most recent probe went out (next_probe's now_us)
     };
 
     void notify(Notice notice, uint8_t addr);
     uint8_t next_backplane_addr(uint8_t addr) const; // wraps ADDR_backplane_min..ADDR_backplane_max
     void apply_result(uint8_t addr, bool ok, uint64_t now_us); // the §6 transition table alone
     void note_wire_rate(uint32_t bit_rate);                    // counts a change (§8)
-    void note_probe(uint8_t addr, uint32_t bit_rate);          // remembers that probe's rate
-    void evaluate_declare();                                   // trunk §7 declare rule
-    void clear_fault(uint32_t bit_rate, uint64_t now_us);      // trunk §7 clear, at that rate
-    Probe pass_probe();                                        // one reference-pass probe
+    void note_probe(uint8_t addr, uint32_t bit_rate,
+                    uint64_t now_us);                     // remembers that probe's rate
+    void evaluate_declare(uint64_t now_us);               // trunk §7 declare rule
+    void clear_fault(uint32_t bit_rate, uint64_t now_us); // trunk §7 clear, at that rate
+    Probe pass_probe(uint64_t now_us);                    // one reference-pass probe
 
     // Stored for the constructor-signature parity with Master/Responder (link-cpp.md
     // "Health tracker"). Every method takes `now_us` explicitly — including the bus-fault

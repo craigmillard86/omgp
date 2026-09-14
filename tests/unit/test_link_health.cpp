@@ -33,12 +33,16 @@ struct RecordingListener : HealthListener {
     bool overrun_noted = false;
 
     // Reserves up front so growth during a HEAP_FREE_SCOPE measures HealthTracker's own
-    // allocations, not this recording harness's vector doubling. 64 covers the largest
-    // scripted sequence in this file (the whole-table tick case emits 45 notices; reviews
-    // on #124: the old 16, then 32, were silently exceeded, which a future
-    // HEAP_FREE_SCOPE user would have measured as a tracker allocation).
+    // allocations, not this recording harness's vector doubling. 128 covers the largest
+    // scripted sequence in this file: the whole-table tick case emitted 45 notices before
+    // T043 added the bus-level BUS_FAULT/ALERT/BUS_RECOVERED notices to the one-node and
+    // 15-node cases, which pushed it past the old 64 and made the overrun note below fire on
+    // every green run (round-7 red team on #530, finding 2). Reviews on #124: 16, then 32,
+    // were silently exceeded, which a future HEAP_FREE_SCOPE user would have measured as a
+    // tracker allocation — so the reserve is raised WITH the count that justifies it, not as
+    // the automatic answer the note warns against.
     RecordingListener() {
-        entries.reserve(64);
+        entries.reserve(128);
     }
 
     void on_notice(Notice notice, uint8_t addr) override {
