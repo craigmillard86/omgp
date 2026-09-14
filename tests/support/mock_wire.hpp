@@ -8,12 +8,21 @@
 // scope, ahead of the rest of T030); Garbage/Babble/Rate are declared so T011/T028 can
 // reference the enum, with their behaviour landing in T030 (tasks.md) — see the switch
 // in mock_wire.cpp.
+//
+// contracts/mock-wire.md:16 gives Kind::Respond's answer to "the node's RequestHandler"
+// (and the CrcError/Duplicate rows build "the real response" from it): set_handler()
+// below is that seat, a fixed omgp::link::RequestHandler* per trunk address (#147). The
+// echo answer this file used to fabricate for every node was an interim default ratified
+// 2026-09-03 (docs/OPEN-QUESTIONS.md 2026-09-01 item 1) because no RequestHandler type
+// existed at T010; that ruling now covers only the no-handler fallback — a node with a
+// handler registered answers with whatever the handler returns.
 #pragma once
 
 #include "fake_clock.hpp"
 #include "link/byte_wire.hpp"
 #include "link/frame.hpp"
 #include "link/link_types.hpp"
+#include "link/responder.hpp" // omgp::link::RequestHandler (contracts/link-cpp.md)
 #include "omgp_protocol.h"
 
 #include <cstddef>
@@ -86,6 +95,15 @@ class MockWire : public omgp::link::ByteWire {
     // fallback script. `steps` must outlive this MockWire; an exhausted or unset script
     // behaves as Respond with delay_us == TRUNK_T_turn_min_us (contracts/mock-wire.md).
     void set_script(uint8_t node, const Step* steps, size_t count);
+
+    // contracts/mock-wire.md:16 — the node's RequestHandler answers Kind::Respond (and
+    // supplies "the real response" CrcError/Duplicate are built from). Registers `handler`
+    // as node `node`'s (0x00..0x0F, omgp::link::kAddrCount); it must outlive this MockWire.
+    // Registering again for the same node replaces the previous handler; a node with none
+    // registered keeps the interim echo answer (see schedule_respond() in mock_wire.cpp).
+    // Allocation-free by construction: handlers_ below is a fixed raw-pointer array, no
+    // std::function and no container (#147).
+    void set_handler(uint8_t node, omgp::link::RequestHandler& handler);
 
     // omgp::link::ByteWire
     uint64_t transmit(const uint8_t* bytes, size_t n, uint64_t now_us) override;
@@ -179,6 +197,20 @@ class MockWire : public omgp::link::ByteWire {
     static constexpr size_t kTranscriptCapacity = 128;
 
     const Step* next_step(uint8_t node);
+
+    // The response `request` is to be answered with, shared by all three answering Kinds
+    // (contracts/mock-wire.md:16, and the CrcError/Duplicate rows' "the real response"):
+    // the node's registered RequestHandler's answer, written into `payload_buf` and
+    // pointed at by `out`, or — for a node with no handler — the interim echo of the
+    // request's own payload. Called exactly ONCE per request, so Duplicate's two emitted
+    // copies are two copies of one answer rather than two invocations.
+    // Returns false, having recorded a fault and left `out` unusable, when the handler
+    // claims a response longer than omgp::LIMIT_max_l3_payload: the caller then enqueues
+    // nothing (never a truncated frame, never a silent drop).
+    bool build_response(const omgp::link::FrameFields& request,
+                        uint8_t (&payload_buf)[omgp::LIMIT_max_l3_payload],
+                        omgp::link::FrameFields& out);
+
     void schedule_respond(const omgp::link::FrameFields& request, uint64_t tx_end,
                           uint32_t delay_us);
     // Kind::CrcError (contracts/mock-wire.md): the real response with its last CRC byte
@@ -234,6 +266,12 @@ class MockWire : public omgp::link::ByteWire {
     // node == 0xFF apply to every node" means each node draws its own sequence of
     // fallback effects, not that the rig-wide first taker exhausts it for everyone else.
     size_t wildcard_pos_[omgp::link::kAddrCount] = {};
+
+    // One RequestHandler seat per trunk address (contracts/mock-wire.md:16, #147). A raw
+    // pointer array, not std::function and not a container: MockWire stays allocation-free
+    // (the contract's preamble) so F4 can seed its virtual wire from it. nullptr — the
+    // initial state of every slot — selects the interim echo answer instead.
+    omgp::link::RequestHandler* handlers_[omgp::link::kAddrCount] = {};
 
     // Sorted by start_us (ascending), not a FIFO: byte-wire-and-clock.md requires
     // receive() to release the earliest-start-instant byte first, and interleaved delays

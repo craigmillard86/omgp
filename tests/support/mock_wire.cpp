@@ -4,6 +4,14 @@
 // scope: test_link_master.cpp needs exactly these two, neither of which reads
 // Step::count); Garbage/Babble/Rate — and the Step::count widening ruling on issue #48 —
 // remain T030.
+//
+// Respond/CrcError/Duplicate answer through the addressed node's registered
+// omgp::link::RequestHandler, as contracts/mock-wire.md:16 specifies — build_response()
+// below is the one place that is decided, and it invokes the handler once per REQUEST.
+// The echo answer this file used to fabricate unconditionally was an interim default
+// ratified 2026-09-03 (docs/OPEN-QUESTIONS.md 2026-09-01 item 1), taken only because no
+// RequestHandler type existed at T010; since #147 that ruling covers just the no-handler
+// fallback, whose wire bytes are unchanged.
 #include "mock_wire.hpp"
 
 #include "catch_amalgamated.hpp"
@@ -106,10 +114,11 @@ size_t encode_crc_corrupted(const omgp::link::FrameFields& f, uint8_t* out, size
 }
 
 namespace {
-// The response FrameFields a conforming node (or MockWire's Respond/CrcError/Duplicate
-// echo) sends back to `request` — dst/src swapped, response bit set, seq echoed. Shared
-// by all three Kinds: they differ only in what bytes reach the wire and when, not in
-// whom the response is addressed to or which payload it carries.
+// The response FrameFields a conforming node sends back to `request` — dst/src swapped,
+// response bit set, seq echoed. Shared by all three answering Kinds: they differ only in
+// what bytes reach the wire and when, not in whom the response is addressed to. The
+// payload starts as the request's own (the no-handler echo); build_response() below
+// replaces it with the node's RequestHandler's answer when one is registered.
 omgp::link::FrameFields response_fields(const omgp::link::FrameFields& request) {
     omgp::link::FrameFields r{};
     r.dst = request.src;
@@ -185,6 +194,15 @@ void MockWire::set_script(uint8_t node, const Step* steps, size_t count) {
     script_pos_[node] = 0;
 }
 
+void MockWire::set_handler(uint8_t node, omgp::link::RequestHandler& handler) {
+    // Runs on the test's own call stack (a rig-setup call, never inside transmit()), so an
+    // out-of-range address is REQUIRE'd here rather than deferred through fault_ — same
+    // treatment set_script() gives it. There is no 0xFF wildcard seat: contracts/mock-wire.md
+    // gives Respond's answer to "the node's" handler, one node at a time.
+    REQUIRE(node < omgp::link::kAddrCount);
+    handlers_[node] = &handler;
+}
+
 const Step* MockWire::next_step(uint8_t node) {
     if (node < omgp::link::kAddrCount && scripts_[node] != nullptr &&
         script_pos_[node] < script_len_[node]) {
@@ -257,18 +275,59 @@ void MockWire::enqueue_frame(const uint8_t* buf, size_t written, uint64_t t0, bo
                 injected);
 }
 
+bool MockWire::build_response(const omgp::link::FrameFields& request,
+                              uint8_t (&payload_buf)[omgp::LIMIT_max_l3_payload],
+                              omgp::link::FrameFields& out) {
+    out = response_fields(request);
+
+    // transmit() already refuses a request whose dst is not a trunk §5 node address, so the
+    // bound below is not what keeps this index safe today — it is restated here so this
+    // function is safe to index with on its own terms, whoever calls it next.
+    omgp::link::RequestHandler* handler =
+        request.dst < omgp::link::kAddrCount ? handlers_[request.dst] : nullptr;
+    if (handler == nullptr)
+        // No handler for this node: the interim echo, which is what response_fields() already
+        // built. Ratified 2026-09-03 (docs/OPEN-QUESTIONS.md 2026-09-01) and since #147 this
+        // fallback is the ONLY thing that ruling still covers — the wire bytes here are
+        // byte-for-byte what they were before the handler seat existed, which is why
+        // tests/unit/test_link_master.cpp's response-length timing assertions are untouched.
+        return true;
+
+    // contracts/link-cpp.md "Responder engine": handle(req, len, resp, cap) returns how many
+    // bytes of `resp` it wrote. `cap` is the protocol's own payload bound, the largest answer
+    // a frame can carry (docs/protocol-l3.md; LIMIT_max_l3_payload).
+    const size_t n =
+        handler->handle(request.payload, request.len, payload_buf, omgp::LIMIT_max_l3_payload);
+    if (n > omgp::LIMIT_max_l3_payload) {
+        // A handler claiming more than a frame can carry. Neither truncating (which would put
+        // a silently-wrong answer on the wire and make the engine under test assert against
+        // it) nor dropping quietly (indistinguishable from Kind::Silence): the answer is
+        // refused and named, on the same deferred-fault path as every other transmit()-stack
+        // failure here (see fault_'s declaration in mock_wire.hpp).
+        if (fault_ == nullptr)
+            fault_ = "MockWire: RequestHandler returned a response longer than "
+                     "LIMIT_max_l3_payload";
+        return false;
+    }
+    // n == 0 is a legitimate answer: a zero-payload response FRAME, not silence. Silence
+    // stays reachable only through Kind::Silence.
+    out.len = static_cast<uint8_t>(n);
+    out.payload = payload_buf;
+    return true;
+}
+
 void MockWire::schedule_respond(const omgp::link::FrameFields& request, uint64_t tx_end,
                                 uint32_t delay_us) {
     using omgp::link::encode_frame;
     using omgp::link::kMaxWire;
     using omgp::link::Status;
 
-    // Default node behaviour: echo the request payload back (contracts/mock-wire.md
-    // "Respond": "the node's RequestHandler ... answers" — a real per-node handler is
-    // wired in by a later task; this skeleton's own answer is a valid, deterministic
-    // response so Respond is directly usable — retry/timeout scripts drive Silence
-    // instead where a real answer must not appear).
-    const auto response = response_fields(request);
+    // contracts/mock-wire.md:16: "the node's RequestHandler ... answers". build_response()
+    // invokes it once, or falls back to the interim echo for a node with none registered.
+    uint8_t payload_buf[omgp::LIMIT_max_l3_payload];
+    omgp::link::FrameFields response{};
+    if (!build_response(request, payload_buf, response))
+        return; // fault already recorded; nothing goes on the wire
     uint8_t buf[kMaxWire];
     size_t written = 0;
     // response.dst == request.src. A well-formed request from a real Master/Responder
@@ -291,7 +350,12 @@ void MockWire::schedule_crc_error(const omgp::link::FrameFields& request, uint64
                                   uint32_t delay_us) {
     using omgp::link::kMaxWire;
 
-    const auto response = response_fields(request);
+    // "the real response with its last CRC byte replaced" — and since #147 the real response
+    // is the node's RequestHandler's, built by the one invocation below, not an echo.
+    uint8_t payload_buf[omgp::LIMIT_max_l3_payload];
+    omgp::link::FrameFields response{};
+    if (!build_response(request, payload_buf, response))
+        return;
     uint8_t buf[kMaxWire];
     const size_t written = encode_crc_corrupted(response, buf, sizeof buf);
     if (written == 0) {
@@ -308,7 +372,14 @@ void MockWire::schedule_duplicate(const omgp::link::FrameFields& request, uint64
     using omgp::link::kMaxWire;
     using omgp::link::Status;
 
-    const auto response = response_fields(request);
+    // ONE invocation for the request, two copies of its answer on the wire (contracts/
+    // mock-wire.md's Duplicate row: "the real response, then the same bytes again"). A
+    // per-copy invocation would hand a stateful handler — a real Responder's replay buffer,
+    // the eventual consumer of this seat — a second, spurious transaction to account for.
+    uint8_t payload_buf[omgp::LIMIT_max_l3_payload];
+    omgp::link::FrameFields response{};
+    if (!build_response(request, payload_buf, response))
+        return;
     uint8_t buf[kMaxWire];
     size_t written = 0;
     if (encode_frame(response, buf, sizeof buf, written) != Status::Ok) {

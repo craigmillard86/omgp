@@ -8,12 +8,15 @@
 #include "heap_guard.hpp"
 #include "link/frame.hpp"
 #include "link/link_types.hpp"
+#include "link/responder.hpp"
 #include "mock_wire.hpp"
 #include "omgp_protocol.h"
 
 #include <algorithm>
 #include <cstring>
 #include <functional>
+#include <initializer_list>
+#include <string>
 #include <vector>
 
 using namespace omgp::link;
@@ -37,11 +40,12 @@ std::vector<uint8_t> encode_request(uint8_t dst, uint8_t seq, uint8_t payload_by
     return std::vector<uint8_t>(out, out + written);
 }
 
-// Independently builds the wire bytes MockWire's default Respond answer must produce
-// (contracts/mock-wire.md "Respond": the node's RequestHandler answers by mirroring the
-// request) by deframing `req` and re-encoding a response frame from its fields — not by
-// calling into mock_wire.cpp, so this stays an independent check of its output.
-std::vector<uint8_t> expected_respond_answer(const std::vector<uint8_t>& req) {
+// Independently builds the wire bytes MockWire must emit for a response to `req` carrying
+// `payload`: the request's mirrored header (dst/src swapped, response bit set, retry clear,
+// seq echoed) re-encoded by the real codec — not by calling into mock_wire.cpp, so this
+// stays an independent check of its output.
+std::vector<uint8_t> expected_answer_with(const std::vector<uint8_t>& req, const uint8_t* payload,
+                                          uint8_t len) {
     Deframer d;
     FrameView view{};
     bool got = false;
@@ -50,11 +54,27 @@ std::vector<uint8_t> expected_respond_answer(const std::vector<uint8_t>& req) {
             got = true;
     REQUIRE(got);
 
-    FrameFields resp{view.f.src, view.f.dst, true, false, view.f.seq, view.f.len, view.f.payload};
+    FrameFields resp{view.f.src, view.f.dst, true, false, view.f.seq, len, payload};
     uint8_t out[kMaxWire];
     size_t written = 0;
     REQUIRE(encode_frame(resp, out, sizeof out, written) == Status::Ok);
     return std::vector<uint8_t>(out, out + written);
+}
+
+// The wire bytes of MockWire's NO-HANDLER fallback answer: the echo of the request's own
+// payload. contracts/mock-wire.md:16 gives the answer to the node's `RequestHandler`; the
+// echo is the ratified interim default (docs/OPEN-QUESTIONS.md 2026-09-01, ruled
+// 2026-09-03) and since #147 it survives only for a `dst` with no handler registered.
+std::vector<uint8_t> expected_respond_answer(const std::vector<uint8_t>& req) {
+    Deframer d;
+    FrameView view{};
+    bool got = false;
+    for (uint8_t b : req)
+        if (d.feed(b, view))
+            got = true;
+    REQUIRE(got);
+    // view.f.payload points into `d`'s own accumulator and stays valid while `d` lives.
+    return expected_answer_with(req, view.f.payload, view.f.len);
 }
 
 // The single max-payload request the RX-overflow case below retransmits unchanged: seq and
@@ -576,4 +596,455 @@ TEST_CASE("encode_crc_corrupted refuses a payload longer than the protocol allow
                                     static_cast<uint8_t>(ok.size()),
                                     ok.data()};
     REQUIRE(omgp_test::encode_crc_corrupted(g, out, sizeof out) > 0);
+}
+
+// --- Kind::Respond answered by the node's RequestHandler (#147) ----------------------------
+// contracts/mock-wire.md:16 has always said the node's `RequestHandler` answers `Kind::
+// Respond`; `schedule_respond()` fabricated an echo instead, an interim default ratified on
+// 2026-09-03 only because `omgp::link::RequestHandler` did not exist at T010. These cases pin
+// the handler seat MockWire now offers: a registered handler's answer is what reaches the
+// wire (for Respond, CrcError and Duplicate alike), the echo survives only where no handler
+// is registered, and the handler is never invoked for traffic it does not own.
+
+namespace {
+
+// A test-local RequestHandler: answers with a fixed payload the test chooses, counts its
+// invocations, and records what the mock passed it. Allocation-free (fixed arrays, no
+// std::vector) so the handler-answer path can be driven inside HEAP_FREE_SCOPE.
+//
+// Records rather than REQUIREs: handle() runs on MockWire::transmit()'s call stack, which in
+// the engine tests is the engine's own — and link/CMakeLists.txt builds omgp_link with
+// -fno-exceptions, so a REQUIRE thrown from this frame would unwind through it (the same
+// hazard mock_wire.hpp's fault_ deferral exists to avoid; test_link_loop.cpp's CountingHandler
+// takes the same care). Every check below runs on the test's own stack afterwards.
+struct ScriptedHandler : RequestHandler {
+    uint8_t answer[omgp::LIMIT_max_l3_payload] = {};
+    size_t answer_len = 0;
+    // Return a value that is NOT what was written — the only way to drive the overlong-answer
+    // refusal without writing past `cap` (which would be this handler's own bug, not
+    // MockWire's).
+    bool force_return = false;
+    size_t forced_return = 0;
+
+    unsigned invocations = 0;
+    uint8_t seen_request[omgp::LIMIT_max_l3_payload] = {};
+    size_t seen_len = 0;
+    size_t seen_cap = 0;
+    bool seen_null_request = false;
+
+    size_t handle(const uint8_t* req, size_t len, uint8_t* resp, size_t cap) override {
+        ++invocations;
+        seen_null_request = (req == nullptr);
+        seen_len = len;
+        seen_cap = cap;
+        for (size_t i = 0; i < len && i < sizeof seen_request; ++i)
+            seen_request[i] = req[i];
+        const size_t n = answer_len < cap ? answer_len : cap;
+        for (size_t i = 0; i < n; ++i)
+            resp[i] = answer[i];
+        return force_return ? forced_return : n;
+    }
+
+    void set_answer(std::initializer_list<uint8_t> bytes) {
+        answer_len = 0;
+        for (uint8_t b : bytes)
+            answer[answer_len++] = b;
+    }
+    const uint8_t* answer_bytes() const {
+        return answer;
+    }
+    uint8_t answer_size() const {
+        return static_cast<uint8_t>(answer_len);
+    }
+};
+
+// Every byte receive() will release at the wire's current clock, in order, with the start
+// instant of the first and last of them.
+std::vector<uint8_t> drain_all(MockWire& wire, uint64_t& first_start, uint64_t& last_start) {
+    std::vector<uint8_t> out;
+    uint8_t byte = 0;
+    uint64_t start_us = 0;
+    while (wire.receive(byte, start_us)) {
+        if (out.empty())
+            first_start = start_us;
+        last_start = start_us;
+        out.push_back(byte);
+    }
+    return out;
+}
+
+std::vector<uint8_t> drain_all(MockWire& wire) {
+    uint64_t first = 0, last = 0;
+    return drain_all(wire, first, last);
+}
+
+// The request every handler case below answers: one payload byte, 0xAB. Every handler answer
+// used here is chosen to be something the echo CANNOT produce (a different length AND
+// different content), so an unchanged schedule_respond() fails these cases rather than
+// passing on a coincidence.
+constexpr uint8_t kRequestByte = 0xAB;
+
+} // namespace
+
+TEST_CASE("Kind::Respond answers from the node's registered RequestHandler, at "
+          "request_end + delay_us",
+          "[link][mock_wire]") {
+    FakeClock clock;
+    static const Step respond_step[] = {{0x01, Kind::Respond, 30}};
+    MockWire wire(clock);
+    ScriptedHandler handler;
+    // Four bytes, none of them the request's single 0xAB: the echo answer is one byte long
+    // and carries 0xAB, so no echo can produce this frame (the "green log proves nothing"
+    // trap named in #147's evidence section).
+    handler.set_answer({0x11, 0x22, 0x33, 0x44});
+    HEAP_FREE_SCOPE({ wire.set_handler(0x01, handler); });
+    wire.set_script(0x01, respond_step, 1);
+
+    const std::vector<uint8_t> req = encode_request(0x01, 7, kRequestByte);
+    uint64_t tx_end = 0;
+    // The whole handler-answer path — invocation, framing, RX enqueue — allocates nothing
+    // (contracts/mock-wire.md preamble: MockWire stays allocation-free so F4 can seed its
+    // virtual wire from it).
+    HEAP_FREE_SCOPE({ tx_end = wire.transmit(req.data(), req.size(), 0); });
+
+    // contracts/mock-wire.md:16 + contracts/link-cpp.md "Responder engine": handle(req, len,
+    // resp, cap) is called once, with the REQUEST's payload and the protocol's payload bound
+    // as `cap`.
+    REQUIRE(handler.invocations == 1);
+    REQUIRE_FALSE(handler.seen_null_request);
+    REQUIRE(handler.seen_len == 1);
+    REQUIRE(handler.seen_request[0] == kRequestByte);
+    REQUIRE(handler.seen_cap == omgp::LIMIT_max_l3_payload);
+
+    const std::vector<uint8_t> expected =
+        expected_answer_with(req, handler.answer_bytes(), handler.answer_size());
+    const uint64_t bt = byte_time_us(omgp::TRUNK_bit_rate);
+    wire.advance_to(tx_end + 30 + static_cast<uint64_t>(expected.size()) * bt);
+
+    uint64_t first_start = 0, last_start = 0;
+    const std::vector<uint8_t> drained = drain_all(wire, first_start, last_start);
+    REQUIRE(drained == expected);
+    // "first byte at request_end + delay_us" (the Respond row), unchanged by whose answer it is.
+    REQUIRE(first_start == tx_end + 30);
+    REQUIRE(last_start == tx_end + 30 + static_cast<uint64_t>(expected.size() - 1) * bt);
+
+    // ...and the frame the engine under test would actually decode: mirrored header, the
+    // handler's length and the handler's bytes.
+    Deframer d;
+    FrameView view{};
+    bool delivered = false;
+    for (uint8_t b : drained)
+        if (d.feed(b, view))
+            delivered = true;
+    REQUIRE(delivered);
+    REQUIRE(view.f.dst == omgp::ADDR_host);
+    REQUIRE(view.f.src == 0x01);
+    REQUIRE(view.f.response);
+    REQUIRE_FALSE(view.f.retry);
+    REQUIRE(view.f.seq == 7);
+    REQUIRE(view.f.len == handler.answer_size());
+    REQUIRE(std::equal(view.f.payload, view.f.payload + view.f.len, handler.answer_bytes()));
+}
+
+TEST_CASE("Kind::CrcError corrupts the registered RequestHandler's answer, invoking it once",
+          "[link][mock_wire]") {
+    FakeClock clock;
+    static const Step crc_step[] = {{0x01, Kind::CrcError, 30}};
+    MockWire wire(clock);
+    ScriptedHandler handler;
+    handler.set_answer({0x5A, 0x5B, 0x5C});
+    wire.set_handler(0x01, handler);
+    wire.set_script(0x01, crc_step, 1);
+
+    const std::vector<uint8_t> req = encode_request(0x01, 3, kRequestByte);
+    uint64_t tx_end = 0;
+    HEAP_FREE_SCOPE({ tx_end = wire.transmit(req.data(), req.size(), 0); });
+    REQUIRE(handler.invocations == 1);
+
+    // contracts/mock-wire.md's CrcError row builds from "the real response" — which is now the
+    // handler's, not the echo's. Same fields, same wire length, one wrong CRC high byte.
+    const std::vector<uint8_t> clean =
+        expected_answer_with(req, handler.answer_bytes(), handler.answer_size());
+    const uint64_t bt = byte_time_us(omgp::TRUNK_bit_rate);
+    wire.advance_to(tx_end + 30 + static_cast<uint64_t>(clean.size()) * bt);
+
+    uint64_t first_start = 0, last_start = 0;
+    const std::vector<uint8_t> drained = drain_all(wire, first_start, last_start);
+    REQUIRE(drained.size() == clean.size());
+    REQUIRE(drained != clean);
+    REQUIRE(first_start == tx_end + 30);
+
+    Deframer d;
+    FrameView view{};
+    bool delivered = false;
+    for (uint8_t b : drained)
+        if (d.feed(b, view))
+            delivered = true;
+    REQUIRE_FALSE(delivered);
+    REQUIRE(d.stats().discarded[static_cast<size_t>(Discard::BadCrc)] == 1);
+
+    // The payload really is the handler's: every byte except the corrupted CRC high one
+    // matches the clean handler answer (the echo answer is a different LENGTH, so it cannot
+    // satisfy the size check above either).
+    size_t differing = 0;
+    for (size_t i = 0; i < clean.size(); ++i)
+        if (drained[i] != clean[i])
+            ++differing;
+    REQUIRE(differing == 1);
+}
+
+TEST_CASE("Kind::Duplicate repeats the registered RequestHandler's answer, invoking the "
+          "handler once per REQUEST rather than once per emitted copy",
+          "[link][mock_wire]") {
+    FakeClock clock;
+    static const Step dup_step[] = {{0x01, Kind::Duplicate, 40}};
+    MockWire wire(clock);
+    ScriptedHandler handler;
+    handler.set_answer({0xC0, 0xC1, 0xC2, 0xC3, 0xC4});
+    wire.set_handler(0x01, handler);
+    wire.set_script(0x01, dup_step, 1);
+
+    const std::vector<uint8_t> req = encode_request(0x01, 5, kRequestByte);
+    uint64_t tx_end = 0;
+    HEAP_FREE_SCOPE({ tx_end = wire.transmit(req.data(), req.size(), 0); });
+
+    // Two copies reach the wire; the handler was consulted ONCE. A per-copy invocation would
+    // make this 2 — and would give a stateful handler (a real Responder's replay buffer, the
+    // eventual consumer of this seat) a second, spurious transaction to account for.
+    REQUIRE(handler.invocations == 1);
+
+    const std::vector<uint8_t> answer =
+        expected_answer_with(req, handler.answer_bytes(), handler.answer_size());
+    const uint64_t bt = byte_time_us(omgp::TRUNK_bit_rate);
+    const uint64_t first_end =
+        tx_end + omgp::TRUNK_T_turn_min_us + static_cast<uint64_t>(answer.size()) * bt;
+    wire.advance_to(first_end + 40 + static_cast<uint64_t>(answer.size()) * bt);
+
+    std::vector<uint8_t> drained;
+    uint64_t second_copy_start = 0;
+    uint8_t byte = 0;
+    uint64_t start_us = 0;
+    while (wire.receive(byte, start_us)) {
+        if (drained.size() == answer.size())
+            second_copy_start = start_us;
+        drained.push_back(byte);
+    }
+    REQUIRE(drained.size() == 2 * answer.size());
+    REQUIRE(std::equal(drained.begin(), drained.begin() + static_cast<long>(answer.size()),
+                       answer.begin()));
+    REQUIRE(std::equal(drained.begin() + static_cast<long>(answer.size()), drained.end(),
+                       answer.begin()));
+    REQUIRE(second_copy_start == first_end + 40);
+}
+
+TEST_CASE("With no handler registered for the addressed node, Respond, CrcError and Duplicate "
+          "still emit the ratified interim echo, byte for byte",
+          "[link][mock_wire]") {
+    // The fallback half of #147: registering a handler for one node must not change what any
+    // OTHER node answers, and a rig that registers none keeps exactly today's bytes — which is
+    // what lets test_link_master.cpp's timing assertions (derived from the echo answer's wire
+    // length) stay untouched. A handler IS registered here, on node 0x02, so the case also
+    // pins that the lookup is per-node and not "any handler answers for anyone".
+    FakeClock clock;
+    static const Step steps[] = {{0x01, Kind::Respond, 30}};
+    MockWire wire(clock);
+    ScriptedHandler other_node;
+    other_node.set_answer({0xEE, 0xEF});
+    wire.set_handler(0x02, other_node);
+
+    const uint64_t bt = byte_time_us(omgp::TRUNK_bit_rate);
+
+    SECTION("Respond") {
+        wire.set_script(0x01, steps, 1);
+        const std::vector<uint8_t> req = encode_request(0x01, 1, kRequestByte);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        const std::vector<uint8_t> echo = expected_respond_answer(req);
+        wire.advance_to(tx_end + 30 + static_cast<uint64_t>(echo.size()) * bt);
+        REQUIRE(drain_all(wire) == echo);
+        REQUIRE(other_node.invocations == 0);
+    }
+
+    SECTION("CrcError") {
+        static const Step crc_step[] = {{0x01, Kind::CrcError, 30}};
+        wire.set_script(0x01, crc_step, 1);
+        const std::vector<uint8_t> req = encode_request(0x01, 1, kRequestByte);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        const std::vector<uint8_t> echo = expected_respond_answer(req);
+        wire.advance_to(tx_end + 30 + static_cast<uint64_t>(echo.size()) * bt);
+        const std::vector<uint8_t> drained = drain_all(wire);
+        REQUIRE(drained.size() == echo.size());
+        size_t differing = 0;
+        for (size_t i = 0; i < echo.size(); ++i)
+            if (drained[i] != echo[i])
+                ++differing;
+        REQUIRE(differing == 1); // the corrupted CRC high byte, and nothing else
+        REQUIRE(other_node.invocations == 0);
+    }
+
+    SECTION("Duplicate") {
+        static const Step dup_step[] = {{0x01, Kind::Duplicate, 40}};
+        wire.set_script(0x01, dup_step, 1);
+        const std::vector<uint8_t> req = encode_request(0x01, 1, kRequestByte);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        const std::vector<uint8_t> echo = expected_respond_answer(req);
+        const uint64_t first_end =
+            tx_end + omgp::TRUNK_T_turn_min_us + static_cast<uint64_t>(echo.size()) * bt;
+        wire.advance_to(first_end + 40 + static_cast<uint64_t>(echo.size()) * bt);
+        const std::vector<uint8_t> drained = drain_all(wire);
+        REQUIRE(drained.size() == 2 * echo.size());
+        REQUIRE(std::equal(drained.begin(), drained.begin() + static_cast<long>(echo.size()),
+                           echo.begin()));
+        REQUIRE(std::equal(drained.begin() + static_cast<long>(echo.size()), drained.end(),
+                           echo.begin()));
+        REQUIRE(other_node.invocations == 0);
+    }
+}
+
+TEST_CASE("A RequestHandler answer longer than LIMIT_max_l3_payload enqueues no frame and "
+          "records a fault, rather than a truncated frame or a silent drop",
+          "[link][mock_wire]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    ScriptedHandler handler;
+    handler.set_answer({0x01, 0x02});
+    // Claims more than it wrote: MockWire must judge the RETURNED length, since that is what it
+    // would put in the frame's len field and copy out of the buffer.
+    handler.force_return = true;
+    handler.forced_return = omgp::LIMIT_max_l3_payload + 1;
+    wire.set_handler(0x01, handler);
+
+    const std::vector<uint8_t> req = encode_request(0x01, 2, kRequestByte);
+    const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+    REQUIRE(handler.invocations == 1);
+
+    // Named, not merely counted: a test driving MockWire into a specific fault asserts WHICH
+    // one fired (take_fault()'s documented use), and taking it clears it for the advance_to()
+    // and transcript_size() below, both of which REQUIRE fault_ == nullptr.
+    const char* fault = wire.take_fault();
+    REQUIRE(fault != nullptr);
+    REQUIRE(std::string(fault).find("longer than") != std::string::npos);
+
+    // Nothing on the wire at all — not a truncated frame, not a clamped one.
+    wire.advance_to(tx_end + omgp::TRUNK_T_turn_min_us + 100 * byte_time_us(omgp::TRUNK_bit_rate));
+    REQUIRE(drain_all(wire).empty());
+    // The request itself was still transcribed: the refusal is of the ANSWER, not of the
+    // request MockWire decoded.
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).dst == 0x01);
+}
+
+TEST_CASE("A RequestHandler answering zero bytes produces a valid zero-payload response frame, "
+          "not silence",
+          "[link][mock_wire]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    ScriptedHandler handler;
+    handler.set_answer({}); // answer_len == 0
+    wire.set_handler(0x01, handler);
+
+    const std::vector<uint8_t> req = encode_request(0x01, 9, kRequestByte);
+    uint64_t tx_end = 0;
+    HEAP_FREE_SCOPE({ tx_end = wire.transmit(req.data(), req.size(), 0); });
+    REQUIRE(handler.invocations == 1);
+
+    const std::vector<uint8_t> expected = expected_answer_with(req, handler.answer_bytes(), 0);
+    const uint64_t bt = byte_time_us(omgp::TRUNK_bit_rate);
+    wire.advance_to(tx_end + omgp::TRUNK_T_turn_min_us +
+                    static_cast<uint64_t>(expected.size()) * bt);
+
+    uint64_t first_start = 0, last_start = 0;
+    const std::vector<uint8_t> drained = drain_all(wire, first_start, last_start);
+    // Silence stays reachable only through Kind::Silence: a zero-length ANSWER is a frame.
+    REQUIRE_FALSE(drained.empty());
+    REQUIRE(drained == expected);
+    REQUIRE(first_start == tx_end + omgp::TRUNK_T_turn_min_us);
+
+    Deframer d;
+    FrameView view{};
+    bool delivered = false;
+    for (uint8_t b : drained)
+        if (d.feed(b, view))
+            delivered = true;
+    REQUIRE(delivered);
+    REQUIRE(view.f.response);
+    REQUIRE(view.f.len == 0);
+    REQUIRE(view.f.seq == 9);
+}
+
+TEST_CASE("A registered RequestHandler is not invoked for traffic it does not own",
+          "[link][mock_wire]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    ScriptedHandler handler;
+    handler.set_answer({0x77, 0x78, 0x79});
+    // Registered on BOTH the host address and node 0x01, so the handler is reachable at every
+    // address any section below actually names as a dst — except 0x10, which set_handler()
+    // REQUIREs against (mock_wire.cpp: node < kAddrCount), and where the counter is therefore
+    // NOT the evidence; see that section. Each section names the mechanism that holds its own
+    // counter at 0: they are three different ones, not one guard in transmit().
+    wire.set_handler(omgp::ADDR_host, handler);
+    wire.set_handler(0x01, handler);
+
+    SECTION("a RESPONSE frame transmitted by the engine under test") {
+        // What a real Responder puts on the wire: dst == ADDR_host, response bit set. MockWire
+        // must not treat it as a request to answer (mock_wire.cpp's `if (view.f.response)
+        // continue;`), so handlers_[ADDR_host] stays untouched. Held by that early return:
+        // a handler IS registered at ADDR_host, so delete the `continue` and this counter
+        // reads 1 — the 0 is evidence for this guard specifically.
+        const uint8_t payload[2] = {0x01, 0x02};
+        FrameFields resp{omgp::ADDR_host, 0x01, true, false, 4, 2, payload};
+        uint8_t out[kMaxWire];
+        size_t written = 0;
+        REQUIRE(encode_frame(resp, out, sizeof out, written) == Status::Ok);
+        wire.transmit(out, written, 0);
+        REQUIRE(handler.invocations == 0);
+    }
+
+    SECTION("a request addressed to a different node") {
+        // transmit() does NOT return early here: 0x02 is a valid node address, so the request
+        // reaches schedule_respond() and build_response(), which finds handlers_[0x02] ==
+        // nullptr and emits the no-handler echo. What holds this counter at 0 is the per-node
+        // lookup (mock_wire.cpp: handlers_[request.dst]) — make that lookup answer with any
+        // registered handler rather than this node's and the counter reads 1.
+        const std::vector<uint8_t> req = encode_request(0x02, 1, kRequestByte);
+        wire.transmit(req.data(), req.size(), 0);
+        REQUIRE(handler.invocations == 0);
+    }
+
+    SECTION("a request addressed outside trunk §5's node range") {
+        // docs/trunk-link-layer.md §5: only 0x00..0x0F are node addresses. encode_frame refuses
+        // only 0xFF, so 0x10 is encodable — and MockWire answers it with silence plus a fault,
+        // never by reaching past the end of handlers_[kAddrCount].
+        //
+        // The counter is NOT the evidence here, and is kept only as the bound on
+        // handlers_[0x10] never being read: set_handler() REQUIREs node < kAddrCount, so no
+        // handler is or can be registered at 0x10, and the counter reads 0 with transmit()'s
+        // dst >= kAddrCount guard deleted exactly as it does with it. What that guard holds is
+        // asserted below instead — delete it and the request resolves to the default Respond,
+        // which records no fault and enqueues a no-handler echo, so the fault REQUIRE fails
+        // (first, ending the section) and the drained-empty one would too.
+        const std::vector<uint8_t> req = encode_request(0x10, 1, kRequestByte);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        REQUIRE(handler.invocations == 0);
+        // Taken before advance_to(), which REQUIREs fault_ == nullptr (mock_wire.hpp).
+        const char* fault = wire.take_fault();
+        REQUIRE(fault != nullptr);
+        REQUIRE(std::string(fault).find("kAddrCount") != std::string::npos);
+        wire.advance_to(tx_end + omgp::TRUNK_T_turn_min_us +
+                        100 * byte_time_us(omgp::TRUNK_bit_rate));
+        REQUIRE(drain_all(wire).empty());
+    }
+
+    SECTION("a Kind::Silence step") {
+        // Held by the Silence arm of transmit()'s switch calling no schedule_*() at all: a
+        // handler IS registered at 0x01, so route this Kind to schedule_respond() and the
+        // counter reads 1 — the 0 is evidence for that arm specifically.
+        static const Step silence_step[] = {{0x01, Kind::Silence, 0}};
+        wire.set_script(0x01, silence_step, 1);
+        const std::vector<uint8_t> req = encode_request(0x01, 1, kRequestByte);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        REQUIRE(handler.invocations == 0);
+        wire.advance_to(tx_end + 10000);
+        REQUIRE(drain_all(wire).empty());
+    }
 }
