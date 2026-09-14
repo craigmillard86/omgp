@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge Mull "Mutation Testing Elements" reports and apply the triage gate (spec 001
+r"""Merge Mull "Mutation Testing Elements" reports and apply the triage gate (spec 001
 FR-027; ruling docs/OPEN-QUESTIONS.md 2026-08-29: the mutation gate is a triage of every
 survivor, never a percentage).
 
@@ -28,14 +28,35 @@ Policy (tools/mutate.cfg [policy] — T3 constants, never relaxed to get green):
   * A label whose line has no surviving mutant it could cover is STALE (the test was
     written or the code moved) — reported as a warning, never counted as a survivor.
   * "No mutants in a non-empty scope" is a tool-failure signal (blind spot: instrumentation
-    not reaching code that exists), UNLESS every changed file in the diff scope carries
+    not reaching code that exists), UNLESS every changed file in the diff scope is one of:
+      - it carries
 
-        // mutation-exempt(no-body): <one-line justification>
+            // mutation-exempt(no-body): <one-line justification>
 
-    anywhere in the file — for sources with no function body at all (e.g. a pure abstract
-    interface: only `= 0` declarations), where Mull structurally cannot produce a mutant.
-    Reviewed like mutant-ok, at file granularity: a human sees the marker in the PR diff and
-    judges whether the file truly has no mutable code (docs/OPEN-QUESTIONS.md 2026-08-30).
+        anywhere in the file — for sources with no function body at all (e.g. a pure abstract
+        interface: only `= 0` declarations), where Mull structurally cannot produce a mutant.
+        Reviewed like mutant-ok, at file granularity: a human sees the marker in the PR diff
+        and judges whether the file truly has no mutable code (docs/OPEN-QUESTIONS.md
+        2026-08-30); or
+      - the diff added at least one line in it, and every line it added OR deleted there is
+        blank or a `//` comment that ends at its own newline. Phase 2 splices backslash-newline
+        and phase 3 replaces what is then a comment by a space, both before anything Mull
+        mutates exists, so no mutator can place a mutant on such a line whatever the
+        instrumentation does — the same structural argument as the marker above, at line
+        granularity, which is why it needs no marker (docs/OPEN-QUESTIONS.md 2026-09-14, and
+        the amendment of the same date). Both halves of the diff are read, because a hunk that
+        deletes a guard and puts a comment in its place has a comment-only added half; the
+        deleted lines arrive as --removed (tools/mutate_ranges.py), each with the post-image
+        line of its surviving predecessor, and are judged by the same per-line test plus the
+        predecessor splice check the added half gets (a `//` comment deleted from after a
+        `\`-ended line re-splices the line below into the macro; round-8 review on #558).
+        See changed_lines_all_comments for the shapes it fails closed on: each
+        is a case where the predicate would otherwise certify what it did not read, and there
+        zero mutants is the blind spot again.
+    Because a comment-only diff is exactly the shape of a PR that rewrites `mutant-ok`
+    justifications, the malformed-label check below runs on every changed line before this
+    exemption can return 0 — the exemption is from the blind-spot rule, never from the policy
+    syntax.
 
 Every claim here is about the current report: "labelled" means a label was found on the
 reported line, nothing more. The label's justification is reviewed by humans in the PR.
@@ -115,6 +136,12 @@ def main(argv=None) -> int:
     ap.add_argument("--root", required=True, help="repository root (report paths are made relative to it)")
     ap.add_argument("--scope-dirs", required=True, help="space-separated embedded-path directories")
     ap.add_argument("--ranges", required=True, help="JSON {rel_path: [[start, end], ...]}; {} = whole tree")
+    ap.add_argument("--removed", default="",
+                    help="JSON {rel_path: [{\"text\": <deleted line>, \"after\": <post-image line of "
+                         "its surviving predecessor; -1 = that line was deleted too; 0 = top of "
+                         "file>}, ...]} (tools/mutate_ranges.py). Omitted, or any other shape "
+                         "(an older text-only list) = the deleted half of the diff was never "
+                         "read, so the comment-only blind-spot exemption is unavailable")
     ap.add_argument("--source-ext", required=True,
                     help="space-separated source extensions (tools/mutate.cfg source_ext, passed by mutate.sh)")
     ap.add_argument("--ref", default="", help="diff ref; empty = whole-tree trend mode")
@@ -136,6 +163,18 @@ def main(argv=None) -> int:
     # one line, handed over by mutate.sh — no copy here to drift from it (#141 review @d1fc20b).
     source_re = re.compile(r"\.(" + "|".join(re.escape(e) for e in args.source_ext.split()) + r")$")
     ranges = {rel: r for rel, r in json.load(open(args.ranges)).items() if source_re.search(rel)}
+    # None (not {}) when --removed is absent: "no file had a line deleted" and "nobody looked"
+    # are different answers, and only the first can support an exemption.
+    removed_lines = None
+    if args.removed:
+        removed_lines = {rel: t for rel, t in json.load(open(args.removed)).items()
+                         if source_re.search(rel)}
+        # Each entry is {"text", "after"} (tools/mutate_ranges.py). Anything else — an older
+        # text-only list, a hand-written file — is a deleted half without the position the
+        # splice check needs, and the exemption below fails closed on it.
+        if any(not (isinstance(e, dict) and "text" in e and "after" in e)
+               for entries in removed_lines.values() for e in entries):
+            removed_lines = None
     reports = sorted(pathlib.Path(args.reports).glob("*.json"))
     diff_mode = bool(args.ref)
 
@@ -190,6 +229,94 @@ def main(argv=None) -> int:
                 return m.group(1).strip()
         return None
 
+    def carries_no_code(text: str) -> bool:
+        r"""One physical line that translation phases 2-3 leave empty, judged from the line
+        itself: blank, or a `//` comment that ends at its own newline and does not end a block
+        comment. The two exclusions are the shapes where a line READS as a comment and is not
+        one:
+          * `*/` anywhere on it — in the ordinary `/* disabled: ... \n// */ code` toggle the
+            `*/` closes the block comment and what follows on that same line is executable
+            (#558 red-team B2). `-Wcomment` does not fire on it (it warns about `/*` inside a
+            comment), so nothing outside this predicate catches the shape;
+          * a trailing `\` — phase 2 splices the NEXT line into the comment, so the line
+            deletes mutable code rather than containing none (#558 red-team B3). In this repo
+            -Wall's -Werror=comment fails such a build first, but that is a control in
+            CMakeLists.txt, not a property of this predicate."""
+        text = text.strip()
+        if not text:
+            return True
+        return text.startswith("//") and not text.endswith("\\") and "*/" not in text
+
+    def changed_lines_all_comments(rel: str) -> bool:
+        r"""True when the diff added at least one line in `rel` and every line it added or
+        deleted there carries no code. Such a line cannot carry a mutant by construction of
+        C++: phase 2 splices backslash-newline, phase 3 replaces what is then a comment by a
+        space, and only after that does anything Mull mutates exist. So an empty in-scope
+        count over those lines is not a blind spot. Fails closed on every other shape, each a
+        case where the predicate would otherwise certify what it did not read:
+          * --removed absent — the deleted half of the diff was never handed over, so a
+            deletion cannot be ruled out (#558 red-team B1);
+          * a deleted line that carries code — a hunk that removes a guard and adds a `//`
+            comment in its place has a comment-only ADDED half, and certifying it would read
+            less of the diff than the empty-range-list case below rejects (same finding);
+          * a deleted line whose surviving predecessor ends with `\` — the mirror of the
+            added-line case below: the pre-image's comment ended that logical line, and with
+            it gone the line after it is spliced into the macro (round-8 review on #558).
+            Judged from `after`, the predecessor's post-image line, or from the previous
+            deleted entry when that predecessor was deleted too; a deleted half without
+            positions (an older text-only list) is treated as never handed over;
+          * no added line at all — mutate.sh emits an empty range list for a file whose hunks
+            are all deletions (`@@ -a,b +c,0 @@`); nothing there was analysed;
+          * an added line whose predecessor in the tree ends with `\` — inserting a comment
+            into a spliced logical line (a multi-line macro) truncates it, commenting out the
+            continuation without deleting any line for the check above to see;
+          * `R"` anywhere in the file — inside a raw string literal a `//` line is string
+            data, the literal may open on a line the diff never touched, and its delimiters
+            (`R"x( ... )x"`) are not decidable line by line. Never parsed, never exempt;
+          * anything else on an added line — code, a `/* */` continuation, a line the ranges
+            name but the checked-out tree does not have."""
+        src = source_lines(rel)
+        spans = ranges.get(rel, [])
+        if not spans or removed_lines is None:
+            return False
+        deleted = removed_lines.get(rel, [])
+        if any('R"' in t for t in src) or any('R"' in e["text"] for e in deleted):
+            return False
+        if not all(carries_no_code(e["text"]) for e in deleted):
+            return False
+        for i, e in enumerate(deleted):
+            k = e["after"]
+            if k == -1:
+                pred = deleted[i - 1]["text"] if i > 0 else None
+                if pred is None:
+                    return False
+            elif k == 0:
+                pred = ""
+            elif 1 <= k <= len(src):
+                pred = src[k - 1]
+            else:
+                return False
+            if pred.rstrip().endswith("\\"):
+                return False
+        for a, b in spans:
+            for ln in range(a, b + 1):
+                if ln > len(src):
+                    return False
+                if not carries_no_code(src[ln - 1]):
+                    return False
+                if ln >= 2 and src[ln - 2].rstrip().endswith("\\"):
+                    return False
+        return True
+
+    def no_mutant_reason(rel: str) -> str | None:
+        """Why `rel` can legitimately contribute no mutant on a changed line, or None."""
+        marker = exempt_reason(rel)
+        if marker is not None:
+            return f"mutation-exempt(no-body): {marker}"
+        if changed_lines_all_comments(rel):
+            return "every line the diff added or deleted there is blank or a // comment"
+        return None
+
     def label_at(rel: str, line) -> Label | None:
         """The label governing `line`: on the line itself, else on a comment-only line
         immediately above it (clang-format reflows long trailing comments, so a label
@@ -226,18 +353,27 @@ def main(argv=None) -> int:
     covered_lines: dict[tuple[str, int], set[str]] = {}
     for s in survivors:
         covered_lines.setdefault((s["file"], s["line"]), set()).add(s["mutator"])
-    files_seen = sorted({k[0] for k in best})
+    # Changed files join the scan even when no in-scope mutant put them in `best`: a diff that
+    # only rewrites justifications touches exactly the lines the policy lives on, and the
+    # comment-only exemption below would otherwise let a malformed label through unread.
+    files_seen = sorted({k[0] for k in best} | (set(ranges) if diff_mode else set()))
     for rel in files_seen:
         for idx, text in enumerate(source_lines(rel), start=1):
             if not LABEL_ANY.search(text):
                 continue
             target = idx + 1 if comment_only(text) else idx   # a comment-only label governs the next line
-            if not _in_scope(rel, target):
+            # Malformed is policy syntax wherever the label sits, so the label's OWN line being
+            # changed is enough to read it; staleness is a claim about the mutants on `target`
+            # and stays gated on `target` (a label line changed while its target was not has no
+            # in-scope mutant to be stale against, and reporting one would be noise).
+            if not (_in_scope(rel, target) or _in_scope(rel, idx)):
                 continue
             lab = parse_label(text, idx, categories)
             if lab is None or lab.error:
                 if lab is not None and f"{rel}:{idx}: {lab.error}" not in malformed:
                     malformed.append(f"{rel}:{idx}: {lab.error}")
+                continue
+            if not _in_scope(rel, target):
                 continue
             here = covered_lines.get((rel, target), set())
             if not any(lab.covers(m) for m in here):
@@ -272,21 +408,29 @@ def main(argv=None) -> int:
     if not reports:
         print("mutation: no Mull reports produced — failing (blind spot: the runner did not execute)")
         return 1
+    if malformed:
+        # Before the count-based rules: a malformed label is a policy syntax error in every
+        # mode and at every count, including the zero-mutant exemptions just below.
+        print(f"mutation: {len(malformed)} malformed mutant-ok label(s) — failing (policy syntax, see ERROR lines)")
+        return 1
     if total + not_covered == 0:
         # Every changed file in scope (ranges' keys — diff mode only; whole-tree has no
-        # single file list to check) opting out with `mutation-exempt(no-body)` means the
-        # files genuinely contain no mutable code, not that instrumentation missed them.
+        # single file list to check) structurally unable to carry a mutant on a changed line —
+        # `mutation-exempt(no-body)`, or a comment-only change — means the diff genuinely
+        # offers nothing to mutate, not that instrumentation missed mutable code.
         if diff_mode and ranges:
-            reasons = {rel: exempt_reason(rel) for rel in ranges}
+            reasons = {rel: no_mutant_reason(rel) for rel in ranges}
             unexempted = [rel for rel, reason in reasons.items() if reason is None]
             if not unexempted:
                 for rel, reason in reasons.items():
-                    print(f"mutation: {rel}: no mutants — mutation-exempt(no-body): {reason}")
-                print("mutation: scope is non-empty but every changed file is mutation-exempt(no-body) — not a blind spot")
+                    print(f"mutation: {rel}: no mutants — {reason}")
+                print("mutation: scope is non-empty but no changed line in it can carry a mutant "
+                      "(see above) — not a blind spot")
                 return 0
             print("mutation: scope is non-empty but Mull generated no mutants, and the following changed "
-                  "file(s) carry no `mutation-exempt(no-body)` marker — failing (blind spot: instrumentation "
-                  "is not reaching the code): " + ", ".join(sorted(unexempted)))
+                  "file(s) added or deleted a line that is neither blank nor a `//` comment and carry no "
+                  "`mutation-exempt(no-body)` marker — failing (blind spot: instrumentation is not "
+                  "reaching the code): " + ", ".join(sorted(unexempted)))
             return 1
         print("mutation: scope is non-empty but Mull generated no mutants — failing (blind spot: instrumentation is not reaching the code)")
         return 1
@@ -297,13 +441,14 @@ def main(argv=None) -> int:
         # leaves total > 0, so the rule above never fires while every core/ mutant silently
         # goes unexecuted (#141 review, LOW). The report post-filter can only REMOVE mutants,
         # never restore ones the runner declined to run — so this is the check that the
-        # filter reached every changed dir. Exempt: a dir whose changed files all carry
-        # `mutation-exempt(no-body)`.
+        # filter reached every changed dir. Exempt: a dir whose changed files can none of them
+        # carry a mutant on a changed line (`mutation-exempt(no-body)`, or a comment-only
+        # change) — there is nothing under it for the filter to have hidden.
         silent = []
         for d in sorted({rel.split("/", 1)[0] for rel in ranges}):
             if executed_by_dir.get(d, 0):
                 continue
-            if all(exempt_reason(rel) is not None for rel in ranges if rel.startswith(d + "/")):
+            if all(no_mutant_reason(rel) is not None for rel in ranges if rel.startswith(d + "/")):
                 continue
             silent.append(d)
         if silent:
@@ -311,9 +456,6 @@ def main(argv=None) -> int:
                   + " although the diff changes sources there — failing (blind spot: the run-time path "
                   "filter or instrumentation is not reaching that directory)")
             return 1
-    if malformed:
-        print(f"mutation: {len(malformed)} malformed mutant-ok label(s) — failing (policy syntax, see ERROR lines)")
-        return 1
     if diff_mode:
         if len(unlabelled) > args.max_unlabelled:
             print(f"mutation: {len(unlabelled)} unlabelled survivor(s) on changed lines — triage each: "
