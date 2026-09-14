@@ -3872,10 +3872,12 @@ is T043 confined to `link/health.cpp`: `specs/002-trunk-link-layer/tasks.md:271`
 at `specs/002-trunk-link-layer/contracts/link-cpp.md:29` and
 `specs/002-trunk-link-layer/data-model.md:319`, whose §8 rule is "incremented at the point the
 event is decided" (`data-model.md:321-322`). On `Master` nothing increments it. A whole-tree
-search at `ac0f36f` (`grep -rn bus_faults` over `link/ core/ sim/ tests/ specs/`) finds only the
-declaration, the two artefact lines, and five test reads, all of which assert it is *unchanged*
-or `== 0` (`tests/unit/test_link_master.cpp:3162,3616,4321`, `tests/unit/test_link_loop.cpp:786`,
-`tests/unit/test_link_types.cpp:118`). No increment anywhere. This is **demonstrated by that
+search at `ac0f36f` (`grep -rn bus_faults` over `link/ core/ sim/ tests/ specs/`) returns nine
+hits and no writer among them: the declaration, the two artefact lines above,
+`specs/002-trunk-link-layer/tasks.md:266` (T041's criterion), and five test reads, all of which
+assert it is *unchanged* or `== 0` (`tests/unit/test_link_master.cpp:3162,3616,4321`,
+`tests/unit/test_link_loop.cpp:786`, `tests/unit/test_link_types.cpp:118`). No increment
+anywhere. This is **demonstrated by that
 search over the current repo contents** — a control, not a guarantee: it says no writer exists
 today, not that none can.
 
