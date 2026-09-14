@@ -164,6 +164,12 @@ def main(argv=None) -> int:
     if args.removed:
         removed_lines = {rel: t for rel, t in json.load(open(args.removed)).items()
                          if source_re.search(rel)}
+        # Each entry is {"text", "after"} (tools/mutate_ranges.py). Anything else — an older
+        # text-only list, a hand-written file — is a deleted half without the position the
+        # splice check needs, and the exemption below fails closed on it.
+        if any(not (isinstance(e, dict) and "text" in e and "after" in e)
+               for entries in removed_lines.values() for e in entries):
+            removed_lines = None
     reports = sorted(pathlib.Path(args.reports).glob("*.json"))
     diff_mode = bool(args.ref)
 
@@ -248,6 +254,12 @@ def main(argv=None) -> int:
           * a deleted line that carries code — a hunk that removes a guard and adds a `//`
             comment in its place has a comment-only ADDED half, and certifying it would read
             less of the diff than the empty-range-list case below rejects (same finding);
+          * a deleted line whose surviving predecessor ends with `\` — the mirror of the
+            added-line case below: the pre-image's comment ended that logical line, and with
+            it gone the line after it is spliced into the macro (round-8 review on #558).
+            Judged from `after`, the predecessor's post-image line, or from the previous
+            deleted entry when that predecessor was deleted too; a deleted half without
+            positions (an older text-only list) is treated as never handed over;
           * no added line at all — mutate.sh emits an empty range list for a file whose hunks
             are all deletions (`@@ -a,b +c,0 @@`); nothing there was analysed;
           * an added line whose predecessor in the tree ends with `\` — inserting a comment
@@ -263,10 +275,24 @@ def main(argv=None) -> int:
         if not spans or removed_lines is None:
             return False
         deleted = removed_lines.get(rel, [])
-        if any('R"' in t for t in src) or any('R"' in t for t in deleted):
+        if any('R"' in t for t in src) or any('R"' in e["text"] for e in deleted):
             return False
-        if not all(carries_no_code(t) for t in deleted):
+        if not all(carries_no_code(e["text"]) for e in deleted):
             return False
+        for i, e in enumerate(deleted):
+            k = e["after"]
+            if k == -1:
+                pred = deleted[i - 1]["text"] if i > 0 else None
+                if pred is None:
+                    return False
+            elif k == 0:
+                pred = ""
+            elif 1 <= k <= len(src):
+                pred = src[k - 1]
+            else:
+                return False
+            if pred.rstrip().endswith("\\"):
+                return False
         for a, b in spans:
             for ln in range(a, b + 1):
                 if ln > len(src):

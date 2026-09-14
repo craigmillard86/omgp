@@ -3816,7 +3816,15 @@ Still no marker (the property remains decidable from the diff), still nothing to
 survivor triage, the malformed-label check and `max_unlabelled_survivors = 0` are unchanged. The
 predicate stays a set of syntactic refusals rather than a C++ comment parser: each refusal is
 one line with a named case in `tools/refimpl/test_tooling.py`, and every shape it cannot decide
-is a refusal.
+from what it is handed is a refusal — which is a control, not a guarantee (rule 11): it refuses
+the shapes it has been shown, and the round-8 review on #558 showed one it had not been. The
+added half carried the backslash-splice check (a `//` comment inserted after a `\`-ended line
+truncates the logical line) while the deleted half was judged by its text alone, so a `//`
+comment DELETED from right after a `\`-ended line — which re-splices the line below into the
+macro — was exempted. `tools/mutate_ranges.py` now hands over each deleted line with the
+post-image line of its surviving predecessor (`after`; -1 when that predecessor was deleted
+too, 0 at the top of the file), and the predicate applies the same check to both halves;
+a deleted half without positions is treated as never handed over.
 
 **Ruling:** PENDING — human, together with the entry it amends: a ruling that drops comment-only
 diffs from `tools/mutate.sh`'s scope entirely would supersede both. **Amends:** the 2026-09-14

@@ -221,9 +221,10 @@ echo "mutation: instrumented build done (mutated functions in library objects:$e
 phase2_config > "$BUILD/mull.yml"
 # Both halves of the diff per in-scope file (tools/mutate_ranges.py, tested from a real
 # `git diff` in tools/refimpl/test_tooling.py): the added/changed line ranges the gate scopes
-# survivors to (new files are whole-file ranges), and the text of the deleted lines, which the
-# comment-only blind-spot exemption below reads so that a hunk deleting a guard in favour of a
-# comment is not certified on its added half alone.
+# survivors to (new files are whole-file ranges), and the deleted lines — each with the
+# post-image line of its surviving predecessor — which the comment-only blind-spot exemption
+# below reads so that a hunk deleting a guard in favour of a comment is not certified on its
+# added half alone, and so that a comment deleted from after a `\`-ended line is caught too.
 if [ -n "$REF" ]; then
   # shellcheck disable=SC2086
   git diff -U0 "$REF" -- $SCOPE_DIRS |

@@ -8,10 +8,16 @@ r"""Split `git diff -U0` into the two per-file line sets the mutation gate reads
   whole-file ranges). tools/mutate_report.py scopes survivors to these lines; a file whose
   hunks are all pure deletions keeps an empty list, which that gate reads as "nothing here was
   analysed" and never exempts.
-* removed {rel_path: [text, ...]} — the text of the lines the diff DELETED, in hunk order. The
-  comment-only blind-spot exemption needs it: the added half of a hunk that deletes a guard and
-  puts a `//` comment in its place is a comment, and deciding on that half alone certifies a
-  file whose diff took mutable code away (#558 red-team B1).
+* removed {rel_path: [{"text": str, "after": int}, ...]} — the lines the diff DELETED, in hunk
+  order. The comment-only blind-spot exemption needs them: the added half of a hunk that
+  deletes a guard and puts a `//` comment in its place is a comment, and deciding on that half
+  alone certifies a file whose diff took mutable code away (#558 red-team B1). `after` is the
+  POST-image line number of the deleted line's surviving predecessor — the line before the
+  hunk, identical in both images since -U0 hunks start at the first changed line — or -1 when
+  that predecessor was deleted too (judge it against the previous entry), or 0 at the top of
+  the file. The predicate reads it for the splice check on the deleted half: a `//` comment
+  deleted from right after a `\`-ended line re-splices the line below into that logical line
+  (round-8 review on #558), the mirror of the added-line case, and text alone cannot see it.
 
 Both maps key on the post-image path (`+++ b/<path>`), so a file the diff deletes outright
 (`+++ /dev/null`) appears in neither — it has no line for the gate to scope to. Parsing lives
@@ -30,8 +36,10 @@ HUNK = re.compile(r"@@ -\S+ \+(\d+)(?:,(\d+))? @@")
 def parse(diff: str) -> tuple[dict, dict]:
     """(ranges, removed) for `diff`, the output of `git diff -U0`."""
     ranges: dict[str, list[list[int]]] = {}
-    removed: dict[str, list[str]] = {}
+    removed: dict[str, list[dict]] = {}
     cur, in_hunk = None, False
+    after = 0          # the surviving predecessor of the NEXT deleted line in this hunk
+    first_in_hunk = True
     for line in diff.splitlines():
         if line.startswith("diff --git "):
             cur, in_hunk = None, False
@@ -56,11 +64,17 @@ def parse(diff: str) -> tuple[dict, dict]:
             if count:
                 ranges[cur].append([start, start + count - 1])
             in_hunk = True
+            # Unified diff: for a zero-count post range the number is the line BEFORE the
+            # deletion point; otherwise the hunk's first post line is the first changed one, so
+            # the surviving predecessor is the line before it. 0 = deleted from the top.
+            after = start if count == 0 else start - 1
+            first_in_hunk = True
         elif in_hunk and cur and line.startswith("-"):
             # Inside a hunk every `-` line is deleted content, including one whose own text
             # starts with `--` (`--count;` at column 0); the `---`/`+++` headers precede the
             # first `@@` and so are never seen here.
-            removed[cur].append(line[1:])
+            removed[cur].append({"text": line[1:], "after": after if first_in_hunk else -1})
+            first_in_hunk = False
     return ranges, removed
 
 
