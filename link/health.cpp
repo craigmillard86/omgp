@@ -121,7 +121,9 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // the fault at 1 Mbit and bypassed the pass (round-8 red team, finding 1). Demonstrated by
     // "a duplicate fallback answer after the pass has probed the answerer ..." and "a fallback
     // answerer that keeps answering cannot stop the pass from ending".
-    const bool is_answerer = bus_.fault && ok && (bus_.fallback_seen & probe_bit(addr)) != 0;
+    // No `bus_.fault` conjunct: fallback_seen is emptied by every clear, so it is non-zero only
+    // while a fault stands — a conjunct here could never be false (round-12 red team, 1(b)).
+    const bool is_answerer = ok && (bus_.fallback_seen & probe_bit(addr)) != 0;
     // An ok from an address that already answered at the fallback rate this episode is that
     // answer again: it neither clears at the reference rate nor takes a §6 transition nor
     // restarts the pass — but if that address's pass probe is outstanding it IS that probe's
@@ -226,11 +228,12 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
         // the pair together — so the conjunct was true whenever `pass_ended` was. VERIFIED BY
         // CONSTRUCTION over this file, which is a control on the current code, not a language
         // guarantee. clear_fault still guards its own deferred apply_result on the answerer.
-        // No divergence from data-model §7, which writes the rule as "fallback_answerer ≠ 0 and
-        // the pass outcome that takes ref_pass_left to 0 is itself a failure": the warning it
-        // attaches is against `ref_pass_left == 0` ALONE, which is not what is tested here —
-        // `pass_ended` says a pass probe's own outcome ended a running pass, and only a pass
-        // started by a recorded answerer can run.
+        // data-model §7 writes the rule as "fallback_answerer ≠ 0 and the pass outcome that
+        // takes ref_pass_left to 0 is itself a failure": `pass_ended` says a pass probe's own
+        // outcome ended a running pass, and only a pass started by a recorded answerer can run,
+        // so the first conjunct is implied. ONE divergence from §7, stated (round-12 review):
+        // the clear enrols every address in fallback_seen, not only "the recorded answerer" —
+        // recorded in docs/OPEN-QUESTIONS.md 2026-09-14 (T043 entry), ruling pending.
         clear_fault(omgp::TRUNK_bit_rate_fallback, now_us);
     }
 
@@ -502,11 +505,13 @@ void HealthTracker::evaluate_declare(uint64_t now_us) {
     // at that statement in this function — see the #530 deep-verify report — and an unused
     // label is reported as stale.)
     //
-    // Dead: fallback_answerer is read only where a pass has ended or a fallback-rate clear is
-    // under way, and both follow on_result's pass start, which assigns it there.
+    // Dead: fallback_answerer is the data model's named answerer, written by on_result's pass
+    // start for §7/§8 observability and read by nothing at this head — the rules read
+    // fallback_seen (round-12 review). fallback_seen itself is NOT reset here: every episode
+    // ends with a clear, which empties it (clear_fault), and a tracker starts empty; a second
+    // reset would be unfalsifiable (round-12 red team, finding 4).
     // mutant-ok(equivalent, cxx_assign_const): overwritten before any reachable read.
     bus_.fallback_answerer = 0;
-    bus_.fallback_seen = 0;
     bus_.ref_pass_left = 0;
     // Dead the same way: pass_probe() reads pass_addr only while ref_pass_left > 0, which the
     // line above makes false until on_result's pass start, and that zeroes pass_addr itself.

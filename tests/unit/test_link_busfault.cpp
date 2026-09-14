@@ -812,6 +812,106 @@ TEST_CASE("every node that answered at the fallback rate this episode is protect
     REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);
 }
 
+TEST_CASE(
+    "a second fallback answer arriving mid-pass joins the record and does not rewind the pass",
+    "[timing:bit_rate_fallback]") {
+    // Round-12 red team on #530, finding 1(a): the round-11 guard "only the FIRST fallback
+    // answer starts the pass" was pinned by nothing — deleting it left the suite green. Here
+    // the second answerer's fallback frame (a late answer to its own alternating probe,
+    // obligation-2 slack) lands AFTER the first pass probe: recomputing the pass would rewind
+    // its cursor to A and issue more than |enrolled| probes (round 10's rewind, rated HIGH).
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    ThreeNodeRig::build(tracker);
+    const Probe pa = tracker.next_probe(4'000); // A @ fallback
+    tracker.next_probe(4'000);                  // B @ reference
+    const Probe pc = tracker.next_probe(4'000); // C @ fallback — answers late, below
+    REQUIRE(pa.addr == kNodeA);
+    REQUIRE(pc.addr == kNodeC);
+    REQUIRE(pc.bit_rate == omgp::TRUNK_bit_rate_fallback);
+    tracker.on_result(kNodeA, true, 5'000); // A's fallback answer: the pass starts
+    uint64_t t = 6'000;
+    Probe p = tracker.next_probe(t); // pass probe 1: A
+    REQUIRE(p.addr == kNodeA);
+    tracker.on_result(kNodeA, false, t += 1'000);
+    tracker.on_result(kNodeC, true, t + 1); // C's late fallback answer, mid-pass
+    REQUIRE(tracker.bus_fault());
+    p = tracker.next_probe(t); // pass probe 2 is B — NOT A again
+    REQUIRE(p.addr == kNodeB);
+    tracker.on_result(kNodeB, false, t += 1'000);
+    p = tracker.next_probe(t); // pass probe 3: C
+    REQUIRE(p.addr == kNodeC);
+    tracker.on_result(kNodeC, false, t += 1'000);
+    REQUIRE_FALSE(tracker.bus_fault()); // exactly |enrolled| = 3 pass probes, then the clear
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED); // both answerers take their
+    REQUIRE(tracker.state(kNodeC) == HealthState::ENROLLED); // deferred transition
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);
+}
+
+TEST_CASE("a fallback answerer at the last backplane address takes its deferred transition on the "
+          "clear",
+          "[timing:bit_rate_fallback]") {
+    // Round-12 red team on #530, finding 2: clear_fault()'s per-address loop over
+    // fallback_seen was untested at ADDR_backplane_max — `<` for `<=` dropped 0x0F's deferred
+    // enrolment and nothing failed (the pass cursor's own last-address case, 677e08e, is the
+    // precedent). A two-node rig whose fallback answerer is 0x0F.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    constexpr uint8_t kLast = omgp::ADDR_backplane_max;
+    enrol(tracker, kNodeA, 0);
+    enrol(tracker, kLast, 0);
+    fail_to_suspect(tracker, kNodeA, 1'000);
+    fail_to_suspect(tracker, kLast, 2'000);
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(probe_until(tracker, kLast, omgp::TRUNK_bit_rate_fallback).addr == kLast);
+    tracker.on_result(kLast, true, 10'000); // 0x0F answers at the fallback rate: the pass starts
+    uint64_t t = 11'000;
+    for (int i = 0; i < 2; ++i) { // |enrolled| = 2, nothing heard at the reference rate
+        const Probe p = tracker.next_probe(t);
+        REQUIRE(p.bit_rate == omgp::TRUNK_bit_rate);
+        tracker.on_result(p.addr, false, t += 1'000);
+    }
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(tracker.state(kLast) == HealthState::ENROLLED); // applied on the clear, not lost
+    REQUIRE(tracker.state(kNodeA) == HealthState::SUSPECT); // never answered: untouched
+}
+
+TEST_CASE("the fallback-answerer record does not outlive its episode",
+          "[timing:bit_rate_fallback]") {
+    // Round-12 red team on #530, finding 4: fallback_seen's per-episode life had no coverage —
+    // with its reset deleted a node that once answered at the fallback rate was barred from
+    // ever clearing a later fault at the reference rate (its ok read as "that answer again"),
+    // pinning the trunk at 115 200 with no automatic return. Same bug class as round 5's on
+    // probe_fallback. Episode 1 clears at the fallback rate on C; in episode 2 C answers a
+    // REFERENCE-rate probe and must clear the fault there.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    ThreeNodeRig::build(tracker);
+    REQUIRE(probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate_fallback).addr == kNodeC);
+    tracker.on_result(kNodeC, true, 10'000); // episode 1: C's fallback answer, the pass starts
+    uint64_t t = 11'000;
+    for (int i = 0; i < 3; ++i) {
+        const Probe p = tracker.next_probe(t);
+        tracker.on_result(p.addr, false, t += 1'000);
+    }
+    REQUIRE_FALSE(tracker.bus_fault()); // cleared at the fallback rate; C ENROLLED
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(tracker.state(kNodeC) == HealthState::ENROLLED);
+    fail_to_suspect(tracker, kNodeC, 20'000); // episode 2 (A and B are still SUSPECT)
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate).addr == kNodeC);
+    tracker.on_result(kNodeC, true, 30'000);             // a valid answer at the REFERENCE rate
+    REQUIRE_FALSE(tracker.bus_fault());                  // FR-026: clears at once…
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate); // …at the reference rate
+    REQUIRE(tracker.state(kNodeC) == HealthState::ENROLLED);
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 2);
+}
+
 TEST_CASE("a second outstanding probe does not cancel the first's episode-boundary exemption",
           "[timing:bit_rate_fallback][timing:T_resp]") {
     // Round-10 review on #530, finding 1 [HIGH]: round 9's "newest handout supersedes" rule
