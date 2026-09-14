@@ -3528,10 +3528,22 @@ it — over a frame it HAS read, which is the difference from @`6440074`.
 no case in the suite demonstrates it, and none is added, because pinning a defect's timing as
 an expectation would make it harder to fix): reachable only for a frame that begins strictly
 after `defer_origin + T_gap` and is still transmitting at `defer_origin + max_frame + T_gap`,
-i.e. only when the bus was continuously busy from `defer_origin` up to that frame's start.
+i.e. only when the bus was busy **as sampled at every poll instant** from `defer_origin` up to
+that frame's start. The engine sees the bus only where it samples it — `ByteWire`
+(`link/byte_wire.hpp`) offers `receive()` alone, and the gap is judged from
+`last_activity_us_`, the end of the last byte drained (`link/responder.cpp`) — so an idle
+window that contains no poll is invisible to it and does not release the wait.
 `max_frame` is one worst-case stuffed frame (142 byte times), so the overlap cannot exceed one
-frame's duration, and it is zero whenever the bus goes idle for `T_gap` at any point in the
-wait. Removing the cap entirely is not available: FR-014's "MUST still transmit" then loses to
+frame's duration, and it is zero whenever a **poll** lands `T_gap` or more after the end of the
+last byte the engine has read — **not** merely whenever the bus goes idle for `T_gap`, which at
+a poll cadence coarser than `T_gap` it may do entirely between two polls. Review @`948cdf0`
+finding 1 states the counter-example (`T_gap` 50 µs, 10 µs/byte, 1 ms polls, this suite's
+cadence): traffic from `defer_origin` for 100 µs, then 300 µs — six `T_gap`s — of idle spanning
+no poll instant, then back-to-back frames from `+400 µs` still running past the cap; the poll
+after the cap finds `want = cap <= now` and keys down into the frame in flight, with the bus
+having been genuinely idle for six `T_gap`s during the wait. Corner (a) below must be judged
+against that reachability, not against the narrower "continuously busy" reading.
+Removing the cap entirely is not available: FR-014's "MUST still transmit" then loses to
 a babbling station, which is exactly what the cap was added for (`link/master.cpp`, and this
 suite's "the wait for an idle bus is bounded …").
 
@@ -3580,8 +3592,19 @@ retry bit. Reachability is ordinary, not adversarial: this suite's amended cases
 at 2 ms poll cadence (4 of 8 answered) and in the burst case (3 of 16), and nothing makes a
 retry rarer than a new request.
 
-**Recommendation:** **amend FR-015 and FR-016 to carry the same 2026-09-11 ruling marker
-FR-014 and data-model §5 already carry**, i.e. accept the discard for a retry on the ground that
+**The divergence is not only against the requirements — it is against an authoritative
+document, flagged here rather than chosen silently (CLAUDE.md: "the documents win; flag the
+conflict").** `docs/trunk-link-layer.md` §7 states the same rule as FR-015, unconditionally and
+without a ruling marker: *"A node receiving a retry of a sequence it already answered re-sends
+its previous response (single-frame replay buffer per node)."* Adopting the recommendation
+below without amending §7 too would leave the trunk spec contradicting the engine — the
+divergence surviving its own ruling. `docs/trunk-link-layer.md` is a human-ruling artefact an
+agent does not edit (OPERATING-POLICY §2), so the amendment is proposed here, not made.
+
+**Recommendation:** **amend FR-015, FR-016 and `docs/trunk-link-layer.md` §7 to carry the same
+2026-09-11 ruling marker FR-014 and data-model §5 already carry** (§7 because it is the
+authoritative document behind FR-015 and says the same thing; a marker on the requirements
+alone would leave the conflict in place), i.e. accept the discard for a retry on the ground that
 a retry *is* a request and the ruled property ("the engine never keys down onto a bus it has not
 read") is indifferent to the retry bit; the host's own trunk §7 retry budget is the recovery
 path, and exempting retries would reintroduce exactly the unbounded, uncounted hold the ruling
@@ -3597,5 +3620,6 @@ transmits inside another station's traffic during a late wait, which is the coll
 Whichever is ruled, the divergence must stop being invisible: until then `link/responder.cpp`
 states it at both the `poll()` comment and the discard branch, and the case above pins it.
 
-**Amends:** the 2026-09-11 rulings entry, item 5 — specifically its **Correction**, which names
-FR-014 and data-model §5 as the only clauses in tension. **Supersedes:** none.
+**Ruling:** PENDING — human. **Amends:** the 2026-09-11 rulings entry, item 5 — specifically
+its **Correction**, which names FR-014 and data-model §5 as the only clauses in tension.
+**Supersedes:** none.

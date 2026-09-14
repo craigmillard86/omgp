@@ -1580,11 +1580,11 @@ TEST_CASE("a trunk §7 retry completing when the hold is already full is discard
     // request, and FR-015's unconditional "MUST retransmit the buffered frame unchanged" is not
     // met for one that completes past kHeldRequests inside a single late wait. That consequence
     // is real, it is a divergence from an UNAMENDED MUST, and it is recorded in
-    // docs/OPEN-QUESTIONS.md 2026-09-14 ("the ruling of 2026-09-11 discards a trunk §7 retry
-    // ...", Ruling: PENDING -- human). This case exists so the divergence is an ASSERTION rather
-    // than a construction argument: whichever way it is ruled, the behaviour cannot move in
-    // silence. It is NOT an endorsement -- corner (b) of that entry would make it fail, which is
-    // the point.
+    // docs/OPEN-QUESTIONS.md 2026-09-14 ("the ruling of 2026-09-11 also discards a trunk §7
+    // retry ...", Ruling: PENDING -- human). This case exists so the divergence is an
+    // ASSERTION rather than a construction argument: whichever way it is ruled, the behaviour
+    // cannot move in silence. It is NOT an endorsement -- corner (b) of that entry would make
+    // it fail, which is the point.
     //
     // The two sections differ only in how many requests sit between the retry and the hold, so
     // what loses the retry is demonstrably the hold bound and nothing about retries themselves.
@@ -1639,13 +1639,19 @@ TEST_CASE("a trunk §7 retry completing when the hold is already full is discard
                 ++with_seq_1;
         REQUIRE(with_seq_1 == 1);
     } else {
-        // One filler short of the bound, R fits in the hold and IS answered: four answers, two
-        // of them seq 1. It is served as new rather than replayed (buffer_ holds B's response
-        // by the time R is popped, so seq 1 != buffer_.seq -- FR-016's "treated as new", which
-        // this engine has always done: red team @033182a finding 3). The contrast is the
-        // evidence that the hold bound, not the retry bit, is what loses it above.
+        // One filler short of the bound, R fits in the hold and IS answered: three answers (A,
+        // B, R), two of them seq 1. It is served as new rather than replayed (buffer_ holds B's
+        // response by the time R is popped, so seq 1 != buffer_.seq -- FR-016's "treated as
+        // new", which this engine has always done: red team @033182a finding 3). The contrast
+        // is the evidence that the hold bound, not the retry bit, is what loses it above.
         REQUIRE(wire.transcript_size() == 3);
         REQUIRE(responder.stats().discards == 0);
+        // "Served as new rather than replayed" is asserted, not just stated: every counter
+        // above holds equally for an engine that replayed (transactions 2 + replays_served 1),
+        // so without this line the sentence is a claim the case does not make (review
+        // @948cdf0 finding 3).
+        REQUIRE(responder.stats().replays_served == 0);
+        REQUIRE(responder.stats().transactions == 3);
         int with_seq_1 = 0;
         for (size_t i = 0; i < wire.transcript_size(); ++i)
             if (wire.transcript(i).seq == 1)
@@ -1654,13 +1660,17 @@ TEST_CASE("a trunk §7 retry completing when the hold is already full is discard
     }
 }
 
-// --- red team @2efcb67 / @7a80ec3: the drain's two exits mean opposite things ------------
-// The drain stops either because the wire's queue is empty (a COMPLETE reading of the bus:
-// T_gap of idle after the last byte is a real gap) or because it is holding all the requests
-// it can (a PARTIAL reading: bytes may remain unread, so the wait falls back to the bounded
-// cap). Every revision that inferred which from a buffer's occupancy had a capacity boundary
-// and reopened the same collision at it, one byte further along each time; the exit itself is
-// now what decides.
+// --- red team @2efcb67 / @7a80ec3: the late drain now has ONE exit ------------------------
+// Those rounds turned on the drain having two exits that meant opposite things: the wire's
+// queue empty (a COMPLETE reading of the bus -- T_gap of idle after the last byte is a real
+// gap) or the hold full (a PARTIAL one -- bytes left unread, so the wait fell back to the
+// bounded cap). Under the ruling of 2026-09-11 (#372) the second exit is gone: poll() drains
+// to the end of the queue on every path and counts what it cannot hold, so on the late path
+// the reading is always complete and T_gap is always measured from a byte the engine actually
+// read. Every revision that instead inferred completeness from a buffer's occupancy had a
+// capacity boundary and reopened the same collision at it, one byte further along each time --
+// the cases below pin the surviving rule at exactly those bounds (review @948cdf0 finding 4:
+// this banner described the deleted exit).
 
 TEST_CASE("a late response goes out T_gap after the last byte the engine saw when the wait "
           "absorbed no request, however much traffic passed",
