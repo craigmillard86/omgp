@@ -125,8 +125,9 @@ remains from the Technical Context.
   compile-time config (the plugin then embeds nothing) — it belongs to the run-time
   config only; (4) `includePaths`/`excludePaths` must not be in the **compile-time** config: excluding
   the TU that holds `main()` (Catch2) there removes the run-time mutant dispatch, so every TU
-  that is built is instrumented. (Amended 2026-09-06, gate-budget PR — pending a ruling, see
-  `docs/OPEN-QUESTIONS.md` 2026-09-06 "Mull path filters are safe at RUN time": the same
+  that is built is instrumented. (Amended 2026-09-06, gate-budget PR; ruled 2026-09-14, see
+  `docs/OPEN-QUESTIONS.md` 2026-09-06 "Mull path filters are safe at RUN time" and the
+  2026-09-14 ratification entry: the same
   keys in the run-time config filter what the runner *executes* and were measured to leave
   every in-scope status unchanged, 14m30s → 43s for `test_link_master`; the build is also
   limited to the oracle targets); (5) Mull's `gitDiffRef` filter drops every mutant in files the diff

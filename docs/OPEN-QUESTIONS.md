@@ -3500,3 +3500,75 @@ Respond's answer, wildcard-script ordering, and deferred-REQUIRE capacity checks
 interim echo is no longer the answer for a node with a handler registered, and covers only
 the no-handler fallback. Items (2) (own-script → wildcard → default ordering) and (3)
 (deferred `fault_` capacity checks) are untouched and stand as ruled.
+
+---
+
+## 2026-09-14 — T_gap tie-break: ruled, the node yields
+
+**Context:** the 2026-09-11 entry "T_gap tie-break: which station yields when the host's gap and a node's expire together?" recorded the conservative reading (the node yields) as PENDING — human; trunk §3's amended gap bullet carried it marked as "the conservative reading rather than an explicit ruling".
+
+**Ruling:** human, 2026-09-14 (in session with Claude Code; ratified by the merge of the PR carrying this entry). **The node yields.** The host is the sole initiator on a bus with no arbitration, no CSMA and no token (trunk §3), so where both gaps expire at the same instant the node waits and the host transmits. Alternatives considered and not taken: the host yielding (would make the node's late transmission a second initiator), and a fixed node back-off after `T_gap` (a new timing symbol for a case the yield rule already settles). trunk §3's bullet now cites this ruling; #374 stands as filed.
+
+**Amends:** the 2026-09-11 tie-break entry (ruled) and trunk §3's gap bullet marker. **Supersedes:** none.
+
+---
+
+## 2026-09-14 — cold fallback-rate rig: bring-up at the fallback rate is an L4/human action through `Master::set_bit_rate`
+
+**Context:** the 2026-09-13 F4 entry left one point open: a rig strapped entirely at the fallback rate with no node ever enrolled never declares BUS_FAULT (`|enrolled| = 0`), so the alternating probes never start and the host, probing at the reference rate, never discovers it — "bring-up rate" is not delivered by the health machinery alone (round-5 review on #472).
+
+**Ruling:** human, 2026-09-14 (in session with Claude Code; ratified by the merge of the PR carrying this entry). **Bring-up at the fallback rate is the layer above's action through `Master::set_bit_rate`** (`contracts/link-cpp.md`), the same path that restores the reference rate; the 2026-08-29 clarification that rate selection is an L4/human action covers both directions. The alternative — the enrolment rotation alternating rates for never-answered addresses — is not taken: it would double discovery time for every reference-rate rig to serve a case that is a deliberate bench configuration, and it would need a data-model §6 change. What this gives up, stated: a cold fallback-rate rig is silent to a host that nobody told; that is the accepted cost, not a property the health rule provides (rule 11). Recorded in trunk §7's bus-health bullet and data-model §7.
+
+**Amends:** the 2026-09-13 F4 entry's "Open, recorded with a recommendation rather than ruled here" point (ruled as recommended). **Supersedes:** none.
+
+---
+
+## 2026-09-14 — #146: mutation attestation for test-only PRs — Option A, attest and never gate
+
+**Context:** #146 (from the review of #142): `tools/mutate.sh --diff <ref>` scopes by changed *sources*, so a PR whose whole purpose is killing surviving mutants gets no machine attestation — `deep-verify` logs `nothing in scope`. spec 001 FR-027 and GOVERNANCE §2 define the gate as "survivors on a changed line", so that exit is the specified behaviour; changing what the gate attests was a ruling, and the enrichment set out two options with very different blast radius.
+
+**Ruling:** human, 2026-09-14 (in session with Claude Code; recorded on #146 the same day). **Option A.** When a PR changes a test file that exercises a scope directory and no source in it, the harness runs that directory's mutants in trend mode and reports (the attestation the reviewer asked for); the exit code on that path stays 0 and FR-027's gate is unchanged. Option B — gating a test-only PR on survivors sitting on lines it never touched — is rejected: it changes the gate's meaning and fails PRs on pre-existing debt. Deliverable is `tools/mutate.sh` plus tests (T2, agent-implementable; `ready` applied by hand since T2 is above `auto_ready_max_tier`); the run-time bound (the proposed split's item 3) is its own story if the measurement demands one.
+
+**Amends:** none. **Supersedes:** none.
+
+---
+
+## 2026-09-14 — #48: the `Step::count` width slice is done by the maintainer; the remaining kinds go to the agent as T0
+
+**Context:** the 2026-09-03 ruling on the 2026-09-02 `Step::count` entry made the `uint16_t → uint32_t` widening an atomic T3 slice across four artefacts, baked into #48. The Opus review on #122 then observed that no mechanical gate would label the resulting agent PR T3 — `risk-score`'s path rules and CODEOWNERS cover neither `specs/**/contracts/` nor `tests/support/**` — so #48 was held `needs-human` on 2026-09-03 with two ways out: a human releases the issue deliberately, or the coverage is extended.
+
+**Ruling:** human, 2026-09-14 (in session with Claude Code). **The maintainer does the width slice** as a human-authored, human-merged PR (`maint/step-count-u32`: the four artefacts and a red-then-green test), and #48 and #60 are released to the agent once it merges — the rest of T030 (`Garbage`/`Babble`/`Rate` bodies) touches only `tests/support/**` and scores T0 honestly. Extending `risk-score`/CODEOWNERS to those paths was considered and not taken now: it would make every test-support change a human merge to guard one already-ruled slice. Releasing #48 as-is (accepting a T0 auto-merge of a ruled-T3 change) was rejected.
+
+**Amends:** the 2026-09-02 `Step::count` entry (its ruling is now implemented). **Supersedes:** none.
+
+---
+
+## 2026-09-14 — Mull path filters: the 2026-09-06 entry is ratified; `contracts/tooling.md` step 3 and research trap (4) now say "at compile time"
+
+**Context:** the 2026-09-06 entry "Mull path filters are safe at RUN time; the 'no include/exclude paths' rule was measured at compile time only" measured 260/260 identical mutant statuses with `includePaths` in the run-time config (Mull 0.34.0, LLVM 14 locally and LLVM 18 in a `ubuntu:24.04` container) and amended `specs/001-protocol-foundation/contracts/tooling.md` step 3 and `research.md` trap (4) in place, marked "pending a ruling". #153 item 4 carried the ruling.
+
+**Ruling:** human, 2026-09-14 (in session with Claude Code; ratified by the merge of the PR carrying this entry). **Ratified as recommended:** run-time `includePaths` derived from `mutate.cfg`'s `scope_dirs` are the harness's filter; the compile-time config stays mutators-only; the per-changed-dir "no executed mutant" failure and the `pwd -P` anchoring stay as the controls that make a silent narrowing impossible (a regression in the runner filter makes the run slower or fails it — never narrows it silently; demonstrated by `tools/mutate_diff_reports.py` on the 2026-09-06 comparison, assumed on GitHub's 4-core runner as that entry states). The "pending a ruling" markers in both artefacts are replaced by this entry's date.
+
+**Amends:** the 2026-09-06 Mull path-filter entry (ruled), `contracts/tooling.md` step 3 and `research.md` trap (4) markers. **Supersedes:** none.
+
+---
+
+## 2026-09-14 — #153 items 1–3: turn caps from measured runs, gate budgets in `agent-config.yml`, and incremental red-team scope under two conditions
+
+**Context:** #141 (gate budgets) left four decisions to the maintainer, carried by #153: (1) a `--max-turns` cap for the review and red-team actions, to be read from completed runs rather than guessed; (2) the budgets (`timeout-minutes`, deadline) in `.github/agent-config.yml` with a reader job, instead of hard-coded 30/45/50; (3) whether a red-team verdict `clean @ head` may rest on attacking only the delta since the previous verdict; (4) the tooling-contract entry (ruled above).
+
+**Measured** (2026-09-14, the last six successful runs of each action, `num_turns` from the action's result line in the run log): `attack-pr` 33, 38, 40, 46, 54, 57 turns (7.5–11.2 min); `claude-review` 26, 29, 38, 42, 53, 62 turns (8.1–13.1 min). Demonstrated by those logs; that future rounds stay in that band is assumed.
+
+**Ruling:** human, 2026-09-14 (in session with Claude Code; the implementation is the `governance/gate-budgets` PR, T3, human-merged). (1) **`--max-turns 150`** for both actions — about 2.5× the largest measured count, so a normal round is never cut and a runaway loop is bounded twice (turns and the clock). (2) **Budgets move to `agent-config.yml`** (`review_timeout_minutes: 30`, `red_team_timeout_minutes: 50`, `deep_verify_timeout_minutes: 45`, `review_max_turns: 150`, `red_team_max_turns: 150`), read by a `budgets` job from the **default branch** so a PR cannot widen its own gate; unreadable or out-of-range values fail closed to the values that were hard-coded; the red team's posting deadline is derived from its timeout (ten minutes before the kill) instead of a second literal. (3) **Incremental red-team scope is allowed under exactly two conditions, otherwise whole-PR:** the previous red-team verdict (at the previous verdict head `tools/round_budget.py` reports) was `clean`, AND every file changed since that head is docs- or tests-only (`docs/**`, `specs/**`, `tests/**`, `*.md`) — then the attack may cover only that delta and still post `clean @ head`, saying so and naming the head it rests on. Any source, workflow, tool or protocol file in the delta, or a previous verdict of `findings`, means the whole PR is attacked again. What this gives up, stated: a clean verdict may then rest on an earlier pass's coverage of unchanged source; the conditions are chosen so that the unchanged source is exactly what that pass already attacked.
+
+**Amends:** GOVERNANCE §4 "Adversarial round budget" (a scope sub-bullet) and the red-team prompt. **Supersedes:** none.
+
+---
+
+## 2026-09-14 — #139: the survivor set was produced by hand and pasted; whole-tree run at `eef9def` shows no unlabelled survivor
+
+**Context:** #139 asks for every surviving mutant on `link/master.cpp` to be killed or truthfully labelled, and names the Mull report at the head as the authority. The dispatched agent could not produce it: `tools/mutate.sh` and Mull are outside the dispatch envelope and installing Mull unattended would be a new third-party dependency (OPERATING-POLICY §2). It stopped honestly with `needs-human`.
+
+**Ruling:** human, 2026-09-14 (in session with Claude Code): the maintainer runs the whole-tree report locally and pastes it on the issue as the authority; the agent triages against that list. Adding a CI `workflow_dispatch` job that posts the report was considered and not taken now (a T3 workflow change to serve one issue); it becomes worth doing if a second issue needs the same. **Measured** at `main` @ `eef9def` (Mull 0.34.0 / LLVM 14 extracted from the release package, `./tools/mutate.sh --require`, whole tree): `mutants=1020 killed=982 survived=38 kill_rate=96.3% labelled[equivalent=28 accepted=10] unlabelled=0` — nine labelled survivors on `link/master.cpp`, no `UNLABELLED survivor:` line anywhere. Demonstrated by that run; CI's LLVM 18 package yielding the same set is assumed (the 2026-09-06 entry measured the two agreeing on #137's tree). What remains for the agent is whether each of the nine labels is true, not whether one is missing.
+
+**Amends:** none. **Supersedes:** none.

@@ -288,6 +288,10 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   (trunk §2) and cannot hear a probe at the other rate, so once `!fault` the rate in use stands
   until the layer above or a human changes it. The fallback rate is a bring-up rate. A
   cadence-and-quorum return was ruled and withdrawn the same day; see `docs/OPEN-QUESTIONS.md`.
+  Bring-up *at* the fallback rate is likewise the layer above's: a rig with no node ever
+  enrolled never declares a fault (`|enrolled| = 0`), so this tracker never alternates and
+  never discovers a cold fallback-rate rig — `Master::set_bit_rate` is the path (ruling
+  2026-09-14); the enrolment rotation does not alternate rates for never-answered addresses.
 - Fall back (while `!fault` and `bit_rate == TRUNK_bit_rate`): only through the declare rule
   above — a fault is declared only when every enrolled node is SUSPECT/OFFLINE, so the host
   never leaves the reference rate while any enrolled node answers at it.
