@@ -193,23 +193,104 @@ Transitions (`on_result(addr, ok, now)`):
 | OFFLINE | fail | OFFLINE | — |
 
 Poll eligibility (`poll_due(addr, now)`): ENROLLED → true; SUSPECT → `now − last_poll ≥
-10 × T_poll`; OFFLINE, UNENROLLED → false (reached only via `next_probe`). Enrolment
+10 × T_poll`; OFFLINE, UNENROLLED → false (reached only via `next_probe`). *(Amended
+2026-09-13, F4.)* While `fault` (§7) → false for every address: no status polls are sent
+while a fault is declared, only `next_probe()` drives the wire, so a node that answered at
+the fallback rate is not polled at the reference rate during the reference pass. Enrolment
 rotation (`next_probe(now)`): round-robin over addresses 0x01–0x0F whose state is
-UNENROLLED or OFFLINE; returns `{addr, bit_rate}`.
+UNENROLLED or OFFLINE; returns `{addr, bit_rate}`. *(Amended 2026-09-13, F4.)* While `fault`
+(§7) the candidate set also includes every SUSPECT address, so the alternating-rate probes
+reach the nodes whose silence declared the fault at once rather than only after they age to
+OFFLINE. While `fault` this layer sends no status polls (`poll_due()` false for every address).
+That nothing else is on the wire either — no demand slots — is an **obligation on the scheduler
+(F3)**, recorded in `contracts/link-cpp.md` "What F3/F4 need" and **assumed** here (rule 11):
+every enrolled node is SUSPECT or OFFLINE, so no L3 traffic could be delivered anyway, and
+this feature's scope boundary leaves superframe composition to F3. Under that obligation, with
+one probe per superframe (trunk §6) and one transaction on the wire at a time (trunk §3), every
+`on_result` during a fault is the outcome of the last probe issued; outside a fault `on_result`
+reports every transaction, status polls included — that is how SUSPECT and OFFLINE are reached.
+The second F3 obligation, same note: `next_probe()` is called once per probe issued — each call
+advances the rotation and, while `fault`, the rate alternation, so a scheduler that polled it at
+every superframe boundary while a transaction was in flight would count phantom rate changes.
+During a reference pass (§7) `next_probe()` yields each enrolled address (state ≠ UNENROLLED)
+once, in address order, at `TRUNK_bit_rate`, without alternating, and records the address it
+yielded in `BusState.pass_addr` until that probe's outcome arrives. **While `pass_addr ≠ 0`,
+`next_probe()` re-yields `pass_addr` and advances nothing** — so a scheduler that mis-calls it at
+a superframe boundary with the probe still in flight (obligation 2 violated) gets the same probe
+back and the pass still completes; without the re-yield that mis-call moved `pass_addr` past the
+probe on the wire and the pass could never end (round-13 red team on #472). Fail-safe under the
+violated assumption, not dependent on it.
 
 ## 7. Bus state
 
 ```
-BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes; u32 faults }
+BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes; u32 faults;
+           u8 fallback_answerer; u8 ref_pass_left; u8 pass_addr }   /* last three added 2026-09-13 (F4, below; 0 = none); implemented by T043 */
 ```
 
 - Declare (`fault = true`, `BUS_FAULT` + `ALERT` notifications, `faults++`): evaluated
   after every `on_result`/`tick`: enrolled = {addr : state ≠ UNENROLLED}; if
   `|enrolled| ≥ 1` and every enrolled node ∈ {SUSPECT, OFFLINE} and `!fault`.
 - While `fault`: `next_probe()` alternates `bit_rate` between reference and fallback per
-  call (starting with the fallback, §7); `rate_changes++` on each change.
-- Clear: first `ok` result at any rate while `fault` → `fault = false`, `bit_rate` = the
-  rate that got the answer, `BUS_RECOVERED`; the answering node → ENROLLED as in §6.
+  call (starting with the fallback, §7), except during a reference pass (Clear, below), when
+  every probe goes out at the reference rate; `rate_changes++` on each change.
+- Clear *(amended 2026-09-13: F4 ruling 2026-09-06, ruling 2026-09-13)*: while `fault`, a valid
+  answer at the **reference** rate → `fault = false`, `bit_rate = TRUNK_bit_rate`, `BUS_RECOVERED`;
+  the answering node → ENROLLED as in §6. A valid answer at the **fallback** rate does not clear
+  the fault by itself and does **not yet** change that node's state: `fallback_answerer = addr`
+  (its §6 transition is deferred — an ENROLLED node would be status-polled at the reference
+  rate it cannot hear, fail into SUSPECT, and the recovery would be re-declared as a fault at
+  once), and a **reference pass** starts — `ref_pass_left = |enrolled|` where enrolled =
+  {addr : state ≠ UNENROLLED}. Under the F3 obligations of §6 (probes are the only traffic during
+  a fault; one `next_probe()` call per probe issued) the fallback answer that starts the pass is
+  the outcome of the only transaction there was and nothing is in flight when the pass begins.
+  This layer's own control: `ref_pass_left` is decremented only by the FIRST `on_result` for
+  `pass_addr`, the address of the pass probe in flight, which also sets `pass_addr = 0` — later
+  outcomes for that address, and outcomes for any other address, are not the pass's and leave
+  it untouched — and never when a probe is issued (a `tick()` between the last probe and its
+  result must not fire the clear, round-8 red team). What this control cannot do, stated (rule
+  11): `on_result` carries only an address, so a non-probe outcome for the very address the pass
+  has just probed, arriving before the probe's own, is indistinguishable here; that case does
+  not arise under F3 obligation 1 (probes are the only traffic during a fault), which the rule
+  assumes.
+  A valid answer at the reference rate during the pass → clear at the reference rate as above,
+  at once (FR-026); the recorded answerer keeps the state it had (it cannot hear the reference
+  rate and will be found by §6 in its own time). If
+  `fallback_answerer ≠ 0` and the pass outcome that takes `ref_pass_left` to 0 is itself a
+  failure → `fault = false`,
+  `bit_rate = TRUNK_bit_rate_fallback`, the recorded answerer → ENROLLED (failures = 0) as in
+  §6 **before** the declare rule is next evaluated, `BUS_RECOVERED`. (`ref_pass_left == 0`
+  alone means no pass is running; the clear at the fallback rate is conditioned on the
+  recorded answerer.) The pass length is exactly `|enrolled|` probes — the same number in
+  `trunk §7`, FR-026 and here; trunk §7's two retries give each address three attempts. On
+  a clear at the fallback rate every other enrolled node keeps its SUSPECT/OFFLINE state and
+  timers. `rate_changes++` on each change of `bit_rate`. On declare, and on every clear at
+  either rate **after the deferred enrolment above has been applied**, `fallback_answerer = 0`
+  and `ref_pass_left = 0` and `pass_addr = 0` — a clear at the reference rate can fire mid-pass,
+  and a stale pass counter must not survive it; resetting first would lose the answerer the clear still needs
+  and re-declare the fault at once (round-8 red team on #472).
+  The superseded **Clear** clause read "first `ok` result at any rate while `fault` →
+  `fault = false`, `bit_rate` = the rate that got the answer": the answering rate pinned the
+  trunk, so one node strapped at the fallback rate could downgrade a reference-rate rig (#110
+  F4).
+- Rate and the schedule (F4, 2026-09-06: "`T_poll` and the §6 budget derive from the rate in
+  use"): a transaction issued at the fallback rate takes `TRUNK_bit_rate / TRUNK_bit_rate_fallback`
+  (≈ 8.7×) the time of the same transaction at the reference rate, and the superframe that issues
+  it is stretched accordingly — whether that is because `bit_rate` is the fallback rate, or
+  because a fault-time fallback probe (§7, alternation) is issued at the fallback rate while
+  `bit_rate` still reads the reference rate (`bit_rate` is assigned only by a clear; during a
+  fault the probe's rate is the probe's own, round-9 red team on #472). Pass probes are issued at
+  the reference rate and are never stretched, so a reference pass is ≤ 15 × T_poll = 30 ms
+  whichever rate was in use before the fault. One minimal status-poll transaction alone is
+  ≈ 2.4 ms at 115.2 kbit/s, so §6's 2 ms superframe cannot hold one. Implemented where the
+  scheduler consumes the probe's `bit_rate` and `bit_rate()` (F3), not in this tracker.
+- No automatic return (ruling 2026-09-13): nodes select their rate by strap or configuration
+  (trunk §2) and cannot hear a probe at the other rate, so once `!fault` the rate in use stands
+  until the layer above or a human changes it. The fallback rate is a bring-up rate. A
+  cadence-and-quorum return was ruled and withdrawn the same day; see `docs/OPEN-QUESTIONS.md`.
+- Fall back (while `!fault` and `bit_rate == TRUNK_bit_rate`): only through the declare rule
+  above — a fault is declared only when every enrolled node is SUSPECT/OFFLINE, so the host
+  never leaves the reference rate while any enrolled node answers at it.
 
 ## 8. Statistics (FR-011a)
 

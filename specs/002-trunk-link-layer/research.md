@@ -121,14 +121,17 @@ from the tree on 2026-08-29; facts about the trunk protocol come from
   `on_result(addr, ok, now)`, `state(addr)`, `poll_due(addr, now)` (ENROLLED: always;
   SUSPECT: `now − last_poll ≥ 10 × T_poll`; OFFLINE/UNENROLLED: only via the enrolment
   rotation), `next_probe(now) → {addr, bit_rate}` (rotation over UNENROLLED and OFFLINE
-  addresses; while BUS_FAULT the rate alternates reference/fallback per probe — ruling Q3),
+  addresses; while BUS_FAULT the rate alternates reference/fallback per probe, except during a
+  reference pass (F4, 2026-09-13) — ruling Q3),
   `bus_fault()`. Transitions and BUS_FAULT declare/clear call
   `HealthListener::on_event(kind, addr)` (kinds: ENROLLED, SUSPECT, OFFLINE, RECOVERED,
   BUS_FAULT, BUS_RECOVERED, ALERT); the listener is a virtual interface implemented by F3
   and by a recording listener in tests. BUS_FAULT rule (ruling Q2): after any result, if
   ≥ 1 enrolled node and every enrolled node (ENROLLED/SUSPECT/OFFLINE) is SUSPECT or
   OFFLINE → declare once; the first valid response from any node clears it once and pins
-  the bit rate that produced it.
+  the bit rate that produced it *(amended 2026-09-13, F4: a reference-rate answer clears at
+  once; a fallback answer clears only after a reference pass of every enrolled address draws
+  nothing; no automatic return — data-model §7)*.
 - **Rationale**: FR-018..FR-026 with no allocation; listener beats a queue because a
   bounded queue can overflow (then a notification is lost silently — the exact failure
   class this repo just fixed in the metrics workflow). `10 × T_poll` is a clock-based

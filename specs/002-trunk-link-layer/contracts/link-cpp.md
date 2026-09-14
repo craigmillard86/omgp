@@ -196,21 +196,32 @@ struct Probe { uint8_t addr; uint32_t bit_rate; };
 class HealthTracker {
 public:
     HealthTracker(Clock&, HealthListener&);
-    void on_result(uint8_t addr, bool ok, uint64_t now_us);   // one transaction outcome
+    void on_result(uint8_t addr, bool ok, uint64_t now_us);   // one transaction outcome (any kind; during a fault, a probe's)
     void tick(uint64_t now_us);                                // time-only transitions (SUSPECT → OFFLINE)
     HealthState state(uint8_t addr) const;
-    bool poll_due(uint8_t addr, uint64_t now_us) const;        // ENROLLED: true; SUSPECT: every 10×T_poll; else false
+    bool poll_due(uint8_t addr, uint64_t now_us) const;        // ENROLLED: true; SUSPECT: every 10×T_poll; else false;
+                                                               // while bus_fault(): false for every address (F4, 2026-09-13)
     void mark_polled(uint8_t addr, uint64_t now_us);
-    Probe next_probe(uint64_t now_us);                         // enrolment rotation; alternates rates while bus_fault()
+    Probe next_probe(uint64_t now_us);                         // enrolment rotation; alternates rates while bus_fault(),
+                                                               // except during a reference pass (F4, 2026-09-13). Each call
+                                                               // advances the rotation/alternation: F3 calls it once per probe
+                                                               // issued ("What F3/F4 need", obligation 2). During a pass the
+                                                               // yielded address is held in pass_addr until its outcome arrives
     bool bus_fault() const;
-    uint32_t bit_rate() const;                                 // rate in use after the last recovery
+    uint32_t bit_rate() const;                                 // rate in use after the last recovery: the reference if any node answered
+                                                               // there during the fault, else the fallback; no automatic return (F4;
+                                                               // data-model §7, amended 2026-09-13)
 };
 ```
 Rules: SUSPECT after `TRUNK_suspect_after_failures` consecutive failures; OFFLINE after
 `TRUNK_offline_after_suspect_ms` in SUSPECT without a valid response; any valid response
-→ ENROLLED; UNENROLLED never counts; BUS_FAULT when ≥ 1 node is enrolled and all enrolled
-nodes are SUSPECT/OFFLINE (declared once); alternating-rate re-probe; first valid answer
-clears the fault and pins the rate. Each transition notifies exactly once.
+→ ENROLLED, except that a fallback-rate answer during a fault is deferred to the clear
+(data-model §7, 2026-09-13); UNENROLLED never counts; BUS_FAULT when ≥ 1 node is enrolled and all enrolled
+nodes are SUSPECT/OFFLINE (declared once); alternating-rate probes while BUS_FAULT except during
+the reference pass; a valid answer at the reference rate clears the fault there at once, a valid
+answer at the fallback rate clears it only after a reference pass — every enrolled address once, at
+the reference rate, without alternating — draws nothing *(amended 2026-09-13, F4)*; no automatic
+return afterwards (data-model §7). Each transition notifies exactly once.
 
 ## What F3/F4 need (interface note, SC-010)
 
@@ -219,3 +230,12 @@ tick/mark_polled`, `HealthListener`, `Clock`. F4 (virtual rig): `ByteWire` (its 
 wire), `Responder` + `RequestHandler` (virtual backplane), `MockWire` step kinds as the
 mapping target for scenario YAML fault steps. All of it is in this contract and
 `byte-wire-and-clock.md`; nothing else is required.
+
+Two obligations on F3 that the health tracker's bus-fault rule (data-model §7, F4, 2026-09-13)
+relies on and cannot enforce from this side — **assumed** here, to be pinned by F3's own tests:
+1. While `bus_fault()` is true, issue only the probe `next_probe()` returns — no status polls
+   (`poll_due()` is already false) and no demand traffic. Every enrolled node is SUSPECT or
+   OFFLINE, so nothing could be delivered; this makes every `on_result` during a fault a probe's.
+2. Call `next_probe()` once per probe issued, when about to issue it. Each call advances the
+   enrolment rotation and, while `bus_fault()`, the rate alternation; polling it at every
+   superframe boundary while a transaction is still in flight would count phantom rate changes.
