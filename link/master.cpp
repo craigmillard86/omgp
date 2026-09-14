@@ -346,8 +346,10 @@ void Master::end_attempt(uint64_t last_activity_us, MasterEvent::Reason reason,
     // unconditional store) is a different edit and is NOT equivalent — it is the rewind
     // described above, and it is red on test_link_master "a CRC-failed frame outside the
     // window gap-defers the retry from its own last byte, not from the earlier timeout
-    // instant", whose first post-poll assertion is that the retry did not go out on the
-    // discarded frame's own last byte.
+    // instant" — at that case's `REQUIRE(wire.transcript_size() == 1)`, the third assertion
+    // after the timeout poll, which with the guard dropped finds the retry already gone out
+    // on the discarded frame's own last byte. (The two assertions before it — the poll's
+    // event kind and the timeouts count — pass with or without the guard.)
     // mutant-ok(equivalent, cxx_gt_to_ge): at equality the branch re-stores the same value.
     if (last_activity_us > last_activity_)
         last_activity_ = last_activity_us;

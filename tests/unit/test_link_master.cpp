@@ -699,11 +699,20 @@ TEST_CASE("a CRC-failed frame arriving outside any open attempt's own window is 
 // measures idle from "the last byte transmitted or RECEIVED", whatever the Deframer then did
 // with it — so the retry the timeout schedules is gap-deferred from THAT frame's last byte,
 // not from the (earlier) timeout instant. Two edits this case is red for, both of them once
-// live: drain_wire()'s unconditional last_activity_/has_last_activity_ update confined to the
-// outcome branches (a CRC discard is not one of them), and end_attempt() overwriting
-// last_activity_ with its own `deadline_` argument instead of taking the later of the two.
-// Either leaves last_activity_ at tx_end + T_resp, whose gap has already elapsed by crc_end,
-// so the retry goes out AT crc_end — the first REQUIRE after the poll below.
+// live, and each on a DIFFERENT assertion below — they leave last_activity_ at different
+// instants, so they are not interchangeable:
+//   - end_attempt() overwriting last_activity_ with its own `deadline_` argument instead of
+//     taking the later of the two: that rewinds it to tx_end + T_resp, whose gap has already
+//     elapsed by crc_end (the REQUIRE above pins exactly that), so the retry goes out AT
+//     crc_end and `REQUIRE(wire.transcript_size() == 1)` after the poll fails.
+//   - drain_wire()'s unconditional last_activity_/has_last_activity_ update confined to the
+//     outcome branches (a CRC discard is not one of them): the discarded frame's last byte
+//     records nothing, so last_activity_ stays at the PREVIOUS byte's end, one byte time
+//     (10 µs at TRUNK_bit_rate) before crc_end. The retry is then one byte time early, which
+//     the poll to crc_end does not see; `REQUIRE(wire.transcript_size() == 1)` at
+//     crc_end + T_gap - 1, the "not one microsecond early" assertion, is what fails.
+// (Both failures demonstrated by emulating each edit in turn and running `./pipeline.sh
+// build unit`; see the PR's falsification table.)
 //
 // Claim labelling (CLAUDE.md rule 11): this is a behavioural pin, NOT a mutant kill. The
 // whole-tree run on #139 (maintainer's comment, main @ eef9def) reports no surviving mutant
