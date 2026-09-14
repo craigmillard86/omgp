@@ -121,24 +121,24 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // the fault at 1 Mbit and bypassed the pass (round-8 red team, finding 1). Demonstrated by
     // "a duplicate fallback answer after the pass has probed the answerer ..." and "a fallback
     // answerer that keeps answering cannot stop the pass from ending".
-    const bool is_answerer = bus_.fallback_answerer != 0 && addr == bus_.fallback_answerer;
-    if (bus_.fault && ok && is_answerer) {
-        // The same answer, recorded again: a NO-OP. Not a clear at the reference rate (round 8:
-        // the pass probe overwrote the answerer's bit and a duplicate cleared at 1 Mbit), and not
-        // a fresh fallback answer either (round 10: recomputing the pass rewound its cursor, so
-        // a retried or babbling answerer kept the pass from ever ending — no clear at either
-        // rate, no polls while faulted, one module starving the trunk). Nothing here moves:
-        // the pass keeps its progress, the pass probe to this address (if outstanding) is still
-        // owed its own outcome, the deferred §6 transition still waits for the clear.
-        return;
-    }
-    const bool fallback_answer = bus_.fault && ok && !at_reference;
+    const bool is_answerer = bus_.fault && ok && (bus_.fallback_seen & probe_bit(addr)) != 0;
+    // An ok from an address that already answered at the fallback rate this episode is that
+    // answer again: it neither clears at the reference rate nor takes a §6 transition nor
+    // restarts the pass — but if that address's pass probe is outstanding it IS that probe's
+    // outcome and advances the pass below, else a babbling or retrying answerer stalled the
+    // pass for ever (round-11 red team on #530, finding 1: round 10's early return sat before
+    // the pass-advance block). Every such address is remembered, not only the latest
+    // (finding 2: a demoted answerer's duplicate cleared at 1 Mbit).
+    const bool fallback_answer = bus_.fault && ok && !at_reference && !is_answerer;
     // The probe this outcome answers is no longer in flight, so its record stops being the
     // one thing a new episode must not overwrite. Unconditional: an outcome for an address
     // with no outstanding probe clears a bit that is already clear.
     bus_.probe_live = static_cast<uint16_t>(bus_.probe_live & ~probe_bit(addr));
 
-    if (fallback_answer) {
+    if (is_answerer) {
+        // Recorded already — nothing to record, nothing to apply; the pass-advance block
+        // below still consumes this outcome if it is the outstanding pass probe's.
+    } else if (fallback_answer) {
         // §7: a fallback-rate answer neither clears the fault nor moves that node's state —
         // enrolling it here would have it status-polled at a rate it cannot hear, fail into
         // SUSPECT and re-declare the fault it just recovered (round-4 red team on #472). It
@@ -158,26 +158,32 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
         // overwrites — "a duplicate fallback answer before the first pass probe restarts an
         // identical pass" in tests/unit/test_link_busfault.cpp.
         bus_.fallback_answerer = addr;
-        uint8_t enrolled = 0;
-        for (const HealthRecord& r : records_)
-            if (r.state != HealthState::UNENROLLED)
-                ++enrolled;
-        bus_.ref_pass_left = enrolled; // exactly |enrolled| probes (FR-026)
-        bus_.pass_addr = 0;
-        // The cursor starts AT ADDR_backplane_min, and nowhere else. cxx_assign_const rewrites
-        // this RHS to a constant that is NOT the type's zero value — demonstrated on #530: the
-        // zero rewrite is killed by "a pass whose only enrolled address is the last one in the
-        // rotation" (a scan from below the rotation spends one of pass_probe()'s
-        // kBackplaneCount iterations on records_[ADDR_host] and stops one address short of
-        // ADDR_backplane_max), yet the mutant survived that test. Mull documents 42 as the
-        // constant, and a rewrite to 42 reproduces the survivor exactly — the whole unit suite
-        // passes with it — so the two cases in tests/unit/test_link_busfault.cpp pin the start
-        // from both sides: that one fails for a cursor starting BELOW ADDR_backplane_min, and
-        // "a pass over the first and last addresses of the rotation probes them in that order"
-        // fails for one starting ABOVE it (a scan from higher up meets ADDR_backplane_max
-        // before it wraps round to ADDR_backplane_min). Both demonstrated by those named tests;
-        // that 42 is the constant Mull emits is ASSUMED, and nothing here depends on its value.
-        bus_.pass_next_addr = omgp::ADDR_backplane_min;
+        bus_.fallback_seen = static_cast<uint16_t>(bus_.fallback_seen | probe_bit(addr));
+        // The FIRST fallback answer of the episode starts the pass; a later answerer joins the
+        // record above and leaves the running pass alone — recomputing it rewound its cursor
+        // (round-10 red team on #530, finding 1). ref_pass_left > 0 exactly while a pass runs.
+        if (bus_.ref_pass_left == 0) {
+            uint8_t enrolled = 0;
+            for (const HealthRecord& r : records_)
+                if (r.state != HealthState::UNENROLLED)
+                    ++enrolled;
+            bus_.ref_pass_left = enrolled; // exactly |enrolled| probes (FR-026)
+            bus_.pass_addr = 0;
+            // The cursor starts AT ADDR_backplane_min, and nowhere else. cxx_assign_const rewrites
+            // this RHS to a constant that is NOT the type's zero value — demonstrated on #530: the
+            // zero rewrite is killed by "a pass whose only enrolled address is the last one in the
+            // rotation" (a scan from below the rotation spends one of pass_probe()'s
+            // kBackplaneCount iterations on records_[ADDR_host] and stops one address short of
+            // ADDR_backplane_max), yet the mutant survived that test. Mull documents 42 as the
+            // constant, and a rewrite to 42 reproduces the survivor exactly — the whole unit suite
+            // passes with it — so the two cases in tests/unit/test_link_busfault.cpp pin the start
+            // from both sides: that one fails for a cursor starting BELOW ADDR_backplane_min, and
+            // "a pass over the first and last addresses of the rotation probes them in that order"
+            // fails for one starting ABOVE it (a scan from higher up meets ADDR_backplane_max
+            // before it wraps round to ADDR_backplane_min). Both demonstrated by those named tests;
+            // that 42 is the constant Mull emits is ASSUMED, and nothing here depends on its value.
+            bus_.pass_next_addr = omgp::ADDR_backplane_min;
+        }
     } else {
         apply_result(addr, ok, now_us);
     }
@@ -204,10 +210,10 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
         pass_ended = --bus_.ref_pass_left == 0;
     }
 
-    if (bus_.fault && ok && at_reference) {
+    if (bus_.fault && ok && at_reference && !is_answerer) {
         // §7: the host prefers the reference rate — a valid answer there clears at once,
-        // mid-pass or not. `addr` has already taken its own §6 transition above. The recorded
-        // fallback answerer never reaches here: its ok outcomes returned early above.
+        // mid-pass or not. `addr` has already taken its own §6 transition above. Never an
+        // address that answered at the fallback rate this episode (is_answerer above).
         clear_fault(omgp::TRUNK_bit_rate, now_us);
     } else if (pass_ended) {
         // §7: the pass drew nothing, so the fallback rate is the rate that works. `pass_ended`
@@ -500,6 +506,7 @@ void HealthTracker::evaluate_declare(uint64_t now_us) {
     // under way, and both follow on_result's pass start, which assigns it there.
     // mutant-ok(equivalent, cxx_assign_const): overwritten before any reachable read.
     bus_.fallback_answerer = 0;
+    bus_.fallback_seen = 0;
     bus_.ref_pass_left = 0;
     // Dead the same way: pass_probe() reads pass_addr only while ref_pass_left > 0, which the
     // line above makes false until on_result's pass start, and that zeroes pass_addr itself.
@@ -580,8 +587,11 @@ void HealthTracker::clear_fault(uint32_t bit_rate, uint64_t now_us) {
     // (round-8 red team on #472). On a clear at the reference rate the recorded answerer is
     // dropped un-applied: it keeps the state it had, since it cannot hear the reference rate
     // and §6 will find it in its own time (data-model.md §7).
-    if (bit_rate == omgp::TRUNK_bit_rate_fallback && bus_.fallback_answerer != 0)
-        apply_result(bus_.fallback_answerer, true, now_us);
+    if (bit_rate == omgp::TRUNK_bit_rate_fallback)
+        for (uint8_t a = omgp::ADDR_backplane_min; a <= omgp::ADDR_backplane_max; ++a)
+            if ((bus_.fallback_seen & probe_bit(a)) != 0) // every answerer of the episode, not
+                apply_result(a, true, now_us);            // only the latest (health.hpp)
+    bus_.fallback_seen = 0;
     // The three resets are dead writes whatever constant replaces them: the fault is clear
     // from here, so next_probe()'s pass branch and on_result()'s fallback branch are both shut
     // until the next declare, and evaluate_declare() rewrites fallback_answerer and

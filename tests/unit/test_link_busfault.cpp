@@ -685,18 +685,11 @@ TEST_CASE("a duplicate fallback answer after the pass has probed the answerer do
 
     tracker.on_result(kNodeC, true, t + 10); // the fallback answer, delivered again
 
-    REQUIRE(tracker.bus_fault());                           // NOT a clear at 1 Mbit
-    REQUIRE(tracker.state(kNodeC) == HealthState::SUSPECT); // still deferred
-    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
-    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 0);
-    // …and it is a NO-OP for the pass (round-10 red team: read as a fresh fallback answer it
-    // restarted the pass, and a babbling or retried answerer starved the trunk for ever): the
-    // pass probe to C is still the one outstanding, its real outcome ends the pass, and the
-    // fault clears at the fallback rate after exactly |enrolled| probes.
-    const Probe again = tracker.next_probe(t + 20);
-    REQUIRE(again.addr == kNodeC); // re-yielded while its outcome is outstanding
-    REQUIRE(again.bit_rate == omgp::TRUNK_bit_rate);
-    tracker.on_result(kNodeC, false, t + 30); // the pass probe's own outcome: nothing heard
+    // Not a clear at 1 Mbit — and not a restart either (round 10: recomputing the pass rewound
+    // its cursor and a babbling answerer starved the trunk) nor a no-op that leaves the pass
+    // probe hanging (round 11: the answerer's answers keep arriving, so no timeout ever comes).
+    // It is the outstanding pass probe's outcome: the pass drew nothing from its |enrolled|
+    // probes and ends here, at the FALLBACK rate, the only clear §7 allows on this path.
     REQUIRE_FALSE(tracker.bus_fault());
     REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
     REQUIRE(tracker.state(kNodeC) == HealthState::ENROLLED);
@@ -809,11 +802,9 @@ TEST_CASE("every node that answered at the fallback rate this episode is protect
 
     tracker.on_result(kNodeC, true, t + 10); // C's fallback answer, delivered again
 
-    REQUIRE(tracker.bus_fault());                           // NOT a clear at 1 Mbit
-    REQUIRE(tracker.state(kNodeC) == HealthState::SUSPECT); // still deferred
-    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 0);
-    // That ok was the outstanding pass probe's outcome: the pass drew nothing and ends here,
-    // clearing at the fallback rate and enrolling BOTH nodes that answered there.
+    // Not a clear at 1 Mbit. That ok was the outstanding pass probe's outcome: the pass drew
+    // nothing and ends here, clearing at the FALLBACK rate and enrolling BOTH nodes that
+    // answered there.
     REQUIRE_FALSE(tracker.bus_fault());
     REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
     REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED);

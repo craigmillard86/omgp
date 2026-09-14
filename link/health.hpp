@@ -115,6 +115,16 @@ class HealthTracker {
         bool next_probe_fallback = false;
         // Address to enrol on a clear at the fallback rate; 0 = none recorded.
         uint8_t fallback_answerer = 0;
+        // One bit per address: answered at the FALLBACK rate in this episode. §7's clear rules
+        // name one answerer (`fallback_answerer` above, the data-model field), but two nodes
+        // answering the fallback probes is the ordinary shape of a rate-mismatch fault, and the
+        // round-8 protection — an ok from an answerer is its fallback answer again, never a
+        // reference-rate clear, even after the pass probe overwrote its rate bit — must cover
+        // every one of them, not the latest (round-11 red team on #530, finding 2). On a
+        // fallback-rate clear every address here takes its deferred §6 transition (each
+        // demonstrated it hears that rate), a superset of the data model's single answerer,
+        // labelled as such. Reset per episode by evaluate_declare() and on every clear.
+        uint16_t fallback_seen = 0;
         // Reference-pass outcomes still owed; 0 = no pass running.
         uint8_t ref_pass_left = 0;
         uint8_t pass_addr = 0; // the pass probe in flight; 0 = none outstanding
