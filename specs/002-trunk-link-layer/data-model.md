@@ -300,13 +300,16 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   or through the layer above's `set_bit_rate` (ruling 2026-09-14; round-2 red team on #523). By
   the declare rule alone the host never leaves the reference rate while any enrolled node answers
   at it — a fault is declared only when every enrolled node is SUSPECT/OFFLINE. The layer above's
-  selection is not so guarded, and the consequence is stated rather than hidden: dropping the
-  rate while enrolled nodes answer at the reference rate polls them at a rate they cannot hear,
-  they fall SUSPECT, the fault is declared, and a fallback answer clears it pinned at the
-  fallback rate with no automatic return. Bring-up at the fallback rate is a bench action on a
-  rig with nothing enrolled; on a live reference-rate rig the selection is the layer above's own
-  choice, and this tracker neither refuses it nor guards against it (rule 11: the assurance in
-  the previous sentence is the declare rule's, not the setter's).
+  selection is not so guarded, and what follows from it is this section's own rules, not a
+  new one: dropping the rate while enrolled nodes answer at the reference rate polls them at a
+  rate they cannot hear, they fall SUSPECT, the fault is declared, the alternating probes reach
+  them at the reference rate and the first valid answer there clears the fault *at the
+  reference rate* — the health rules undo the selection (round-3 red team on #523; a round-2
+  wording had the opposite outcome and was wrong). Bring-up at the fallback rate is therefore a
+  bench action on a rig with nothing enrolled; on a live reference-rate rig it is self-correcting
+  through the declare/alternate/clear path, at the cost of one fault cycle, and this tracker
+  neither refuses the selection nor guards against it (rule 11: the assurance in the previous
+  sentence is the declare rule's, not the setter's).
 
 ## 8. Statistics (FR-011a)
 

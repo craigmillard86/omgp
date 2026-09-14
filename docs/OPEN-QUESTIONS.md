@@ -3511,6 +3511,8 @@ the no-handler fallback. Items (2) (own-script → wildcard → default ordering
 
 **Refined after the round-1 red team on #523:** the ruling was ahead of the engines. Both key down at exactly `last activity + T_gap` — the host at `max(deadline, last_activity + T_gap)`, the node at `last_activity + T_gap` — and the existing `[timing:T_gap]` cases in `test_link_master` and `test_link_responder` pin those identical instants (demonstrated by the red team on the pristine tree). A node cannot see the host's pending gap, so "yield" is implementable only as a node-side margin: earliest transmission strictly after the gap. That obligation is filed as #527 (tests first; the host side unchanged), trunk §3 now says so beside the rule, and until it lands the sentence is document text the engines do not implement (rule 11: a recorded divergence).
 
+**Refined after the round-3 red team on #523:** the round-1 statement "both engines key down at exactly `last activity + T_gap`" was true of the uncapped path only. Both engines also carry the bounded-courtesy cap (`defer_origin + max_frame + T_gap`), and on the Responder's late path with a partial drain that cap is the whole rule — the node keys down with less than `T_gap` of idle, which the 2026-09-07 entry already records as an open defect and the engine's own comment disclaims. trunk §3 now states both paths; #527 covers the uncapped tie only and says so; the capped path stays with the 2026-09-07 entry.
+
 **Amends:** the 2026-09-11 tie-break entry (ruled) and trunk §3's gap bullet marker. **Supersedes:** none.
 
 ---

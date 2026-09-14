@@ -219,8 +219,13 @@ public:
                                                                // Never a clear, changes no node state. Refused (not assigned) on
                                                                // exactly Master::set_bit_rate's rule — bps == 0 or bps > 10 Mb/s,
                                                                // byte_time_us(bps) would be 0 — so a refused rate leaves BOTH
-                                                               // unchanged (round-2 red team on #523). Called in the same step as
-                                                               // Master::set_bit_rate ("What F3/F4 need", obligation 3). T043
+                                                               // unchanged (round-2 red team on #523). An accepted rate is a change
+                                                               // of bit_rate and counts once in BusState.rate_changes (data-model
+                                                               // §7's rule); Master::set_bit_rate counts the same action once in
+                                                               // BusStats.rate_changes — two counters, two questions (what the wire
+                                                               // was told; what the rate in use did), deliberately (round-3 red
+                                                               // team on #523). Called in the same step as Master::set_bit_rate
+                                                               // ("What F3/F4 need", obligation 3). Tests first in T041; T043
 };
 ```
 Rules: SUSPECT after `TRUNK_suspect_after_failures` consecutive failures; OFFLINE after
