@@ -1579,9 +1579,11 @@ TEST_CASE("a trunk §7 retry completing when the hold is already full is discard
     // range -- never f.retry. So a retry is discarded on exactly the same terms as a new
     // request, and FR-015's unconditional "MUST retransmit the buffered frame unchanged" is not
     // met for one that completes past kHeldRequests inside a single late wait. That consequence
-    // is real, it is a divergence from an UNAMENDED MUST, and it is recorded in
-    // docs/OPEN-QUESTIONS.md 2026-09-14 ("the ruling of 2026-09-11 also discards a trunk §7
-    // retry ...", Ruling: PENDING -- human). This case exists so the divergence is an
+    // is real, it is a divergence from a MUST that item 5 of that ruling did not amend (FR-015
+    // does carry a 2026-09-11 marker, but it is item 7's #373 request-byte matching, which
+    // does not reach a retry discarded before the replay test runs), and it is recorded in
+    // docs/OPEN-QUESTIONS.md 2026-09-14 ("item 5 of the 2026-09-11 rulings also discards a
+    // trunk §7 retry ...", Ruling: PENDING -- human). This case exists so the divergence is an
     // ASSERTION rather than a construction argument: whichever way it is ruled, the behaviour
     // cannot move in silence. It is NOT an endorsement -- corner (b) of that entry would make
     // it fail, which is the point.

@@ -193,7 +193,9 @@ public:
                                                   //  that the hold cannot take -- ruling 2026-09-11, #372. The
                                                   //  acceptance screen there does not read `retry`, so a trunk §7
                                                   //  retry past the hold is discarded too: no replay (FR-015), no
-                                                  //  fresh answer (FR-016). Neither MUST is amended by that ruling
+                                                  //  fresh answer (FR-016). Neither MUST is amended by item 5 of
+                                                  //  that ruling (FR-015's 2026-09-11 marker is item 7's #373
+                                                  //  request-byte matching, a different clause; FR-016 has none)
                                                   //  -- divergence open, docs/OPEN-QUESTIONS.md 2026-09-14.)
 };
 ```

@@ -179,11 +179,14 @@ void Responder::hold_or_discard(const FrameFields& f, uint64_t request_end_us) {
     // this one is in stats() where FR-016's channel exists to show it.
     //
     // This branch does not read f.retry, so it drops a trunk §7 RETRY on the same terms --
-    // against FR-015 and FR-016, neither of which that ruling amends. Deliberate (the ruled
-    // corner is "a completed request beyond the hold is discarded and counted", and a retry is
-    // a request), disclosed rather than assumed: docs/OPEN-QUESTIONS.md 2026-09-14 "the ruling
-    // of 2026-09-11 also discards a trunk §7 retry", Ruling: PENDING -- human. Review
-    // @3dfe0e3; pinned by the "retry completing when the hold is already full" case.
+    // against FR-015 and FR-016, neither of which item 5 amends. (FR-015 does carry a
+    // 2026-09-11 marker, but it is item 7's request-byte-matching amendment, #373, which says
+    // WHICH retries match the buffer -- not what happens to one discarded before that test is
+    // reached. FR-016 carries no 2026-09-11 marker.) Deliberate (the ruled corner is "a
+    // completed request beyond the hold is discarded and counted", and a retry is a request),
+    // disclosed rather than assumed: docs/OPEN-QUESTIONS.md 2026-09-14 "item 5 of the
+    // 2026-09-11 rulings also discards a trunk §7 retry", Ruling: PENDING -- human. Review
+    // @3dfe0e3, @dcde3a2; pinned by the "retry completing when the hold is already full" case.
     if (held_count_ >= kHeldRequests) {
         stats_.discards++;
         return;
@@ -339,10 +342,13 @@ void Responder::poll(uint64_t now_us) {
     // retry completing past kHeldRequests inside one late wait is discarded and counted like
     // any other request: it gets neither the buffered frame (FR-015 "MUST retransmit ...
     // unchanged") nor a fresh answer (FR-016 "MUST be treated as new"), and the host sees a
-    // second T_resp timeout. The 2026-09-11 ruling amends FR-014 and data-model §5 only, so
-    // this consequence sits against two UNAMENDED MUSTs; it is recorded, not resolved here
-    // (docs/OPEN-QUESTIONS.md 2026-09-14 "the ruling of 2026-09-11 also discards a trunk §7
-    // retry", Ruling: PENDING -- human) and pinned by tests/unit/test_link_responder.cpp
+    // second T_resp timeout. Item 5 of the 2026-09-11 rulings amends FR-014 and data-model §5
+    // only -- FR-015's own 2026-09-11 marker is item 7's (#373, which bytes a retry must
+    // repeat to match the buffer) and does not reach this clause, and FR-016 has none -- so
+    // this consequence sits against two MUSTs unamended for it; it is recorded, not resolved
+    // here (docs/OPEN-QUESTIONS.md 2026-09-14 "item 5 of the 2026-09-11 rulings also discards
+    // a trunk §7 retry", Ruling: PENDING -- human) and pinned by
+    // tests/unit/test_link_responder.cpp
     // "a trunk §7 retry completing when the hold is already full ...".
     //
     // A response already due is flushed ahead of every byte, not just once

@@ -3564,14 +3564,24 @@ records what its implementation does and does not establish. **Supersedes:** non
 
 ---
 
-## 2026-09-14 — the ruling of 2026-09-11 also discards a trunk §7 retry, against FR-015 and FR-016, which it did not amend
+## 2026-09-14 — item 5 of the 2026-09-11 rulings also discards a trunk §7 retry, against FR-015 and FR-016, which item 5 did not amend
 
 **Context:** item 5 of the 2026-09-11 "Maintainer rulings on the pending entries" entry rules
 that "a completed request beyond `kHeldRequests` is discarded and counted in `stats()`", and its
 own **Correction** states which clauses it is trading against: *"FR-015/016 are the
 replay-buffer requirements … The clause in tension is FR-014's 'at once' together with
-data-model §5's 'nothing is dropped'."* FR-014 and data-model §5 accordingly carry ruling
-markers; FR-015 and FR-016 do not.
+data-model §5's 'nothing is dropped'."* FR-014 (`specs/002-trunk-link-layer/spec.md:402-409`)
+and data-model §5 (`data-model.md:161`) accordingly carry item 5's ruling marker; **neither
+FR-015 nor FR-016 carries one.**
+
+**Precisely, because the near-miss is easy to act on wrongly** (review @`dcde3a2`): FR-015
+*does* carry a 2026-09-11 maintainer-ruling marker (`spec.md:416-423`), but it is **item 7's**
+— the replay-request-byte-matching amendment from the 2026-09-07 "replay entry has no age
+bound" entry, implementation #373. That marker qualifies *which retries match the buffer*; it
+does not reach what happens to a matching retry that is discarded before the replay test is
+ever applied, which is this entry's subject. FR-016 carries no 2026-09-11 marker at all. So
+the clause this entry is about is unamended in both requirements, and a maintainer must add
+item 5's marker **beside** item 7's on FR-015, never over it.
 
 That correction is no longer complete for the engine the ruling produced. `hold_or_discard()`
 (`link/responder.cpp`) takes its discard branch for **any** `acceptable()` frame once
@@ -3601,8 +3611,10 @@ below without amending §7 too would leave the trunk spec contradicting the engi
 divergence surviving its own ruling. `docs/trunk-link-layer.md` is a human-ruling artefact an
 agent does not edit (OPERATING-POLICY §2), so the amendment is proposed here, not made.
 
-**Recommendation:** **amend FR-015, FR-016 and `docs/trunk-link-layer.md` §7 to carry the same
-2026-09-11 ruling marker FR-014 and data-model §5 already carry** (§7 because it is the
+**Recommendation:** **amend FR-015, FR-016 and `docs/trunk-link-layer.md` §7 to carry item 5's
+2026-09-11 ruling marker, the one FR-014 and data-model §5 already carry** — on FR-015 that is
+an *addition* alongside the item 7 (#373) marker already there, not a replacement for it, and
+FR-016 and §7 carry no 2026-09-11 marker to start from (§7 because it is the
 authoritative document behind FR-015 and says the same thing; a marker on the requirements
 alone would leave the conflict in place), i.e. accept the discard for a retry on the ground that
 a retry *is* a request and the ruled property ("the engine never keys down onto a bus it has not
