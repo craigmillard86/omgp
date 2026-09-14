@@ -177,6 +177,13 @@ void Responder::hold_or_discard(const FrameFields& f, uint64_t request_end_us) {
     // requests at the WIRE, uncounted (74 offered, 7 answered, discards == 0; red team
     // @bab7378 finding 2). The loss is the same order of magnitude; the difference is that
     // this one is in stats() where FR-016's channel exists to show it.
+    //
+    // This branch does not read f.retry, so it drops a trunk §7 RETRY on the same terms --
+    // against FR-015 and FR-016, neither of which that ruling amends. Deliberate (the ruled
+    // corner is "a completed request beyond the hold is discarded and counted", and a retry is
+    // a request), disclosed rather than assumed: docs/OPEN-QUESTIONS.md 2026-09-14 "the ruling
+    // of 2026-09-11 also discards a trunk §7 retry", Ruling: PENDING -- human. Review
+    // @3dfe0e3; pinned by the "retry completing when the hold is already full" case.
     if (held_count_ >= kHeldRequests) {
         stats_.discards++;
         return;
@@ -321,10 +328,24 @@ void Responder::poll(uint64_t now_us) {
     // a UART's RX FIFO — and are picked up, intact, by the first poll() after the wire is
     // free. So several requests queued ahead of an infrequent poll() call are each
     // answered in turn (FR-014: late ones counted; past what one late wait can hold,
-    // discarded and counted too -- below), a queued trunk §7 retry
-    // is replayed (FR-015), and a later request can never overwrite a response still
-    // pending in buffer_ (red team @e510b29 finding 1; docs/OPEN-QUESTIONS.md
-    // 2026-09-06). A response already due is flushed ahead of every byte, not just once
+    // discarded and counted too -- below), a queued trunk §7 retry is replayed (FR-015)
+    // WHEN IT IS ONE OF THOSE THE ENGINE CAN ANSWER, and a later request can never overwrite
+    // a response still pending in buffer_ (red team @e510b29 finding 1;
+    // docs/OPEN-QUESTIONS.md 2026-09-06).
+    //
+    // That FR-015 clause is qualified, and the qualification is a known divergence rather
+    // than an oversight (review @3dfe0e3). hold_or_discard()'s discard branch tests
+    // acceptable() only -- dst, the response bit, src, trunk §5's range -- never f.retry, so a
+    // retry completing past kHeldRequests inside one late wait is discarded and counted like
+    // any other request: it gets neither the buffered frame (FR-015 "MUST retransmit ...
+    // unchanged") nor a fresh answer (FR-016 "MUST be treated as new"), and the host sees a
+    // second T_resp timeout. The 2026-09-11 ruling amends FR-014 and data-model §5 only, so
+    // this consequence sits against two UNAMENDED MUSTs; it is recorded, not resolved here
+    // (docs/OPEN-QUESTIONS.md 2026-09-14 "the ruling of 2026-09-11 also discards a trunk §7
+    // retry", Ruling: PENDING -- human) and pinned by tests/unit/test_link_responder.cpp
+    // "a trunk §7 retry completing when the hold is already full ...".
+    //
+    // A response already due is flushed ahead of every byte, not just once
     // at the end, so a queued request is decoded the instant the wire is free.
     //
     // The other side of that rule, stated rather than hidden: one accepted request leaves

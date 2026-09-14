@@ -128,6 +128,13 @@ class Responder {
     // a third completed frame inside one late wait is itself evidence of a load this node
     // cannot answer inside its windows anyway. Widening it only moves that boundary; the
     // ruling's property is that crossing it is COUNTED, not that it is never crossed.
+    // What crossing it costs, stated rather than left to be discovered: the excess is
+    // discarded whatever it is, a trunk §7 RETRY included, so past this bound FR-015's replay
+    // and FR-016's "treated as new" both fail for one late wait. The 2026-09-11 ruling amends
+    // FR-014 and data-model §5 only, so that consequence is an open divergence, not a ruled
+    // one -- docs/OPEN-QUESTIONS.md 2026-09-14 "the ruling of 2026-09-11 also discards a trunk
+    // §7 retry" (PENDING -- human), pinned by this suite's "a trunk §7 retry completing when
+    // the hold is already full ..." (review @3dfe0e3).
     static constexpr size_t kHeldRequests = 2;
     // The ring's index arithmetic in responder.cpp carries two `mutant-ok(equivalent,
     // cxx_add_to_sub)` labels whose justification is that -y ≡ y (mod 2). That is a property

@@ -1571,6 +1571,89 @@ TEST_CASE("a request arriving when the hold is already full is discarded WHOLE a
     REQUIRE(wire.pending_injected() == 0);
 }
 
+TEST_CASE("a trunk §7 retry completing when the hold is already full is discarded and counted, "
+          "NOT replayed: what FR-015 loses to the 2026-09-11 ruling, pinned",
+          "[link]") {
+    // Review @3dfe0e3 (BLOCKING): the discard branch hold_or_discard() gained under the ruling
+    // of 2026-09-11 (#372) tests acceptable() only -- dst, the response bit, src and trunk §5's
+    // range -- never f.retry. So a retry is discarded on exactly the same terms as a new
+    // request, and FR-015's unconditional "MUST retransmit the buffered frame unchanged" is not
+    // met for one that completes past kHeldRequests inside a single late wait. That consequence
+    // is real, it is a divergence from an UNAMENDED MUST, and it is recorded in
+    // docs/OPEN-QUESTIONS.md 2026-09-14 ("the ruling of 2026-09-11 discards a trunk §7 retry
+    // ...", Ruling: PENDING -- human). This case exists so the divergence is an ASSERTION rather
+    // than a construction argument: whichever way it is ruled, the behaviour cannot move in
+    // silence. It is NOT an endorsement -- corner (b) of that entry would make it fail, which is
+    // the point.
+    //
+    // The two sections differ only in how many requests sit between the retry and the hold, so
+    // what loses the retry is demonstrably the hold bound and nothing about retries themselves.
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    const uint8_t pa[] = {0xA1, 0x0A};
+    const uint8_t pb[] = {0xB2, 0x0B};
+    const uint8_t pc[] = {0xC3, 0x0C};
+    // A is answered, and its answer is on the late path from defer_origin on. Fillers arrive
+    // behind it during that wait; R -- a trunk §7 retry of A, the frame FR-015 says must be
+    // served from buffer_ byte for byte -- arrives last.
+    const uint64_t end_a =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, pa, sizeof pa), 1000);
+    uint64_t end_last = inject_request(wire, request_bytes(kMyAddr, kPeer, false, 2, pb, sizeof pb),
+                                       end_a + byte_us());
+    const bool hold_full = GENERATE(true, false);
+    if (hold_full)
+        end_last = inject_request(wire, request_bytes(kMyAddr, kPeer, false, 3, pc, sizeof pc),
+                                  end_last + byte_us());
+    const uint64_t end_r = inject_request(
+        wire, request_bytes(kMyAddr, kPeer, true, 1, pa, sizeof pa), end_last + byte_us());
+
+    for (uint64_t t = end_a + omgp::TRUNK_T_turn_max_us + 1; t <= end_r + 40000; t += byte_us())
+        wire.advance_to(t, responder);
+
+    INFO("hold_full=" << hold_full << " answers=" << wire.transcript_size()
+                      << " discards=" << responder.stats().discards
+                      << " replays=" << responder.stats().replays_served);
+    // Common to both: every offered frame was read off the wire, and each is in exactly one
+    // counter. The ruling's accounting property holds for a retry as for anything else.
+    REQUIRE(wire.pending_injected() == 0);
+    const uint32_t accounted = responder.stats().transactions + responder.stats().replays_served +
+                               responder.stats().discards;
+    REQUIRE(accounted == (hold_full ? 4u : 3u));
+
+    if (hold_full) {
+        // A, B and C answered; R read, discarded and COUNTED. The host gets no answer to its
+        // retry at all -- neither the buffered frame (FR-015) nor a fresh one (FR-016) -- so it
+        // sees a second T_resp timeout and, per trunk §7, a consecutive failure against this
+        // node. That is the cost the entry puts to the maintainer.
+        REQUIRE(wire.transcript_size() == 3);
+        REQUIRE(responder.stats().transactions == 3);
+        REQUIRE(responder.stats().replays_served == 0);
+        REQUIRE(responder.stats().discards == 1);
+        // Exactly one answer carries seq 1 -- A's own. R produced no second one.
+        int with_seq_1 = 0;
+        for (size_t i = 0; i < wire.transcript_size(); ++i)
+            if (wire.transcript(i).seq == 1)
+                ++with_seq_1;
+        REQUIRE(with_seq_1 == 1);
+    } else {
+        // One filler short of the bound, R fits in the hold and IS answered: four answers, two
+        // of them seq 1. It is served as new rather than replayed (buffer_ holds B's response
+        // by the time R is popped, so seq 1 != buffer_.seq -- FR-016's "treated as new", which
+        // this engine has always done: red team @033182a finding 3). The contrast is the
+        // evidence that the hold bound, not the retry bit, is what loses it above.
+        REQUIRE(wire.transcript_size() == 3);
+        REQUIRE(responder.stats().discards == 0);
+        int with_seq_1 = 0;
+        for (size_t i = 0; i < wire.transcript_size(); ++i)
+            if (wire.transcript(i).seq == 1)
+                ++with_seq_1;
+        REQUIRE(with_seq_1 == 2);
+    }
+}
+
 // --- red team @2efcb67 / @7a80ec3: the drain's two exits mean opposite things ------------
 // The drain stops either because the wire's queue is empty (a COMPLETE reading of the bus:
 // T_gap of idle after the last byte is a real gap) or because it is holding all the requests

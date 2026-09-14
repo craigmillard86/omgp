@@ -3549,3 +3549,53 @@ clauses, so it is a maintainer's call, not an implementation detail.
 
 **Ruling:** PENDING — human. **Amends:** none — the 2026-09-11 ruling stands as made; this
 records what its implementation does and does not establish. **Supersedes:** none.
+
+---
+
+## 2026-09-14 — the ruling of 2026-09-11 also discards a trunk §7 retry, against FR-015 and FR-016, which it did not amend
+
+**Context:** item 5 of the 2026-09-11 "Maintainer rulings on the pending entries" entry rules
+that "a completed request beyond `kHeldRequests` is discarded and counted in `stats()`", and its
+own **Correction** states which clauses it is trading against: *"FR-015/016 are the
+replay-buffer requirements … The clause in tension is FR-014's 'at once' together with
+data-model §5's 'nothing is dropped'."* FR-014 and data-model §5 accordingly carry ruling
+markers; FR-015 and FR-016 do not.
+
+That correction is no longer complete for the engine the ruling produced. `hold_or_discard()`
+(`link/responder.cpp`) takes its discard branch for **any** `acceptable()` frame once
+`held_count_ == kHeldRequests`, and `acceptable()` screens `dst`, the response bit, `src !=
+my_addr_` and trunk §5's address range — **never `f.retry`**. A trunk §7 retry is `acceptable()`
+like any other request, so a retry that completes third inside one late wait is counted in
+`stats().discards` and receives neither the buffered frame (FR-015: "MUST retransmit the
+buffered frame unchanged") nor a fresh answer (FR-016: "MUST be treated as new"). The host sees
+a second `T_resp` timeout and, per trunk §7, a consecutive failure against this node.
+
+**Demonstrated, not argued** (CLAUDE.md rule 11): `tests/unit/test_link_responder.cpp` "a trunk
+§7 retry completing when the hold is already full is discarded and counted, NOT replayed" runs
+the same script twice, differing only in how many requests sit between the retry and the hold.
+With the hold full: 4 offered, 3 answered, `replays_served == 0`, `discards == 1`, and exactly
+one answer carries the retried sequence — the retry's own answer never goes out. One filler
+short of the bound: the retry is held and answered. So what loses it is the hold bound, not the
+retry bit. Reachability is ordinary, not adversarial: this suite's amended cases reach the bound
+at 2 ms poll cadence (4 of 8 answered) and in the burst case (3 of 16), and nothing makes a
+retry rarer than a new request.
+
+**Recommendation:** **amend FR-015 and FR-016 to carry the same 2026-09-11 ruling marker
+FR-014 and data-model §5 already carry**, i.e. accept the discard for a retry on the ground that
+a retry *is* a request and the ruled property ("the engine never keys down onto a bus it has not
+read") is indifferent to the retry bit; the host's own trunk §7 retry budget is the recovery
+path, and exempting retries would reintroduce exactly the unbounded, uncounted hold the ruling
+removed. Two alternatives, both more expensive and neither recommended:
+(a) **serve a retry from the discard branch** — replay `buffer_` when `f.retry && buffer_.valid
+&& f.seq == buffer_.seq && f.src == buffer_.peer`, instead of discarding. Cheap in code but it
+transmits inside another station's traffic during a late wait, which is the collision the
+2026-09-11 ruling exists to close; it also reorders a retry ahead of held requests.
+(b) **reserve a hold slot for retries** — raises `kHeldRequests` and re-opens the
+`(head ± count) % kHeldRequests` equivalence the depth-2 ring depends on
+(`link/responder.cpp`), for a guarantee that still fails on the second retry.
+
+Whichever is ruled, the divergence must stop being invisible: until then `link/responder.cpp`
+states it at both the `poll()` comment and the discard branch, and the case above pins it.
+
+**Amends:** the 2026-09-11 rulings entry, item 5 — specifically its **Correction**, which names
+FR-014 and data-model §5 as the only clauses in tension. **Supersedes:** none.

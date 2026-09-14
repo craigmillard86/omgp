@@ -190,7 +190,11 @@ public:
                                                   // docs/OPEN-QUESTIONS.md 2026-09-14.)
     const AddrStats& stats() const;               // replays_served, discards, transactions (requests handled), late_responses
                                                   // (discards also counts a request completing during a late wait
-                                                  //  that the hold cannot take -- ruling 2026-09-11, #372)
+                                                  //  that the hold cannot take -- ruling 2026-09-11, #372. The
+                                                  //  acceptance screen there does not read `retry`, so a trunk §7
+                                                  //  retry past the hold is discarded too: no replay (FR-015), no
+                                                  //  fresh answer (FR-016). Neither MUST is amended by that ruling
+                                                  //  -- divergence open, docs/OPEN-QUESTIONS.md 2026-09-14.)
 };
 ```
 
