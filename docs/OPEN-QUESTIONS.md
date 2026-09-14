@@ -3653,9 +3653,11 @@ reads that zero as the tool-failure signal it was written for, and fails.
 
 This is the 2026-08-30 entry's situation one level down. There the class was a *file* that can
 carry no mutant (a pure abstract interface); here it is a *line* — and unlike the file case,
-the argument needs no human judgement to check: comments are replaced by a space in translation
-phase 3, before any expression Mull could mutate exists, so no mutant can be located on a
-comment line whatever the instrumentation, the oracle or the ranges do. Nor is it rare: any PR
+the argument needs no human judgement to check: backslash-newline is spliced in translation
+phase 2 and what is then a comment is replaced by a space in phase 3, both before any
+expression Mull could mutate exists, so no mutant can be located on a line that is still a
+comment after phase 2, whatever the instrumentation, the oracle or the ranges do. Nor is it
+rare: any PR
 that answers the mutation gate by writing or rewriting a justification produces exactly this
 diff, so the gate reds the very PRs it asks for.
 
@@ -3665,19 +3667,25 @@ added or changed in it is blank or starts with `//` — alongside, not instead o
 and the per-changed-dir rule). No marker of its own, because the property is decidable from the
 diff. It fails closed: one changed line that is neither blank nor a `//` comment (a `/* */`
 continuation line included — deliberately, rather than widen this into a comment parser) puts
-the file back under the old rule, and so does a line the ranges name but the checked-out tree
-does not have. Because the exempted diff shape is precisely the shape that carries policy
-labels, the malformed-`mutant-ok` check moves ahead of the count-based rules and widens to
-every changed line (it previously ran only over files that had an in-scope mutant, so a
-malformed label in a comment-only PR was read by nothing): the exemption is from the blind-spot
-rule, never from the label syntax.
+the file back under the old rule, and so do a line the ranges name but the checked-out tree
+does not have, a `//` comment whose last character is `\` (phase 2 splices the line below it
+into the comment, so that changed line deletes mutable code — `-Werror=comment` fails such a
+build before this gate sees it, but that is a control in `CMakeLists.txt` and the predicate
+does not lean on it), and a file the diff touched with no added-or-changed line at all, which
+`tools/mutate.sh` records as an empty range list when every hunk in it is a pure deletion —
+there is nothing there for the predicate to have read. Because the exempted diff shape is
+precisely the shape that carries policy labels, the malformed-`mutant-ok` check moves ahead of
+the count-based rules and widens to every changed line (it previously ran only over files that
+had an in-scope mutant, so a malformed label in a comment-only PR was read by nothing): the
+exemption is from the blind-spot rule, never from the label syntax.
 
 Does not touch `tools/mutate.cfg [policy]`'s T3 constants (`max_unlabelled_survivors = 0`,
 `label_categories`): a changed *code* line with an unlabelled survivor gates exactly as before.
 Implemented as the safe default per CLAUDE.md ("proceed only if a safe default exists"), in
 `tools/mutate_report.py` (`changed_lines_all_comments`, `no_mutant_reason`), with
-`tools/refimpl/test_tooling.py` pinning all three edges — exempt, fails-closed on a changed code
-line, malformed label still fails. If a human ruling instead prefers that comment-only diffs be
+`tools/refimpl/test_tooling.py` pinning all five edges — exempt, fails-closed on a changed code
+line, on a `\`-continued comment line and on a deletion-only range list, malformed label still
+fails. If a human ruling instead prefers that comment-only diffs be
 dropped from `tools/mutate.sh`'s scope entirely (which would also skip the instrumented build
 for such a PR, at the cost of the oracle's evidence that the dir is still reachable), that
 should supersede this entry.

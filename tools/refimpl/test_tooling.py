@@ -473,9 +473,10 @@ def test_report_diff_mode_comment_only_changes_are_not_a_blind_spot(tmp_path):
     """A diff that touches only comment lines under a scope dir leaves no changed line a
     mutant can sit on, so the in-scope count is 0 and the whole-scope blind-spot rule fired —
     reddening CI for a PR that rewrote `mutant-ok` justifications (PR #558, link/master.cpp).
-    Comments are removed in translation phase 3, so no mutator can place a mutant on such a
-    line whatever the instrumentation does: structurally the same case as
-    `mutation-exempt(no-body)`, at line granularity, and no marker is needed to see it."""
+    Comments are removed in translation phase 3, before anything Mull mutates exists, so a
+    line that is a comment after phase 2 carries no mutant: structurally the same case as
+    `mutation-exempt(no-body)`, at line granularity, and no marker is needed to see it. The
+    "after phase 2" qualifier is the subject of the two cases below it."""
     root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": [[6, 6]]})   # line 6: a comment
     rc, out, doc = _report(tmp_path, root, reports, "--ref", "origin/main")
     assert rc == 0, out
@@ -493,6 +494,35 @@ def test_report_diff_mode_still_fails_when_a_changed_code_line_yields_no_mutant(
     rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
     assert rc == 1, out
     assert "blind spot" in out and "l3/x.cpp" in out, out
+
+
+def test_report_deletion_only_change_is_not_exempted(tmp_path):
+    """mutate.sh records a changed file with an EMPTY range list when every hunk in it is a
+    pure deletion (`@@ -a,b +c,0 @@`): it does `ranges.setdefault(cur, [])` on the `+++` line
+    and appends only when the hunk's `+count` is non-zero. No changed line exists there to
+    read, so the comment-only exemption has nothing to decide and must not certify the file —
+    it fails closed, exactly as the rule does without the exemption (red-team B2 on #558)."""
+    root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": []})
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1, out
+    assert "blind spot" in out and "l3/x.cpp" in out, out
+    assert "blank or a // comment" not in out, out   # never a reason about lines nobody read
+
+
+def test_report_backslash_continued_comment_line_is_not_exempted(tmp_path):
+    r"""Translation phase 2 splices backslash-newline BEFORE phase 3 removes comments
+    ([lex.comment]), so a `//` comment whose last character is `\` swallows the line below
+    it: a changed line that reads as a comment but DELETES mutable code. `-Werror=comment`
+    (implied by -Wall, CMakeLists.txt) stops such a file reaching this gate in this repo, but
+    that is a control in another file, not a property of the predicate — so the predicate
+    rejects the shape itself (red-team B3 on #558)."""
+    src = list(SRC)
+    src[5] = "    // mutant-ok(accepted, cxx_gt_to_ge): cap check; only detail bytes differ \\"
+    root, reports = _setup(tmp_path, src, MUTANTS, {"l3/x.cpp": [[6, 6]]})
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1, out
+    assert "blind spot" in out and "l3/x.cpp" in out, out
+    assert "blank or a // comment" not in out, out
 
 
 def test_report_malformed_label_on_a_changed_comment_line_fails(tmp_path):

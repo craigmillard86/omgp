@@ -38,13 +38,17 @@ Policy (tools/mutate.cfg [policy] — T3 constants, never relaxed to get green):
         Reviewed like mutant-ok, at file granularity: a human sees the marker in the PR diff
         and judges whether the file truly has no mutable code (docs/OPEN-QUESTIONS.md
         2026-08-30); or
-      - every line the diff added or changed in it is blank or a `//` comment. Comments are
-        removed in translation phase 3, before anything Mull mutates exists, so no mutator can
-        place a mutant on such a line whatever the instrumentation does — the same structural
-        argument as the marker above, at line granularity, which is why it needs no marker
-        (docs/OPEN-QUESTIONS.md 2026-09-14). This fails closed: one changed line that is not
-        blank and does not start with `//` (a `/* */` continuation line included) is code, and
-        zero mutants is then the blind spot again.
+      - the diff changed at least one line in it and every such line is blank or a `//`
+        comment that ends at its own newline. Phase 2 splices backslash-newline and phase 3
+        replaces what is then a comment by a space, both before anything Mull mutates exists,
+        so no mutator can place a mutant on such a line whatever the instrumentation does —
+        the same structural argument as the marker above, at line granularity, which is why it
+        needs no marker (docs/OPEN-QUESTIONS.md 2026-09-14). This fails closed: one changed
+        line that is not blank and does not start with `//` (a `/* */` continuation line
+        included) is code; so is a `//` comment ending in `\`, which splices the line below it
+        into the comment and therefore deletes code; and so is a file the diff touched with no
+        added-or-changed line at all (an all-deletions hunk), where nothing was read. In each
+        case zero mutants is the blind spot again.
     Because a comment-only diff is exactly the shape of a PR that rewrites `mutant-ok`
     justifications, the malformed-label check below runs on every changed line before this
     exemption can return 0 — the exemption is from the blind-spot rule, never from the policy
@@ -204,18 +208,32 @@ def main(argv=None) -> int:
         return None
 
     def changed_lines_all_comments(rel: str) -> bool:
-        """True when every line the diff added or changed in `rel` is blank or a `//` comment.
-        Such a line cannot carry a mutant by construction of C++ (comments are replaced by a
-        space in translation phase 3), so an empty in-scope count over them is not a blind
-        spot. Fails closed twice over: anything else on the line — code, a `/* */`
-        continuation, a line the ranges name but the tree does not have — returns False."""
+        """True when the diff changed at least one line in `rel` and every such line is blank
+        or a `//` comment that ends at its own newline. Such a line cannot carry a mutant by
+        construction of C++: phase 2 splices backslash-newline, phase 3 replaces what is then
+        a comment by a space, and only after that does anything Mull mutates exist. So an
+        empty in-scope count over those lines is not a blind spot. Fails closed on every other
+        shape, each a case where the predicate would otherwise certify what it did not read:
+          * no changed line at all — mutate.sh emits an empty range list for a file whose
+            hunks are all deletions (`@@ -a,b +c,0 @@`); nothing was analysed there;
+          * a `//` comment whose last character is `\\` — phase 2 splices the NEXT line into
+            it, so the changed line deletes mutable code rather than containing none. In this
+            repo -Wall's -Werror=comment fails the build first, but that is a control in
+            CMakeLists.txt, not a property of this predicate (#558 red-team B3);
+          * anything else on the line — code, a `/* */` continuation, a line the ranges name
+            but the checked-out tree does not have."""
         src = source_lines(rel)
-        for a, b in ranges.get(rel, []):
+        spans = ranges.get(rel, [])
+        if not spans:
+            return False
+        for a, b in spans:
             for ln in range(a, b + 1):
                 if ln > len(src):
                     return False
                 text = src[ln - 1].strip()
-                if text and not text.startswith("//"):
+                if not text:
+                    continue
+                if not text.startswith("//") or text.endswith("\\"):
                     return False
         return True
 

@@ -16,7 +16,11 @@
 # The same holds line by line and needs no marker: a diff that changes only blank lines and
 # `//` comments (a PR rewriting `mutant-ok` justifications) leaves nothing a mutant can sit
 # on, so zero in-scope mutants there is structural, not a blind spot (docs/OPEN-QUESTIONS.md
-# 2026-09-14). One changed line that is neither blank nor a `//` comment fails as before.
+# 2026-09-14). One changed line that is neither blank nor a `//` comment fails as before, and
+# so do the two shapes that only look like comment-only: a `//` comment ending in `\` (phase 2
+# splices the line below into it, deleting code — -Werror=comment normally stops that reaching
+# here, but the check does not lean on it) and a file whose hunks are all deletions, which
+# reaches mutate_report.py as an empty range list with no changed line to read.
 #
 # Oracle: for every scope dir with changed files, the tests/unit binaries named test_<dir>_*
 # (CMakeLists.txt omgp_add_catch_test) run under the runner. It was a hard-coded test_l3_*
