@@ -217,7 +217,7 @@ public:
                                                                // BusStats::discards is the Master's field and is never written by the
                                                                // tracker (it sees no frames), so the two engines' blocks are read
                                                                // separately and never summed.
-                                                               // (Amended in the PR closing #59/#61 — pending a ruling. The T041 tests assert on these
+                                                               // (Amended in PR #530 — pending a ruling. The T041 tests assert on these
                                                                // counters and data-model §7/§8 specify them, but this contract declared
                                                                // no accessor for them on HealthTracker; the maintainer's 2026-09-06
                                                                // rescope of #59/#61 directs T043 to add it here.)
