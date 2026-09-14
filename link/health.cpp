@@ -159,6 +159,9 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
         // cursor is already at ADDR_backplane_min, so the recomputation reproduces the state it
         // overwrites — "a duplicate fallback answer before the first pass probe restarts an
         // identical pass" in tests/unit/test_link_busfault.cpp.
+        // The data model's named answerer, written here and read by nothing at this head (the
+        // rules read fallback_seen below), so any constant is behaviourally identical:
+        // mutant-ok(equivalent, cxx_assign_const): written, never read at this head.
         bus_.fallback_answerer = addr;
         bus_.fallback_seen = static_cast<uint16_t>(bus_.fallback_seen | probe_bit(addr));
         // The FIRST fallback answer of the episode starts the pass; a later answerer joins the
@@ -560,6 +563,9 @@ void HealthTracker::evaluate_declare(uint64_t now_us) {
     // Demonstrated by the abandoned-probe, sweep and discovery-probe cases in
     // tests/unit/test_link_busfault.cpp; the in-window half by the two boundary cases.
     for (uint8_t a = omgp::ADDR_backplane_min; a <= omgp::ADDR_backplane_max; ++a)
+        // With `|` the first operand is always true and the drop below runs for every stale
+        // address; clearing a bit that is already clear is a no-op, so the outcome coincides:
+        // mutant-ok(equivalent, cxx_and_to_or): the drop on an already-clear bit is a no-op.
         if ((bus_.probe_live & probe_bit(a)) != 0 &&
             elapsed_us(now_us, records_[a].probe_issued_us) > kOutcomeWindowUs)
             bus_.probe_live = static_cast<uint16_t>(bus_.probe_live & ~probe_bit(a));

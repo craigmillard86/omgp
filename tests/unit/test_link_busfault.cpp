@@ -948,6 +948,74 @@ TEST_CASE("a clear at the REFERENCE rate also empties the fallback-answerer reco
     REQUIRE(listener.count(Notice::BUS_RECOVERED) == 2);
 }
 
+TEST_CASE("an abandoned probe at the last backplane address is written off after the window too",
+          "[timing:bit_rate_fallback][timing:T_resp]") {
+    // deep-verify on #530 (round 13): the expiry loop's upper bound, direction and both
+    // probe_bit() calls survived mutation because every abandoned-probe case used address
+    // 0x01 — `<` for `<=`, `--` for `++` (which visits 0x01 then wraps out) and a 42 in place
+    // of probe_bit() all still handle 0x01. This case abandons 0x0F's probe.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    constexpr uint8_t kLast = omgp::ADDR_backplane_max;
+    enrol(tracker, kNodeA, 0);
+    enrol(tracker, kLast, 0);
+    fail_to_suspect(tracker, kNodeA, 1'000);
+    fail_to_suspect(tracker, kLast, 2'000);
+    REQUIRE(tracker.bus_fault());
+    const Probe p = probe_until(tracker, kLast, omgp::TRUNK_bit_rate_fallback); // t = 0
+    REQUIRE(p.addr == kLast); // 0x0F @ fallback — never answered
+    // A later handout (A at the reference rate) does not cancel 0x0F's record (round 10); A's
+    // answer to it clears episode 1 at the reference rate.
+    REQUIRE(probe_until(tracker, kNodeA, omgp::TRUNK_bit_rate).addr == kNodeA);
+    tracker.on_result(kNodeA, true, 6'000);
+    REQUIRE_FALSE(tracker.bus_fault());
+    fail_to_suspect(tracker, kNodeA,
+                    50'000); // episode 2, 50 ms after 0x0F's probe: past the window
+    REQUIRE(tracker.bus_fault());
+    tracker.on_result(kLast, true, 50'001); // a REFERENCE-rate answer (a pre-declare poll's)
+    REQUIRE_FALSE(tracker.bus_fault());     // FR-026: clears at once…
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate); // …at the reference rate
+    REQUIRE(tracker.state(kLast) == HealthState::ENROLLED);
+}
+
+TEST_CASE("an outstanding probe exactly one outcome window old is still owed its outcome",
+          "[timing:bit_rate_fallback][timing:T_resp]") {
+    // deep-verify on #530 (round 13): the expiry test `elapsed > kOutcomeWindowUs` survived
+    // `>=` — no case sat on the boundary. The window is inclusive: at exactly one window the
+    // outcome can still arrive (contracts/link-cpp.md: the response window is half-open on
+    // its far end, [tx_end, tx_end + T_resp), so the last admissible instant is the bound
+    // itself minus nothing the tracker can see); one microsecond later it cannot.
+    constexpr uint64_t kWindow =
+        2ull * kMaxWire * byte_time_us(omgp::TRUNK_bit_rate_fallback) + omgp::TRUNK_T_resp_us;
+    for (const uint64_t late : {uint64_t{0}, uint64_t{1}}) {
+        CAPTURE(late);
+        FakeClock clock;
+        RecordingListener listener;
+        HealthTracker tracker(clock, listener);
+        ThreeNodeRig::build(tracker);
+        const uint64_t t0 = 100'000;
+        const Probe p1 = tracker.next_probe(t0); // A @ fallback
+        const Probe p2 = tracker.next_probe(t0); // B @ reference
+        const Probe p3 = tracker.next_probe(t0); // C @ fallback, left outstanding
+        REQUIRE(p1.bit_rate == omgp::TRUNK_bit_rate_fallback);
+        REQUIRE(p2.addr == kNodeB);
+        REQUIRE(p3.addr == kNodeC);
+        tracker.on_result(kNodeB, true, t0 + 10); // episode 1 clears at the reference rate
+        REQUIRE_FALSE(tracker.bus_fault());
+        fail_to_suspect(tracker, kNodeB, t0 + kWindow + late); // episode 2, at / past the bound
+        REQUIRE(tracker.bus_fault());
+        tracker.on_result(kNodeC, true, t0 + kWindow + late + 1); // p3's fallback answer
+        if (late == 0) {
+            REQUIRE(tracker.bus_fault());                           // still owed: deferred
+            REQUIRE(tracker.state(kNodeC) == HealthState::SUSPECT); // not enrolled at 1 Mbit
+        } else {
+            REQUIRE_FALSE(tracker.bus_fault()); // written off: read at the rate in use (reference)
+            REQUIRE(tracker.state(kNodeC) == HealthState::ENROLLED);
+        }
+    }
+}
+
 TEST_CASE("a second outstanding probe does not cancel the first's episode-boundary exemption",
           "[timing:bit_rate_fallback][timing:T_resp]") {
     // Round-10 review on #530, finding 1 [HIGH]: round 9's "newest handout supersedes" rule
