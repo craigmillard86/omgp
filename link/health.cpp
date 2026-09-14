@@ -84,6 +84,11 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
                 ++enrolled;
         bus_.ref_pass_left = enrolled; // exactly |enrolled| probes (FR-026)
         bus_.pass_addr = 0;
+        // The cursor starts AT ADDR_backplane_min, never below it: cxx_assign_const rewrites
+        // this RHS to the type's zero value, which spends one of pass_probe()'s
+        // kBackplaneCount iterations on records_[ADDR_host] and so stops one address short of
+        // ADDR_backplane_max. Killed by "a pass whose only enrolled address is the last one in
+        // the rotation" in tests/unit/test_link_busfault.cpp.
         bus_.pass_next_addr = omgp::ADDR_backplane_min;
     } else {
         apply_result(addr, ok, now_us);
@@ -95,6 +100,9 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // outcome for the same address. `pass_addr` is non-zero only while a pass probe is
     // outstanding, and `addr` is a node address here, so this one comparison carries the
     // whole condition: no redundant "a pass is running" conjunct to get out of step with it.
+    // A bool initialised `false`; the mutation writes 0, the same value (the same rewrite is
+    // recorded on `bool belief_stale = false` in link/responder.cpp poll()).
+    // mutant-ok(equivalent, cxx_init_const): the mutation and the original coincide.
     bool pass_ended = false;
     if (bus_.pass_addr == addr) {
         bus_.pass_addr = 0;
@@ -175,8 +183,10 @@ void HealthTracker::tick(uint64_t now_us) {
     // enrolled node is SUSPECT or OFFLINE", and the only transition above is SUSPECT ->
     // OFFLINE, which moves a node between two members of that set. This call is the data
     // model's evaluation point, not a reachable declaration path, so a mutant deleting it
-    // survives by construction rather than for want of a test.
-    evaluate_declare(); // mutant-ok(equivalent, statement_deletion): see above
+    // survives by construction rather than for want of a test. (`statement_deletion` named a
+    // mutator Mull has no such name for, so the label covered nothing and the survivor came
+    // back unlabelled; `cxx_remove_void_call` is Mull's own name for this mutation.)
+    evaluate_declare(); // mutant-ok(equivalent, cxx_remove_void_call): see above
 }
 
 HealthState HealthTracker::state(uint8_t addr) const {
@@ -233,9 +243,24 @@ Probe HealthTracker::pass_probe() {
         // probe in flight (F3 obligation 2 violated) then still completes the pass; walking
         // the cursor past the probe on the wire would leave a pass that can never end
         // (round-13 red team on #472). Fail-safe under a violated assumption.
+        //
+        // The call below cannot change anything on this path, BY CONSTRUCTION: `pass_addr`
+        // is non-zero only between the loop below issuing a pass probe at TRUNK_bit_rate and
+        // that probe's outcome, and nothing can move the wire rate in between — next_probe()
+        // routes here whenever fault && ref_pass_left > 0, and the two places that end a pass
+        // (on_result's decrement, clear_fault) both zero `pass_addr` first. So wire_rate is
+        // already TRUNK_bit_rate and note_wire_rate returns without touching rate_changes.
+        // mutant-ok(equivalent, cxx_remove_void_call): a no-op call on this path.
         note_wire_rate(omgp::TRUNK_bit_rate);
         return Probe{bus_.pass_addr, omgp::TRUNK_bit_rate};
     }
+    // The <= mutant of this bound adds one iteration, which changes nothing until all
+    // kBackplaneCount addresses have come back UNENROLLED — the sentinel path below, which a
+    // running pass cannot reach. Every reachable call returns from inside the loop, at the
+    // same iteration either way. `++i` is a different matter: its -- mutant underflows
+    // `i` to SIZE_MAX and ends the scan after ONE address, and is killed by "a pass whose
+    // only enrolled address is the last one in the rotation" in test_link_busfault.cpp.
+    // mutant-ok(accepted, cxx_lt_to_le): differs only on the unreachable exhaustion path.
     for (size_t i = 0; i < kBackplaneCount; ++i) {
         const uint8_t addr = bus_.pass_next_addr;
         bus_.pass_next_addr = next_backplane_addr(addr);
@@ -249,6 +274,7 @@ Probe HealthTracker::pass_probe() {
     // declared only with at least one enrolled node, and no transition during a pass
     // un-enrols one. Returning the sentinel rather than spinning keeps the "nothing to
     // probe" contract if that ever changes (rule 11: a guard, not a property).
+    // mutant-ok(accepted, cxx_remove_void_call): on the unreachable path described above.
     note_wire_rate(omgp::TRUNK_bit_rate);
     return Probe{omgp::ADDR_host, omgp::TRUNK_bit_rate};
 }
@@ -318,9 +344,21 @@ void HealthTracker::evaluate_declare() {
 
     bus_.fault = true;
     bus_.next_probe_fallback = true; // FR-025: re-probing starts at the fallback rate
+    // The four pass fields are reset per episode. cxx_assign_const writes the type's zero
+    // value, so each `= 0` here is byte-for-byte identical to its mutant. (`ref_pass_left`
+    // carries no label: Mull emitted no mutant at that statement in this function — see the
+    // #530 deep-verify report — and an unused label is reported as stale.)
+    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
     bus_.fallback_answerer = 0;
     bus_.ref_pass_left = 0;
+    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
     bus_.pass_addr = 0;
+    // Unlike the three above, this RHS is not zero — but the write is dead in every reachable
+    // execution, so its mutant is still indistinguishable: pass_next_addr is read only by
+    // pass_probe(), reached only while ref_pass_left > 0, and the sole place that makes
+    // ref_pass_left non-zero (on_result's pass start) re-writes pass_next_addr in the same
+    // block. `ref_pass_left = 0` two lines up is what makes that hold on entry to the episode.
+    // mutant-ok(equivalent, cxx_assign_const): a dead write; no reachable read sees it.
     bus_.pass_next_addr = omgp::ADDR_backplane_min;
     ++stats_.bus_faults;
     notify(Notice::BUS_FAULT, kBusAddr);
@@ -331,6 +369,13 @@ void HealthTracker::clear_fault(uint32_t bit_rate, uint64_t now_us) {
     // trunk §7: the fault clears exactly once per episode, at the rate that worked, and the
     // rate in use then stands until the layer above or a human changes it — there is NO
     // automatic return from the fallback rate (ruling 2026-09-13).
+    //
+    // This bool and the three uint8_t resets at the end of this function are assigned their
+    // own type's zero value, which is exactly what cxx_assign_const substitutes: each mutated
+    // statement is byte-for-byte identical to the one it replaces, so no test can tell them
+    // apart. (In evaluate_declare() the same fields are assigned `true`/ADDR_backplane_min,
+    // where the rewrite is NOT identical and the mutants are killed or argued separately.)
+    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
     bus_.fault = false;
     bus_.bit_rate = bit_rate;
     note_wire_rate(bit_rate);
@@ -342,8 +387,11 @@ void HealthTracker::clear_fault(uint32_t bit_rate, uint64_t now_us) {
     // and §6 will find it in its own time (data-model.md §7).
     if (bit_rate == omgp::TRUNK_bit_rate_fallback && bus_.fallback_answerer != 0)
         apply_result(bus_.fallback_answerer, true, now_us);
+    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
     bus_.fallback_answerer = 0;
+    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
     bus_.ref_pass_left = 0;
+    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
     bus_.pass_addr = 0;
     notify(Notice::BUS_RECOVERED, kBusAddr);
 }

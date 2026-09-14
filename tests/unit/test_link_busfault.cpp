@@ -377,6 +377,45 @@ TEST_CASE("after a fallback-rate answer the pass probes every enrolled address o
     }
 }
 
+TEST_CASE("a pass whose only enrolled address is the last one in the rotation still reaches it",
+          "[timing:bit_rate_fallback]") {
+    // FR-026 "every enrolled address once, in address order": the pass cursor starts AT
+    // ADDR_backplane_min and scans the whole backplane range. Every other pass test above
+    // enrols ADDR_backplane_min itself, which pass_probe() finds on its FIRST iteration — so
+    // none of them can tell a full scan from a one-address one, nor a cursor that starts one
+    // address too low. This case puts the sole enrolled address LAST in the rotation, where
+    // only a scan that runs the full kBackplaneCount iterations from ADDR_backplane_min
+    // reaches it (deep-verify survivors on #530).
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    constexpr uint8_t kNodeTop = omgp::ADDR_backplane_max;
+    enrol(tracker, kNodeTop, 0);
+    fail_to_suspect(tracker, kNodeTop, 1'000);
+    REQUIRE(tracker.bus_fault()); // one enrolled node is all nodes (ruling Q2)
+
+    // A fallback-rate answer from an address that never enrolled starts the pass; kNodeTop is
+    // the only enrolled address, so FR-026 makes the pass exactly one probe.
+    probe_until(tracker, kNodeA, omgp::TRUNK_bit_rate_fallback);
+    tracker.on_result(kNodeA, true, 10'000);
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(tracker.state(kNodeA) == HealthState::UNENROLLED); // a fallback answer does not enrol
+
+    const Probe p = tracker.next_probe(0);
+    REQUIRE(p.addr == kNodeTop); // not the ADDR_host sentinel: the scan neither started one
+                                 // address low nor stopped short of the last address
+    REQUIRE(p.bit_rate == omgp::TRUNK_bit_rate);
+
+    // ...and that single probe drawing nothing ends the pass and clears at the fallback rate.
+    tracker.on_result(kNodeTop, false, 11'000);
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED); // the deferred §6 transition
+    REQUIRE(tracker.state(kNodeTop) == HealthState::SUSPECT);
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);
+}
+
 TEST_CASE("a pass probe is re-yielded while its outcome is outstanding", "[link]") {
     // data-model.md §6 (round-13 red team on #472): a scheduler that calls next_probe() with
     // the pass probe still in flight (F3 obligation 2 violated) gets the SAME probe back and
