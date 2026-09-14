@@ -111,11 +111,19 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
                 ++enrolled;
         bus_.ref_pass_left = enrolled; // exactly |enrolled| probes (FR-026)
         bus_.pass_addr = 0;
-        // The cursor starts AT ADDR_backplane_min, never below it: cxx_assign_const rewrites
-        // this RHS to the type's zero value, which spends one of pass_probe()'s
-        // kBackplaneCount iterations on records_[ADDR_host] and so stops one address short of
-        // ADDR_backplane_max. Killed by "a pass whose only enrolled address is the last one in
-        // the rotation" in tests/unit/test_link_busfault.cpp.
+        // The cursor starts AT ADDR_backplane_min, and nowhere else. cxx_assign_const rewrites
+        // this RHS to a constant that is NOT the type's zero value — demonstrated on #530: the
+        // zero rewrite is killed by "a pass whose only enrolled address is the last one in the
+        // rotation" (a scan from below the rotation spends one of pass_probe()'s
+        // kBackplaneCount iterations on records_[ADDR_host] and stops one address short of
+        // ADDR_backplane_max), yet the mutant survived that test. Mull documents 42 as the
+        // constant, and a rewrite to 42 reproduces the survivor exactly — the whole unit suite
+        // passes with it — so the two cases in tests/unit/test_link_busfault.cpp pin the start
+        // from both sides: that one fails for a cursor starting BELOW ADDR_backplane_min, and
+        // "a pass over the first and last addresses of the rotation probes them in that order"
+        // fails for one starting ABOVE it (a scan from higher up meets ADDR_backplane_max
+        // before it wraps round to ADDR_backplane_min). Both demonstrated by those named tests;
+        // that 42 is the constant Mull emits is ASSUMED, and nothing here depends on its value.
         bus_.pass_next_addr = omgp::ADDR_backplane_min;
     } else {
         apply_result(addr, ok, now_us);
@@ -127,8 +135,13 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // outcome for the same address. `pass_addr` is non-zero only while a pass probe is
     // outstanding, and `addr` is a node address here, so this one comparison carries the
     // whole condition: no redundant "a pass is running" conjunct to get out of step with it.
-    // A bool initialised `false`; the mutation writes 0, the same value (the same rewrite is
-    // recorded on `bool belief_stale = false` in link/responder.cpp poll()).
+    // A bool initialised `false`. cxx_init_const rewrites the RHS to a constant that is not
+    // the type's zero value (see the pass start above), but a bool is read back as `value & 1`
+    // — so the mutant either reads `false`, coinciding with the original, or reads `true` and
+    // fires the pass-end clear on the FIRST outcome after any fallback answer, which the
+    // multi-probe pass cases in tests/unit/test_link_busfault.cpp assert does not happen. It
+    // survived them, so it reads `false`. (The same rewrite is recorded on
+    // `bool belief_stale = false` in link/responder.cpp poll().)
     // mutant-ok(equivalent, cxx_init_const): the mutation and the original coincide.
     bool pass_ended = false;
     if (bus_.pass_addr == addr) {
@@ -394,20 +407,31 @@ void HealthTracker::evaluate_declare() {
 
     bus_.fault = true;
     bus_.next_probe_fallback = true; // FR-025: re-probing starts at the fallback rate
-    // The four pass fields are reset per episode. cxx_assign_const writes the type's zero
-    // value, so each `= 0` here is byte-for-byte identical to its mutant. (`ref_pass_left`
-    // carries no label: Mull emitted no mutant at that statement in this function — see the
-    // #530 deep-verify report — and an unused label is reported as stale.)
-    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
+    // The four pass fields are reset per episode. cxx_assign_const does NOT write the type's
+    // zero value (demonstrated at on_result's pass start above), so each label below argues
+    // from the write being DEAD — true whatever constant is substituted — never from the
+    // mutant being byte-identical. (`ref_pass_left` carries no label: Mull emitted no mutant
+    // at that statement in this function — see the #530 deep-verify report — and an unused
+    // label is reported as stale.)
+    //
+    // Dead: fallback_answerer is read only where a pass has ended or a fallback-rate clear is
+    // under way, and both follow on_result's pass start, which assigns it there.
+    // mutant-ok(equivalent, cxx_assign_const): overwritten before any reachable read.
     bus_.fallback_answerer = 0;
     bus_.ref_pass_left = 0;
-    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
+    // Dead the same way: pass_probe() reads pass_addr only while ref_pass_left > 0, which the
+    // line above makes false until on_result's pass start, and that zeroes pass_addr itself.
+    // The one read this does not cover is on_result's `pass_addr == addr`, which a constant
+    // INSIDE [ADDR_backplane_min, ADDR_backplane_max] would make fire without a pass and
+    // underflow ref_pass_left — demonstrated not to be this constant for the addresses the
+    // cases in tests/unit/test_link_busfault.cpp drive outcomes for during a declared fault
+    // (kNodeA..kNodeC and ADDR_backplane_max); for the rest of the rotation, ASSUMED.
+    // mutant-ok(equivalent, cxx_assign_const): overwritten before any reachable read.
     bus_.pass_addr = 0;
-    // Unlike the three above, this RHS is not zero — but the write is dead in every reachable
-    // execution, so its mutant is still indistinguishable: pass_next_addr is read only by
-    // pass_probe(), reached only while ref_pass_left > 0, and the sole place that makes
-    // ref_pass_left non-zero (on_result's pass start) re-writes pass_next_addr in the same
-    // block. `ref_pass_left = 0` two lines up is what makes that hold on entry to the episode.
+    // Dead in every reachable execution: pass_next_addr is read only by pass_probe(), reached
+    // only while ref_pass_left > 0, and the sole place that makes ref_pass_left non-zero
+    // (on_result's pass start) re-writes pass_next_addr in the same block. `ref_pass_left = 0`
+    // above is what makes that hold on entry to the episode.
     // mutant-ok(equivalent, cxx_assign_const): a dead write; no reachable read sees it.
     bus_.pass_next_addr = omgp::ADDR_backplane_min;
     ++stats_.bus_faults;
@@ -420,11 +444,12 @@ void HealthTracker::clear_fault(uint32_t bit_rate, uint64_t now_us) {
     // rate in use then stands until the layer above or a human changes it — there is NO
     // automatic return from the fallback rate (ruling 2026-09-13).
     //
-    // This bool and the three uint8_t resets at the end of this function are assigned their
-    // own type's zero value, which is exactly what cxx_assign_const substitutes: each mutated
-    // statement is byte-for-byte identical to the one it replaces, so no test can tell them
-    // apart. (In evaluate_declare() the same fields are assigned `true`/ADDR_backplane_min,
-    // where the rewrite is NOT identical and the mutants are killed or argued separately.)
+    // cxx_assign_const does not substitute the type's zero value (demonstrated at on_result's
+    // pass start), so this bool and the three uint8_t resets at the end of this function are
+    // argued one by one, not as a block. This one is a bool, read back as `value & 1`: the
+    // mutant either reads `false`, coinciding with the original, or leaves the fault standing
+    // through every clear — which every REQUIRE_FALSE(bus_fault()) in
+    // tests/unit/test_link_busfault.cpp would catch. It survived them, so it reads `false`.
     // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
     bus_.fault = false;
     bus_.bit_rate = bit_rate;
@@ -437,11 +462,19 @@ void HealthTracker::clear_fault(uint32_t bit_rate, uint64_t now_us) {
     // and §6 will find it in its own time (data-model.md §7).
     if (bit_rate == omgp::TRUNK_bit_rate_fallback && bus_.fallback_answerer != 0)
         apply_result(bus_.fallback_answerer, true, now_us);
-    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
+    // The three resets are dead writes whatever constant replaces them: the fault is clear
+    // from here, so next_probe()'s pass branch and on_result()'s fallback branch are both shut
+    // until the next declare, and evaluate_declare() rewrites fallback_answerer and
+    // ref_pass_left before a pass can start — which then rewrites pass_addr itself.
+    // mutant-ok(equivalent, cxx_assign_const): overwritten before any reachable read.
     bus_.fallback_answerer = 0;
-    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
+    // mutant-ok(equivalent, cxx_assign_const): overwritten before any reachable read.
     bus_.ref_pass_left = 0;
-    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
+    // Same caveat as the pass_addr reset in evaluate_declare(): on_result's
+    // `pass_addr == addr` is the one read no rewrite is shut out of, and the node addresses
+    // the cases in tests/unit/test_link_busfault.cpp drive outcomes for are demonstrated not
+    // to be this constant. For the rest of the rotation, ASSUMED.
+    // mutant-ok(equivalent, cxx_assign_const): overwritten before any reachable read.
     bus_.pass_addr = 0;
     notify(Notice::BUS_RECOVERED, kBusAddr);
 }

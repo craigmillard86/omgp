@@ -519,6 +519,52 @@ TEST_CASE("a pass whose only enrolled address is the last one in the rotation st
     REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);
 }
 
+TEST_CASE("a pass over the first and last addresses of the rotation probes them in that order",
+          "[timing:bit_rate_fallback]") {
+    // The companion of the case above, and the other half of what pins the pass cursor's
+    // start to exactly ADDR_backplane_min. That case enrols only the LAST address, so it
+    // fails for a cursor that starts too LOW (the scan then spends one of its
+    // kBackplaneCount iterations below the rotation and stops one address short). It cannot
+    // fail for a cursor that starts too HIGH: a scan from anywhere inside the range still
+    // reaches the sole enrolled address by wrapping. This case enrols the FIRST and the LAST
+    // address and pins the order, so a cursor starting anywhere above ADDR_backplane_min
+    // meets ADDR_backplane_max first and probes it out of order (deep-verify survivor
+    // link/health.cpp:92 cxx_assign_const on #530, whose rewritten constant is NOT the
+    // type's zero value — see the comment at that line).
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    constexpr uint8_t kNodeTop = omgp::ADDR_backplane_max;
+    enrol(tracker, kNodeA, 0);
+    enrol(tracker, kNodeTop, 0);
+    fail_to_suspect(tracker, kNodeA, 1'000);
+    fail_to_suspect(tracker, kNodeTop, 2'000);
+    REQUIRE(tracker.bus_fault());
+
+    // kNodeB never enrolled, so the pass is exactly the two enrolled addresses (FR-026).
+    probe_until(tracker, kNodeB, omgp::TRUNK_bit_rate_fallback);
+    tracker.on_result(kNodeB, true, 10'000);
+    REQUIRE(tracker.bus_fault());
+
+    const Probe first = tracker.next_probe(0);
+    REQUIRE(first.addr == kNodeA); // address order: the FIRST address of the rotation first
+    REQUIRE(first.bit_rate == omgp::TRUNK_bit_rate);
+    tracker.on_result(kNodeA, false, 11'000);
+    REQUIRE(tracker.bus_fault()); // one probe of two: the pass has not ended
+
+    const Probe second = tracker.next_probe(0);
+    REQUIRE(second.addr == kNodeTop); // ...and the last address of the rotation second
+    REQUIRE(second.bit_rate == omgp::TRUNK_bit_rate);
+
+    // Both probes drew nothing, so the pass ends and the fallback rate is the one that works.
+    tracker.on_result(kNodeTop, false, 12'000);
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(tracker.state(kNodeB) == HealthState::ENROLLED); // the deferred §6 transition
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);
+}
+
 TEST_CASE("a pass probe answered by a node last probed at the fallback rate still clears at the "
           "reference rate",
           "[timing:bit_rate_fallback]") {
