@@ -519,6 +519,40 @@ TEST_CASE("a pass whose only enrolled address is the last one in the rotation st
     REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);
 }
 
+TEST_CASE("a pass probe answered by a node last probed at the fallback rate still clears at the "
+          "reference rate",
+          "[timing:bit_rate_fallback]") {
+    // The rate an outcome is read at is the rate of the last probe TO THAT ADDRESS, so a pass
+    // probe must record its own reference rate against the address it goes to: A is probed at
+    // the fallback rate first and does not answer, and only later answers a PASS probe. Without
+    // the pass probe's record, A's reference-rate answer would be read at the rate of the
+    // fallback probe it never answered — starting a second pass instead of clearing at once
+    // (FR-026). The mid-pass clear cases above cannot see this: their answerer's last
+    // alternating probe happened to be a reference-rate one.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    ThreeNodeRig::build(tracker);
+    const Probe fb = probe_until(tracker, kNodeA, omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(fb.addr == kNodeA);
+    tracker.on_result(kNodeA, false, 5'000); // A is silent at the fallback rate
+
+    probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate_fallback);
+    tracker.on_result(kNodeC, true, 10'000); // C answers there: the pass starts
+
+    const Probe pass = tracker.next_probe(0);
+    REQUIRE(pass.addr == kNodeA); // the pass runs in address order
+    REQUIRE(pass.bit_rate == omgp::TRUNK_bit_rate);
+    tracker.on_result(kNodeA, true, 11'000); // …and A answers it, at the REFERENCE rate
+
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+    REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED);
+    REQUIRE(tracker.state(kNodeC) == HealthState::SUSPECT); // the recorded answerer, untouched
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);
+}
+
 TEST_CASE("a pass probe is re-yielded while its outcome is outstanding", "[link]") {
     // data-model.md §6 (round-13 red team on #472): a scheduler that calls next_probe() with
     // the pass probe still in flight (F3 obligation 2 violated) gets the SAME probe back and
