@@ -74,16 +74,17 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
         // enrolling it here would have it status-polled at a rate it cannot hear, fail into
         // SUSPECT and re-declare the fault it just recovered (round-4 red team on #472). It
         // is recorded, and a reference pass over every enrolled address starts.
+        // No pass can already be running: every probe issued during one goes out at the
+        // reference rate (pass_probe below), so no outcome while a pass runs is a
+        // fallback-rate answer. True by construction, not by assumption.
         bus_.fallback_answerer = addr;
-        if (bus_.ref_pass_left == 0) {
-            uint8_t enrolled = 0;
-            for (const HealthRecord& r : records_)
-                if (r.state != HealthState::UNENROLLED)
-                    ++enrolled;
-            bus_.ref_pass_left = enrolled; // exactly |enrolled| probes (FR-026)
-            bus_.pass_addr = 0;
-            bus_.pass_next_addr = omgp::ADDR_backplane_min;
-        }
+        uint8_t enrolled = 0;
+        for (const HealthRecord& r : records_)
+            if (r.state != HealthState::UNENROLLED)
+                ++enrolled;
+        bus_.ref_pass_left = enrolled; // exactly |enrolled| probes (FR-026)
+        bus_.pass_addr = 0;
+        bus_.pass_next_addr = omgp::ADDR_backplane_min;
     } else {
         apply_result(addr, ok, now_us);
     }
@@ -91,9 +92,11 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // §7: the pass is advanced by the FIRST outcome for the address whose pass probe is in
     // flight, and by nothing else — not by a probe being issued (a tick between the last
     // probe and its result must not fire the clear, round-8 red team) and not by a later
-    // outcome for the same address.
+    // outcome for the same address. `pass_addr` is non-zero only while a pass probe is
+    // outstanding, and `addr` is a node address here, so this one comparison carries the
+    // whole condition: no redundant "a pass is running" conjunct to get out of step with it.
     bool pass_ended = false;
-    if (bus_.fault && bus_.ref_pass_left > 0 && bus_.pass_addr == addr) {
+    if (bus_.pass_addr == addr) {
         bus_.pass_addr = 0;
         pass_ended = --bus_.ref_pass_left == 0;
     }
@@ -102,7 +105,7 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
         // §7: the host prefers the reference rate — a valid answer there clears at once,
         // mid-pass or not. `addr` has already taken its own §6 transition above.
         clear_fault(omgp::TRUNK_bit_rate, now_us);
-    } else if (bus_.fault && pass_ended && bus_.fallback_answerer != 0) {
+    } else if (pass_ended && bus_.fallback_answerer != 0) {
         // §7: the pass drew nothing, so the fallback rate is the rate that works. Conditioned
         // on the recorded answerer, not on ref_pass_left == 0 alone (0 also means "no pass").
         clear_fault(omgp::TRUNK_bit_rate_fallback, now_us);
