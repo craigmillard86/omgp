@@ -294,8 +294,9 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   never discovers a cold fallback-rate rig — `Master::set_bit_rate` together with this
   tracker's `set_bit_rate`, in the same step, is the path (ruling 2026-09-14; F3 obligation 3 in
   `contracts/link-cpp.md`, added after the round-1 red team on #523 showed the Master call is a
-  wire pass-through that leaves `bit_rate` 8.7× wrong); the enrolment rotation does not
-  alternate rates for never-answered addresses.
+  wire pass-through that leaves `bit_rate` 8.7× wrong); while `!fault` the enrolment rotation
+  does not alternate rates for never-answered addresses (while `fault`, §6's alternation reaches
+  every address, UNENROLLED included — round-5 red team on #523).
 - Fall back (while `!fault` and `bit_rate == TRUNK_bit_rate`): through the declare rule above,
   or through the layer above's `set_bit_rate` (ruling 2026-09-14; round-2 red team on #523). By
   the declare rule alone the host never leaves the reference rate while any enrolled node answers
