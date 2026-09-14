@@ -295,6 +295,69 @@ TEST_CASE("no address is poll_due while a fault is declared", "[link]") {
     REQUIRE(tracker.poll_due(kNodeA, 2'000));
 }
 
+// ---------------------------------- an outcome is classified by ITS OWN probe's rate -------
+
+TEST_CASE("an extra next_probe() call does not re-read a fallback-rate answer as a reference-rate "
+          "one",
+          "[timing:bit_rate_fallback]") {
+    // data-model.md §7 (red team round 2 on #530, finding 1): `on_result` carries no bit rate,
+    // so the rate an outcome arrived at is inferred. Inferring it from the rate last put on the
+    // WIRE makes one extra next_probe() call — F3 obligation 2 violated by a single superframe —
+    // re-read this fallback-rate answer as a reference-rate one: the fault would clear at the
+    // reference rate and this node would be enrolled at a rate it cannot hear, fail back into
+    // SUSPECT and re-declare the fault, without bound. The rate is therefore remembered PER
+    // ADDRESS, so the extra call (which moves the wire to another address's probe) cannot
+    // change how B's answer is read.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    ThreeNodeRig::build(tracker);
+    probe_until(tracker, kNodeB, omgp::TRUNK_bit_rate_fallback);
+    tracker.next_probe(0);                      // the extra call: no probe was issued for it
+    tracker.on_result(kNodeB, true, 10'000);    // B answers — at the FALLBACK rate
+
+    REQUIRE(tracker.bus_fault());                           // §7: a fallback answer clears nothing
+    REQUIRE(tracker.state(kNodeB) == HealthState::SUSPECT); // …and its §6 transition is deferred
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 0);
+
+    // …and what it did start is the reference pass, which here draws nothing.
+    uint64_t t = 11'000;
+    for (int i = 0; i < 3; ++i) {
+        const Probe p = tracker.next_probe(0);
+        REQUIRE(p.bit_rate == omgp::TRUNK_bit_rate);
+        tracker.on_result(p.addr, false, t += 1'000);
+    }
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(tracker.state(kNodeB) == HealthState::ENROLLED); // the deferred transition, on clear
+    REQUIRE(tracker.bus_stats().bus_faults == 1);            // one episode, not an oscillation
+}
+
+TEST_CASE("an extra next_probe() call does not re-read a reference-rate answer as a fallback-rate "
+          "one",
+          "[timing:bit_rate_fallback]") {
+    // The other direction of the same finding: with the rate taken from the wire, one extra
+    // next_probe() call makes this reference-rate answer look like a fallback one, so instead
+    // of clearing at once (FR-026) the trunk runs a reference pass and — the pass drawing
+    // nothing — is pinned at the fallback rate with no automatic return (ruling 2026-09-13):
+    // the downgrade data-model §7's superseded Clear clause was replaced to prevent.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    ThreeNodeRig::build(tracker);
+    probe_until(tracker, kNodeB, omgp::TRUNK_bit_rate);
+    tracker.next_probe(0);                   // the extra call: no probe was issued for it
+    tracker.on_result(kNodeB, true, 10'000); // B answers — at the REFERENCE rate
+
+    REQUIRE_FALSE(tracker.bus_fault()); // FR-026: a reference-rate answer clears at once
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate); // not downgraded
+    REQUIRE(tracker.state(kNodeB) == HealthState::ENROLLED);
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);
+    REQUIRE(tracker.bus_stats().bus_faults == 1);
+}
+
 // --------------------------------------------------- clear at the reference rate (FR-026) --
 
 TEST_CASE("a valid answer at the reference rate clears the fault at the reference rate at once",
@@ -375,6 +438,46 @@ TEST_CASE("after a fallback-rate answer the pass probes every enrolled address o
             REQUIRE(tracker.bus_fault()); // not cleared before the pass has finished
         tracker.on_result(p.addr, false, t += 1'000);
     }
+}
+
+TEST_CASE("a duplicate fallback answer before the first pass probe restarts an identical pass",
+          "[timing:bit_rate_fallback]") {
+    // Pins the window the fallback branch's comment in link/health.cpp now names (red team
+    // round 2 on #530, finding 2): between the answer that starts a pass and the first pass
+    // probe, the remembered rate for the answerer is still the fallback one, so a duplicate or
+    // late outcome for it re-enters that branch and recomputes the pass. It is benign, and the
+    // assertions below are what says so: |enrolled| cannot change in that window and the pass
+    // cursor is already at ADDR_backplane_min, so the recomputation reproduces the state it
+    // overwrites — the pass is still exactly |enrolled| probes in address order, and the clear
+    // is still one BUS_RECOVERED at the fallback rate.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    ThreeNodeRig::build(tracker);
+    probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate_fallback);
+    tracker.on_result(kNodeC, true, 10'000); // starts the pass
+    tracker.on_result(kNodeC, true, 10'001); // the duplicate, before the first pass probe
+
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(tracker.state(kNodeC) == HealthState::SUSPECT); // still deferred, not enrolled twice
+
+    const uint8_t expected[3] = {kNodeA, kNodeB, kNodeC};
+    uint64_t t = 11'000;
+    for (int i = 0; i < 3; ++i) {
+        const Probe p = tracker.next_probe(0);
+        REQUIRE(p.addr == expected[i]);
+        REQUIRE(p.bit_rate == omgp::TRUNK_bit_rate);
+        if (i < 2)
+            REQUIRE(tracker.bus_fault()); // the restart did not shorten the pass
+        tracker.on_result(p.addr, false, t += 1'000);
+    }
+
+    REQUIRE_FALSE(tracker.bus_fault()); // …nor lengthen it
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(tracker.state(kNodeC) == HealthState::ENROLLED);
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);
+    REQUIRE(listener.count(Notice::RECOVERED) == 1); // the deferred transition, applied once
 }
 
 TEST_CASE("a pass whose only enrolled address is the last one in the rotation still reaches it",
