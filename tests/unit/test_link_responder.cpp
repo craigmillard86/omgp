@@ -632,16 +632,23 @@ TEST_CASE("a retry queued in the same late-poll batch as its original is replaye
     REQUIRE(replay.payload[0] == 0xC3);
 }
 
-TEST_CASE("eight well-spaced requests are all answered whatever the poll cadence, none "
-          "discarded",
+TEST_CASE("eight well-spaced requests are all accounted for whatever the poll cadence: "
+          "answered, or discarded and counted",
           "[link]") {
-    // The red team's own sweep (@e510b29 finding 1): at 400 us and coarser, requests
-    // were silently swallowed -- 2 of 8 answered at a 2 ms poll period. Expected by
-    // FR-014: all eight, late ones counted, nothing dropped. The property is unchanged; the
-    // window is longer than it was because an answer whose wait absorbed queued requests
-    // falls back to the bounded cap (transmit_if_due: a drain that stopped with requests
-    // held has read only part of the wire, and says so). Latency, not loss -- with the
-    // clock allowed to run, all eight are still answered at every cadence, none discarded.
+    // The red team's own sweep (@e510b29 finding 1): at 400 us and coarser, requests were
+    // SILENTLY swallowed -- 2 of 8 answered at a 2 ms poll period, stats() unmoved. That
+    // silence is what this case was written to close, and it stays closed.
+    //
+    // AMENDED for the maintainer ruling of 2026-09-11 (docs/OPEN-QUESTIONS.md "Maintainer
+    // rulings on the pending entries", item 5; the ruling names this case). Its earlier form
+    // asserted "all eight answered, none discarded", which the hold-and-stop corner bought by
+    // leaving bytes unread on the wire -- destroying them there, uncounted, under any heavier
+    // load (red team @bab7378 finding 2). The engine now reads to the end of the queue and
+    // discards the excess IN THE ENGINE, where FR-016's stats().discards channel shows it. So
+    // the property asserted here is accounting, not throughput: at every cadence every one of
+    // the eight is either answered or counted, and the answers still come out in arrival
+    // order. The per-cadence answered counts are pinned too, as the honest observable of this
+    // design -- they are what the ruling traded for, not a target.
     const uint8_t p[] = {0x5A};
     for (uint64_t period : {50u, 400u, 1000u, 2000u}) {
         DYNAMIC_SECTION("poll period " << period << " us") {
@@ -658,12 +665,32 @@ TEST_CASE("eight well-spaced requests are all answered whatever the poll cadence
             }
             for (uint64_t now = period; now <= last_end + 200000; now += period)
                 wire.advance_to(now, responder);
-            REQUIRE(handler.calls == 8);
-            REQUIRE(wire.transcript_size() == 8);
-            for (size_t i = 0; i < 8; ++i)
-                REQUIRE(wire.transcript(i).seq == i);
-            REQUIRE(responder.stats().transactions == 8);
-            REQUIRE(responder.stats().discards == 0);
+            const uint32_t answered = responder.stats().transactions;
+            INFO("period=" << period << " answered=" << answered
+                           << " discards=" << responder.stats().discards);
+            // Nothing is lost silently: every request the station offered was read off the
+            // wire and is in exactly one of the two counters.
+            REQUIRE(answered + responder.stats().discards == 8);
+            REQUIRE(wire.pending_injected() == 0);
+            REQUIRE(handler.calls == static_cast<int>(answered));
+            REQUIRE(wire.transcript_size() == answered);
+            // Arrival order, with a discarded request's sequence simply absent: the hold is a
+            // queue, and a discard never reorders what is still in it.
+            for (size_t i = 1; i < wire.transcript_size(); ++i)
+                REQUIRE(wire.transcript(i).seq > wire.transcript(i - 1).seq);
+            // The measured cost, pinned per cadence: 8, 7, 5 and 4 answered at 50, 400, 1000
+            // and 2000 us. The last three are exactly the "7/8, 5/8, 4/8" the ruling's own
+            // entry measured for this corner (docs/OPEN-QUESTIONS.md 2026-09-07, the "never
+            // stop, hold 2, discard-and-count the excess" row), so the engine built here is
+            // the one the maintainer ruled on and not some neighbour of it.
+            uint32_t expected_answered = 4;
+            if (period == 50)
+                expected_answered = 8;
+            else if (period == 400)
+                expected_answered = 7;
+            else if (period == 1000)
+                expected_answered = 5;
+            REQUIRE(answered == expected_answered);
         }
     }
 }
@@ -999,22 +1026,28 @@ TEST_CASE("a request duplicated on the wire with the retry bit clear re-invokes 
     CHECK(responder.stats().replays_served == 0);
 }
 
-TEST_CASE("requests arriving faster than poll() is called queue up behind the held-request "
-          "rule: one answer per poll(), all of them late, the host's own request never "
-          "reached, nothing counted (open question, not asserted as desired)",
+TEST_CASE("requests arriving faster than poll() is called are answered as far as the hold "
+          "reaches and counted beyond it: the backlog cannot grow unread, and the host's own "
+          "request is reached (open question on the tension, not asserted as desired)",
           "[link]") {
     // Red team @17554c8 finding 1 (MEDIUM), confirmed by review @17554c8 finding 1, re-run
-    // here with the suite's own helpers. "Held, not discarded" (docs/OPEN-QUESTIONS.md
-    // 2026-09-06) plus "one accepted request leaves Listening and ends the drain" means a
-    // poll() answers exactly ONE queued request, oldest first, with no bound on the
-    // backlog's age or depth. A station at 0x07 puts one request to this node on the bus
-    // every 300 us; the engine is polled every 1 ms; the host sends its own request at
-    // t = 8 ms. Pre-`70d7660` (drain always, discard-and-count while busy) the host was
-    // answered at the next poll and the dropped traffic was counted (discards == 48 in the
-    // red team's run); at this head neither happens. FR-014 (a late poll MUST still
-    // transmit) and FR-017 (MUST never transmit outside a response window) pull opposite
-    // ways on a stale queued request; the ruling is the maintainer's -- these CHECKs pin
-    // today's observable so the ruling's implementation starts from a failing test.
+    // here with the suite's own helpers. A station at 0x07 puts one request to this node on
+    // the bus every 300 us; the engine is polled every 1 ms; the host sends its own request at
+    // t = 8 ms.
+    //
+    // AMENDED under the ruling of 2026-09-11 (#372); the earlier form of this case existed to
+    // pin a failing observable for that ruling, and this is what it turns into. Under
+    // hold-and-stop the engine answered 6, counted NOTHING, left 63 requests unread on the
+    // wire, and never reached the host at all -- an unbounded backlog whose only visible trace
+    // was the absence of answers. Now the engine reads the queue to its end at every poll:
+    // 7 answered, 59 discarded and counted, at most kHeldRequests decoded-and-waiting, and the
+    // host's request IS answered, because a request can no longer be starved behind bytes the
+    // engine refuses to read.
+    //
+    // What this case does NOT settle: FR-014 (a late poll MUST still transmit) and FR-017
+    // (MUST never transmit outside a response window) still pull opposite ways on a stale
+    // queued request. The 2026-09-11 ruling says so in terms and leaves it to the 2026-09-06
+    // held-request-queue entry, which is still open. These CHECKs pin what the engine does.
     FakeClock clock;
     MockWire wire(clock);
     RecordingHandler handler;
@@ -1056,53 +1089,51 @@ TEST_CASE("requests arriving faster than poll() is called queue up behind the he
         if (wire.transcript(i).dst == kPeer)
             answered_host = true;
 
-    // 6 answers over 21 polls, not one per poll. The engine refuses to transmit on a
-    // reading of the bus it knows to be partial, and on a bus this busy every wait absorbs
-    // queued requests and therefore stops early, so each answer falls back to the bounded
-    // cap (transmit_if_due). A LATENCY change, not a new loss: nothing is dropped, the
-    // backlog still grows without bound and the host is still never reached, which is what
-    // this case pins. Pin history, each value the honest observable of its design:
-    // 20 (71caba0, stop draining at the first decoded request and judge from a stale
-    // last_activity_), 17 (b262d46, drain everything into a byte stash), 7 (2efcb67, treat a
-    // full stash as blindness), 6 (here: hold what a wait can absorb, stop rather than drop,
-    // and say the reading is partial). docs/OPEN-QUESTIONS.md 2026-09-06 (FR-014 vs FR-017)
-    // still governs what the behaviour SHOULD be; this pins what it is.
-    CHECK(wire.transcript_size() == 6);
-    // One more handler call than answers on the wire: the seventh request was accepted and
-    // its response encoded, and is still waiting out its cap when the run ends.
+    // Pin history, each value the honest observable of its design: 20 (71caba0, stop draining
+    // at the first decoded request and judge from a stale last_activity_), 17 (b262d46, drain
+    // everything into a byte stash), 7 (2efcb67, treat a full stash as blindness), 6 (5830fc4,
+    // hold what a wait can absorb, stop rather than drop, and say the reading is partial), and
+    // now this, under the ruling of 2026-09-11 (#372): read to the end of the queue every
+    // time, hold two, count the rest.
+    INFO("answers=" << wire.transcript_size() << " calls=" << handler.calls
+                    << " late=" << responder.stats().late_responses
+                    << " discards=" << responder.stats().discards);
+    CHECK(wire.transcript_size() == 7);
     CHECK(handler.calls == 7);
-    CHECK_FALSE(answered_host); // 12 ms after host_end, and still queued behind 0x07's frames
-    CHECK(responder.stats().late_responses == 6);
-    // Nothing counted -- and this is the assertion most likely to be misread, so it says what
-    // it does NOT mean (review @8093b48). `discards == 0` here is not "nothing was lost". It
-    // is "nothing the ENGINE consumed was dropped", which is a much weaker statement: the
-    // requests this cell never answers are still sitting in the wire's receive queue at the
-    // last poll, uncounted because the engine never read them.
-    CHECK(responder.stats().discards == 0);
-    // Why the run stops here, rather than at the load this cell's own documentation names.
-    // Continue the same 300 us / 1 ms probe and at ~t = 23 ms MockWire's receive queue
-    // (4 * kMaxWire = 568 bytes) overflows -- and mock_wire.hpp makes that a harness REQUIRE
-    // failure by design ("no silent drop"), so the run would end as a harness fault rather
-    // than as an assertion about the engine. That is exactly the loss described in
-    // link/responder.hpp and in docs/OPEN-QUESTIONS.md 2026-09-07: 74 offered, 7 answered,
-    // destroyed at the wire with stats() showing nothing. This cell deliberately stops just
-    // short of it and pins the boundary instead, so the stopping point is a stated choice
-    // rather than a coincidence.
-    // The backlog, by arithmetic on this cell's own numbers: 70 requests offered, 7 accepted,
-    // so 63 are still sitting unread on the wire -- and none of them is counted anywhere.
+    CHECK(responder.stats().late_responses == 7);
+    // The loss under this load is large and it is COUNTED -- the whole of what the ruling
+    // requires of an overloaded node, and the opposite of the `discards == 0` this case used
+    // to pin while 63 requests sat destroyed-or-waiting outside the engine's books.
+    CHECK(responder.stats().discards == 59);
+    // ...and the host, which the backlog used to bury, is answered. Not a general guarantee:
+    // it holds here because the engine no longer starves behind bytes it refuses to read.
+    CHECK(answered_host);
+    CHECK(host_end + omgp::TRUNK_T_resp_us < 20 * poll_period); // though long after it gave up
     REQUIRE(flooded == 70);
-    REQUIRE(flooded - handler.calls == 63);
-    REQUIRE(responder.stats().discards == 0);
-    CHECK(host_end + omgp::TRUNK_T_resp_us < 20 * poll_period); // the host gave up long ago
-    // #148: those 63 unread requests ARE undelivered injected bytes -- the residue ~MockWire()
-    // fails a case for leaving behind. Here it is not an unexamined fault but the observable
-    // this cell exists to pin, so it is acknowledged explicitly. Bounded, not exact: the count
-    // depends on where in the queue the engine's drain stopped, which no test-side timeline can
-    // compute -- but it cannot be less than one byte for each unread request, and it cannot
-    // exceed what was offered. (Measured at this head: 558 bytes of 866 offered.)
+
+    // Full accounting, and the one assertion that would catch a silent regression to the old
+    // corner. #148: the run ends mid-cadence, so the last few requests are still arriving --
+    // 27 bytes, three whole frames, injected after the final poll's instant. Everything else
+    // was READ, and every read request is answered, counted, or one of at most kHeldRequests
+    // decoded and still waiting for the wire. Nothing else is possible: the difference below
+    // IS the hold's occupancy, and asserting it against kHeldRequests is what makes "the
+    // backlog cannot grow unread" an assertion rather than a claim.
     const size_t left = wire.take_pending_injected();
-    CHECK(left >= static_cast<size_t>(flooded - handler.calls));
+    CHECK(left == 27);
     CHECK(left < offered_bytes);
+    const std::vector<uint8_t> one_frame =
+        request_bytes(kMyAddr, kOther, false, 0, flood_payload, sizeof flood_payload);
+    const size_t frame_bytes = one_frame.size();
+    REQUIRE(left % frame_bytes == 0); // whole frames, none of them half-consumed
+    const size_t offered_frames = static_cast<size_t>(flooded) + 1; // the flood, plus the host
+    const size_t read_frames = offered_frames - left / frame_bytes;
+    const size_t accounted = wire.transcript_size() + responder.stats().discards;
+    INFO("read=" << read_frames << " accounted=" << accounted);
+    REQUIRE(read_frames >= accounted);
+    // The hold's depth is private to the engine (Responder::kHeldRequests, link/responder.hpp,
+    // which static_asserts it to 2); restated here because that is what the bound means.
+    constexpr size_t kHold = 2;
+    REQUIRE(read_frames - accounted <= kHold);
 }
 
 // --- red team @71caba0 finding 1 (BLOCKING, HIGH): listen before transmitting ------------
@@ -1462,20 +1493,26 @@ TEST_CASE("a request held through a wait and answered inside its own turnaround 
     REQUIRE(responder.stats().late_responses == 1); // A only; B was on time
 }
 
-TEST_CASE("a request arriving when the hold is already full is left on the wire and answered "
-          "later, never swallowed: the drain stops BEFORE it consumes what it cannot keep",
+TEST_CASE("a request arriving when the hold is already full is discarded WHOLE and counted, "
+          "never swallowed: one frame, one discard, and the frames behind it still decode",
           "[link]") {
     // Red team @b262d46 finding 1 (BLOCKING), restated for the design that replaced it. The
-    // defect was that a byte was taken off the wire and only then found to be unkeepable, so
+    // defect was that a BYTE was taken off the wire and only then found to be unkeepable, so
     // a legal request straddling a capacity bound lost its opening byte and the rest of its
-    // frame decoded as headless garbage -- silently unanswered. The bound is now expressed in
-    // REQUESTS, and the rule is the same: the drain stops before consuming anything it cannot
-    // keep, so everything behind stays in the wire's own receive queue.
+    // frame decoded as headless garbage -- silently unanswered. The bound is expressed in
+    // REQUESTS, so that defect cannot recur: a request is discarded only once the Deframer has
+    // delivered it whole, and the frame behind it starts at its own opening flag.
     //
-    // (The previous version of this case filled a byte stash with non-frame noise. Noise is
-    // never held, so under the current engine it exercised no bound at all -- review @6440074
-    // finding 5. This one fills the hold with real requests, which is the only way to reach
-    // it.)
+    // AMENDED for the ruling of 2026-09-11 (#372). The earlier form asserted that D was "left
+    // on the wire and answered later" -- the hold-and-stop corner, which bought that answer by
+    // leaving the wire unread, and lost requests uncounted at the wire under heavier load. D is
+    // now consumed, discarded and COUNTED. What must still hold, and is what this case exists
+    // for, is that the discard is clean: B and C come back with their own payloads, D's bytes
+    // corrupt nothing, and the loss is visible in stats().
+    //
+    // (An earlier version filled a byte stash with non-frame noise. Noise is never held, so
+    // under the current engine it exercised no bound at all -- review @6440074 finding 5. This
+    // one fills the hold with real requests, which is the only way to reach it.)
     FakeClock clock;
     MockWire wire(clock);
     RecordingHandler handler;
@@ -1504,23 +1541,29 @@ TEST_CASE("a request arriving when the hold is already full is left on the wire 
     for (uint64_t t = end_a + omgp::TRUNK_T_turn_max_us + 1; t <= end_d + 40000; t += byte_us())
         wire.advance_to(t, responder);
 
-    // All four answered, in arrival order, and nothing discarded: D was never consumed while
-    // the hold was full, so it was still there to be read once a slot freed.
+    // A, B and C answered in arrival order; D discarded and counted, exactly one discard for
+    // exactly one frame. Full accounting: four offered, three answered, one counted.
     INFO("answers=" << wire.transcript_size() << " discards=" << responder.stats().discards);
-    REQUIRE(wire.transcript_size() == 4);
-    REQUIRE(handler.calls == 4);
-    const uint8_t* expected[4] = {pa, pb, pc, pd};
-    for (size_t i = 0; i < 4; ++i) {
+    REQUIRE(wire.transcript_size() == 3);
+    REQUIRE(handler.calls == 3);
+    const uint8_t* expected[3] = {pa, pb, pc};
+    for (size_t i = 0; i < 3; ++i) {
         INFO("answer " << i);
         REQUIRE(wire.transcript(i).seq == static_cast<uint8_t>(i + 1));
         // Each answer echoes ITS OWN request's payload. B and C came out of the hold, so
-        // this pins that the hold carried their bytes and not merely their headers.
+        // this pins that the hold carried their bytes and not merely their headers -- and
+        // that D, discarded from the slot-full path, overwrote neither of them.
         REQUIRE(wire.transcript(i).len == 2);
         REQUIRE(wire.transcript(i).payload[0] == expected[i][0]);
         REQUIRE(wire.transcript(i).payload[1] == expected[i][1]);
     }
-    REQUIRE(responder.stats().transactions == 4);
-    REQUIRE(responder.stats().discards == 0);
+    REQUIRE(responder.stats().transactions == 3);
+    REQUIRE(responder.stats().discards == 1); // D, counted -- not lost in silence
+    // D's own sequence is never answered, and its bytes left nothing behind them: the wire is
+    // fully read, and no fifth frame decoded out of the residue.
+    for (size_t i = 0; i < wire.transcript_size(); ++i)
+        REQUIRE(wire.transcript(i).seq != 4);
+    REQUIRE(wire.pending_injected() == 0);
 }
 
 // --- red team @2efcb67 / @7a80ec3: the drain's two exits mean opposite things ------------
@@ -1566,15 +1609,20 @@ TEST_CASE("a late response goes out T_gap after the last byte the engine saw whe
     REQUIRE(responder.stats().transactions == 1);
 }
 
-TEST_CASE("a burst of back-to-back requests is answered in full, none lost, paced by the "
-          "bounded cap rather than dropped",
+TEST_CASE("a burst of back-to-back requests is fully accounted: the few the node can answer "
+          "inside one wait are answered, the rest are discarded and counted",
           "[link]") {
-    // The engine holds what a wait can absorb and STOPS reading rather than destroying a
-    // byte, so everything behind stays in the wire's own receive queue and is answered later
-    // (FR-015/FR-016). The cost is latency, and it is real: a wait that stopped early falls
-    // back to the cap, so a long backlog drains at roughly one cap per absorbed batch rather
-    // than at wire speed. Recorded, with its consequence, in docs/OPEN-QUESTIONS.md
-    // 2026-09-07 ("a Responder that stops reading to avoid dropping").
+    // AMENDED for the ruling of 2026-09-11 (#372); this is the case where the trade is at its
+    // starkest, so it states both sides. Before: the engine held what a wait could absorb and
+    // STOPPED reading, so a 142-byte burst was answered in full, over ~21.93 ms of caps -- and
+    // the bytes it did not read sat in the wire's queue, which on any real UART (or on
+    // MockWire past 568 bytes) destroys them uncounted once it fills. After: the engine reads
+    // the burst to the end, answers what its hold can carry, and COUNTS the rest.
+    //
+    // A burst this dense cannot be answered in full by a node that may hold two requests at a
+    // time and owes each answer a gap: that is a property of the offered load, not of this
+    // choice. What the choice decides is whether the shortfall is visible. It is:
+    // transactions + discards accounts for every frame in the burst.
     FakeClock clock;
     MockWire wire(clock);
     RecordingHandler handler;
@@ -1604,14 +1652,9 @@ TEST_CASE("a burst of back-to-back requests is answered in full, none lost, pace
 
     // A bound on the backlog's latency, restored after review @6440074 finding 3: the two
     // earlier bounds were dropped in the same commit that made the engine slower, leaving
-    // nothing to fail if it slowed further on exactly its known weak axis.
-    //
-    // The bound is stated for what this design actually costs, measured, not for what one
-    // might hope: answering a held request re-enters a wait that stops again, so the backlog
-    // costs about ONE CAP PER ANSWER, not per batch of kHeldRequests -- 21.93 ms to clear
-    // this 142-byte burst, against 24.87 ms for the byte-stash revision it replaced. That is
-    // a modest improvement, not an order of magnitude, and saying so here is the point: two
-    // caps of headroom catches a doubling, which is what a real regression looks like.
+    // nothing to fail if it slowed further on exactly its known weak axis. The bound is per
+    // ANSWER, so it keeps its meaning now that the number of answers is smaller: what it
+    // catches is a doubling of the per-answer cost.
     const uint64_t cap_us = static_cast<uint64_t>(kMaxWire) * byte_us() + omgp::TRUNK_T_gap_us;
     const uint64_t answers = static_cast<uint64_t>(wire.transcript_size());
     const uint64_t last_tx = wire.transcript(wire.transcript_size() - 1).tx_start_us;
@@ -1620,19 +1663,26 @@ TEST_CASE("a burst of back-to-back requests is answered in full, none lost, pace
 
     INFO("frames=" << frames << " answers=" << wire.transcript_size()
                    << " discards=" << responder.stats().discards);
-    // Every request in the burst is answered, and the first one too: nothing was dropped and
-    // nothing was destroyed at any capacity bound, because there is none.
-    REQUIRE(wire.transcript_size() == static_cast<size_t>(frames) + 1);
-    REQUIRE(handler.calls == frames + 1);
-    REQUIRE(responder.stats().transactions == static_cast<uint32_t>(frames) + 1);
-    REQUIRE(responder.stats().discards == 0);
-    // Sequences come out in arrival order -- the hold is a queue, not a slot that overwrites.
-    // `seq` is 4 bits (link/frame.cpp), so the burst's own numbering wraps within the run.
+    // Full accounting over the burst plus the first request: each is a transaction or a
+    // counted discard, and the wire is left empty -- nothing waiting, nothing destroyed
+    // outside the engine's own books.
+    REQUIRE(responder.stats().transactions + responder.stats().discards ==
+            static_cast<uint32_t>(frames) + 1);
+    REQUIRE(wire.pending_injected() == 0);
+    REQUIRE(handler.calls == static_cast<int>(responder.stats().transactions));
+    REQUIRE(wire.transcript_size() == responder.stats().transactions);
+    // The measured shortfall, pinned: 15 frames behind the first request, 3 answered, 13
+    // counted. Pinning it is how a silent change in either direction gets noticed -- an
+    // engine that answered more without accounting for the rest would pass a bare
+    // transactions + discards check.
+    REQUIRE(frames == 15);
+    REQUIRE(responder.stats().transactions == 3);
+    REQUIRE(responder.stats().discards == 13);
+    // The answers that do go out are in arrival order -- the hold is a queue, not a slot that
+    // overwrites -- starting with the first request. `seq` is 4 bits (link/frame.cpp).
     REQUIRE(wire.transcript(0).seq == 1);
-    for (int i = 0; i < frames; ++i) {
-        INFO("burst answer " << i);
-        REQUIRE(wire.transcript(static_cast<size_t>(i) + 1).seq == ((2 + i) & 0x0F));
-    }
+    for (size_t i = 1; i < wire.transcript_size(); ++i)
+        REQUIRE(wire.transcript(i).seq > wire.transcript(i - 1).seq);
 }
 
 // --- #372, maintainer ruling 2026-09-11 (docs/OPEN-QUESTIONS.md "Maintainer rulings on the -

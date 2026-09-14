@@ -169,15 +169,15 @@ void Responder::hold_or_discard(const FrameFields& f, uint64_t request_end_us) {
         stats_.discards++;
         return;
     }
-    // Appended in arrival order. poll() stops draining once held_count_ reaches
-    // kHeldRequests, so this cannot overrun -- but the bound is repeated here rather than
-    // assumed, because the cost of being wrong is a write past the array: with poll()'s stop
-    // deleted, ASan aborts on exactly this line.
-    // mutant-ok(accepted, cxx_ge_to_gt): unreachable by construction of poll()'s own stop.
+    // Appended in arrival order while a slot is free. Past kHeldRequests the request is
+    // DISCARDED AND COUNTED rather than left unread on the wire: the maintainer ruling of
+    // 2026-09-11 (docs/OPEN-QUESTIONS.md "Maintainer rulings ...", item 5; FR-014 and
+    // data-model.md §5 carry the marker) put the engine's complete reading of the bus above
+    // FR-014's "at once" and §5's "nothing is dropped", because the corner this replaces lost
+    // requests at the WIRE, uncounted (74 offered, 7 answered, discards == 0; red team
+    // @bab7378 finding 2). The loss is the same order of magnitude; the difference is that
+    // this one is in stats() where FR-016's channel exists to show it.
     if (held_count_ >= kHeldRequests) {
-        // Inside that unreachable branch, so its own mutants are unreachable too; no test can
-        // reach the counter to observe which way it moves.
-        // mutant-ok(accepted, cxx_post_inc_to_post_dec): unreachable, as above.
         stats_.discards++;
         return;
     }
@@ -220,7 +220,7 @@ uint64_t Responder::max_frame_us() const {
     return static_cast<uint64_t>(kMaxWire) * byte_time_us(wire_.bit_rate());
 }
 
-void Responder::transmit_if_due(uint64_t now_us, bool queue_drained, bool belief_stale) {
+void Responder::transmit_if_due(uint64_t now_us, bool queue_drained) {
     if (state_ == State::Transmitting) {
         // Strict `<`: transmit_until_us_ is "the instant of the final stop bit" (ByteWire),
         // so a poll() at exactly that instant already finds the wire free and drains the
@@ -272,30 +272,28 @@ void Responder::transmit_if_due(uint64_t now_us, bool queue_drained, bool belief
         // no longer; past it, a station still occupying the wire is a §3 violator and the
         // transaction goes out on schedule.
         const uint64_t cap_us = defer_origin_us_ + max_frame_us() + omgp::TRUNK_T_gap_us;
-        // Which exit poll()'s drain took decides what last_activity_us_ is worth. Ran to
-        // the end of the wire's queue: it is a COMPLETE reading, and T_gap of idle after it
-        // is a real gap. Stopped because a request is held: bytes may remain unread, so it
-        // is a PARTIAL reading and acting on it is the frozen belief of red team @7d31410 --
-        // the wait falls back to the bounded cap instead. Never inferred from a buffer's
-        // occupancy: every revision that tried had a capacity boundary and reopened the
-        // collision at it, one byte further along each time (@b262d46, @2efcb67, @7a80ec3).
+        // last_activity_us_ is now worth the same here as it is for the Master, because the
+        // drain that produced it has the Master's precondition again: poll() reads to the end
+        // of the wire's queue on every path into this line (ruling 2026-09-11, #372 -- a
+        // completed request the hold cannot take is discarded and counted, not left unread).
+        // The reading is therefore COMPLETE, and T_gap of idle after the last byte of it is a
+        // real gap. The `belief_stale` argument this line used to take, and the partial
+        // reading it reported, are gone with the stop that created them.
         //
-        // What the cap is NOT, corrected here after review @6440074 finding 2 asserted the
-        // opposite of what an earlier revision of this comment claimed: it is NOT "the
-        // protection level Master documents and accepts". Master's cap argument rests on a
-        // drain loop that never exits early (link/master.cpp:224-227, which records that
-        // when it once did, "the argument was false for exactly the bytes left behind it"),
-        // and this path is precisely that excluded case -- Master's cap without Master's
-        // precondition. Master further argues that any frame starting later than
-        // defer_origin + T_gap is a §3 violator "on every path into this state"; on the LATE
-        // path it is not, because the host has already timed this node out after T_resp and
-        // may legitimately open a new transaction T_gap after the bus goes idle. So a frame
-        // beginning inside this wait can be transmitted over, and red team @6440074 finding
-        // 1 demonstrates exactly that. It is an open defect, recorded in the PR and in
-        // docs/OPEN-QUESTIONS.md 2026-09-07, not a bound this comment may claim is safe.
-        uint64_t want_us = cap_us;
-        if (!belief_stale)
-            want_us = has_activity_ ? last_activity_us_ + omgp::TRUNK_T_gap_us : now_us;
+        // What the cap still is NOT (review @6440074 finding 2, kept because only half of it
+        // has been fixed): Master argues that any frame starting later than defer_origin +
+        // T_gap is a §3 violator "on every path into this state"; on the LATE path it is not,
+        // because the host has already timed this node out after T_resp and may legitimately
+        // open a new transaction T_gap after the bus goes idle. Such a frame can still be
+        // running when the cap expires, and the cap then fires into it. What #372 removes is
+        // the BLIND case -- keying down onto a bus the engine stopped reading, red team
+        // @6440074 finding 1, whose reproducer is the "does not blind the engine" case in
+        // tests/unit/test_link_responder.cpp. The residual is bounded by construction (only
+        // a frame that begins after defer_origin + T_gap and is still running at
+        // defer_origin + max_frame + T_gap) and is recorded in docs/OPEN-QUESTIONS.md
+        // 2026-09-14; no test here demonstrates it, and this comment claims no more than
+        // that.
+        uint64_t want_us = has_activity_ ? last_activity_us_ + omgp::TRUNK_T_gap_us : now_us;
         // `a > b ? b : a` and `a >= b ? b : a` both compute min(a, b); they differ only at
         // a == b, where both branches yield the same value (Master's label, :278-281).
         // mutant-ok(equivalent, cxx_gt_to_ge): min(a, b) either way.
@@ -316,11 +314,6 @@ void Responder::transmit_if_due(uint64_t now_us, bool queue_drained, bool belief
 void Responder::poll(uint64_t now_us) {
     uint8_t byte;
     uint64_t start_us;
-    // Set only where the drain stops with a request held; see there and transmit_if_due().
-    // Initialising it to `true` instead is NOT equivalent and is killed (11 cases): every
-    // wait would fall back to the cap. Only the `false`-to-0 rewrite coincides.
-    // mutant-ok(equivalent, cxx_init_const): the mutation and the original coincide.
-    bool belief_stale = false;
     // The wire is drained only while Listening. Trunk §3 is half-duplex, one transaction
     // at a time: while a response is Scheduled (encoded, not yet due) or Transmitting
     // (physically occupying the wire until transmit_until_us_) any bytes that have already
@@ -343,7 +336,7 @@ void Responder::poll(uint64_t now_us) {
     // bound applies is docs/OPEN-QUESTIONS.md 2026-09-06 ("held-request queue is
     // unbounded"), pending human -- not decided here.
     for (;;) {
-        transmit_if_due(now_us, /*queue_drained=*/false, /*belief_stale=*/false);
+        transmit_if_due(now_us, /*queue_drained=*/false);
         const bool listening = state_ == State::Listening;
         if (listening && held_count_ > 0) {
             // The wire is free again: requests decoded during the wait are answered, oldest
@@ -364,21 +357,19 @@ void Responder::poll(uint64_t now_us) {
         }
         // Listening: the normal drain. past_window(): a response whose window has closed is
         // waiting for an idle bus, and the only way this engine can see the bus is to read
-        // it -- so it does, decoding as it goes. What it decodes there it cannot answer
-        // (trunk §3, one transaction at a time), so the first such request is HELD and the
-        // drain stops: everything behind it stays in the wire's receive queue, intact, as it
-        // did before any of this existed. Nothing is destroyed and nothing is dropped
-        // (FR-015/FR-016). While Transmitting, and while Scheduled INSIDE the window, bytes
-        // wait untouched in that queue as before (red team @e510b29 finding 1).
+        // it -- so it does, decoding as it goes, to the END of the queue every time (ruling
+        // 2026-09-11, #372). What it decodes there it cannot answer (trunk §3, one
+        // transaction at a time): up to kHeldRequests of those are HELD and answered later,
+        // and any further one is discarded and counted (hold_or_discard). The drain does NOT
+        // stop to avoid that discard, which is what it used to do -- the bytes left behind
+        // then were destroyed by the wire's own queue instead, uncounted, and the engine's
+        // reading of the bus went stale for the rest of the wait. While Transmitting, and
+        // while Scheduled INSIDE the window, bytes wait untouched in the wire's receive queue
+        // as before (red team @e510b29 finding 1): there the engine owns the bus by protocol
+        // and needs no reading of it.
         const bool waiting = past_window(now_us);
         if (!listening && !waiting)
             break;
-        if (waiting && held_count_ >= kHeldRequests) {
-            // Stopping here is the one exit that leaves bytes unread, so the belief about
-            // the bus is partial from this instant on. Said, not inferred.
-            belief_stale = true;
-            break;
-        }
         if (!wire_.receive(byte, start_us))
             break;
         // Every byte drained, whatever becomes of it, is evidence the bus was busy: its END
@@ -405,8 +396,10 @@ void Responder::poll(uint64_t now_us) {
     }
     // The drain loop has stopped: the wire's queue is empty, or an accepted request ended
     // it. Only now -- with last_activity_us_ current for every byte the engine could read --
-    // can a late response be judged against the bus.
-    transmit_if_due(now_us, /*queue_drained=*/true, belief_stale);
+    // can a late response be judged against the bus. On the late path this is always the
+    // empty-queue exit, since nothing else can end the drain while a response is waiting:
+    // the reading is complete (#372).
+    transmit_if_due(now_us, /*queue_drained=*/true);
 }
 
 } // namespace link

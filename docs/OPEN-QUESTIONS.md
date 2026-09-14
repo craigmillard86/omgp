@@ -3451,3 +3451,52 @@ same human eye as the entry above did. Nothing speculative implemented in #144.
 **Where it lands** (seven artefacts, each with a dated 2026-09-13 marker): `docs/trunk-link-layer.md` §7; `specs/002-trunk-link-layer/data-model.md` §6 (`next_probe()` during a fault and during the pass; `poll_due()` false while faulted) and §7 (`BusState` gains three fields — `fallback_answerer`, the address to enrol on the clear; `ref_pass_left`; `pass_addr`, the pass probe in flight — and the clear rule as above; implemented by T043); `spec.md` FR-026 (rewritten as one rule), the 2026-08-29 clarification and US5 acceptance scenario 3; `contracts/link-cpp.md` `bit_rate()`, `poll_due()`, `next_probe()`, `on_result()`, the health Rules and the two F3 obligations in "What F3/F4 need"; `tasks.md` (US5 goal, T041, T042, T043); `research.md`; `quickstart.md` §6 — the last three stated the superseded clear-and-pin rule. `protocol/omgp-protocol.yaml` is unchanged at this head (the two keys were added at `b85171d` and removed again). The remainder of #155 (F1, F2(b), F3) is untouched here.
 
 **Supersedes:** the "re-probes on a fixed cadence … returns when a quorum answers" clauses of the 2026-09-06 F4 entry, which keeps its history; and this entry's own first revision at `b85171d`. **Amends:** the seven artefacts named above, each with a dated marker.
+
+---
+
+## 2026-09-14 — after #372, the Responder's late-path cap can still fire into a frame it HAS read: the residual, its exact bound, and why it is not the collision the ruling closed
+
+**Context:** the maintainer ruling of 2026-09-11 (the "Maintainer rulings on the pending
+entries" entry, item 5) preserves "the engine never keys down onto a bus it has not read, nor
+over another station's arriving frame", and #372 implements the first half: `poll()` drains
+`ByteWire` to the end of its queue on every path, holds `kHeldRequests` requests decoded
+during a late wait and discards-and-counts the rest, so `last_activity_us_` is always a
+complete reading. The reproduced blind collision (red team @`6440074` finding 1: transmit at
+`2661` inside a third station's frame at `[2631, 2721)`) is closed and pinned by
+`tests/unit/test_link_responder.cpp` "the hold filling during a late wait does not blind the
+engine …" — the answer now goes out at `1341`.
+
+**The residual, stated so the ruling's property is not read as fully delivered.** The late path
+still transmits at `min(last_activity + T_gap, defer_origin + max_frame + T_gap)`. The second
+term is a cap, and `link/responder.cpp` records why Master's justification for it does not
+carry across: Master argues that any frame beginning after `defer_origin + T_gap` is a trunk §3
+violator, but on the late path the host has already timed this node out after `T_resp` and may
+legitimately open a new transaction one `T_gap` after the bus goes idle. Such a frame can begin
+inside the wait and still be running when the cap expires, and the engine then keys down over
+it — over a frame it HAS read, which is the difference from @`6440074`.
+
+**The bound, by construction** (CLAUDE.md rule 11: this is a structural argument, not a test —
+no case in the suite demonstrates it, and none is added, because pinning a defect's timing as
+an expectation would make it harder to fix): reachable only for a frame that begins strictly
+after `defer_origin + T_gap` and is still transmitting at `defer_origin + max_frame + T_gap`,
+i.e. only when the bus was continuously busy from `defer_origin` up to that frame's start.
+`max_frame` is one worst-case stuffed frame (142 byte times), so the overlap cannot exceed one
+frame's duration, and it is zero whenever the bus goes idle for `T_gap` at any point in the
+wait. Removing the cap entirely is not available: FR-014's "MUST still transmit" then loses to
+a babbling station, which is exactly what the cap was added for (`link/master.cpp`, and this
+suite's "the wait for an idle bus is bounded …").
+
+**Recommendation:** rule it with the still-open 2026-09-06 entry "the held-request queue is
+unbounded and uncounted; FR-014 and FR-017 conflict on a stale queued request", which is the
+same conflict at a different point — whether a node's late answer may go out over a bus that is
+legitimately busy, or must wait indefinitely. Two candidate corners, both cheap to build: (a)
+keep the cap and accept the overlap as a bounded, documented risk (`docs/THREAT-MODEL.md`), on
+the ground that the host has already timed this node out and will retry (trunk §7); or (b) let
+the cap release the *wait* but still require `T_gap` of idle before keying down, i.e. abandon
+the late response after the cap when the bus never grants a gap, counting the abandonment in
+`stats()` — which respects FR-017 and trunk §3 absolutely, at the cost of FR-014's "MUST still
+transmit" in exactly the babble case. (b) inverts the 2026-09-11 precedence between those two
+clauses, so it is a maintainer's call, not an implementation detail.
+
+**Ruling:** PENDING — human. **Amends:** none — the 2026-09-11 ruling stands as made; this
+records what its implementation does and does not establish. **Supersedes:** none.
