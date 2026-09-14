@@ -135,7 +135,24 @@ jobs:
             .github/agent-config.yml
             tools/ci/gate-budgets.sh
       - id: read
-        run: bash tools/ci/gate-budgets.sh .github/agent-config.yml | tee -a "$GITHUB_OUTPUT"
+        # Bootstrap and fail-soft, learned on the PR that added this job: the default branch
+        # did not carry the reader yet, `bash missing.sh | tee` passed under the default
+        # `bash -e` (no pipefail), the outputs were EMPTY, and fromJSON('') then failed the
+        # gated job at setup — ci-gate red, no review, no red-team verdict. So: pipefail
+        # (shell: bash), and if the reader is absent, fails, or emits anything but the six
+        # key=value lines, fall back to the literals the workflows carried before the ruling
+        # — never wider — and say so. Pinned by test_gate_budgets_are_read_from_the_default_branch_and_wired.
+        shell: bash
+        run: |
+          out=""
+          if [ -f tools/ci/gate-budgets.sh ]; then
+            out=$(bash tools/ci/gate-budgets.sh .github/agent-config.yml) || out=""
+          fi
+          if [ "$(printf '%s\n' "$out" | grep -c '^[a-z_]*=[0-9][0-9]*$')" -ne 6 ]; then
+            echo "::notice::gate-budgets: reader absent or unreadable on the default branch — using the pre-ruling literals"
+            out=$'review_timeout_minutes=30\nred_team_timeout_minutes=50\ndeep_verify_timeout_minutes=45\nreview_max_turns=150\nred_team_max_turns=150\nred_team_deadline_minutes=40'
+          fi
+          printf '%s\n' "$out" | tee -a "$GITHUB_OUTPUT"
 
   deep-verify:
     needs: budgets

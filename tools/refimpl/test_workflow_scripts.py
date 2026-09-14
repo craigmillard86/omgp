@@ -1563,7 +1563,17 @@ def test_gate_budgets_are_read_from_the_default_branch_and_wired():
         budgets = _job(wfn, "budgets")
         co = next(s for s in budgets["steps"] if "actions/checkout" in s.get("uses", ""))
         assert "default_branch" in co["with"]["ref"], f"{wfn}: budgets must check out the default branch"
-        assert any("tools/ci/gate-budgets.sh" in s.get("run", "") for s in budgets["steps"]), wfn
+        read = next(s for s in budgets["steps"] if "tools/ci/gate-budgets.sh" in s.get("run", ""))
+        # Bootstrap + fail-soft (found live on the PR that added the job, run 34819298347/51 and
+        # ci 34819298330: reader absent on the default branch -> empty outputs -> fromJSON('')
+        # failed the gated job at setup). pipefail, presence test, six-line validation, and a
+        # fallback that is exactly the pre-ruling literals.
+        assert read.get("shell") == "bash", f"{wfn}: the read step needs pipefail (shell: bash)"
+        assert "[ -f tools/ci/gate-budgets.sh ]" in read["run"], f"{wfn}: no bootstrap presence test"
+        assert "-ne 6" in read["run"], f"{wfn}: the reader's output is not validated"
+        for lit in ("review_timeout_minutes=30", "red_team_timeout_minutes=50", "deep_verify_timeout_minutes=45",
+                    "review_max_turns=150", "red_team_max_turns=150", "red_team_deadline_minutes=40"):
+            assert lit in read["run"], f"{wfn}: fallback lost {lit}"
         gated = _job(wfn, job)
         assert "budgets" in (gated.get("needs") or []), f"{wfn}: {job} does not need budgets"
         assert f"needs.budgets.outputs.{tkey}" in str(gated["timeout-minutes"]), (wfn, gated["timeout-minutes"])
