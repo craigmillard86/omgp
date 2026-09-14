@@ -3509,6 +3509,8 @@ the no-handler fallback. Items (2) (own-script → wildcard → default ordering
 
 **Ruling:** human, 2026-09-14 (in session with Claude Code; ratified by the merge of the PR carrying this entry). **The node yields.** The host is the sole initiator on a bus with no arbitration, no CSMA and no token (trunk §3), so where both gaps expire at the same instant the node waits and the host transmits. Alternatives considered and not taken: the host yielding (would make the node's late transmission a second initiator), and a fixed node back-off after `T_gap` (a new timing symbol for a case the yield rule already settles). trunk §3's bullet now cites this ruling; #374 stands as filed.
 
+**Refined after the round-1 red team on #523:** the ruling was ahead of the engines. Both key down at exactly `last activity + T_gap` — the host at `max(deadline, last_activity + T_gap)`, the node at `last_activity + T_gap` — and the existing `[timing:T_gap]` cases in `test_link_master` and `test_link_responder` pin those identical instants (demonstrated by the red team on the pristine tree). A node cannot see the host's pending gap, so "yield" is implementable only as a node-side margin: earliest transmission strictly after the gap. That obligation is filed as #527 (tests first; the host side unchanged), trunk §3 now says so beside the rule, and until it lands the sentence is document text the engines do not implement (rule 11: a recorded divergence).
+
 **Amends:** the 2026-09-11 tie-break entry (ruled) and trunk §3's gap bullet marker. **Supersedes:** none.
 
 ---
@@ -3518,6 +3520,8 @@ the no-handler fallback. Items (2) (own-script → wildcard → default ordering
 **Context:** the 2026-09-13 F4 entry left one point open: a rig strapped entirely at the fallback rate with no node ever enrolled never declares BUS_FAULT (`|enrolled| = 0`), so the alternating probes never start and the host, probing at the reference rate, never discovers it — "bring-up rate" is not delivered by the health machinery alone (round-5 review on #472).
 
 **Ruling:** human, 2026-09-14 (in session with Claude Code; ratified by the merge of the PR carrying this entry). **Bring-up at the fallback rate is the layer above's action through `Master::set_bit_rate`** (`contracts/link-cpp.md`), the same path that restores the reference rate; the 2026-08-29 clarification that rate selection is an L4/human action covers both directions. The alternative — the enrolment rotation alternating rates for never-answered addresses — is not taken: it would double discovery time for every reference-rate rig to serve a case that is a deliberate bench configuration, and it would need a data-model §6 change. What this gives up, stated: a cold fallback-rate rig is silent to a host that nobody told; that is the accepted cost, not a property the health rule provides (rule 11). Recorded in trunk §7's bus-health bullet and data-model §7.
+
+**Refined after the round-1 red team on #523:** naming `Master::set_bit_rate` alone was wrong. That call is a pass-through to the wire, and the tracker's `bit_rate()` — the value F3 derives `T_poll` and the §6 budget from, and the rate enrolment probes are issued at — was assigned only by a clear; on a cold rig there is no fault and no clear, so the red team's stub-wire reproducer showed `wire.bit_rate() = 115200` against `health.bit_rate() = 1000000` (8.68×) after the ruled call, and the next enrolment probe would have undone the bring-up. `contracts/link-cpp.md` now gives `HealthTracker` a `set_bit_rate` (the layer above's selection; never a clear; T043) and a third F3 obligation — the wire and the tracker are set in the same step; data-model §7 says `bit_rate` is assigned by a clear or by that call. The ruling's substance (bring-up is the layer above's action, not the rotation's) stands.
 
 **Amends:** the 2026-09-13 F4 entry's "Open, recorded with a recommendation rather than ruled here" point (ruled as recommended). **Supersedes:** none.
 
@@ -3543,7 +3547,7 @@ the no-handler fallback. Items (2) (own-script → wildcard → default ordering
 
 ---
 
-## 2026-09-14 — Mull path filters: the 2026-09-06 entry is ratified; `contracts/tooling.md` step 3 and research trap (4) now say "at compile time"
+## 2026-09-14 — Mull path filters: the 2026-09-06 entry is ratified; `contracts/tooling.md` step 3 and research trap (4) drop the "pending a ruling" marker
 
 **Context:** the 2026-09-06 entry "Mull path filters are safe at RUN time; the 'no include/exclude paths' rule was measured at compile time only" measured 260/260 identical mutant statuses with `includePaths` in the run-time config (Mull 0.34.0, LLVM 14 locally and LLVM 18 in a `ubuntu:24.04` container) and amended `specs/001-protocol-foundation/contracts/tooling.md` step 3 and `research.md` trap (4) in place, marked "pending a ruling". #153 item 4 carried the ruling.
 
@@ -3561,7 +3565,7 @@ the no-handler fallback. Items (2) (own-script → wildcard → default ordering
 
 **Ruling:** human, 2026-09-14 (in session with Claude Code; the implementation is the `governance/gate-budgets` PR, T3, human-merged). (1) **`--max-turns 150`** for both actions — about 2.5× the largest measured count, so a normal round is never cut and a runaway loop is bounded twice (turns and the clock). (2) **Budgets move to `agent-config.yml`** (`review_timeout_minutes: 30`, `red_team_timeout_minutes: 50`, `deep_verify_timeout_minutes: 45`, `review_max_turns: 150`, `red_team_max_turns: 150`), read by a `budgets` job from the **default branch** so a PR cannot widen its own gate; unreadable or out-of-range values fail closed to the values that were hard-coded; the red team's posting deadline is derived from its timeout (ten minutes before the kill) instead of a second literal. (3) **Incremental red-team scope is allowed under exactly two conditions, otherwise whole-PR:** the previous red-team verdict (at the previous verdict head `tools/round_budget.py` reports) was `clean`, AND every file changed since that head is docs- or tests-only (`docs/**`, `specs/**`, `tests/**`, `*.md`) — then the attack may cover only that delta and still post `clean @ head`, saying so and naming the head it rests on. Any source, workflow, tool or protocol file in the delta, or a previous verdict of `findings`, means the whole PR is attacked again. What this gives up, stated: a clean verdict may then rest on an earlier pass's coverage of unchanged source; the conditions are chosen so that the unchanged source is exactly what that pass already attacked.
 
-**Amends:** GOVERNANCE §4 "Adversarial round budget" (a scope sub-bullet) and the red-team prompt. **Supersedes:** none.
+**Amends** (in the `governance/gate-budgets` PR, #524 — not in the PR carrying this entry, which changes no workflow, config or GOVERNANCE text): GOVERNANCE §4 "Adversarial round budget" (a scope sub-bullet), a new §4 "Gate budgets" bullet, `agent-config.yml` and the red-team prompt. **Supersedes:** none.
 
 ---
 

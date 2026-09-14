@@ -208,9 +208,14 @@ public:
                                                                // issued ("What F3/F4 need", obligation 2). During a pass the
                                                                // yielded address is held in pass_addr until its outcome arrives
     bool bus_fault() const;
-    uint32_t bit_rate() const;                                 // rate in use after the last recovery: the reference if any node answered
-                                                               // there during the fault, else the fallback; no automatic return (F4;
-                                                               // data-model §7, amended 2026-09-13)
+    uint32_t bit_rate() const;                                 // rate in use: assigned by a clear (the reference if any node answered
+                                                               // there during the fault, else the fallback; no automatic return — F4,
+                                                               // data-model §7, amended 2026-09-13) or by set_bit_rate() below
+    void set_bit_rate(uint32_t bps);                           // the layer above's selection — bring-up AT the fallback rate, or
+                                                               // restoring the reference rate (ruling 2026-09-14): assigns the rate
+                                                               // bit_rate() reports and enrolment probes are issued at; never a
+                                                               // clear, changes no node state. Called in the same step as
+                                                               // Master::set_bit_rate ("What F3/F4 need", obligation 3). T043
 };
 ```
 Rules: SUSPECT after `TRUNK_suspect_after_failures` consecutive failures; OFFLINE after
@@ -231,11 +236,17 @@ wire), `Responder` + `RequestHandler` (virtual backplane), `MockWire` step kinds
 mapping target for scenario YAML fault steps. All of it is in this contract and
 `byte-wire-and-clock.md`; nothing else is required.
 
-Two obligations on F3 that the health tracker's bus-fault rule (data-model §7, F4, 2026-09-13)
-relies on and cannot enforce from this side — **assumed** here, to be pinned by F3's own tests:
+Three obligations on F3 that the health tracker's rate rules (data-model §7, F4, 2026-09-13 and
+2026-09-14) rely on and cannot enforce from this side — **assumed** here, to be pinned by F3's own tests:
 1. While `bus_fault()` is true, issue only the probe `next_probe()` returns — no status polls
    (`poll_due()` is already false) and no demand traffic. Every enrolled node is SUSPECT or
    OFFLINE, so nothing could be delivered; this makes every `on_result` during a fault a probe's.
 2. Call `next_probe()` once per probe issued, when about to issue it. Each call advances the
    enrolment rotation and, while `bus_fault()`, the rate alternation; polling it at every
    superframe boundary while a transaction is still in flight would count phantom rate changes.
+3. Keep the wire and the tracker in step: a rate the layer above selects — bring-up at the
+   fallback rate, or restoring the reference rate (ruling 2026-09-14) — goes to BOTH
+   `Master::set_bit_rate` and `HealthTracker::set_bit_rate` in the same step. The Master call is
+   a pass-through to the wire and does not reach the tracker; a tracker left at the reference
+   rate would issue the next enrolment probe at it (undoing the bring-up) and budget every
+   superframe ≈ 8.7× too short — demonstrated by the round-1 red team on #523 with a stub wire.

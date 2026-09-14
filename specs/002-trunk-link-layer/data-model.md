@@ -278,8 +278,9 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   (≈ 8.7×) the time of the same transaction at the reference rate, and the superframe that issues
   it is stretched accordingly — whether that is because `bit_rate` is the fallback rate, or
   because a fault-time fallback probe (§7, alternation) is issued at the fallback rate while
-  `bit_rate` still reads the reference rate (`bit_rate` is assigned only by a clear; during a
-  fault the probe's rate is the probe's own, round-9 red team on #472). Pass probes are issued at
+  `bit_rate` still reads the reference rate (`bit_rate` is assigned only by a clear or by the
+  layer above's `set_bit_rate`, ruling 2026-09-14; during a fault the probe's rate is the
+  probe's own, round-9 red team on #472). Pass probes are issued at
   the reference rate and are never stretched, so a reference pass is ≤ 15 × T_poll = 30 ms
   whichever rate was in use before the fault. One minimal status-poll transaction alone is
   ≈ 2.4 ms at 115.2 kbit/s, so §6's 2 ms superframe cannot hold one. Implemented where the
@@ -290,8 +291,11 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   cadence-and-quorum return was ruled and withdrawn the same day; see `docs/OPEN-QUESTIONS.md`.
   Bring-up *at* the fallback rate is likewise the layer above's: a rig with no node ever
   enrolled never declares a fault (`|enrolled| = 0`), so this tracker never alternates and
-  never discovers a cold fallback-rate rig — `Master::set_bit_rate` is the path (ruling
-  2026-09-14); the enrolment rotation does not alternate rates for never-answered addresses.
+  never discovers a cold fallback-rate rig — `Master::set_bit_rate` together with this
+  tracker's `set_bit_rate`, in the same step, is the path (ruling 2026-09-14; F3 obligation 3 in
+  `contracts/link-cpp.md`, added after the round-1 red team on #523 showed the Master call is a
+  wire pass-through that leaves `bit_rate` 8.7× wrong); the enrolment rotation does not
+  alternate rates for never-answered addresses.
 - Fall back (while `!fault` and `bit_rate == TRUNK_bit_rate`): only through the declare rule
   above — a fault is declared only when every enrolled node is SUSPECT/OFFLINE, so the host
   never leaves the reference rate while any enrolled node answers at it.
