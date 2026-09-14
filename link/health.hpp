@@ -5,9 +5,12 @@
 //
 // Bus fault (trunk §7) is US5 (T043): the declare rule, the alternating-rate re-probe, the
 // reference pass and the two clear rules of data-model.md §7 (amended 2026-09-13, F4 —
-// docs/OPEN-QUESTIONS.md "F4's two deferred values"). Two obligations on the scheduler (F3)
-// that this layer assumes and cannot enforce are recorded in contracts/link-cpp.md
-// "What F3/F4 need"; `on_result` and `next_probe` below say where each one is relied on.
+// docs/OPEN-QUESTIONS.md "F4's two deferred values"). Three obligations on the scheduler
+// (F3) that this layer assumes and cannot enforce are recorded in contracts/link-cpp.md
+// "What F3/F4 need"; `on_result` and `next_probe` below say where the first two are relied
+// on. The third (the wire and this tracker set to the layer above's rate in the same step,
+// ruling 2026-09-14) belongs with `HealthTracker::set_bit_rate`, which is NOT implemented
+// here — tasks.md T041/T043 carry it as a red-first follow-up slice.
 #pragma once
 
 #include "link/clock.hpp"

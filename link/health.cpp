@@ -111,7 +111,17 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // outcome back is read at. That is obligation 1's territory, ASSUMED, not enforced.
     // Outside a fault the rate plays no part.
     const bool at_reference = (bus_.probe_fallback & probe_bit(addr)) == 0;
-    const bool fallback_answer = bus_.fault && ok && !at_reference;
+    // The recorded fallback answerer is strapped to the fallback rate (trunk §2: one rate per
+    // node, no auto-baud), so it cannot hear the pass probe the pass sends it at the reference
+    // rate, and an ok outcome for it while the fault stands is its fallback answer delivered
+    // again (golden rule 2: an L2 retry, a legitimate input) — never a reference-rate answer.
+    // Read at its overwritten bit (the pass probe's, reference) it cleared the fault at 1 Mbit,
+    // enrolled the node at a rate it cannot hear and bypassed the pass (round-8 red team on
+    // #530, finding 1). It is read as the fallback answer it is: the pass restarts, as the
+    // pre-first-probe duplicate already does. Demonstrated by "a duplicate fallback answer
+    // after the pass has probed the answerer ..." in tests/unit/test_link_busfault.cpp.
+    const bool is_answerer = bus_.fallback_answerer != 0 && addr == bus_.fallback_answerer;
+    const bool fallback_answer = bus_.fault && ok && (!at_reference || is_answerer);
     // The probe this outcome answers is no longer in flight, so its record stops being the
     // one thing a new episode must not overwrite. Unconditional: an outcome for an address
     // with no outstanding probe clears a bit that is already clear.
@@ -180,9 +190,10 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
         pass_ended = --bus_.ref_pass_left == 0;
     }
 
-    if (bus_.fault && ok && at_reference) {
+    if (bus_.fault && ok && at_reference && !is_answerer) {
         // §7: the host prefers the reference rate — a valid answer there clears at once,
-        // mid-pass or not. `addr` has already taken its own §6 transition above.
+        // mid-pass or not. `addr` has already taken its own §6 transition above. Never the
+        // recorded fallback answerer: its ok outcomes are its fallback answer again (above).
         clear_fault(omgp::TRUNK_bit_rate, now_us);
     } else if (pass_ended) {
         // §7: the pass drew nothing, so the fallback rate is the rate that works. `pass_ended`
