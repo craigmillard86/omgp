@@ -32,10 +32,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  budgets:
+    # Gate budgets — this job's timeout, the Claude action's turn cap and (red team) the
+    # posting deadline — come from .github/agent-config.yml on the DEFAULT branch, never
+    # from the PR's own checkout, so a PR cannot widen the gate that judges it (ruling
+    # 2026-09-14, #153 items 1-2; GOVERNANCE §4 "Gate budgets"). tools/ci/gate-budgets.sh
+    # fails closed to the literals these jobs carried before the ruling and always exits 0.
+    # Pinned by test_gate_budgets_* in tools/refimpl/test_workflow_scripts.py.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      review_timeout_minutes: ${{ steps.read.outputs.review_timeout_minutes }}
+      red_team_timeout_minutes: ${{ steps.read.outputs.red_team_timeout_minutes }}
+      deep_verify_timeout_minutes: ${{ steps.read.outputs.deep_verify_timeout_minutes }}
+      review_max_turns: ${{ steps.read.outputs.review_max_turns }}
+      red_team_max_turns: ${{ steps.read.outputs.red_team_max_turns }}
+      red_team_deadline_minutes: ${{ steps.read.outputs.red_team_deadline_minutes }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch || 'main' }}
+          sparse-checkout: |
+            .github/agent-config.yml
+            tools/ci/gate-budgets.sh
+      - id: read
+        run: bash tools/ci/gate-budgets.sh .github/agent-config.yml | tee -a "$GITHUB_OUTPUT"
+
   review:
+    needs: budgets
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: ${{ fromJSON(needs.budgets.outputs.review_timeout_minutes) }}   # review_timeout_minutes, agent-config.yml on the default branch (budgets job above)
     steps:
       # THE REVIEWER NEVER EXECUTES THE PR'S CODE (red team on #127, F1). Running the diff's
       # own tests in this job would put PR-controlled code (a conftest.py, a modified
@@ -102,7 +131,7 @@ jobs:
           case "$out" in
             round=*) ;;
             *) echo "::notice::round budget unavailable — falling back to budget off"
-               out=$'round=1\nbudget=0\nbudget_exceeded=false\nprevious_head=' ;;
+               out=$'round=1\nbudget=0\nbudget_exceeded=false\nprevious_head=\nprevious_red_team=' ;;
           esac
           printf '%s\n' "$out" >> "$GITHUB_OUTPUT"
           printf '%s\n' "$out"
@@ -208,6 +237,7 @@ jobs:
           # write verb (`gh pr review`/`merge`/`api`), and Edit/Write.
           claude_args: |
             --model claude-opus-5
+            --max-turns ${{ needs.budgets.outputs.review_max_turns }}
             --allowedTools "Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr checks*),Bash(gh pr comment*),Bash(gh run view*),Bash(gh run list*),Bash(gh issue view*),Read,Grep,Glob"
 
       - name: A verdict for this head exists

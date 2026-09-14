@@ -15,6 +15,9 @@ on stdin and prints GITHUB_OUTPUT lines:
     budget=<n>           the effective budget after clamping (0 = off)
     budget_exceeded=<bool>
     previous_head=<sha>  the head of the most recent verdict at another commit ("" if none)
+    previous_red_team=<clean|findings|>  the LAST red-team verdict state at previous_head (""
+                         if that head carried a review verdict only) — incremental scope
+                         (ruling 2026-09-14) may rest only on `clean`
 
 A round is a head, not a comment: a red-team verdict following a review verdict on the same
 commit is one round, the same rule the review-fix loop already uses for its attempts.
@@ -34,20 +37,26 @@ import sys
 # The verdict shape agent-approve.yml and red-team.yml's own guard parse: the LAST non-blank
 # line of a claude[bot] comment, trimmed, and nothing after it. A verdict quoted mid-comment
 # is not a verdict (#103) — otherwise a PR could spend its own budget by quoting itself.
-VERDICT = re.compile(r"^VERDICT\((?:review|red-team)\):\s*(?:clean|findings)\s*@\s*([0-9a-f]{40})$")
+VERDICT = re.compile(r"^VERDICT\((review|red-team)\):\s*(clean|findings)\s*@\s*([0-9a-f]{40})$")
 BUDGET_KEY = re.compile(r"^adversarial_round_budget:\s*(\d+)\s*(?:#.*)?$", re.MULTILINE)
 MAX_BUDGET = 10
 
 
-def verdict_head(comment: dict) -> str | None:
-    """The head sha a claude[bot] comment gives a verdict for, or None."""
+def verdict_of(comment: dict) -> tuple[str, str, str] | None:
+    """(kind, state, head sha) of the verdict a claude[bot] comment gives, or None."""
     if (comment.get("user") or {}).get("login") != "claude[bot]":
         return None
     lines = [ln for ln in (comment.get("body") or "").split("\n") if ln.strip()]
     if not lines:
         return None
     m = VERDICT.match(lines[-1].strip())
-    return m.group(1) if m else None
+    return (m.group(1), m.group(2), m.group(3)) if m else None
+
+
+def verdict_head(comment: dict) -> str | None:
+    """The head sha a claude[bot] comment gives a verdict for, or None."""
+    v = verdict_of(comment)
+    return v[2] if v else None
 
 
 def budget_of(config_text: str) -> int:
@@ -87,11 +96,19 @@ def main() -> int:
     except (json.JSONDecodeError, ValueError, TypeError):
         comments = []
     seen: list[str] = []
+    red_team: dict[str, str] = {}   # head -> LAST red-team state given at that head
     for c in comments if isinstance(comments, list) else []:
-        head = verdict_head(c) if isinstance(c, dict) else None
+        v = verdict_of(c) if isinstance(c, dict) else None
+        if not v:
+            continue
+        kind, state, head = v
         # The current head's own verdicts are this round's, not a previous one's.
-        if head and head != args.head and head not in seen:
+        if head == args.head:
+            continue
+        if head not in seen:
             seen.append(head)
+        if kind == "red-team":
+            red_team[head] = state   # comments are oldest-first: the last word wins
 
     try:
         budget = budget_of(pathlib.Path(args.config).read_text())
@@ -106,6 +123,7 @@ def main() -> int:
     print(f"budget={budget}")
     print(f"budget_exceeded={'true' if exceeded else 'false'}")
     print(f"previous_head={seen[-1] if seen else ''}")
+    print(f"previous_red_team={red_team.get(seen[-1], '') if seen else ''}")
     return 0
 
 
