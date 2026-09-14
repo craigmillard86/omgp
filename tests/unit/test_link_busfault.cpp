@@ -1121,6 +1121,73 @@ TEST_CASE("a failed outcome for a recorded fallback answerer still takes its §6
     REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED); // the deferred transition on the clear
 }
 
+TEST_CASE("a late reference-rate answer to a written-off pass probe does not enrol its node on a "
+          "fallback-rate trunk",
+          "[timing:bit_rate_fallback][timing:T_resp]") {
+    // Round-15 red team on #530: the write-off spent B's pass probe as evidence of silence
+    // (the pass ended, the fault cleared at the fallback rate), and then B's answer to that
+    // very probe — at the REFERENCE rate, one microsecond past the window — was read outside
+    // the fault as "the rate plays no part" and enrolled B on a trunk it cannot hear: stranded
+    // as ENROLLED, status-polled at 115 200, silently. A probe issued at a rate other than the
+    // rate now in use is not evidence its node hears the rate in use; outside a fault such an
+    // answer moves no §6 state. What this does NOT do, stated: it does not undo the clear —
+    // past the window the tracker acted as if B were silent, and no automatic return exists
+    // (ruling 2026-09-13); B stays SUSPECT, visibly, until a human or the layer above acts.
+    constexpr uint64_t kWindow =
+        2ull * kMaxWire * byte_time_us(omgp::TRUNK_bit_rate_fallback) + omgp::TRUNK_T_resp_us;
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    ThreeNodeRig::build(tracker);
+    REQUIRE(probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate_fallback).addr == kNodeC);
+    tracker.on_result(kNodeC, true, 10'000); // C's fallback answer: the pass starts
+    Probe p = tracker.next_probe(11'000);    // pass probe A
+    REQUIRE(p.addr == kNodeA);
+    tracker.on_result(kNodeA, false, 12'000);
+    const uint64_t tb = 13'000;
+    p = tracker.next_probe(tb); // pass probe B, at the reference rate — its answer is late
+    REQUIRE(p.addr == kNodeB);
+    REQUIRE(p.bit_rate == omgp::TRUNK_bit_rate);
+    p = tracker.next_probe(tb + kWindow + 1); // B written off; pass probe C
+    REQUIRE(p.addr == kNodeC);
+    tracker.on_result(kNodeC, false, tb + kWindow + 2); // the pass drew nothing: clears at 115 200
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    const size_t recovered_before = listener.count(Notice::RECOVERED);
+
+    tracker.on_result(kNodeB, true, tb + kWindow + 3); // B's reference-rate answer, at last
+
+    REQUIRE(tracker.state(kNodeB) ==
+            HealthState::SUSPECT); // not enrolled on a trunk it cannot hear
+    REQUIRE(listener.count(Notice::RECOVERED) == recovered_before); // no transition notified
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);   // and no clear is undone
+}
+
+TEST_CASE("a late fallback-rate answer after a reference-rate clear does not enrol its node either",
+          "[timing:bit_rate_fallback]") {
+    // The mirror of the case above: A's fault-time probe went out at the fallback rate, B then
+    // cleared the fault at the reference rate, and A's late fallback answer arrives outside
+    // the fault. Enrolling A would status-poll it at 1 Mbit, which it cannot hear, back into
+    // SUSPECT and a re-declared fault — the declare/clear oscillation §7's deferral exists to
+    // prevent. A probe answered at a rate other than the rate in use moves no §6 state.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    ThreeNodeRig::build(tracker);
+    const Probe pa = tracker.next_probe(4'000); // A @ fallback
+    const Probe pb = tracker.next_probe(4'000); // B @ reference
+    REQUIRE(pa.bit_rate == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(pb.addr == kNodeB);
+    tracker.on_result(kNodeB, true, 4'100); // clears at the reference rate
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+    const size_t recovered_before = listener.count(Notice::RECOVERED);
+    tracker.on_result(kNodeA, true, 4'200); // A's fallback-rate answer, after the clear
+    REQUIRE(tracker.state(kNodeA) == HealthState::SUSPECT);
+    REQUIRE(listener.count(Notice::RECOVERED) == recovered_before);
+    REQUIRE_FALSE(tracker.bus_fault());
+}
+
 TEST_CASE("a second outstanding probe does not cancel the first's episode-boundary exemption",
           "[timing:bit_rate_fallback][timing:T_resp]") {
     // Round-10 review on #530, finding 1 [HIGH]: round 9's "newest handout supersedes" rule
