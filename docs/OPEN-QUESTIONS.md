@@ -3877,9 +3877,8 @@ hits and no writer among them: the declaration, the two artefact lines above,
 `specs/002-trunk-link-layer/tasks.md:266` (T041's criterion), and five test reads, all of which
 assert it is *unchanged* or `== 0` (`tests/unit/test_link_master.cpp:3162,3616,4321`,
 `tests/unit/test_link_loop.cpp:786`, `tests/unit/test_link_types.cpp:118`). No increment
-anywhere. This is **demonstrated by that
-search over the current repo contents** — a control, not a guarantee: it says no writer exists
-today, not that none can.
+anywhere. This is **demonstrated by that search over the current repo contents** — a control, not
+a guarantee: it says no writer exists today, not that none can.
 
 Nor can the layer that decides the fault reach that counter. This too is a **control over the
 contents of these files at `ac0f36f`**, not a proof by construction — the tasks under discussion
