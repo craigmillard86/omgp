@@ -35,7 +35,12 @@ def parse(diff: str) -> tuple[dict, dict]:
     for line in diff.splitlines():
         if line.startswith("diff --git "):
             cur, in_hunk = None, False
-        elif line.startswith("+++ "):
+        elif not in_hunk and line.startswith("+++ "):
+            # `not in_hunk` for the same reason the `-` branch below has it: an ADDED line whose
+            # own text starts with `++ ` renders as `+++ new note`, and read as a header it
+            # re-keys the file's remaining hunks under a fabricated path — the changed lines
+            # after it leave the gate's scope and a survivor on them is never counted (#558
+            # red-team B-A). A real `+++` header always precedes its file's first `@@`.
             p = line[4:].strip()
             cur = None if p == "/dev/null" else (p[2:] if p.startswith("b/") else p)
             in_hunk = False

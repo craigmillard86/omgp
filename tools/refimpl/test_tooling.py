@@ -683,6 +683,58 @@ def test_mutate_ranges_feeds_the_gate_the_deleted_half_of_a_mixed_hunk(tmp_path)
     assert "blank or a // comment" not in out, out
 
 
+def test_mutate_ranges_does_not_read_an_added_line_as_a_file_header(tmp_path):
+    """`git diff -U0` renders an ADDED line whose own text begins with `++ ` as `+++ new note`,
+    which is also the shape of a post-image file header. Reading it as one re-keys every LATER
+    hunk of that file under a fabricated path: the real file loses the changed lines that follow
+    (so a survivor on them is out of scope, `survived=0`), and the fabricated dir's per-dir
+    blind-spot check is vacuously satisfied — the gate exits 0 on an unlabelled survivor sitting
+    on a line the diff changed (#558 red-team B-A). A header only ever precedes its file's first
+    `@@`, so that branch is reachable only outside a hunk, exactly as the `-` branch already is.
+    The carrier here is a block comment: clang-format normalises a leading `++ ` away in code,
+    but not inside `/* … */`."""
+    repo = tmp_path / "r"
+    (repo / "l3").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True)
+    before = ("/* changelog:\n   older note\n*/\nint f(int a) {\n    if (a > 4)\n"
+              "        return 1;\n    return 0;\n}\n")
+    (repo / "l3" / "x.cpp").write_text(before)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "b"],
+                   cwd=repo, check=True)
+    # Hunk 1 adds the poison line inside the block comment; hunk 2 — the one that must not be
+    # lost — changes a real guard.
+    (repo / "l3" / "x.cpp").write_text(before.replace("/* changelog:\n", "/* changelog:\n++ new note\n")
+                                             .replace("if (a > 4)", "if (a >= 4)"))
+    diff = subprocess.run(["git", "diff", "-U0", "HEAD", "--", "l3"], cwd=repo,
+                          capture_output=True, text=True, check=True).stdout
+    assert "\n+++ new note\n" in diff, diff        # the shape under attack really is produced
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "mutate_ranges.py"),
+                        "--ranges-out", str(tmp_path / "rg.json"),
+                        "--removed-out", str(tmp_path / "rm.json")],
+                       input=diff, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    ranges = json.loads((tmp_path / "rg.json").read_text())
+    removed = json.loads((tmp_path / "rm.json").read_text())
+    assert list(ranges) == ["l3/x.cpp"], ranges    # no fabricated key
+    assert ranges["l3/x.cpp"] == [[2, 2], [6, 6]], ranges
+    assert removed["l3/x.cpp"] == ["    if (a > 4)"], removed
+    # ... and end to end: the survivor on the guard the diff changed is in scope and unlabelled.
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "test_x.json").write_text(json.dumps({"files": {str(repo / "l3" / "x.cpp"): {"mutants": [
+        _mutant(6, 9, "cxx_ge_to_gt", "Survived"), _mutant(7, 9, "cxx_remove_void_call", "Killed")]}}}))
+    r = subprocess.run([sys.executable, str(REPORT), "--reports", str(reports), "--root", str(repo),
+                        "--scope-dirs", "l3 link core", "--ranges", str(tmp_path / "rg.json"),
+                        "--removed", str(tmp_path / "rm.json"), "--source-ext", _cfg_source_ext(),
+                        "--ref", "HEAD", "--out", str(tmp_path / "report.json")],
+                       capture_output=True, text=True, cwd=ROOT)
+    out = r.stdout + r.stderr
+    assert r.returncode == 1, out
+    assert "UNLABELLED survivor: l3/x.cpp:6" in out, out
+    assert "survived=1" in out, out
+
+
 def test_report_diff_mode_fails_when_a_changed_dir_has_no_executed_mutants(tmp_path):
     """A run-time path filter (mutate.sh phase 2) that matches one scope dir but not another
     leaves total > 0, so the whole-scope blind-spot rule above never fires while every mutant
