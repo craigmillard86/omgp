@@ -167,23 +167,36 @@ public:
                                                   // (Amended in PR #149, red team @71caba0 HIGH: "immediately" is
                                                   // qualified by trunk §3's media access -- outside its window the
                                                   // engine owes an idle bus, so it transmits at
-                                                  // min(last_activity + T_gap, defer_origin + max_frame + T_gap)
-                                                  // when its reading of the bus is COMPLETE, and at
-                                                  // defer_origin + max_frame + T_gap (the cap alone, whatever
-                                                  // last_activity says) when the drain stopped with requests held
-                                                  // and the reading is therefore partial. The wait is RATE-
-                                                  // DEPENDENT, because max_frame_us() recomputes from the wire's
-                                                  // current rate: ~1.47 ms at TRUNK_bit_rate (142*10 + 50 us) but
-                                                  // ~12.3 ms at TRUNK_bit_rate_fallback (142*86 + 50 us, byte_time
-                                                  // 86 us by integer division) -- 8.3x, and operative exactly when
-                                                  // the trunk is degraded, since HealthTracker re-probes at the
-                                                  // fallback rate under bus_fault(). Quoting only the 1 Mb/s figure
-                                                  // would mis-size anything built on this engine by an order of
-                                                  // magnitude on its known weak axis. Pending a ruling, see
-                                                  // docs/OPEN-QUESTIONS.md 2026-09-07 "the Responder's late path
-                                                  // defers for an idle bus" and, for the collision that wait can
-                                                  // still cause, "...CAN transmit into a frame it has not read".)
+                                                  // min(last_activity + T_gap, defer_origin + max_frame + T_gap).
+                                                  // The wait is RATE-DEPENDENT, because max_frame_us() recomputes
+                                                  // from the wire's current rate: ~1.47 ms at TRUNK_bit_rate
+                                                  // (142*10 + 50 us) but ~12.3 ms at TRUNK_bit_rate_fallback
+                                                  // (142*86 + 50 us, byte_time 86 us by integer division) -- 8.3x,
+                                                  // and operative exactly when the trunk is degraded, since
+                                                  // HealthTracker re-probes at the fallback rate under
+                                                  // bus_fault(). Quoting only the 1 Mb/s figure would mis-size
+                                                  // anything built on this engine by an order of magnitude on its
+                                                  // known weak axis.)
+                                                  // (Amended again 2026-09-14, ruling of 2026-09-11 implemented by
+                                                  // #372: poll() drains to the END of the wire's queue on every
+                                                  // path, so `last_activity` is always a COMPLETE reading and the
+                                                  // second, cap-only branch above -- "the drain stopped with
+                                                  // requests held" -- no longer exists. A request completing
+                                                  // during a late wait is held (2 of them) or DISCARDED AND
+                                                  // COUNTED in stats().discards. What the cap does NOT give is
+                                                  // freedom from collision: a frame beginning after
+                                                  // defer_origin + T_gap and still running at the cap is
+                                                  // transmitted over. That residual is open --
+                                                  // docs/OPEN-QUESTIONS.md 2026-09-14.)
     const AddrStats& stats() const;               // replays_served, discards, transactions (requests handled), late_responses
+                                                  // (discards also counts a request completing during a late wait
+                                                  //  that the hold cannot take -- ruling 2026-09-11, #372. The
+                                                  //  acceptance screen there does not read `retry`, so a trunk §7
+                                                  //  retry past the hold is discarded too: no replay (FR-015), no
+                                                  //  fresh answer (FR-016). Neither MUST is amended by item 5 of
+                                                  //  that ruling (FR-015's 2026-09-11 marker is item 7's #373
+                                                  //  request-byte matching, a different clause; FR-016 has none)
+                                                  //  -- divergence open, docs/OPEN-QUESTIONS.md 2026-09-14.)
 };
 ```
 
@@ -208,9 +221,24 @@ public:
                                                                // issued ("What F3/F4 need", obligation 2). During a pass the
                                                                // yielded address is held in pass_addr until its outcome arrives
     bool bus_fault() const;
-    uint32_t bit_rate() const;                                 // rate in use after the last recovery: the reference if any node answered
-                                                               // there during the fault, else the fallback; no automatic return (F4;
-                                                               // data-model §7, amended 2026-09-13)
+    uint32_t bit_rate() const;                                 // rate in use: assigned by a clear (the reference if any node answered
+                                                               // there during the fault, else the fallback; no automatic return — F4,
+                                                               // data-model §7, amended 2026-09-13) or by set_bit_rate() below
+    void set_bit_rate(uint32_t bps);                           // the layer above's selection — bring-up AT the fallback rate, or
+                                                               // restoring the reference rate (ruling 2026-09-14): assigns the rate
+                                                               // bit_rate() reports and, while !bus_fault(), the rate enrolment
+                                                               // probes are issued at (during a fault the probe's rate is the
+                                                               // probe's own: alternation and the reference pass, data-model §7).
+                                                               // Never a clear, changes no node state. Refused (not assigned) on
+                                                               // exactly Master::set_bit_rate's rule — bps == 0 or bps > 10 Mb/s,
+                                                               // byte_time_us(bps) would be 0 — so a refused rate leaves BOTH
+                                                               // unchanged (round-2 red team on #523). An accepted rate is a change
+                                                               // of bit_rate and counts once in BusState.rate_changes (data-model
+                                                               // §7's rule); Master::set_bit_rate counts the same action once in
+                                                               // BusStats.rate_changes — two counters, two questions (what the wire
+                                                               // was told; what the rate in use did), deliberately (round-3 red
+                                                               // team on #523). Called in the same step as Master::set_bit_rate
+                                                               // ("What F3/F4 need", obligation 3). Tests first in T041; T043
     const BusStats& bus_stats() const;                         // data-model §8: rate_changes and bus_faults as decided HERE — a rate
                                                                // change each time a probe goes out at a rate other than the last one
                                                                // used or a clear pins one, a fault each time one is declared.
@@ -262,11 +290,21 @@ wire), `Responder` + `RequestHandler` (virtual backplane), `MockWire` step kinds
 mapping target for scenario YAML fault steps. All of it is in this contract and
 `byte-wire-and-clock.md`; nothing else is required.
 
-Two obligations on F3 that the health tracker's bus-fault rule (data-model §7, F4, 2026-09-13)
-relies on and cannot enforce from this side — **assumed** here, to be pinned by F3's own tests:
+Three obligations on F3 that the health tracker's rate rules (data-model §7, F4, 2026-09-13 and
+2026-09-14) rely on and cannot enforce from this side — **assumed** here, to be pinned by F3's own tests:
 1. While `bus_fault()` is true, issue only the probe `next_probe()` returns — no status polls
    (`poll_due()` is already false) and no demand traffic. Every enrolled node is SUSPECT or
    OFFLINE, so nothing could be delivered; this makes every `on_result` during a fault a probe's.
 2. Call `next_probe()` once per probe issued, when about to issue it. Each call advances the
    enrolment rotation and, while `bus_fault()`, the rate alternation; polling it at every
    superframe boundary while a transaction is still in flight would count phantom rate changes.
+3. Keep the wire and the tracker in step: a rate the layer above selects — bring-up at the
+   fallback rate, or restoring the reference rate (ruling 2026-09-14) — goes to BOTH
+   `Master::set_bit_rate` and `HealthTracker::set_bit_rate` in the same step. The Master call is
+   a pass-through to the wire and does not reach the tracker; a tracker left at the reference
+   rate would issue the next enrolment probe at it (undoing the bring-up) and budget every
+   superframe ≈ 8.7× too short — demonstrated by the round-1 red team on #523 with a stub wire.
+   "In step" holds because both setters refuse the same arguments (`bps == 0`, `bps > 10 Mb/s`)
+   and neither reports acceptance: a refused rate changes neither, an accepted rate changes both
+   (round-2 red team on #523 — with a refusal rule on one side only, every refused argument put
+   the two out of step and left the tracker holding a rate whose `byte_time_us` is 0).

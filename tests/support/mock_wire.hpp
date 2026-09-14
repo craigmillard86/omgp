@@ -51,7 +51,12 @@ struct Step {
     // -Wextra, and this project builds -Werror) flags a trailing designated-init member
     // with no default member initializer even though its zero-initialized value is the
     // same either way. Only Garbage/Babble/Rate (T030) read count/seed at all.
-    uint16_t count = 0;
+    // uint32_t, not the uint16_t the artefacts first stated: Kind::Rate reads count as a bit
+    // rate (1 000 000 or 115 200), neither of which fits 16 bits. Widened 2026-09-14 by the
+    // 2026-09-03 ruling (docs/OPEN-QUESTIONS.md 2026-09-02 "Step::count (uint16_t) cannot
+    // represent Kind::Rate's bit-rate values"; #48) atomically with contracts/mock-wire.md,
+    // data-model.md §10 and research.md R-07.
+    uint32_t count = 0;
     uint32_t seed = 0;
 };
 

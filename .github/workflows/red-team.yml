@@ -36,12 +36,58 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  budgets:
+    # Gate budgets — this job's timeout, the Claude action's turn cap and (red team) the
+    # posting deadline — come from .github/agent-config.yml on the DEFAULT branch, never
+    # from the PR's own checkout, so a PR cannot widen the gate that judges it (ruling
+    # 2026-09-14, #153 items 1-2; GOVERNANCE §4 "Gate budgets"). tools/ci/gate-budgets.sh
+    # fails closed to the literals these jobs carried before the ruling and always exits 0.
+    # Pinned by test_gate_budgets_* in tools/refimpl/test_workflow_scripts.py.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      review_timeout_minutes: ${{ steps.read.outputs.review_timeout_minutes }}
+      red_team_timeout_minutes: ${{ steps.read.outputs.red_team_timeout_minutes }}
+      deep_verify_timeout_minutes: ${{ steps.read.outputs.deep_verify_timeout_minutes }}
+      review_max_turns: ${{ steps.read.outputs.review_max_turns }}
+      red_team_max_turns: ${{ steps.read.outputs.red_team_max_turns }}
+      red_team_deadline_minutes: ${{ steps.read.outputs.red_team_deadline_minutes }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch || 'main' }}
+          sparse-checkout: |
+            .github/agent-config.yml
+            tools/ci/gate-budgets.sh
+      - id: read
+        # Bootstrap and fail-soft, learned on the PR that added this job: the default branch
+        # did not carry the reader yet, `bash missing.sh | tee` passed under the default
+        # `bash -e` (no pipefail), the outputs were EMPTY, and fromJSON('') then failed the
+        # gated job at setup — ci-gate red, no review, no red-team verdict. So: pipefail
+        # (shell: bash), and if the reader is absent, fails, or emits anything but the six
+        # key=value lines, fall back to the literals the workflows carried before the ruling
+        # — never wider — and say so. Pinned by test_gate_budgets_are_read_from_the_default_branch_and_wired.
+        shell: bash
+        run: |
+          out=""
+          if [ -f tools/ci/gate-budgets.sh ]; then
+            out=$(bash tools/ci/gate-budgets.sh .github/agent-config.yml) || out=""
+          fi
+          if [ "$(printf '%s\n' "$out" | grep -c '^[a-z_]*=[0-9][0-9]*$')" -ne 6 ]; then
+            echo "::notice::gate-budgets: reader absent or unreadable on the default branch — using the pre-ruling literals"
+            out=$'review_timeout_minutes=30\nred_team_timeout_minutes=50\ndeep_verify_timeout_minutes=45\nreview_max_turns=150\nred_team_max_turns=150\nred_team_deadline_minutes=40'
+          fi
+          printf '%s\n' "$out" | tee -a "$GITHUB_OUTPUT"
+
   attack-pr:
+    needs: budgets
     if: >
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: ${{ fromJSON(needs.budgets.outputs.red_team_timeout_minutes) }}   # red_team_timeout_minutes, agent-config.yml on the default branch (budgets job above)
     # A job-level block REPLACES the workflow-level one, so every permission this job needs
     # is restated here. actions: read is this job's alone: it READS the native job's log for
     # the baseline suite result (gh run view --log) instead of re-running the whole suite per
@@ -61,11 +107,14 @@ jobs:
         # gets a deadline it can check with `date -u`. FIRST step, unconditionally: the kill
         # counts from the job start, so a clock read after checkout and the toolchain would
         # quote a start later than the real one and the margin before the kill would shrink
-        # by however long setup took (#141 review @d1fc20b, LOW).
+        # by however long setup took (#141 review @d1fc20b, LOW). The deadline is DERIVED
+        # from the timeout budget (timeout - 10 min, tools/ci/gate-budgets.sh) — two literals
+        # that had to agree were one drift away from a deadline after the kill (ruling
+        # 2026-09-14).
         id: clock
         run: |
           echo "start=$(date -u +%H:%M)Z" >> "$GITHUB_OUTPUT"
-          echo "deadline=$(date -u -d '+40 min' +%H:%M)Z" >> "$GITHUB_OUTPUT"
+          echo "deadline=$(date -u -d "+${{ needs.budgets.outputs.red_team_deadline_minutes }} min" +%H:%M)Z" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with: {ref: '${{ github.event.pull_request.head.sha }}', fetch-depth: 0}
       - id: tier
@@ -101,7 +150,7 @@ jobs:
           case "$out" in
             round=*) ;;
             *) echo "::notice::round budget unavailable — falling back to budget off"
-               out=$'round=1\nbudget=0\nbudget_exceeded=false\nprevious_head=' ;;
+               out=$'round=1\nbudget=0\nbudget_exceeded=false\nprevious_head=\nprevious_red_team=' ;;
           esac
           printf '%s\n' "$out" >> "$GITHUB_OUTPUT"
           printf '%s\n' "$out"
@@ -186,7 +235,8 @@ jobs:
             "held" claim, run the unit binaries you attacked on the pristine
             tree once. Iterate on the attacks, not on the suite.
             BUDGET: this job started at ${{ steps.clock.outputs.start }}
-            and is killed 50 min later with nothing posted. Post the comment
+            and is killed ${{ needs.budgets.outputs.red_team_timeout_minutes }}
+            min later with nothing posted. Post the comment
             BEFORE ${{ steps.clock.outputs.deadline }} — check with
             `date -u` — listing under NOT EXAMINED everything you did not
             reach. A partial verdict that says what it skipped beats no
@@ -228,6 +278,19 @@ jobs:
             changes. Say plainly in the comment that the budget applied and
             name every finding it moved, so the human sees what was
             deferred and can rule otherwise.
+            INCREMENTAL SCOPE (ruling 2026-09-14, GOVERNANCE §4): the last
+            red-team verdict at that previous head was
+            `${{ steps.rounds.outputs.previous_red_team }}` (empty: none).
+            You may attack ONLY the delta since the previous head — and
+            still post `clean @ <head sha>` resting on that earlier pass —
+            if and only if BOTH hold: (1) that value is exactly `clean`;
+            (2) every file in `git diff --name-only <previous head>..HEAD`
+            is docs- or tests-only: under docs/**, specs/**, tests/**, or a
+            *.md file. Then say in the comment that the scope was
+            incremental and name the head it rests on. If either condition
+            fails — any source, workflow, tool, CMake or protocol file in
+            the delta, a previous verdict of findings, or no previous head
+            — attack the WHOLE PR as above.
             If everything you tried passed, say exactly what you
             attacked and concede: "attacked N vectors, change held."
             Never file style opinions. Never modify the PR. A finding
@@ -250,6 +313,7 @@ jobs:
           # native job's log for the baseline (needs actions: read above).
           claude_args: |
             --model claude-opus-5
+            --max-turns ${{ needs.budgets.outputs.red_team_max_turns }}
             --allowedTools "Bash(./pipeline.sh*),Bash(./build/native/*),Bash(ctest*),Bash(g++*),Bash(python3*),Bash(date -u),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr checks*),Bash(gh run view*),Bash(gh pr comment*),Read,Write,Grep,Glob"
       - name: A verdict for this head exists
         # The action can finish "success" having posted nothing (it skips itself when this

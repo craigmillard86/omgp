@@ -63,10 +63,10 @@ in `tools/mutate_report.py` (tested on synthetic Elements reports in
    --print-phase2-config` shows it) with the same mutators, the timeout, `quiet: true` and
    `includePaths` for `scope_dirs` (`^<root>/<dir>/.*`), so only scope-dir mutants are
    *executed*; the runner captures no test output (`--no-output`; kills are exit-status);
-   the merge in step 4 is unchanged and still the gate. (Amended 2026-09-06, gate-budget PR —
-   pending a ruling, see `docs/OPEN-QUESTIONS.md` 2026-09-06 "Mull path filters are safe at
-   RUN time"; `tools/mutate_diff_reports.py` compares two Elements reports mutant by mutant
-   and is the evidence tool for it.)
+   the merge in step 4 is unchanged and still the gate. (Amended 2026-09-06, gate-budget PR;
+   ruled 2026-09-14 — `docs/OPEN-QUESTIONS.md` 2026-09-06 "Mull path filters are safe at
+   RUN time" and the 2026-09-14 ratification entry; `tools/mutate_diff_reports.py` compares
+   two Elements reports mutant by mutant and is the evidence tool for it.)
 4. Runs the three unit binaries (`test_l3_header/payload/descriptor` — the property
    binaries are too slow per mutant at -O0) under the runner with `--workers $(nproc)`
    and the `IDE` + `Elements` reporters (+ `GitHubAnnotations` under CI); merges the

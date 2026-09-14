@@ -8,7 +8,7 @@ through explicit time.
 
 ```cpp
 enum class Kind : uint8_t { Respond, Silence, Garbage, CrcError, Duplicate, Babble, Rate };
-struct Step { uint8_t node; Kind kind; uint32_t delay_us; uint16_t count; uint32_t seed; };
+struct Step { uint8_t node; Kind kind; uint32_t delay_us; uint32_t count; uint32_t seed; };   // count widened to uint32_t 2026-09-14 (ruling 2026-09-03, #48): Rate reads it as a bit rate
 ```
 
 | Kind | Effect on the next request addressed to `node` |
