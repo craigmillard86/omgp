@@ -1016,6 +1016,46 @@ TEST_CASE("an outstanding probe exactly one outcome window old is still owed its
     }
 }
 
+TEST_CASE("an abandoned pass probe is written off after the outcome window and the pass goes on",
+          "[timing:bit_rate_fallback][timing:T_resp]") {
+    // Round-14 red team on #530, finding 1 [HIGH]: pass_probe() re-yields pass_addr until its
+    // outcome arrives, and that hold had no time bound — a single pass probe whose outcome
+    // never reaches on_result (dropped at L2, abandoned, timeout never reported: the threat
+    // model probe_live's bound already concedes) wedged the trunk for ever: bus_fault() stuck
+    // true, poll_due() false for every address, next_probe() handing back one dead address.
+    // The same bound applies: at exactly one outcome window the probe is still owed its
+    // outcome and re-yielded; one microsecond later it is written off as "drew nothing" and
+    // the pass advances — and if it was the last pass probe, the fault clears at the fallback
+    // rate right there.
+    constexpr uint64_t kWindow =
+        2ull * kMaxWire * byte_time_us(omgp::TRUNK_bit_rate_fallback) + omgp::TRUNK_T_resp_us;
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    ThreeNodeRig::build(tracker);
+    REQUIRE(probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate_fallback).addr == kNodeC);
+    tracker.on_result(kNodeC, true, 10'000); // the fallback answer: the pass starts
+    const uint64_t t0 = 11'000;
+    Probe p = tracker.next_probe(t0); // pass probe 1: A — its outcome never arrives
+    REQUIRE(p.addr == kNodeA);
+    REQUIRE(p.bit_rate == omgp::TRUNK_bit_rate);
+    p = tracker.next_probe(t0 + kWindow); // still owed: re-yielded at exactly one window
+    REQUIRE(p.addr == kNodeA);
+    p = tracker.next_probe(t0 + kWindow + 1); // written off: the pass moves to B
+    REQUIRE(p.addr == kNodeB);
+    REQUIRE(tracker.bus_fault());
+    tracker.on_result(kNodeB, false, t0 + kWindow + 100);
+    p = tracker.next_probe(t0 + kWindow + 200); // pass probe 3: C — also abandoned
+    REQUIRE(p.addr == kNodeC);
+    const uint64_t t3 = t0 + kWindow + 200;
+    p = tracker.next_probe(t3 + kWindow + 1); // the last pass probe written off: the pass drew
+    REQUIRE_FALSE(tracker.bus_fault());       // nothing, and the fault clears at the fallback rate
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(tracker.state(kNodeC) == HealthState::ENROLLED);
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);
+    REQUIRE(p.addr != kNodeC); // and what came back is an ordinary rotation probe, not the pass's
+}
+
 TEST_CASE("a second outstanding probe does not cancel the first's episode-boundary exemption",
           "[timing:bit_rate_fallback][timing:T_resp]") {
     // Round-10 review on #530, finding 1 [HIGH]: round 9's "newest handout supersedes" rule
