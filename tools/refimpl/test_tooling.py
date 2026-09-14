@@ -469,6 +469,44 @@ def test_report_no_reports_or_no_mutants_is_a_failure(tmp_path):
     assert rc == 1 and "no Mull reports" in out
 
 
+def test_report_diff_mode_comment_only_changes_are_not_a_blind_spot(tmp_path):
+    """A diff that touches only comment lines under a scope dir leaves no changed line a
+    mutant can sit on, so the in-scope count is 0 and the whole-scope blind-spot rule fired —
+    reddening CI for a PR that rewrote `mutant-ok` justifications (PR #558, link/master.cpp).
+    Comments are removed in translation phase 3, so no mutator can place a mutant on such a
+    line whatever the instrumentation does: structurally the same case as
+    `mutation-exempt(no-body)`, at line granularity, and no marker is needed to see it."""
+    root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": [[6, 6]]})   # line 6: a comment
+    rc, out, doc = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 0, out
+    assert "failing (blind spot" not in out, out
+    assert "l3/x.cpp" in out and "blank or a // comment" in out, out
+    assert doc["survived"] == 0 and doc["unlabelled"] == 0
+
+
+def test_report_diff_mode_still_fails_when_a_changed_code_line_yields_no_mutant(tmp_path):
+    """The exemption above is per changed LINE and fails closed: one changed line that is not
+    blank and not a `//` comment is code Mull should have reached, so zero mutants there is
+    still the blind spot the rule exists to catch."""
+    # Line 3 (`return 1;`) is code that carries no mutant; line 6 is a comment.
+    root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": [[3, 3], [6, 6]]})
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1, out
+    assert "blind spot" in out and "l3/x.cpp" in out, out
+
+
+def test_report_malformed_label_on_a_changed_comment_line_fails(tmp_path):
+    """The comment-only exemption must not become a hole in the label syntax check: a PR that
+    only rewrites `mutant-ok` justifications changes exactly the lines the policy lives on. A
+    malformed label on a changed line fails even when no mutant is in scope."""
+    src = list(SRC)
+    src[5] = "    // mutant-ok(whatever, cxx_gt_to_ge): not a category"
+    root, reports = _setup(tmp_path, src, MUTANTS, {"l3/x.cpp": [[6, 6]]})
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1, out
+    assert "unknown label category 'whatever'" in out, out
+
+
 def test_report_diff_mode_fails_when_a_changed_dir_has_no_executed_mutants(tmp_path):
     """A run-time path filter (mutate.sh phase 2) that matches one scope dir but not another
     leaves total > 0, so the whole-scope blind-spot rule above never fires while every mutant

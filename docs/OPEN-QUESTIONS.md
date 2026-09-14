@@ -3635,3 +3635,52 @@ states it at both the `poll()` comment and the discard branch, and the case abov
 **Ruling:** PENDING — human. **Amends:** the 2026-09-11 rulings entry, item 5 — specifically
 its **Correction**, which names FR-014 and data-model §5 as the only clauses in tension.
 **Supersedes:** none.
+
+---
+
+## 2026-09-14 — The mutation blind-spot rule reds a diff that changes only comment lines
+
+**Context:** PR #558 (task/139, `link/master.cpp`) failed the `deep-verify` diff-scoped
+mutation step: `mutation: mode=diff ... mutants=0 ...` then "scope is non-empty but Mull
+generated no mutants, and the following changed file(s) carry no `mutation-exempt(no-body)`
+marker — failing (blind spot: instrumentation is not reaching the code): link/master.cpp"
+(CI run 34847204694). The instrumentation was in fact reaching the code, and the same run says
+so three lines earlier: `test_link_master: Surviving mutants: 29`, with mutants in six further
+link/ binaries. What is zero is the count *after* the changed-line filter — every line this PR
+adds to `link/master.cpp` is a `//` comment, because the PR's whole content is rewritten
+`mutant-ok` justifications. `tools/mutate_report.py`'s "no mutants in a non-empty scope" rule
+reads that zero as the tool-failure signal it was written for, and fails.
+
+This is the 2026-08-30 entry's situation one level down. There the class was a *file* that can
+carry no mutant (a pure abstract interface); here it is a *line* — and unlike the file case,
+the argument needs no human judgement to check: comments are replaced by a space in translation
+phase 3, before any expression Mull could mutate exists, so no mutant can be located on a
+comment line whatever the instrumentation, the oracle or the ranges do. Nor is it rare: any PR
+that answers the mutation gate by writing or rewriting a justification produces exactly this
+diff, so the gate reds the very PRs it asks for.
+
+**Recommendation:** exempt a changed file from the blind-spot rule when every line the diff
+added or changed in it is blank or starts with `//` — alongside, not instead of, the
+`mutation-exempt(no-body)` marker, in both places that marker is honoured (the whole-scope rule
+and the per-changed-dir rule). No marker of its own, because the property is decidable from the
+diff. It fails closed: one changed line that is neither blank nor a `//` comment (a `/* */`
+continuation line included — deliberately, rather than widen this into a comment parser) puts
+the file back under the old rule, and so does a line the ranges name but the checked-out tree
+does not have. Because the exempted diff shape is precisely the shape that carries policy
+labels, the malformed-`mutant-ok` check moves ahead of the count-based rules and widens to
+every changed line (it previously ran only over files that had an in-scope mutant, so a
+malformed label in a comment-only PR was read by nothing): the exemption is from the blind-spot
+rule, never from the label syntax.
+
+Does not touch `tools/mutate.cfg [policy]`'s T3 constants (`max_unlabelled_survivors = 0`,
+`label_categories`): a changed *code* line with an unlabelled survivor gates exactly as before.
+Implemented as the safe default per CLAUDE.md ("proceed only if a safe default exists"), in
+`tools/mutate_report.py` (`changed_lines_all_comments`, `no_mutant_reason`), with
+`tools/refimpl/test_tooling.py` pinning all three edges — exempt, fails-closed on a changed code
+line, malformed label still fails. If a human ruling instead prefers that comment-only diffs be
+dropped from `tools/mutate.sh`'s scope entirely (which would also skip the instrumented build
+for such a PR, at the cost of the oracle's evidence that the dir is still reachable), that
+should supersede this entry.
+
+**Ruling:** PENDING — human. **Supersedes:** none — it extends the 2026-08-30 "pure-interface
+headers" entry (ratified 2026-09-03), whose per-file marker stands exactly as ruled.

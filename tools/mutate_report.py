@@ -28,14 +28,27 @@ Policy (tools/mutate.cfg [policy] — T3 constants, never relaxed to get green):
   * A label whose line has no surviving mutant it could cover is STALE (the test was
     written or the code moved) — reported as a warning, never counted as a survivor.
   * "No mutants in a non-empty scope" is a tool-failure signal (blind spot: instrumentation
-    not reaching code that exists), UNLESS every changed file in the diff scope carries
+    not reaching code that exists), UNLESS every changed file in the diff scope is one of:
+      - it carries
 
-        // mutation-exempt(no-body): <one-line justification>
+            // mutation-exempt(no-body): <one-line justification>
 
-    anywhere in the file — for sources with no function body at all (e.g. a pure abstract
-    interface: only `= 0` declarations), where Mull structurally cannot produce a mutant.
-    Reviewed like mutant-ok, at file granularity: a human sees the marker in the PR diff and
-    judges whether the file truly has no mutable code (docs/OPEN-QUESTIONS.md 2026-08-30).
+        anywhere in the file — for sources with no function body at all (e.g. a pure abstract
+        interface: only `= 0` declarations), where Mull structurally cannot produce a mutant.
+        Reviewed like mutant-ok, at file granularity: a human sees the marker in the PR diff
+        and judges whether the file truly has no mutable code (docs/OPEN-QUESTIONS.md
+        2026-08-30); or
+      - every line the diff added or changed in it is blank or a `//` comment. Comments are
+        removed in translation phase 3, before anything Mull mutates exists, so no mutator can
+        place a mutant on such a line whatever the instrumentation does — the same structural
+        argument as the marker above, at line granularity, which is why it needs no marker
+        (docs/OPEN-QUESTIONS.md 2026-09-14). This fails closed: one changed line that is not
+        blank and does not start with `//` (a `/* */` continuation line included) is code, and
+        zero mutants is then the blind spot again.
+    Because a comment-only diff is exactly the shape of a PR that rewrites `mutant-ok`
+    justifications, the malformed-label check below runs on every changed line before this
+    exemption can return 0 — the exemption is from the blind-spot rule, never from the policy
+    syntax.
 
 Every claim here is about the current report: "labelled" means a label was found on the
 reported line, nothing more. The label's justification is reviewed by humans in the PR.
@@ -190,6 +203,31 @@ def main(argv=None) -> int:
                 return m.group(1).strip()
         return None
 
+    def changed_lines_all_comments(rel: str) -> bool:
+        """True when every line the diff added or changed in `rel` is blank or a `//` comment.
+        Such a line cannot carry a mutant by construction of C++ (comments are replaced by a
+        space in translation phase 3), so an empty in-scope count over them is not a blind
+        spot. Fails closed twice over: anything else on the line — code, a `/* */`
+        continuation, a line the ranges name but the tree does not have — returns False."""
+        src = source_lines(rel)
+        for a, b in ranges.get(rel, []):
+            for ln in range(a, b + 1):
+                if ln > len(src):
+                    return False
+                text = src[ln - 1].strip()
+                if text and not text.startswith("//"):
+                    return False
+        return True
+
+    def no_mutant_reason(rel: str) -> str | None:
+        """Why `rel` can legitimately contribute no mutant on a changed line, or None."""
+        marker = exempt_reason(rel)
+        if marker is not None:
+            return f"mutation-exempt(no-body): {marker}"
+        if changed_lines_all_comments(rel):
+            return "every line the diff changed there is blank or a // comment"
+        return None
+
     def label_at(rel: str, line) -> Label | None:
         """The label governing `line`: on the line itself, else on a comment-only line
         immediately above it (clang-format reflows long trailing comments, so a label
@@ -226,18 +264,27 @@ def main(argv=None) -> int:
     covered_lines: dict[tuple[str, int], set[str]] = {}
     for s in survivors:
         covered_lines.setdefault((s["file"], s["line"]), set()).add(s["mutator"])
-    files_seen = sorted({k[0] for k in best})
+    # Changed files join the scan even when no in-scope mutant put them in `best`: a diff that
+    # only rewrites justifications touches exactly the lines the policy lives on, and the
+    # comment-only exemption below would otherwise let a malformed label through unread.
+    files_seen = sorted({k[0] for k in best} | (set(ranges) if diff_mode else set()))
     for rel in files_seen:
         for idx, text in enumerate(source_lines(rel), start=1):
             if not LABEL_ANY.search(text):
                 continue
             target = idx + 1 if comment_only(text) else idx   # a comment-only label governs the next line
-            if not _in_scope(rel, target):
+            # Malformed is policy syntax wherever the label sits, so the label's OWN line being
+            # changed is enough to read it; staleness is a claim about the mutants on `target`
+            # and stays gated on `target` (a label line changed while its target was not has no
+            # in-scope mutant to be stale against, and reporting one would be noise).
+            if not (_in_scope(rel, target) or _in_scope(rel, idx)):
                 continue
             lab = parse_label(text, idx, categories)
             if lab is None or lab.error:
                 if lab is not None and f"{rel}:{idx}: {lab.error}" not in malformed:
                     malformed.append(f"{rel}:{idx}: {lab.error}")
+                continue
+            if not _in_scope(rel, target):
                 continue
             here = covered_lines.get((rel, target), set())
             if not any(lab.covers(m) for m in here):
@@ -272,21 +319,29 @@ def main(argv=None) -> int:
     if not reports:
         print("mutation: no Mull reports produced — failing (blind spot: the runner did not execute)")
         return 1
+    if malformed:
+        # Before the count-based rules: a malformed label is a policy syntax error in every
+        # mode and at every count, including the zero-mutant exemptions just below.
+        print(f"mutation: {len(malformed)} malformed mutant-ok label(s) — failing (policy syntax, see ERROR lines)")
+        return 1
     if total + not_covered == 0:
         # Every changed file in scope (ranges' keys — diff mode only; whole-tree has no
-        # single file list to check) opting out with `mutation-exempt(no-body)` means the
-        # files genuinely contain no mutable code, not that instrumentation missed them.
+        # single file list to check) structurally unable to carry a mutant on a changed line —
+        # `mutation-exempt(no-body)`, or a comment-only change — means the diff genuinely
+        # offers nothing to mutate, not that instrumentation missed mutable code.
         if diff_mode and ranges:
-            reasons = {rel: exempt_reason(rel) for rel in ranges}
+            reasons = {rel: no_mutant_reason(rel) for rel in ranges}
             unexempted = [rel for rel, reason in reasons.items() if reason is None]
             if not unexempted:
                 for rel, reason in reasons.items():
-                    print(f"mutation: {rel}: no mutants — mutation-exempt(no-body): {reason}")
-                print("mutation: scope is non-empty but every changed file is mutation-exempt(no-body) — not a blind spot")
+                    print(f"mutation: {rel}: no mutants — {reason}")
+                print("mutation: scope is non-empty but no changed line in it can carry a mutant "
+                      "(see above) — not a blind spot")
                 return 0
             print("mutation: scope is non-empty but Mull generated no mutants, and the following changed "
-                  "file(s) carry no `mutation-exempt(no-body)` marker — failing (blind spot: instrumentation "
-                  "is not reaching the code): " + ", ".join(sorted(unexempted)))
+                  "file(s) changed a line that is neither blank nor a `//` comment and carry no "
+                  "`mutation-exempt(no-body)` marker — failing (blind spot: instrumentation is not "
+                  "reaching the code): " + ", ".join(sorted(unexempted)))
             return 1
         print("mutation: scope is non-empty but Mull generated no mutants — failing (blind spot: instrumentation is not reaching the code)")
         return 1
@@ -297,13 +352,14 @@ def main(argv=None) -> int:
         # leaves total > 0, so the rule above never fires while every core/ mutant silently
         # goes unexecuted (#141 review, LOW). The report post-filter can only REMOVE mutants,
         # never restore ones the runner declined to run — so this is the check that the
-        # filter reached every changed dir. Exempt: a dir whose changed files all carry
-        # `mutation-exempt(no-body)`.
+        # filter reached every changed dir. Exempt: a dir whose changed files can none of them
+        # carry a mutant on a changed line (`mutation-exempt(no-body)`, or a comment-only
+        # change) — there is nothing under it for the filter to have hidden.
         silent = []
         for d in sorted({rel.split("/", 1)[0] for rel in ranges}):
             if executed_by_dir.get(d, 0):
                 continue
-            if all(exempt_reason(rel) is not None for rel in ranges if rel.startswith(d + "/")):
+            if all(no_mutant_reason(rel) is not None for rel in ranges if rel.startswith(d + "/")):
                 continue
             silent.append(d)
         if silent:
@@ -311,9 +367,6 @@ def main(argv=None) -> int:
                   + " although the diff changes sources there — failing (blind spot: the run-time path "
                   "filter or instrumentation is not reaching that directory)")
             return 1
-    if malformed:
-        print(f"mutation: {len(malformed)} malformed mutant-ok label(s) — failing (policy syntax, see ERROR lines)")
-        return 1
     if diff_mode:
         if len(unlabelled) > args.max_unlabelled:
             print(f"mutation: {len(unlabelled)} unlabelled survivor(s) on changed lines — triage each: "

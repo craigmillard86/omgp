@@ -13,6 +13,10 @@
 # produce a mutant; that would otherwise look identical to the "instrumentation isn't
 # reaching the code" blind spot. Opt out per file with `// mutation-exempt(no-body): <why>`
 # (docs/OPEN-QUESTIONS.md 2026-08-30) — reviewed like mutant-ok, just at file granularity.
+# The same holds line by line and needs no marker: a diff that changes only blank lines and
+# `//` comments (a PR rewriting `mutant-ok` justifications) leaves nothing a mutant can sit
+# on, so zero in-scope mutants there is structural, not a blind spot (docs/OPEN-QUESTIONS.md
+# 2026-09-14). One changed line that is neither blank nor a `//` comment fails as before.
 #
 # Oracle: for every scope dir with changed files, the tests/unit binaries named test_<dir>_*
 # (CMakeLists.txt omgp_add_catch_test) run under the runner. It was a hard-coded test_l3_*
