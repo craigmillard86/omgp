@@ -1479,3 +1479,141 @@ def test_risk_score_tiering(tmp_path):
     assert not failed, "\n".join(failed) + "\n" + r.stdout
     assert r.returncode == 0, r.stdout + r.stderr
     assert "cases passed" in r.stdout
+
+
+# --- gate budgets and incremental red-team scope (#153 items 1-3, ruling 2026-09-14) -------------
+
+GATE_BUDGETS = ROOT / "tools" / "ci" / "gate-budgets.sh"
+# The values that were hard-coded in the workflows before the ruling: what an unreadable
+# config falls back to. A fallback is never wider than what the workflows already granted.
+BUDGET_DEFAULTS = {"review_timeout_minutes": "30", "red_team_timeout_minutes": "50",
+                   "deep_verify_timeout_minutes": "45", "review_max_turns": "150",
+                   "red_team_max_turns": "150"}
+MEASURED_MAX_TURNS = 62   # largest num_turns over the last six successful runs of each action, 2026-09-14
+
+
+def _budgets(config_text, tmp_path, path=None):
+    cfg = tmp_path / "agent-config.yml"
+    cfg.write_text(config_text)
+    r = subprocess.run(["bash", str(GATE_BUDGETS), str(path or cfg)], capture_output=True, text=True,
+                       timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return dict(line.split("=", 1) for line in r.stdout.strip().splitlines() if "=" in line)
+
+
+def test_gate_budgets_reader_reads_the_ruled_keys(tmp_path):
+    """Each budget is one key in agent-config.yml; a key that is absent keeps its default, an
+    inline comment after the value is tolerated (as everywhere in that file), and the red
+    team's posting deadline is DERIVED from its timeout (ten minutes before the kill) so the
+    two can never drift apart the way two literals could."""
+    out = _budgets("review_timeout_minutes: 20\nred_team_timeout_minutes: 40   # ruling\n"
+                   "review_max_turns: 80\n", tmp_path)
+    assert out["review_timeout_minutes"] == "20"
+    assert out["red_team_timeout_minutes"] == "40"
+    assert out["red_team_deadline_minutes"] == "30"
+    assert out["review_max_turns"] == "80"
+    assert out["deep_verify_timeout_minutes"] == BUDGET_DEFAULTS["deep_verify_timeout_minutes"]
+    assert out["red_team_max_turns"] == BUDGET_DEFAULTS["red_team_max_turns"]
+
+
+def test_gate_budgets_reader_fails_closed_to_the_hard_coded_values(tmp_path):
+    """Unreadable, absent, zero, negative, fractional, hex or out-of-range values fall back to
+    the value the workflow carried before the ruling — never to a wider budget. Timeouts are
+    accepted in 5..120 minutes, turn caps in 10..500; a missing file yields every default."""
+    for cfg in ("", "wip_cap: 2\n", "review_timeout_minutes: abc\n", "review_timeout_minutes: 0\n",
+                "review_timeout_minutes: -5\n", "review_timeout_minutes: 4.9\n",
+                "review_timeout_minutes: 0x10\n", "review_timeout_minutes: 121\n",
+                "review_timeout_minutes: 4\n"):
+        out = _budgets(cfg, tmp_path)
+        assert out == dict(BUDGET_DEFAULTS, red_team_deadline_minutes="40"), (cfg, out)
+    assert _budgets("review_max_turns: 9\nred_team_max_turns: 501\n", tmp_path)["review_max_turns"] == "150"
+    assert _budgets("review_max_turns: 9\nred_team_max_turns: 501\n", tmp_path)["red_team_max_turns"] == "150"
+    assert _budgets("review_max_turns: 10\n", tmp_path)["review_max_turns"] == "10"
+    assert _budgets("review_timeout_minutes: 120\n", tmp_path)["review_timeout_minutes"] == "120"
+    missing = _budgets("", tmp_path, path=tmp_path / "nope.yml")
+    assert missing["red_team_timeout_minutes"] == "50" and missing["red_team_deadline_minutes"] == "40"
+
+
+def test_gate_budgets_config_keys_are_present_and_measured():
+    """The keys exist in agent-config.yml (a silent deletion is a policy reversal, not a
+    no-op), the timeouts are the values that were hard-coded, and the turn caps sit above
+    the largest measured round with headroom (ruling: ~2.5x) but inside the reader's range."""
+    cfg = (ROOT / ".github" / "agent-config.yml").read_text()
+    for key, default in BUDGET_DEFAULTS.items():
+        m = re.search(rf"^{key}:\s*(\d+)", cfg, re.MULTILINE)
+        assert m, f"agent-config.yml lost {key}"
+        if key.endswith("_max_turns"):
+            assert MEASURED_MAX_TURNS < int(m.group(1)) <= 500, (key, m.group(1))
+        else:
+            assert m.group(1) == default, (key, m.group(1), "the ruling keeps the hard-coded budgets")
+
+
+def _job(wfn, job):
+    return yaml.safe_load((ROOT / ".github" / "workflows" / wfn).read_text(encoding="utf-8"))["jobs"][job]
+
+
+def test_gate_budgets_are_read_from_the_default_branch_and_wired():
+    """A budgets job reads the values from the DEFAULT branch (a PR must not widen its own
+    gate), and each gated job takes its timeout-minutes from that job's outputs; the two Claude
+    actions carry --max-turns from it too. The red team's deadline and the timeout it quotes in
+    its prompt come from the same source, not from literals that drift."""
+    for wfn, job, tkey, turnkey in (("claude-review.yml", "review", "review_timeout_minutes", "review_max_turns"),
+                                    ("red-team.yml", "attack-pr", "red_team_timeout_minutes", "red_team_max_turns"),
+                                    ("ci.yml", "deep-verify", "deep_verify_timeout_minutes", None)):
+        budgets = _job(wfn, "budgets")
+        co = next(s for s in budgets["steps"] if "actions/checkout" in s.get("uses", ""))
+        assert "default_branch" in co["with"]["ref"], f"{wfn}: budgets must check out the default branch"
+        read = next(s for s in budgets["steps"] if "tools/ci/gate-budgets.sh" in s.get("run", ""))
+        # Bootstrap + fail-soft (found live on the PR that added the job, run 34819298347/51 and
+        # ci 34819298330: reader absent on the default branch -> empty outputs -> fromJSON('')
+        # failed the gated job at setup). pipefail, presence test, six-line validation, and a
+        # fallback that is exactly the pre-ruling literals.
+        assert read.get("shell") == "bash", f"{wfn}: the read step needs pipefail (shell: bash)"
+        assert "[ -f tools/ci/gate-budgets.sh ]" in read["run"], f"{wfn}: no bootstrap presence test"
+        assert "-ne 6" in read["run"], f"{wfn}: the reader's output is not validated"
+        for lit in ("review_timeout_minutes=30", "red_team_timeout_minutes=50", "deep_verify_timeout_minutes=45",
+                    "review_max_turns=150", "red_team_max_turns=150", "red_team_deadline_minutes=40"):
+            assert lit in read["run"], f"{wfn}: fallback lost {lit}"
+        gated = _job(wfn, job)
+        assert "budgets" in (gated.get("needs") or []), f"{wfn}: {job} does not need budgets"
+        assert f"needs.budgets.outputs.{tkey}" in str(gated["timeout-minutes"]), (wfn, gated["timeout-minutes"])
+        if turnkey:
+            step = next(s for s in gated["steps"] if "claude-code-action" in s.get("uses", ""))
+            assert f"--max-turns ${{{{ needs.budgets.outputs.{turnkey} }}}}" in step["with"]["claude_args"], wfn
+    clock = next(s for s in _job("red-team.yml", "attack-pr")["steps"] if s.get("id") == "clock")
+    assert "needs.budgets.outputs.red_team_deadline_minutes" in clock["run"]
+    assert "+40 min" not in clock["run"], "the deadline is derived from the budget, not a literal"
+    prompt = _verdict_prompt("red-team.yml", "attack-pr")
+    assert "needs.budgets.outputs.red_team_timeout_minutes" in prompt
+    assert "killed 50 min later" not in prompt
+
+
+def test_round_budget_reports_the_previous_red_team_verdict(tmp_path):
+    """Incremental scope (ruling 2026-09-14) may rest only on a previous CLEAN red-team verdict,
+    so the counter reports the red-team state at the previous head: clean, findings, or ""
+    when that head carried a review verdict only."""
+    out = _round_budget([_verdict(A, "red-team", "findings"), _verdict(B, "review", "clean"),
+                         _verdict(B, "red-team", "clean")], D, tmp_path=tmp_path)
+    assert out["previous_head"] == B and out["previous_red_team"] == "clean"
+    assert _round_budget([_verdict(B, "red-team", "findings")], D, tmp_path=tmp_path)["previous_red_team"] == "findings"
+    assert _round_budget([_verdict(B, "review", "clean")], D, tmp_path=tmp_path)["previous_red_team"] == ""
+    assert _round_budget([], D, tmp_path=tmp_path)["previous_red_team"] == ""
+    # A later findings verdict at the same head wins over an earlier clean one (the LAST word).
+    out = _round_budget([_verdict(B, "red-team", "clean"), _verdict(B, "red-team", "findings")], D, tmp_path=tmp_path)
+    assert out["previous_red_team"] == "findings"
+
+
+def test_incremental_red_team_scope_is_pinned():
+    """The permissive half (attack only the delta) is safe only with its two conditions and its
+    fallback; pin all three, and the governance text that states them."""
+    prompt = _verdict_prompt("red-team.yml", "attack-pr")
+    assert "INCREMENTAL SCOPE" in prompt
+    assert "steps.rounds.outputs.previous_red_team" in prompt
+    assert "steps.rounds.outputs.previous_head" in prompt
+    for token in ("docs/**", "specs/**", "tests/**", "*.md", "attack the WHOLE PR"):
+        assert token in prompt, token
+    gov = (ROOT / "docs" / "GOVERNANCE.md").read_text(encoding="utf-8")
+    assert "Incremental red-team scope" in gov and "docs- or tests-only" in gov
+    assert "Gate budgets" in gov
+    rt = next(s for s in _job("red-team.yml", "attack-pr")["steps"] if s.get("id") == "rounds")
+    assert "previous_red_team=" in rt["run"], "the fail-soft fallback must define previous_red_team too"

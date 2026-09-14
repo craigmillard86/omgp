@@ -109,7 +109,53 @@ jobs:
           path: esp32-host/build/*.bin
           if-no-files-found: ignore
 
+  budgets:
+    # Gate budgets — this job's timeout, the Claude action's turn cap and (red team) the
+    # posting deadline — come from .github/agent-config.yml on the DEFAULT branch, never
+    # from the PR's own checkout, so a PR cannot widen the gate that judges it (ruling
+    # 2026-09-14, #153 items 1-2; GOVERNANCE §4 "Gate budgets"). tools/ci/gate-budgets.sh
+    # fails closed to the literals these jobs carried before the ruling and always exits 0.
+    # Pinned by test_gate_budgets_* in tools/refimpl/test_workflow_scripts.py.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      review_timeout_minutes: ${{ steps.read.outputs.review_timeout_minutes }}
+      red_team_timeout_minutes: ${{ steps.read.outputs.red_team_timeout_minutes }}
+      deep_verify_timeout_minutes: ${{ steps.read.outputs.deep_verify_timeout_minutes }}
+      review_max_turns: ${{ steps.read.outputs.review_max_turns }}
+      red_team_max_turns: ${{ steps.read.outputs.red_team_max_turns }}
+      red_team_deadline_minutes: ${{ steps.read.outputs.red_team_deadline_minutes }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch || 'main' }}
+          sparse-checkout: |
+            .github/agent-config.yml
+            tools/ci/gate-budgets.sh
+      - id: read
+        # Bootstrap and fail-soft, learned on the PR that added this job: the default branch
+        # did not carry the reader yet, `bash missing.sh | tee` passed under the default
+        # `bash -e` (no pipefail), the outputs were EMPTY, and fromJSON('') then failed the
+        # gated job at setup — ci-gate red, no review, no red-team verdict. So: pipefail
+        # (shell: bash), and if the reader is absent, fails, or emits anything but the six
+        # key=value lines, fall back to the literals the workflows carried before the ruling
+        # — never wider — and say so. Pinned by test_gate_budgets_are_read_from_the_default_branch_and_wired.
+        shell: bash
+        run: |
+          out=""
+          if [ -f tools/ci/gate-budgets.sh ]; then
+            out=$(bash tools/ci/gate-budgets.sh .github/agent-config.yml) || out=""
+          fi
+          if [ "$(printf '%s\n' "$out" | grep -c '^[a-z_]*=[0-9][0-9]*$')" -ne 6 ]; then
+            echo "::notice::gate-budgets: reader absent or unreadable on the default branch — using the pre-ruling literals"
+            out=$'review_timeout_minutes=30\nred_team_timeout_minutes=50\ndeep_verify_timeout_minutes=45\nreview_max_turns=150\nred_team_max_turns=150\nred_team_deadline_minutes=40'
+          fi
+          printf '%s\n' "$out" | tee -a "$GITHUB_OUTPUT"
+
   deep-verify:
+    needs: budgets
     # Risk-scaled deep testing: T2/T3 PRs run focused fuzz + diff-scoped
     # mutation BEFORE merge (nightly covers the whole repo after).
     # Live since feature 001: tools/fuzz-smoke.sh runs real libFuzzer targets
@@ -120,7 +166,7 @@ jobs:
     # and the heavy steps are skipped below T2, so the job — and ci-gate — stay green.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: ${{ fromJSON(needs.budgets.outputs.deep_verify_timeout_minutes) }}   # deep_verify_timeout_minutes, agent-config.yml on the default branch (budgets job above)
     steps:
       - uses: actions/checkout@v7
         with: {fetch-depth: 0}   # mutate.sh scopes against origin/main; a depth-1 clone has no such ref
@@ -177,7 +223,7 @@ jobs:
   # so adding/removing jobs never means editing protection rules.
   gate:
     name: ci-gate
-    needs: [native, esp32, deep-verify]
+    needs: [native, esp32, deep-verify, budgets]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -186,3 +232,6 @@ jobs:
           [ "${{ needs.native.result }}" = "success" ] || exit 1
           [ "${{ needs.esp32.result }}" = "success" ] || exit 1
           [ "${{ needs.deep-verify.result }}" = "success" ] || [ "${{ needs.deep-verify.result }}" = "skipped" ] || exit 1
+          # budgets feeds deep-verify's timeout: if it failed, deep-verify was SKIPPED for the
+          # wrong reason and the line above would pass a T2 PR that was never deep-verified.
+          [ "${{ needs.budgets.result }}" = "success" ] || exit 1
