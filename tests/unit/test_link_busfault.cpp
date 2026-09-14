@@ -763,6 +763,50 @@ TEST_CASE("a pass that draws nothing clears the fault at the fallback rate and e
     REQUIRE(tracker.bus_stats().rate_changes == changes_before + 2);
 }
 
+TEST_CASE("after a fallback-rate clear a valid answer at the rate now in use enrols its node",
+          "[timing:bit_rate_fallback]") {
+    // data-model.md §7: "a valid answer at the fallback rate" is a FAULT-TIME classification.
+    // Once the fault has cleared at the fallback rate, that rate IS the rate in use (no
+    // automatic return, ruling 2026-09-13) and every probe goes out at it — so each answering
+    // address keeps its BusState::probe_fallback bit set, and only on_result's `bus_.fault`
+    // conjunct stops the next ordinary answer being read as a fallback answer. Without it the
+    // answer is deferred to a reference pass that a cleared bus never runs: the node is never
+    // enrolled, emits no ENROLLED notice, and F3 never polls it (review round 3 on #530,
+    // finding 3(b) — the conjunct was load-bearing and pinned by nothing).
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    ThreeNodeRig::build(tracker);
+    probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate_fallback);
+    tracker.on_result(kNodeC, true, 10'000);
+    uint64_t t = 11'000;
+    for (int i = 0; i < 3; ++i) {
+        const Probe p = tracker.next_probe(0);
+        tracker.on_result(p.addr, false, t += 1'000);
+    }
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    const size_t notices_after_clear = listener.entries.size();
+
+    // A fresh address from the healthy-rig rotation: A and B are SUSPECT (never candidates
+    // once the fault is cleared) and C is ENROLLED, so this is an UNENROLLED one.
+    const Probe fresh = tracker.next_probe(0);
+    REQUIRE(fresh.bit_rate == omgp::TRUNK_bit_rate_fallback); // the rate now in use
+    REQUIRE(tracker.state(fresh.addr) == HealthState::UNENROLLED);
+
+    tracker.on_result(fresh.addr, true, t += 1'000);
+
+    REQUIRE(tracker.state(fresh.addr) == HealthState::ENROLLED); // applied, NOT deferred
+    REQUIRE(listener.entries.size() == notices_after_clear + 1);
+    REQUIRE(listener.entries.back().notice == Notice::ENROLLED);
+    REQUIRE(listener.entries.back().addr == fresh.addr);
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback); // unchanged by an enrolment
+    REQUIRE(tracker.bus_stats().bus_faults == 1);
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);
+}
+
 TEST_CASE("the nodes that did not answer keep their own SUSPECT clocks across the episode",
           "[timing:offline_after_suspect]") {
     // FR-026 "their clocks were not paused by the fault" / data-model.md §6: each record's
