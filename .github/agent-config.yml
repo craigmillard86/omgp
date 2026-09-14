@@ -79,6 +79,21 @@ adversarial_round_budget: 3
 # retryBudget cases in agent_noop_harness.js.
 agent_retry_max: 1
 
+# Gate budgets (ruling 2026-09-14, #153 items 1-2; GOVERNANCE §4 "Gate budgets"). Read by
+# each gate workflow's `budgets` job from the DEFAULT branch via tools/ci/gate-budgets.sh,
+# so a PR cannot widen the gate that judges it. Timeouts are the job's `timeout-minutes`
+# (were hard-coded 30 / 50 / 45); the red team's posting deadline is derived as
+# red_team_timeout_minutes - 10 and is not a key. Turn caps are `--max-turns` on the two
+# judgement actions — a second, independent bound beside the clock. Measured 2026-09-14
+# over the last six successful runs of each: attack-pr 33-57 turns, claude-review 26-62;
+# 150 is ~2.5x the largest, so a normal round is never cut. Unreadable or out-of-range
+# values (timeouts outside 5..120, caps outside 10..500) fail closed to the old literals.
+review_timeout_minutes: 30
+red_team_timeout_minutes: 50
+deep_verify_timeout_minutes: 45
+review_max_turns: 150
+red_team_max_turns: 150
+
 # Backstops that make auto-release safe (do not remove):
 # - ready-gate still validates the enriched story mechanically
 # - risk-score re-rates the ACTUAL diff at PR time; a T2+/T3 outcome from

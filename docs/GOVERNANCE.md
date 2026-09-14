@@ -44,7 +44,7 @@ issues, comments) — never as direct changes to main.
 | WIP cap (`wip_cap` in .github/agent-config.yml, currently 2; stories in flight = open agent PRs ∪ claimed tasks, deduped per story; ruling 2026-09-03) | review capacity governs autonomy; `wip_cap: 1` restores single-slot | dispatch workflow |
 | `ready`-only pull | humans release all autonomous work | dispatch workflow |
 | Tool allow-lists + minimal permissions | agent blast radius | workflow definitions |
-| Timeouts + claim release | no runaway/stuck autonomy | workflow definitions |
+| Timeouts + claim release | no runaway/stuck autonomy | workflow definitions; the judgement gates' timeouts and turn caps are `agent-config.yml` budgets read from the default branch (§4 "Gate budgets", ruled 2026-09-14) |
 
 ## 3. Risk tiers
 
@@ -147,8 +147,37 @@ the enforcement.
     default branch, never from the PR's own checkout.
   - **Kill switch:** `adversarial_round_budget: 0` restores the unbounded
     loop. An unreadable value fails closed to the same.
+  - **Incremental red-team scope** (ruled 2026-09-14, #153 item 3). A
+    red-team verdict `clean @ head` may rest on attacking only the delta
+    since the previous verdict head under exactly two conditions, both
+    read mechanically: the last red-team verdict at that head was `clean`
+    (`tools/round_budget.py` reports it as `previous_red_team`), and every
+    file changed since it is docs- or tests-only (`docs/**`, `specs/**`,
+    `tests/**`, `*.md`). Any source, workflow, tool, CMake or protocol
+    file in the delta, a previous `findings`, or no previous head means
+    the whole PR is attacked again. The comment must say the scope was
+    incremental and name the head it rests on. What this gives up: such a
+    clean verdict rests on an earlier pass's coverage of the unchanged
+    source — the conditions are chosen so that the unchanged source is
+    exactly what that pass already attacked.
   - **Not yet in the OPERATING-POLICY §4 table** — same as the loops
     below; a human adds the row.
+
+- Gate budgets (`review_timeout_minutes`, `red_team_timeout_minutes`,
+  `deep_verify_timeout_minutes`, `review_max_turns`, `red_team_max_turns`;
+  ruled 2026-09-14, #153 items 1-2). The judgement gates' `timeout-minutes`
+  and the two Claude actions' `--max-turns` are `.github/agent-config.yml`
+  keys, read by a `budgets` job in each gate workflow from the **default
+  branch** — never the PR's checkout — through `tools/ci/gate-budgets.sh`;
+  the red team's posting deadline is derived (timeout − 10 min), not a
+  second literal. Turn caps were set from measurement, not guessed (rule
+  11): the last six successful runs of each action on 2026-09-14 took
+  33–57 (`attack-pr`) and 26–62 (`claude-review`) turns; 150 is ~2.5× the
+  largest, so a normal round is never cut and a runaway loop is bounded
+  twice. Fail closed: an unreadable or out-of-range value restores the
+  literal the workflow carried before (30 / 50 / 45 min; 150 turns), never
+  a wider budget, and `ci-gate` requires the `budgets` job itself to have
+  succeeded so a broken reader cannot skip `deep-verify` silently.
 
 - Review-finding auto-resolution (`review-fix` workflow, ruled 2026-09-02).
   `claude-review` and `red-team` are read-only, and the only consumer of
