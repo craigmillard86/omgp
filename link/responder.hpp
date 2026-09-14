@@ -44,8 +44,13 @@ class Responder {
     // ByteWire::receive() into the engine's own Deframer, decides new-vs-replay for any
     // intact request addressed to my_addr, and transmits a scheduled response once
     // now_us reaches its deadline. A response still due when now_us is already past
-    // request_end + TRUNK_T_turn_max_us (late poll) is transmitted at once rather than
-    // dropped, and counted in stats().late_responses (spec FR-014).
+    // request_end + TRUNK_T_turn_max_us (late poll) is transmitted rather than dropped, and
+    // counted in stats().late_responses (spec FR-014) -- "at once" as FR-014 reads it, on the
+    // first poll that reaches it once the engine has read the bus to idle, within
+    // transmit_if_due()'s bounded courtesy (FR-014's ruling marker, 2026-09-11). The wire is
+    // drained to the end of its queue on every such poll, so that reading is complete;
+    // requests decoded during the wait are held (kHeldRequests of them) or discarded and
+    // counted (#372).
     void poll(uint64_t now_us);
 
     // replays_served, discards, transactions (requests handled), late_responses
@@ -76,64 +81,62 @@ class Responder {
     };
 
     // Requests decoded while a late response was still waiting for an idle bus, kept
-    // unanswered until the wire is free. kHeldRequests of them, and then the drain STOPS:
-    // everything behind stays in the wire's own receive queue, exactly as it did before any
-    // of this existed, so THIS ENGINE never destroys or drops a request (FR-015/FR-016; the
-    // property test_link_responder.cpp's "eight well-spaced requests ... none discarded"
-    // pins, itself the fix for red team @e510b29).
+    // unanswered until the wire is free. kHeldRequests of them; a further request completing
+    // during the same wait is DISCARDED AND COUNTED in stats().discards, and the engine keeps
+    // reading either way (maintainer ruling 2026-09-11, docs/OPEN-QUESTIONS.md "Maintainer
+    // rulings on the pending entries", item 5, implemented by #372; FR-014 and data-model.md
+    // §5 carry the marker).
     //
-    // That guarantee stops at the engine's edge, and it is weaker than an earlier revision of
-    // this comment claimed (red team @5830fc4 finding 2, then @bab7378 finding 2, which
-    // corrected the bound):
+    // What that ruling chose, and against what. The merged corner (hold 2, then STOP
+    // draining) kept the engine's own bookkeeping clean -- it destroyed nothing it had read --
+    // and paid for it twice:
     //
-    //  - the blind window is up to max_frame + T_gap of arrivals PER OCCURRENCE, and it
-    //    RECURS every cap cycle while the hold stays full, so the cumulative exposure is
-    //    unbounded, not one worst-case frame. Saying only the per-occurrence figure, as this
-    //    comment used to, understated it;
-    //  - it therefore fires in the NATIVE harness too, not just on target: one station
-    //    offering this node a request every 300 us (~37% bus occupancy, nothing in it
-    //    violating trunk §3/§9) against a 1 ms poll gives 74 requests offered, 7 answered,
-    //    and MockWire's own 568-byte receive queue overflowing at t = 23 ms;
-    //  - and the loss is INVISIBLE: stats().discards stays 0 throughout, because the engine
-    //    never sees the bytes the wire destroyed. Pre-@e510b29 this same branch COUNTED them
-    //    (48 discards in that comparison), so relative to earlier heads this is a telemetry
-    //    regression, which FR-016's "counted in stats().discards" channel exists to prevent.
+    //  - requests were lost anyway, at the WIRE, uncounted. One station offering this node a
+    //    request every 300 us (~37% bus occupancy, nothing in it violating trunk §3/§9)
+    //    against a 1 ms poll gave 74 offered, 7 answered, MockWire's 568-byte receive queue
+    //    overflowing at t = 23 ms, and stats().discards == 0 throughout (red team @bab7378
+    //    finding 2). The ESP32-S3's 128-byte RX FIFO is the same exposure, earlier;
+    //  - and the engine went blind for the rest of each wait -- up to max_frame + T_gap per
+    //    occurrence, RECURRING every cap cycle while the hold stayed full -- so it could key
+    //    down inside another station's frame (red team @6440074 finding 1).
     //
-    // So "this engine never destroys or drops a request" is true and load-bearing only for
-    // the engine's own bookkeeping; end to end, under an ordinary offered load, requests ARE
-    // lost -- at the wire, uncounted. That materially weakens the reason this corner of the
-    // trade was chosen, and it is recorded as such in docs/OPEN-QUESTIONS.md 2026-09-07 for
-    // the maintainer's ruling. The ESP32-S3's 128-byte RX FIFO is the same exposure, earlier.
+    // So the choice was never "lose nothing" against "lose some": it was lose some UNCOUNTED,
+    // at the wire, against lose some COUNTED, in the engine, and the second also closes the
+    // blind window. FR-016's stats().discards channel exists for exactly this.
     //
-    // Stopping means the engine has left bytes unread, so from that instant its picture of
-    // the bus is INCOMPLETE -- and it says so (poll()'s belief_stale) rather than judging
-    // T_gap against a reading it knows to be partial. A stale belief falls back to the
-    // bounded cap, which BOUNDS the wait but does NOT make the transmit safe: the cap fires
-    // against a bus the engine has not read since it stopped, and red team @6440074 finding
-    // 1 demonstrates a frame being transmitted over there. See transmit_if_due() for why
-    // Master's cap argument does not carry across, and the PR / docs/OPEN-QUESTIONS.md
-    // 2026-09-07 for the open ruling on which corner of that trade to take.
+    // Both cases are pinned: tests/unit/test_link_responder.cpp's "a conformant offered load
+    // is fully accounted ..." (every offered request answered or counted, no RX overflow) and
+    // "the hold filling during a late wait does not blind the engine ...". The reading of the
+    // bus is complete on every path now, which is what makes transmit_if_due()'s T_gap
+    // judgement worth what the Master's is; the residual there is the CAP, not blindness.
     //
     // The alternative, stashing raw bytes to re-feed later, was tried and abandoned across
     // red team @b262d46 / @2efcb67 / @7a80ec3: any fixed buffer has a capacity at which the
     // engine must either destroy a byte or stop reading, and each revision moved that
-    // boundary by one byte rather than closing it. One decoded request has no such capacity:
-    // it is always holdable.
+    // boundary by one byte rather than closing it. A decoded request is discarded WHOLE:
+    // there is no boundary at which half a frame is consumed and the rest decodes as garbage,
+    // which is what made those revisions fail.
     struct HeldRequest {
         FrameFields f = {};
         uint8_t payload[omgp::LIMIT_max_l3_payload] = {};
         uint64_t request_end_us = 0;
     };
 
-    // How many completed requests one wait may absorb before the engine stops reading. TWO,
-    // and the second is not arbitrary: with one, the engine stopped as soon as anything
-    // completed -- including when the wire was already empty behind it -- so the ordinary
-    // "two requests queued ahead of one late poll" case fell back to the cap and every
-    // answer in it was delayed by ~1.47 ms (measured against this suite's own :536 and :561
-    // cases). Two lets the engine reach the end of the queue in that case and see for itself
-    // that the bus is quiet. Past two it stops, holds what it has, and says its reading is
-    // partial -- and two completed frames during one wait is itself evidence the bus was
-    // busy, so the pessimism is then earned rather than assumed.
+    // How many completed requests one wait may absorb before the excess is discarded and
+    // counted. TWO, unchanged by #372: the ordinary "two requests queued ahead of one late
+    // poll" case (this suite's own :536 and :561) is answered in full without a discard, and
+    // a third completed frame inside one late wait is itself evidence of a load this node
+    // cannot answer inside its windows anyway. Widening it only moves that boundary; the
+    // ruling's property is that crossing it is COUNTED, not that it is never crossed.
+    // What crossing it costs, stated rather than left to be discovered: the excess is
+    // discarded whatever it is, a trunk §7 RETRY included, so past this bound FR-015's replay
+    // and FR-016's "treated as new" both fail for one late wait. Item 5 of the 2026-09-11
+    // rulings amends FR-014 and data-model §5 only (FR-015's 2026-09-11 marker is item 7's
+    // #373 request-byte matching, a different clause; FR-016 has none), so that consequence is
+    // an open divergence, not a ruled one -- docs/OPEN-QUESTIONS.md 2026-09-14 "item 5 of the
+    // 2026-09-11 rulings also discards a trunk §7 retry" (PENDING -- human), pinned by this
+    // suite's "a trunk §7 retry completing when the hold is already full ..."
+    // (review @3dfe0e3, @dcde3a2).
     static constexpr size_t kHeldRequests = 2;
     // The ring's index arithmetic in responder.cpp carries two `mutant-ok(equivalent,
     // cxx_add_to_sub)` labels whose justification is that -y ≡ y (mod 2). That is a property
@@ -145,19 +148,19 @@ class Responder {
     // Decides new-vs-replay for one intact frame addressed to my_addr, or counts a
     // discard: for a frame this node is not addressed by or could never answer — a
     // different dst, a RESPONSE-bit frame, a src equal to my_addr, or a src outside trunk
-    // §5's L2 address range (see the .cpp). Only ever called while Listening — poll()
-    // either stops draining or holds what it decodes otherwise — so a pending response is
-    // never overwritten. Schedules an accepted request's response at request_end_us +
-    // turnaround_us_ (data-model.md §5).
+    // §5's L2 address range (see the .cpp). Only ever called while Listening — poll() holds
+    // or discards what it decodes otherwise — so a pending response is never overwritten.
+    // Schedules an accepted request's response at request_end_us + turnaround_us_
+    // (data-model.md §5).
     void on_request(const FrameFields& f, uint64_t request_end_us);
 
     // data-model.md §5 "Request acceptance", plus the two address bounds this engine owes
     // trunk §5: the claimed source of an accepted request, and this node's own address.
     bool acceptable(const FrameFields& f) const;
 
-    // One intact frame decoded while a response was pending: appended to held_ if this node
-    // owes an answer to it, discarded and counted if it is not this node's. Never called
-    // with held_ already full -- poll() stops draining at that point.
+    // One intact frame decoded while a response was pending and its window has closed:
+    // appended to held_ if this node owes an answer to it and a slot is free, discarded and
+    // counted if it is not this node's OR if the hold is already full (#372).
     void hold_or_discard(const FrameFields& f, uint64_t request_end_us);
 
     // True while a scheduled response is already outside trunk §9's turnaround window, the
@@ -177,11 +180,11 @@ class Responder {
     // next queued byte is drained (see poll()'s own comment).
     // queue_drained: poll()'s drain loop has stopped, so the late path may now be judged --
     // never at the top of an iteration with bytes still unread behind it, which is how the
-    // engine used to key down inside another station's frame.
-    // belief_stale: it stopped because a request is held, not because the wire went quiet,
-    // so bytes may remain unread and last_activity_us_ is a partial reading. The two exits
-    // mean opposite things and poll() reports which it took (red team @2efcb67).
-    void transmit_if_due(uint64_t now_us, bool queue_drained, bool belief_stale);
+    // engine used to key down inside another station's frame. On the late path that stop is
+    // always the wire's queue running empty (#372: the drain no longer stops for a full
+    // hold), so last_activity_us_ is a COMPLETE reading of the bus. The belief_stale
+    // argument that reported the other exit went with it.
+    void transmit_if_due(uint64_t now_us, bool queue_drained);
 
     ByteWire& wire_;
     // Stored for the constructor-signature parity with Master/Health (link-cpp.md

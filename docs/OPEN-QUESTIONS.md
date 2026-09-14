@@ -3500,3 +3500,138 @@ Respond's answer, wildcard-script ordering, and deferred-REQUIRE capacity checks
 interim echo is no longer the answer for a node with a handler registered, and covers only
 the no-handler fallback. Items (2) (own-script → wildcard → default ordering) and (3)
 (deferred `fault_` capacity checks) are untouched and stand as ruled.
+
+---
+
+## 2026-09-14 — after #372, the Responder's late-path cap can still fire into a frame it HAS read: the residual, its exact bound, and why it is not the collision the ruling closed
+
+**Context:** the maintainer ruling of 2026-09-11 (the "Maintainer rulings on the pending
+entries" entry, item 5) preserves "the engine never keys down onto a bus it has not read, nor
+over another station's arriving frame", and #372 implements the first half: `poll()` drains
+`ByteWire` to the end of its queue on every path, holds `kHeldRequests` requests decoded
+during a late wait and discards-and-counts the rest, so `last_activity_us_` is always a
+complete reading. The reproduced blind collision (red team @`6440074` finding 1: transmit at
+`2661` inside a third station's frame at `[2631, 2721)`) is closed and pinned by
+`tests/unit/test_link_responder.cpp` "the hold filling during a late wait does not blind the
+engine …" — the answer now goes out at `1341`.
+
+**The residual, stated so the ruling's property is not read as fully delivered.** The late path
+still transmits at `min(last_activity + T_gap, defer_origin + max_frame + T_gap)`. The second
+term is a cap, and `link/responder.cpp` records why Master's justification for it does not
+carry across: Master argues that any frame beginning after `defer_origin + T_gap` is a trunk §3
+violator, but on the late path the host has already timed this node out after `T_resp` and may
+legitimately open a new transaction one `T_gap` after the bus goes idle. Such a frame can begin
+inside the wait and still be running when the cap expires, and the engine then keys down over
+it — over a frame it HAS read, which is the difference from @`6440074`.
+
+**The bound, by construction** (CLAUDE.md rule 11: this is a structural argument, not a test —
+no case in the suite demonstrates it, and none is added, because pinning a defect's timing as
+an expectation would make it harder to fix): reachable only for a frame that begins strictly
+after `defer_origin + T_gap` and is still transmitting at `defer_origin + max_frame + T_gap`,
+i.e. only when the bus was busy **as sampled at every poll instant** from `defer_origin` up to
+that frame's start. The engine sees the bus only where it samples it — `ByteWire`
+(`link/byte_wire.hpp`) offers `receive()` alone, and the gap is judged from
+`last_activity_us_`, the end of the last byte drained (`link/responder.cpp`) — so an idle
+window that contains no poll is invisible to it and does not release the wait.
+`max_frame` is one worst-case stuffed frame (142 byte times), so the overlap cannot exceed one
+frame's duration, and it is zero whenever a **poll** lands `T_gap` or more after the end of the
+last byte the engine has read — **not** merely whenever the bus goes idle for `T_gap`, which at
+a poll cadence coarser than `T_gap` it may do entirely between two polls. Review @`948cdf0`
+finding 1 states the counter-example (`T_gap` 50 µs, 10 µs/byte, 1 ms polls, this suite's
+cadence): traffic from `defer_origin` for 100 µs, then 300 µs — six `T_gap`s — of idle spanning
+no poll instant, then back-to-back frames from `+400 µs` still running past the cap; the poll
+after the cap finds `want = cap <= now` and keys down into the frame in flight, with the bus
+having been genuinely idle for six `T_gap`s during the wait. Corner (a) below must be judged
+against that reachability, not against the narrower "continuously busy" reading.
+Removing the cap entirely is not available: FR-014's "MUST still transmit" then loses to
+a babbling station, which is exactly what the cap was added for (`link/master.cpp`, and this
+suite's "the wait for an idle bus is bounded …").
+
+**Recommendation:** rule it with the still-open 2026-09-06 entry "the held-request queue is
+unbounded and uncounted; FR-014 and FR-017 conflict on a stale queued request", which is the
+same conflict at a different point — whether a node's late answer may go out over a bus that is
+legitimately busy, or must wait indefinitely. Two candidate corners, both cheap to build: (a)
+keep the cap and accept the overlap as a bounded, documented risk (`docs/THREAT-MODEL.md`), on
+the ground that the host has already timed this node out and will retry (trunk §7); or (b) let
+the cap release the *wait* but still require `T_gap` of idle before keying down, i.e. abandon
+the late response after the cap when the bus never grants a gap, counting the abandonment in
+`stats()` — which respects FR-017 and trunk §3 absolutely, at the cost of FR-014's "MUST still
+transmit" in exactly the babble case. (b) inverts the 2026-09-11 precedence between those two
+clauses, so it is a maintainer's call, not an implementation detail.
+
+**Ruling:** PENDING — human. **Amends:** none — the 2026-09-11 ruling stands as made; this
+records what its implementation does and does not establish. **Supersedes:** none.
+
+---
+
+## 2026-09-14 — item 5 of the 2026-09-11 rulings also discards a trunk §7 retry, against FR-015 and FR-016, which item 5 did not amend
+
+**Context:** item 5 of the 2026-09-11 "Maintainer rulings on the pending entries" entry rules
+that "a completed request beyond `kHeldRequests` is discarded and counted in `stats()`", and its
+own **Correction** states which clauses it is trading against: *"FR-015/016 are the
+replay-buffer requirements … The clause in tension is FR-014's 'at once' together with
+data-model §5's 'nothing is dropped'."* FR-014 (`specs/002-trunk-link-layer/spec.md:402-409`)
+and data-model §5 (`data-model.md:161`) accordingly carry item 5's ruling marker; **neither
+FR-015 nor FR-016 carries one.**
+
+**Precisely, because the near-miss is easy to act on wrongly** (review @`dcde3a2`): FR-015
+*does* carry a 2026-09-11 maintainer-ruling marker (`spec.md:416-423`), but it is **item 7's**
+— the replay-request-byte-matching amendment from the 2026-09-07 "replay entry has no age
+bound" entry, implementation #373. That marker qualifies *which retries match the buffer*; it
+does not reach what happens to a matching retry that is discarded before the replay test is
+ever applied, which is this entry's subject. FR-016 carries no 2026-09-11 marker at all. So
+the clause this entry is about is unamended in both requirements, and a maintainer must add
+item 5's marker **beside** item 7's on FR-015, never over it.
+
+That correction is no longer complete for the engine the ruling produced. `hold_or_discard()`
+(`link/responder.cpp`) takes its discard branch for **any** `acceptable()` frame once
+`held_count_ == kHeldRequests`, and `acceptable()` screens `dst`, the response bit, `src !=
+my_addr_` and trunk §5's address range — **never `f.retry`**. A trunk §7 retry is `acceptable()`
+like any other request, so a retry that completes third inside one late wait is counted in
+`stats().discards` and receives neither the buffered frame (FR-015: "MUST retransmit the
+buffered frame unchanged") nor a fresh answer (FR-016: "MUST be treated as new"). The host sees
+a second `T_resp` timeout and, per trunk §7, a consecutive failure against this node.
+
+**Demonstrated, not argued** (CLAUDE.md rule 11): `tests/unit/test_link_responder.cpp` "a trunk
+§7 retry completing when the hold is already full is discarded and counted, NOT replayed" runs
+the same script twice, differing only in how many requests sit between the retry and the hold.
+With the hold full: 4 offered, 3 answered, `replays_served == 0`, `discards == 1`, and exactly
+one answer carries the retried sequence — the retry's own answer never goes out. One filler
+short of the bound: the retry is held and answered. So what loses it is the hold bound, not the
+retry bit. Reachability is ordinary, not adversarial: this suite's amended cases reach the bound
+at 2 ms poll cadence (4 of 8 answered) and in the burst case (3 of 16), and nothing makes a
+retry rarer than a new request.
+
+**The divergence is not only against the requirements — it is against an authoritative
+document, flagged here rather than chosen silently (CLAUDE.md: "the documents win; flag the
+conflict").** `docs/trunk-link-layer.md` §7 states the same rule as FR-015, unconditionally and
+without a ruling marker: *"A node receiving a retry of a sequence it already answered re-sends
+its previous response (single-frame replay buffer per node)."* Adopting the recommendation
+below without amending §7 too would leave the trunk spec contradicting the engine — the
+divergence surviving its own ruling. `docs/trunk-link-layer.md` is a human-ruling artefact an
+agent does not edit (OPERATING-POLICY §2), so the amendment is proposed here, not made.
+
+**Recommendation:** **amend FR-015, FR-016 and `docs/trunk-link-layer.md` §7 to carry item 5's
+2026-09-11 ruling marker, the one FR-014 and data-model §5 already carry** — on FR-015 that is
+an *addition* alongside the item 7 (#373) marker already there, not a replacement for it, and
+FR-016 and §7 carry no 2026-09-11 marker to start from (§7 because it is the
+authoritative document behind FR-015 and says the same thing; a marker on the requirements
+alone would leave the conflict in place), i.e. accept the discard for a retry on the ground that
+a retry *is* a request and the ruled property ("the engine never keys down onto a bus it has not
+read") is indifferent to the retry bit; the host's own trunk §7 retry budget is the recovery
+path, and exempting retries would reintroduce exactly the unbounded, uncounted hold the ruling
+removed. Two alternatives, both more expensive and neither recommended:
+(a) **serve a retry from the discard branch** — replay `buffer_` when `f.retry && buffer_.valid
+&& f.seq == buffer_.seq && f.src == buffer_.peer`, instead of discarding. Cheap in code but it
+transmits inside another station's traffic during a late wait, which is the collision the
+2026-09-11 ruling exists to close; it also reorders a retry ahead of held requests.
+(b) **reserve a hold slot for retries** — raises `kHeldRequests` and re-opens the
+`(head ± count) % kHeldRequests` equivalence the depth-2 ring depends on
+(`link/responder.cpp`), for a guarantee that still fails on the second retry.
+
+Whichever is ruled, the divergence must stop being invisible: until then `link/responder.cpp`
+states it at both the `poll()` comment and the discard branch, and the case above pins it.
+
+**Ruling:** PENDING — human. **Amends:** the 2026-09-11 rulings entry, item 5 — specifically
+its **Correction**, which names FR-014 and data-model §5 as the only clauses in tension.
+**Supersedes:** none.

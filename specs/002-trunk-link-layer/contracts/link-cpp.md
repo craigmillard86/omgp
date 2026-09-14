@@ -167,23 +167,36 @@ public:
                                                   // (Amended in PR #149, red team @71caba0 HIGH: "immediately" is
                                                   // qualified by trunk §3's media access -- outside its window the
                                                   // engine owes an idle bus, so it transmits at
-                                                  // min(last_activity + T_gap, defer_origin + max_frame + T_gap)
-                                                  // when its reading of the bus is COMPLETE, and at
-                                                  // defer_origin + max_frame + T_gap (the cap alone, whatever
-                                                  // last_activity says) when the drain stopped with requests held
-                                                  // and the reading is therefore partial. The wait is RATE-
-                                                  // DEPENDENT, because max_frame_us() recomputes from the wire's
-                                                  // current rate: ~1.47 ms at TRUNK_bit_rate (142*10 + 50 us) but
-                                                  // ~12.3 ms at TRUNK_bit_rate_fallback (142*86 + 50 us, byte_time
-                                                  // 86 us by integer division) -- 8.3x, and operative exactly when
-                                                  // the trunk is degraded, since HealthTracker re-probes at the
-                                                  // fallback rate under bus_fault(). Quoting only the 1 Mb/s figure
-                                                  // would mis-size anything built on this engine by an order of
-                                                  // magnitude on its known weak axis. Pending a ruling, see
-                                                  // docs/OPEN-QUESTIONS.md 2026-09-07 "the Responder's late path
-                                                  // defers for an idle bus" and, for the collision that wait can
-                                                  // still cause, "...CAN transmit into a frame it has not read".)
+                                                  // min(last_activity + T_gap, defer_origin + max_frame + T_gap).
+                                                  // The wait is RATE-DEPENDENT, because max_frame_us() recomputes
+                                                  // from the wire's current rate: ~1.47 ms at TRUNK_bit_rate
+                                                  // (142*10 + 50 us) but ~12.3 ms at TRUNK_bit_rate_fallback
+                                                  // (142*86 + 50 us, byte_time 86 us by integer division) -- 8.3x,
+                                                  // and operative exactly when the trunk is degraded, since
+                                                  // HealthTracker re-probes at the fallback rate under
+                                                  // bus_fault(). Quoting only the 1 Mb/s figure would mis-size
+                                                  // anything built on this engine by an order of magnitude on its
+                                                  // known weak axis.)
+                                                  // (Amended again 2026-09-14, ruling of 2026-09-11 implemented by
+                                                  // #372: poll() drains to the END of the wire's queue on every
+                                                  // path, so `last_activity` is always a COMPLETE reading and the
+                                                  // second, cap-only branch above -- "the drain stopped with
+                                                  // requests held" -- no longer exists. A request completing
+                                                  // during a late wait is held (2 of them) or DISCARDED AND
+                                                  // COUNTED in stats().discards. What the cap does NOT give is
+                                                  // freedom from collision: a frame beginning after
+                                                  // defer_origin + T_gap and still running at the cap is
+                                                  // transmitted over. That residual is open --
+                                                  // docs/OPEN-QUESTIONS.md 2026-09-14.)
     const AddrStats& stats() const;               // replays_served, discards, transactions (requests handled), late_responses
+                                                  // (discards also counts a request completing during a late wait
+                                                  //  that the hold cannot take -- ruling 2026-09-11, #372. The
+                                                  //  acceptance screen there does not read `retry`, so a trunk §7
+                                                  //  retry past the hold is discarded too: no replay (FR-015), no
+                                                  //  fresh answer (FR-016). Neither MUST is amended by item 5 of
+                                                  //  that ruling (FR-015's 2026-09-11 marker is item 7's #373
+                                                  //  request-byte matching, a different clause; FR-016 has none)
+                                                  //  -- divergence open, docs/OPEN-QUESTIONS.md 2026-09-14.)
 };
 ```
 
