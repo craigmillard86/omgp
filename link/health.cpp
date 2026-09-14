@@ -155,9 +155,22 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
         // §7: the host prefers the reference rate — a valid answer there clears at once,
         // mid-pass or not. `addr` has already taken its own §6 transition above.
         clear_fault(omgp::TRUNK_bit_rate, now_us);
-    } else if (pass_ended && bus_.fallback_answerer != 0) {
-        // §7: the pass drew nothing, so the fallback rate is the rate that works. Conditioned
-        // on the recorded answerer, not on ref_pass_left == 0 alone (0 also means "no pass").
+    } else if (pass_ended) {
+        // §7: the pass drew nothing, so the fallback rate is the rate that works. `pass_ended`
+        // is the whole condition, not `ref_pass_left == 0` (which also means "no pass"): it is
+        // set only by the decrement above, i.e. by the outcome of a pass probe. The
+        // "&& bus_.fallback_answerer != 0" conjunct this line used to carry was removed as a
+        // condition no test could falsify (review round 3 on #530, finding 3(a)): a pass runs
+        // only while ref_pass_left > 0, which is set only in the fallback branch above, which
+        // records a non-zero answerer in the same block, and clear_fault/evaluate_declare zero
+        // the pair together — so the conjunct was true whenever `pass_ended` was. VERIFIED BY
+        // CONSTRUCTION over this file, which is a control on the current code, not a language
+        // guarantee. clear_fault still guards its own deferred apply_result on the answerer.
+        // No divergence from data-model §7, which writes the rule as "fallback_answerer ≠ 0 and
+        // the pass outcome that takes ref_pass_left to 0 is itself a failure": the warning it
+        // attaches is against `ref_pass_left == 0` ALONE, which is not what is tested here —
+        // `pass_ended` says a pass probe's own outcome ended a running pass, and only a pass
+        // started by a recorded answerer can run.
         clear_fault(omgp::TRUNK_bit_rate_fallback, now_us);
     }
 
