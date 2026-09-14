@@ -85,6 +85,98 @@ const isVerdict = body => (body || '').split('\n').some(l => !isQuoted(l) && /^V
 const FIXER_MARK = /^review-fix\(\d+\) @ [0-9a-f]{7,40}\b/i;
 const isFixer = body => FIXER_MARK.test(unwrap((body || '').split('\n').find(l => l.trim()) || ''));
 
+// Closing references, in the four spellings GitHub documents — `KEYWORD #n`, `KEYWORD GH-n`,
+// `KEYWORD owner/repo#n`, `KEYWORD <issue URL>` (bare, autolinked or markdown-linked), keyword in
+// any case, optionally emphasised, optional colon — matched AFTER code (fenced, indented, inline)
+// and HTML comments are removed, since GitHub does not honour a reference inside those.
+// CONTROL, NOT GUARANTEE (rule 11): GitHub's own parser is the authority; this covers the
+// spellings named here and nothing else. Cross-repo forms count under ANY owner, as the URL form
+// always did — GitHub honours them, permission-gated — so `fixes core/scheduler#3` in prose is a
+// documented false positive in the loud direction (one escalation), not a lost auto-close
+// (round-5 red team on #466 reversed round 4's owner filter).
+//
+// `closingRefs` returns each reference AS SPELLED — the whole matched keyword-and-reference
+// text, whitespace runs collapsed — because the guard's job is to notice any change to what the
+// merge gate will act on: folding `o/r#465` to `465` (round 4), or `Closes:#n`, `**Closes** #n`
+// and `Closes [#n](url)` to `#n` (round 5), hid rewrites that leave in-progress on an issue the
+// merge should have released. `closingIssues` gives the exhaustion release its same-repo numbers
+// (see its own comment for what it covers and why).
+// What the closing-reference guard protects is what the merge automation READS: agent-merge's
+// release/close path and this workflow's exhaustion release regex the raw body, so the guard
+// compares the raw body's references, each as spelled. It does NOT model what GitHub's renderer
+// honours (a reference inside code or an HTML comment is not auto-closed by GitHub). Rounds 4-9
+// on #466 tried to: every round found another CommonMark spelling the hand-written stripper
+// did not know, and the stripper itself opened holes (a code span pairing across a blank line,
+// a literal `<!--` blinding the rest of the body). A partial markdown parser is a control that
+// cannot be labelled honestly (rule 11), so it is withdrawn. RESIDUAL, stated: on a HAND merge
+// (T3), where agent-merge never runs, closure depends on GitHub's auto-close, and a fixer that
+// wraps a live reference in code leaves that issue open — visible in the issue, recoverable by
+// a human, forbidden by the prompt, and closed by the follow-up that closes raw-referenced
+// issues on any merge. On the autonomous path agent-merge closes from the raw view regardless.
+// Two readers, unioned into one compared set. CLOSING knows the four spellings GitHub documents;
+// MERGE_RE is agent-merge.yml's release/close regex VERBATIM (pinned byte-equal by
+// test_reference_guard_reads_at_least_what_agent_merge_reads, which also checks the guard's set
+// carries every MERGE_RE match over a corpus). MERGE_RE's matches live in their own `merge:`
+// namespace and are never deduped against CLOSING's, so the guard's set is a superset of what
+// agent-merge reads by construction, and a change to either reader's view is a change.
+const CLOSING = /(?<![\w*_])[*_]*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[*_]*\s*:?\s*(?:<?(https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+))>?|\[#(\d+)\]\(([^)]*)\)|([\w.-]+)\/([\w.-]+)#(\d+)|GH-(\d+)|#(\d+))/gi;
+const MERGE_RE = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
+const ISSUE_URL = /^https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)\/?$/i;
+function closingMatches(text, owner, repo) {   // the RAW body; no markup is interpreted
+  const own = String(owner).toLowerCase(), rep = String(repo).toLowerCase();
+  const sameRepo = (o, r) => o.toLowerCase() === own && r.toLowerCase() === rep;
+  const out = [];
+  const body = String(text || '');
+  const spans = [];   // [start, end) of every wider-reader match
+  for (const m of body.matchAll(CLOSING)) {
+    const spelled = m[0].replace(/\s+/g, ' ');
+    spans.push([m.index, m.index + m[0].length]);
+    if (m[1]) out.push({ spelled, kind: 2, num: Number(m[4]), same: sameRepo(m[2], m[3]) });
+    else if (m[5]) {
+      const tgt = ISSUE_URL.exec(m[6] || '');
+      const agrees = !!tgt && sameRepo(tgt[1], tgt[2]) && Number(tgt[3]) === Number(m[5]);
+      out.push({ spelled, kind: 0, num: Number(m[5]), same: agrees });
+    }
+    else if (m[9]) out.push({ spelled, kind: 2, num: Number(m[9]), same: sameRepo(m[7], m[8]) });
+    else if (m[10]) out.push({ spelled, kind: 1, num: Number(m[10]), same: true });
+    else out.push({ spelled, kind: 0, num: Number(m[11]), same: true });
+  }
+  // agent-merge's reader, verbatim, in its OWN namespace (`merge:` prefix). A match is dropped
+  // only when it lies INSIDE a wider-reader match that ends on the same `#n` token — the same
+  // reference, read twice (`***fixes #131***`: the wider reader takes the emphasis, both end at
+  // the token). A suffix dedup on the TEXT let `_closes #131_` (wider-reader only; `_` is a word
+  // character) swallow a distinct `a**closes #131**` elsewhere in the body that agent-merge acts
+  // on (round-12 red team on #466); position, not text, decides.
+  for (const m of body.matchAll(MERGE_RE)) {
+    const st = m.index, en = m.index + m[0].length;
+    if (spans.some(([a, b]) => a <= st && b === en)) continue;
+    out.push({ spelled: 'merge:' + m[0].replace(/\s+/g, ' '), kind: 3, num: Number(m[1]), same: true, merge: true });
+  }
+  return out;
+}
+// What agent-merge itself would close/release: MERGE_RE alone, same repo by construction.
+function mergeGateIssues(text) {
+  return [...new Set([...String(text || '').matchAll(MERGE_RE)].map(m => Number(m[1])))].sort((x, y) => x - y);
+}
+function joinSpelled(items) {
+  const seen = new Set(), uniq = [];
+  for (const it of items) { if (!seen.has(it.spelled)) { seen.add(it.spelled); uniq.push(it); } }
+  uniq.sort((x, y) => x.kind - y.kind || x.num - y.num || (x.spelled < y.spelled ? -1 : x.spelled > y.spelled ? 1 : 0));
+  // `,` is the separator, so a comma INSIDE an element (a markdown-link target may carry one)
+  // is percent-encoded, `%` first so an encoded comma cannot collide with a literal `%2C`
+  // (round-13 red team on #466: a shredded element could stand in for a separate reference).
+  return uniq.map(i => i.spelled.replace(/%/g, '%25').replace(/,/g, '%2C')).join(',');
+}
+function closingRefs(body, owner, repo) { return joinSpelled(closingMatches(body, owner, repo)); }
+// The exhaustion release releases CLAIMS: every same-repo issue the body names in a spelling
+// GitHub honours (the four documented forms; a markdown link only when its target agrees), plus
+// everything agent-merge reads — so an issue this PR claims can be re-dispatched after
+// exhaustion. Round 11 narrowed this to agent-merge's reader and left a claimed issue's
+// `in-progress` stale (round-12 red team on #466). Stated, not derived: a control.
+function closingIssues(body, owner, repo) {
+  return [...new Set(closingMatches(body, owner, repo).filter(i => i.same).map(i => i.num))].sort((x, y) => x - y);
+}
+
 // How many times a no-op run may be retried in-job before the claim is released (#361 AC2).
 // Read at RUN time from the DEFAULT-branch config, like every other knob here, so retuning it
 // needs no workflow-scope push. Fail closed to 0 on anything unreadable, absent, negative or
@@ -118,7 +210,7 @@ async function detect({ github, context, core, env }) {
   // is the line that tells a human this was a permissions problem, not an empty backlog.
   core.notice(`agent-noop: ${kind} run — turns=${f.turns} denials=${f.denials} is_error=${f.isError}`);
 
-  let produced = false, partial = false, reason = '';
+  let produced = false, partial = false, onlyComment = false, refsChanged = false, refsDetail = '', reason = '';
   const since = Date.parse(env.SINCE || '');
   const sinceKnown = Number.isFinite(since);
   if (!sinceKnown) core.warning('agent-noop: the run start (SINCE) is empty or unparseable — t0 did not run, so nothing can be attributed to this run (fail closed)');
@@ -181,6 +273,36 @@ async function detect({ github, context, core, env }) {
       c.user && c.user.login === 'claude[bot]' && isFixer(c.body) && !isVerdict(c.body) &&
       Date.parse(c.created_at || '') > since);
     produced = moved || spoke;
+    // A comment with no commit is production for THIS check and a dead end for the loop: no new
+    // head, so no new review, so agent-merge says "review reported findings" until a human reads
+    // the comment (#463, seen on #452). finalize turns it into the label humans watch.
+    onlyComment = spoke && !moved;
+    // The fixer may now rewrite the description (#463), and agent-merge closes — and the
+    // exhaustion path releases — every issue the body's Closes/Fixes/Resolves name. The gate
+    // snapshots that set before the run (`none` when empty; '' means an older gate that did not);
+    // a change is escalated and the job failed (round-2 review + red team on #466).
+    const snap = String(env.CLOSES_BEFORE || '').trim();
+    const asSet = t => [...new Set(String(t || '').split(',').map(x => x.trim()).filter(Boolean))].sort().join(',');
+    const now = asSet(closingRefs(pr.body, owner, repo));
+    const show = t => t ? t.split(',').join(', ') : 'none';
+    if (!snap) {
+      // No snapshot means a gate older than this detector. The guard fails CLOSED: it cannot
+      // judge, so it escalates rather than letting a body rewrite through unseen (round-6 red team).
+      refsChanged = true;
+      refsDetail = `no closing-reference snapshot from the gate (gate and detector out of step); now: ${show(now)}`;
+      core.warning(`agent-noop: ${refsDetail}`);
+    } else {
+      // The gate and this detector ship together and both load from the default branch, so the
+      // snapshot is always this format; anything else is unreadable and fails CLOSED (a shim for an
+      // older two-view format truncated legitimate snapshots — round-10 red team on #466).
+      if (/^raw=|;gh=/.test(snap)) { refsChanged = true; refsDetail = `unreadable closing-reference snapshot '${snap.slice(0, 60)}' (gate and detector out of step)`; }
+      else {
+        const before = snap === 'none' ? '' : asSet(snap);
+        refsChanged = before !== now;
+        refsDetail = `as the merge automation reads it — before: ${show(before)}; now: ${show(now)}`;
+      }
+      if (refsChanged) core.warning(`agent-noop: the PR's closing references changed during the run (${refsDetail})`);
+    }
     reason = moved ? `head moved from ${before.slice(0, 7)} to ${pr.head.sha.slice(0, 7)}`
       : spoke ? 'the fixer commented during the run'
         : !sinceKnown ? `head unchanged at ${before.slice(0, 7)} and the run start is unknown (t0 did not run)`
@@ -202,10 +324,13 @@ async function detect({ github, context, core, env }) {
   // must NOT be retried — re-fixing fixed code is its own hazard.
   core.setOutput('produced', String(produced));
   core.setOutput('partial', String(partial));   // implement only: a branch with no PR
+  core.setOutput('only_comment', String(onlyComment));   // fix only: answered, did not push
+  core.setOutput('refs_changed', String(refsChanged));   // fix only: Closes/Fixes/Resolves set moved
+  core.setOutput('refs_detail', refsDetail);
   core.setOutput('reason', reason);   // finalize reports THIS, not a hard-coded sentence
   core.setOutput('turns', String(f.turns));
   core.setOutput('denials', String(f.denials));
-  return { noop, produced, partial, turns: f.turns, denials: f.denials, reason };
+  return { noop, produced, partial, only_comment: onlyComment, refs_changed: refsChanged, refs_detail: refsDetail, turns: f.turns, denials: f.denials, reason };
 }
 
 // A label that is already absent is a non-event (404), the same rule review-fix's exhaustion path
@@ -225,6 +350,14 @@ async function dropLabel(github, owner, repo, number, name, core) {
 async function finalize({ github, context, core, env }) {
   const { owner, repo } = context.repo;
   const kind = env.KIND;
+  // Mirror the workflows' own early return, so the module is right even if the glue is not: a
+  // run that produced, did not error, is not comment-only and not partial has nothing to
+  // finalize. Compared against the literal 'true' — the workflow sends the STRING 'false' on
+  // every ordinary run, and 'false' is truthy (round-1 red team on #466).
+  if (env.NOOP === 'false' && env.ONLY_COMMENT !== 'true' && env.PARTIAL !== 'true' && env.REFS_CHANGED !== 'true') {
+    core.notice('agent-noop: production established — nothing to finalize');
+    return;
+  }
   const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
   // AC3 asks for the per-attempt figures, and the env used to carry only the LAST attempt's while
   // the comment said "per-attempt" (round-2 review). Report each attempt that ran.
@@ -278,6 +411,41 @@ async function finalize({ github, context, core, env }) {
 
   const pr = Number(env.PR);
   const label = `review-fix-${env.ATTEMPT}`;
+  if (env.REFS_CHANGED === 'true') {
+    // An agent rewrote the text the merge gate acts on mechanically. Whatever else the run did,
+    // this is escalated and fails: the references are restored by a human, not by the loop.
+    let esc = true;
+    try { await github.rest.issues.addLabels({ owner, repo, issue_number: pr, labels: ['needs-human'] }); }
+    catch (e) { esc = false; core.warning(`agent-noop: could NOT apply \`needs-human\` to #${pr} (${(e && e.status) || ''}) — apply it by hand`); }
+    await github.rest.issues.createComment({
+      owner, repo, issue_number: pr,
+      body: `🛑 Review-fix changed the closing references in this PR's description (${env.REFS_DETAIL || 'detail unavailable'}), after ${spent}.\n\n` +
+        `\`agent-merge\` closes, and the exhaustion path releases, every issue those \`Closes\`/\`Fixes\`/\`Resolves\` references name — text an agent must not change. ` +
+        `${esc ? '`needs-human` is applied' : '⚠️ `needs-human` could NOT be applied — apply it by hand'}: restore the references by hand before this PR goes any further. ` +
+        `\`${label}\` stays: the attempt was spent. Job log: ${runUrl}`});
+    core.setFailed(`agent-noop: review-fix on #${pr} changed the PR's closing references (${env.REFS_DETAIL || ''}) — needs-human ${esc ? 'applied' : 'NOT applied'}, job failed (#463).`);
+    return;
+  }
+  // Only a run that did NOT error: is_error is a no-op whatever else is true (see the header), so
+  // an errored comment-only run falls through to the produced-then-errored branch below, which
+  // fails loudly and says it errored (round-1 review on #466).
+  if (env.ONLY_COMMENT === 'true' && env.NOOP === 'false') {
+    // The fixer answered — a rebuttal, or a finding it cannot reach — and pushed nothing. That is
+    // what the prompt tells it to do, so the job does not fail and the attempt stays spent; but
+    // the loop cannot advance from here on its own, and every other terminal state applies
+    // `needs-human`. This one now does too (#463).
+    let esc = true;
+    try { await github.rest.issues.addLabels({ owner, repo, issue_number: pr, labels: ['needs-human'] }); }
+    catch (e) { esc = false; core.warning(`agent-noop: could NOT apply \`needs-human\` to #${pr} (${(e && e.status) || ''}) — apply it by hand`); }
+    await github.rest.issues.createComment({
+      owner, repo, issue_number: pr,
+      body: `🧑 Review-fix answered without a commit (${spent}).\n\n${why}\n\n` +
+        `The fixer's comment above is a rebuttal, a finding it could not act on, or a description-only correction that was not followed by the empty commit its prompt asks for. No new head means no new review, so the loop stops here: ` +
+        `${esc ? '`needs-human` is applied' : '⚠️ `needs-human` could NOT be applied — apply it by hand'}. Rule on the rebuttal, or push the change it asked for, then remove the label. ` +
+        `\`${label}\` stays: the attempt was spent. Job log: ${runUrl}`});
+    core.notice(`agent-noop: review-fix on #${pr} answered without a commit — needs-human ${esc ? 'applied' : 'NOT applied'}; attempt ${label} spent (#463).`);
+    return;
+  }
   if (produced) {
     // It pushed or commented, then errored: the attempt is SPENT, whatever is_error says. Handing
     // it back understated review_fix_max_attempts on a run that changed the branch (round-3 red team).
@@ -313,4 +481,4 @@ async function finalize({ github, context, core, env }) {
   core.setFailed(`agent-noop: review-fix on #${pr} produced nothing after ${spent} — ${env.REASON || 'no output'}; attempt ${attempt}, needs-human ${escalated ? 'applied' : 'NOT applied'}, job failed (#361).`);
 }
 
-module.exports = { detect, finalize, readFigures, isVerdict, isFixer, retryBudget };
+module.exports = { detect, finalize, readFigures, isVerdict, isFixer, retryBudget, closingRefs, closingIssues };

@@ -597,6 +597,155 @@ def test_noop_round3_wiring():
     assert "review-fix({{ATTEMPT}}) @ {{HEAD}}" in prompt, "review-fix.md must tell the fixer to open its comment with the marker"
 
 
+def prompt_text_for_review_fix():
+    return (ROOT / ".github" / "agent-prompts" / "review-fix.md").read_text()
+
+
+def test_rebuttal_only_fix_run_is_escalated_and_the_fixer_may_edit_the_body():
+    """#463 (seen on #452): a review-fix run that comments without a commit is production for the
+    no-op detector and a dead end for the loop — no new head, no new review, no label. Two pins:
+    (a) finalize is told ONLY_COMMENT and applies `needs-human`; (b) the fixer may correct a
+    PR-body-only finding itself (`gh pr edit`), since the round-budget ruling makes such a
+    finding blocking at every round and the fixer was the one agent that could not touch it."""
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "review-fix.yml").read_text())
+    steps = wf["jobs"]["fix"]["steps"]
+    by_id = {s.get("id"): s for s in steps if s.get("id")}
+    env = by_id["finalize"].get("env", {})
+    assert "ONLY_COMMENT" in env and "steps.detect.outputs.only_comment" in str(env["ONLY_COMMENT"]), (
+        "finalize must be told when the run's only output was a comment")
+    assert "ONLY_COMMENT" in _script("review-fix.yml", "fix", "finalize"), (
+        "finalize's early return must not swallow a comment-only run")
+    claude = [st for st in steps if "claude-code-action" in st.get("uses", "")]
+    import fnmatch
+    for st in claude:
+        granted = set(re.search(r'--allowedTools "([^"]*)"', st["with"]["claude_args"]).group(1).split(","))
+        # Round-1 review on #466: `Bash(gh pr edit*)` is a prefix glob and `gh pr edit` is not a
+        # body-only verb — it also adds/removes labels (`needs-human`, `risk:t<n>`,
+        # `review-fix-<n>`), which is the surface agent-merge and the attempt budget READ. The
+        # grant is scoped to the one form the prompt sanctions: this PR's number, then
+        # --body-file. Checked with the allow-list's own prefix semantics, not by string equality.
+        # Round 2: a trailing `*` spans the rest of the command line, so `--body-file x
+        # --remove-label needs-human` matched the round-1 grant. The grant is now the EXACT
+        # command the prompt dictates — this PR, this file path, nothing after — with no wildcard.
+        edit_grants = [g for g in granted if g.startswith("Bash(gh pr edit")]
+        assert edit_grants == ["Bash(gh pr edit ${{ needs.gate.outputs.pr }} --body-file /tmp/pr-body.md)"], (
+            st.get("id"), "the fixer's gh pr edit grant must be the exact sanctioned command", edit_grants)
+        assert not any("*" in g for g in edit_grants), "no wildcard anywhere in the gh pr edit grant"
+        pats = [g[5:-1] for g in granted if g.startswith("Bash(")]
+        pr = "${{ needs.gate.outputs.pr }}"
+        allowed = lambda c: any(fnmatch.fnmatchcase(c, p) for p in pats)
+        assert allowed(f"gh pr edit {pr} --body-file /tmp/pr-body.md"), "the sanctioned body edit must be permitted"
+        for c in (f"gh pr edit {pr} --remove-label needs-human", f"gh pr edit {pr} --add-label risk:t0",
+                  f"gh pr edit {pr} --remove-label review-fix-1", f"gh pr edit {pr} --base main",
+                  "gh pr edit 999 --body-file /tmp/pr-body.md", f"gh pr edit {pr} --title x --body-file /tmp/pr-body.md",
+                  f"gh pr edit {pr} --body-file /tmp/pr-body.md --remove-label needs-human",
+                  f"gh pr edit {pr} --body-file /tmp/pr-body.md --add-label risk:t0 --remove-label risk:t3",
+                  f"gh pr edit {pr} --body-file /tmp/pr-body.md --remove-label review-fix-1",
+                  f"gh pr edit {pr} --body-file /tmp/other.md", f"gh pr edit {pr} --body-file /tmp/pr-body.md;gh pr edit {pr} --base main"):
+            assert not allowed(c), (st.get("id"), "must be denied by the allow-list", c)
+        # ...and still nothing that reaches the approval path.
+        for banned in ("Bash(gh pr review*)", "Bash(gh pr merge*)", "Bash(gh api*)", "Bash(gh*)", "Bash(*)"):
+            assert banned not in granted, (st.get("id"), banned)
+    assert "/tmp/pr-body.md" in prompt_text_for_review_fix(), "the prompt must dictate the exact sanctioned command"
+    # The Closes/Fixes/Resolves set the merge gate acts on is snapshotted by the gate and compared
+    # by detect; finalize is told REFS_CHANGED and must not return early on it.
+    assert "closes" in wf["jobs"]["gate"]["outputs"], "the gate must export the body's closing-reference set"
+    # Round 3: ONE implementation. The gate loads the module from the default-branch checkout
+    # (that job runs no Claude step, so the workspace is trusted there) and calls closingRefs;
+    # no second regex may exist in the gate script.
+    gate_script = _script("review-fix.yml", "gate")
+    assert "agent-noop.js" in gate_script and "closingRefs(" in gate_script, "the gate must snapshot with the shared closingRefs"
+    assert "close[sd]?" not in gate_script, "no private copy of the closing-keyword regex in the gate"
+    denv = by_id["detect"].get("env", {})
+    assert "CLOSES_BEFORE" in denv and "needs.gate.outputs.closes" in str(denv["CLOSES_BEFORE"]), "detect must receive the snapshot"
+    assert "REFS_CHANGED" in env and "steps.detect.outputs.refs_changed" in str(env["REFS_CHANGED"]), "finalize must be told"
+    assert "REFS_CHANGED" in _script("review-fix.yml", "fix", "finalize"), "finalize's early return must not swallow it"
+    prompt = prompt_text_for_review_fix()
+    assert "gh pr edit" in prompt, "review-fix.md must tell the fixer it may correct the PR body"
+    assert "Closes" in prompt and "must not" in prompt, "the prompt must forbid touching the closing references"
+    # Round-1 red team on #466, finding 5: a body edit does not move the head, so on its own the
+    # run the grant enables is the run the escalation catches. The prompt must make the fixer
+    # push an empty commit after a body-only correction, so the reviewers re-read it.
+    assert "--allow-empty" in prompt, "after a body-only correction the fixer must push an empty commit"
+
+
+def test_reference_guard_reads_at_least_what_agent_merge_reads(tmp_path):
+    """Round-10 red team on #466: the guard's `KEYWORD #n` parser was narrower than agent-merge's
+    (`agent-merge.yml`'s release/close regex), so a body edit could add or remove a reference the
+    merge automation acts on while the guard said "unchanged". Pin the property, not a spelling:
+    extract agent-merge's literal regex from its workflow and check, on a corpus of awkward bodies,
+    that the GUARD's compared set (`closingRefs`, what the gate snapshots and `detect` compares)
+    contains every match agent-merge's regex finds — as a `merge:` element, or as the identical
+    span read by the wider reader (whose spelling then ENDS with agent-merge's text, e.g.
+    `***fixes #131` for `fixes #131`; the module drops the duplicate only on that positional
+    condition, never on text). Round 12: the corpus loop had drifted onto the release path, which
+    by then WAS agent-merge's regex, so it was a tautology; it reads the guard now."""
+    if shutil.which("node") is None:
+        pytest.skip("node not present")
+    merge_src = (ROOT / ".github" / "workflows" / "agent-merge.yml").read_text()
+    m = re.search(r"matchAll\((/\\b\(\?:close\[sd\]\?\|fix\(\?:e\[sd\]\)\?\|resolve\[sd\]\?\)[^/]*/gi)\)", merge_src)
+    assert m, "agent-merge.yml's closing-reference regex not found where expected"
+    merge_re = m.group(1)
+    corpus = [
+        "Closes #463", "Also fixes #131-followup in passing.", "resolves #131_x", "closes #131abc",
+        "***fixes #131*** — noted.", "**Closes** #12", "Closes:#12", "closes:  #12", "Fixes #1, fixes #2\nResolved #3",
+        "```\nCloses #7\n```", "<!-- Closes #8 -->", "- a\n    - Closes #9", "text\n\n    Closes #10",
+        "Closes #11\nfixes GH-12\ncloses o/r#13\nresolves https://github.com/o/r/issues/14",
+    ]
+    runner = tmp_path / "cmp.js"
+    runner.write_text(
+        "const noop = require(process.argv[2]); const bodies = JSON.parse(process.argv[3]);\n"
+        "const mergeRe = " + merge_re + ";\n"
+        "let bad = [];\n"
+        "for (const b of bodies) {\n"
+        "  const merge = [...new Set([...b.matchAll(mergeRe)].map(x => Number(x[1])))];\n"
+        "  const guard = noop.closingRefs(b, 'o', 'r').split(',');\n"
+        "  for (const m of b.matchAll(mergeRe)) { const sp = 'merge:' + m[0].replace(/\\s+/g, ' '); if (!guard.some(g => g === sp || g === sp.slice(6) || g.endsWith(sp.slice(6)))) bad.push(JSON.stringify(b) + ' -> agent-merge reads ' + JSON.stringify(m[0]) + ', the guard set lacks ' + JSON.stringify(sp)); }\n"
+        "}\n"
+        "console.log(bad.length ? bad.join('\\n') : 'SUPERSET');\n")
+    r = subprocess.run(["node", str(runner), str(ROOT / "tools" / "ci" / "agent-noop.js"), json.dumps(corpus)],
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "SUPERSET", r.stdout
+    # Round 11: the superset holds by CONSTRUCTION — the module carries agent-merge's regex
+    # verbatim as a second reader. Pin the two literals equal, so a change to either without the
+    # other turns red here rather than surfacing as a silent divergence.
+    noop_src = (ROOT / "tools" / "ci" / "agent-noop.js").read_text()
+    m2 = re.search(r"const MERGE_RE = (/[^\n]*?/gi);", noop_src)
+    assert m2, "agent-noop.js must carry agent-merge's closing-reference regex as MERGE_RE"
+    assert m2.group(1) == merge_re, f"MERGE_RE {m2.group(1)} != agent-merge.yml {merge_re}"
+
+
+def test_review_fix_finalize_glue_calls_finalize_on_a_comment_only_run(tmp_path):
+    """Round-1 red team on #466, finding 4: the wiring test asserted the literal ONLY_COMMENT in
+    the finalize step, not the condition — inverting `!== 'true'` to `=== 'true'` survived the
+    suite with the whole change silently undone. So: EXECUTE the three-line glue under node with
+    a stub module, for the three (NOOP, ONLY_COMMENT) shapes the workflow can send."""
+    if shutil.which("node") is None:
+        pytest.skip("node not present")
+    script = _script("review-fix.yml", "fix", "finalize")
+    stub = tmp_path / "agent-noop.js"
+    stub.write_text("module.exports = { finalize: async () => { process.stdout.write('FINALIZE_CALLED'); } };")
+    runner = tmp_path / "run.js"
+    runner.write_text(
+        "const S = process.argv[2]; const AF = Object.getPrototypeOf(async function(){}).constructor;\n"
+        "(async () => { await new AF('github','context','core','require', S)({}, {}, {notice(){},warning(){}}, require); })();")
+    def calls(noop, only, refs="false"):
+        env = dict(os.environ, RUNNER_TEMP=str(tmp_path), NOOP=noop, ONLY_COMMENT=only, REFS_CHANGED=refs, KIND="fix", PR="1")
+        r = subprocess.run(["node", str(runner), script], capture_output=True, text=True, env=env, timeout=30)
+        assert r.returncode == 0, r.stderr
+        return "FINALIZE_CALLED" in r.stdout
+    assert calls("false", "true"), "a comment-only run must reach finalize (it is escalated)"
+    assert not calls("false", "false"), "an ordinary produced run must return early"
+    assert calls("true", "false"), "a no-op run must reach finalize (it is released)"
+    assert calls("true", "true"), "an errored comment-only run must reach finalize (it fails loudly)"
+    assert calls("false", "false", "true"), "a run that changed the closing references must reach finalize"
+    # The implement path has no comment-only outcome; the signal must not leak into dispatch.
+    dwf = yaml.safe_load((ROOT / ".github" / "workflows" / "agent-dispatch.yml").read_text())
+    denv = {s.get("id"): s for s in dwf["jobs"]["implement"]["steps"] if s.get("id")}["finalize"].get("env", {})
+    assert "ONLY_COMMENT" not in denv
+
+
 def test_every_claude_step_has_an_id_so_its_execution_file_is_readable():
     """`execution_file` (turns, denials, is_error) is a step output; an id-less step has none."""
     for wf_name, job, _ in NOOP_WORKFLOWS:

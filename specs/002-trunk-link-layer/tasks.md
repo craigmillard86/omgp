@@ -254,19 +254,19 @@ enrolment rotation and one notification per transition.
 ## Phase 7: User Story 5 — A dead bus is not ten dead nodes (Priority: P3)
 
 **Goal**: BUS_FAULT declaration (ruling Q2), alternating-rate re-probe and recovery
-(ruling Q3), rate pinned to the answering rate, bus statistics.
+(ruling Q3), rate pinned to the answering rate *(amended 2026-09-13, F4: the host prefers the reference rate and a fallback answer clears the fault only after a reference pass of every enrolled address; no automatic return — data-model §7)*, bus statistics.
 
 **Independent Test**: `./build/native/test_link_busfault` green, including
 `[timing:bit_rate_fallback]`.
 
 ### Tests for User Story 5 (write first, must fail — one dispatch unit with their implementation, ruling 2026-08-30)
 
-- [ ] T041 [P] [US5] Write `tests/unit/test_link_busfault.cpp`: three enrolled nodes all SUSPECT → exactly one `BUS_FAULT` and one `ALERT`, `bus_faults == 1`; two nodes with one ENROLLED → none; a single enrolled node SUSPECT → declared (ruling Q2); `next_probe()` rates alternate fallback, reference, fallback… while faulted, each change counted in `rate_changes` `[timing:bit_rate_fallback]`; first valid answer at the fallback rate → `BUS_RECOVERED` once, `bit_rate() == TRUNK_bit_rate_fallback`, answering node ENROLLED, the others keep SUSPECT/OFFLINE timers (one of them goes OFFLINE at its own 1 s mark afterwards); a second fault after recovery is declared again (once)
-- [ ] T042 [P] [US5] Extend `tests/unit/test_link_loop.cpp` with the wrong-rate script: all nodes `Rate 115200`; host probes at 1 Mbit/s → silence → SUSPECT → BUS_FAULT → the alternating probe at 115 200 gets an answer → recovery, `Master::set_bit_rate` observed on the mock
+- [ ] T041 [P] [US5] Write `tests/unit/test_link_busfault.cpp`: three enrolled nodes all SUSPECT → exactly one `BUS_FAULT` and one `ALERT`, `bus_faults == 1`; two nodes with one ENROLLED → none; a single enrolled node SUSPECT → declared (ruling Q2); `next_probe()` rates alternate fallback, reference, fallback… while faulted and no reference pass is running, each change counted in `rate_changes` `[timing:bit_rate_fallback]`; first valid answer at the fallback rate → `BUS_RECOVERED` once, `bit_rate() == TRUNK_bit_rate_fallback`, answering node ENROLLED *(amended 2026-09-13, F4 — assert instead: a valid answer at the REFERENCE rate → `BUS_RECOVERED` once at once, `bit_rate() == TRUNK_bit_rate`; a valid answer at the FALLBACK rate → no recovery yet, `bus_fault()` still true, that node's state unchanged, no `poll_due()` for any address, then `next_probe()` yields every enrolled address once at `TRUNK_bit_rate` without alternating; a reference-rate answer during that pass → recovery at `TRUNK_bit_rate`; none → recovery at `TRUNK_bit_rate_fallback` with the fallback answerer ENROLLED and NO immediate re-declare; data-model §7)*, the others keep SUSPECT/OFFLINE timers (one of them goes OFFLINE at its own 1 s mark afterwards); a second fault after recovery is declared again (once)
+- [ ] T042 [P] [US5] Extend `tests/unit/test_link_loop.cpp` with the wrong-rate script: all nodes `Rate 115200`; host probes at 1 Mbit/s → silence → SUSPECT → BUS_FAULT → the alternating probe at 115 200 gets an answer → *(amended 2026-09-13, F4)* a reference pass of every enrolled address at 1 Mbit/s draws nothing (the mock's nodes hear only 115 200) → recovery at 115 200, `Master::set_bit_rate` observed on the mock for each rate change, no fault re-declared
 
 ### Implementation for User Story 5
 
-- [ ] T043 [US5] Implement the bus-fault logic in `link/health.cpp` per data-model.md §7 (declare rule, alternation in `next_probe`, clear-and-pin on the first valid answer, `BusStats`), citing `trunk §7` — make T041 and T042 pass
+- [ ] T043 [US5] Implement the bus-fault logic in `link/health.cpp` per data-model.md §7 (declare rule, alternation in `next_probe`, clear-and-pin on the first valid answer *(amended 2026-09-13, F4: a reference-rate answer clears at once; a fallback answer starts a reference pass of every enrolled address, `BusState.fallback_answerer` (the address to enrol on the clear, 0 = none)/`ref_pass_left`/`pass_addr`; no automatic return — data-model §7; assumes the two F3 obligations in `contracts/link-cpp.md` "What F3/F4 need")*, `BusStats`), citing `trunk §7` — make T041 and T042 pass
 - [ ] T044 [US5] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; local mutation run
 
 **Checkpoint**: SC-007 demonstrated; every §7 mode has a script (SC-005 table complete).

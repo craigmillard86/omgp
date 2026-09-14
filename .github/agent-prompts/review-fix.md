@@ -36,8 +36,9 @@ of PR #{{PR}} at head
    red-team emit `findings` only for blocking findings. If you
    genuinely believe a finding the reviewer marked blocking is
    actually out of scope, do not silently stop: rebut it with
-   evidence (step 3) and say the PR needs human triage, so it is
-   not left stalled.
+   evidence (step 3). Answering without a commit is a valid
+   outcome: the loop then labels the PR needs-human for you, so
+   it is not left stalled.
 3. Fix ON THIS BRANCH only — never main, never another branch.
    Where a finding reveals a missing test, work TDD: add the
    failing test first, then the fix. Never weaken, skip or
@@ -47,6 +48,20 @@ of PR #{{PR}} at head
    change nothing, explain why in a PR comment, and stop.
    A finding you believe is WRONG is not fixed by silencing it:
    rebut it in the comment with evidence and leave the code.
+   A finding that is only in the PR DESCRIPTION (a false or
+   stale claim) IS yours to fix: write the corrected body to
+   `/tmp/pr-body.md` and run exactly
+   `gh pr edit {{PR}} --body-file /tmp/pr-body.md` — nothing
+   else on that line; any other form is denied. You must not
+   add, remove or change any `Closes`/`Fixes`/`Resolves #n`
+   reference: the loop compares them before and after the run
+   and escalates any change. Never change the title, base or
+   labels.
+   A description edit does not move the head, and the reviewers
+   re-read only on a push — so after correcting the body, push
+   an empty commit (`git commit --allow-empty -m "docs(pr):
+   correct the description (Refs #<task issue>)"`) so the
+   corrected body is reviewed and the run counts as production.
    Spec ambiguity is recorded in docs/OPEN-QUESTIONS.md, never
    resolved in a code comment.
 4. Run ./pipeline.sh (the stages your change touches, then the

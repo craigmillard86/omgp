@@ -34,7 +34,9 @@ specification.
 - Q: After BUS_FAULT, what is the rate/recovery policy? → A: Alternate enrolment probes
   between the reference and fallback bit rates; the first valid answer clears the fault
   and the rate that obtained it becomes the rate in use (restoring the reference rate
-  later is an L4/human action). Recorded in `docs/OPEN-QUESTIONS.md`.
+  later is an L4/human action). Recorded in `docs/OPEN-QUESTIONS.md`. *(Amended 2026-09-13:
+  the first valid answer no longer pins the rate — the host prefers the reference rate, F4 —
+  but "restoring the reference rate later is an L4/human action" is reaffirmed; see FR-026.)*
 - Q: Where does the link layer sit relative to the message-level `OMGPTransport` of Spec
   §42, and does the simulator's `VirtualTransport` run the real L2 engines? → A: Below it.
   The trunk implementation of `OMGPTransport` is the L2 master engine over a **byte-wire**
@@ -234,14 +236,18 @@ assert no bus fault.
 **Acceptance Scenarios**:
 
 1. **Given** several ENROLLED nodes, **When** all of them fail per the bus-fault rule
-   (FR-028), **Then** the host declares BUS_FAULT once, raises one alert, and the next
+   (FR-024), **Then** the host declares BUS_FAULT once, raises one alert, and the next
    probes go out at the fallback bit rate.
 2. **Given** several ENROLLED nodes, **When** only some of them fail, **Then** those nodes
    follow the Story 4 state machine and no bus fault is declared.
 3. **Given** a declared bus fault, **When** probes alternate between the reference and
-   fallback rates and a node answers one of them, **Then** the bus fault clears, a
-   recovery notification is raised, and the bit rate in use is the one the answer arrived
-   at (FR-026).
+   fallback rates and a node answers at the **reference** rate, **Then** the bus fault clears
+   at once, a recovery notification is raised, and the reference rate is in use. *(Amended
+   2026-09-13, F4.)* **When** instead a node answers at the **fallback** rate, **Then** the
+   host probes every enrolled address once at the reference rate; a reference-rate answer
+   clears the fault at the reference rate, and none clears it at the fallback rate — in
+   either case exactly one recovery notification. The superseded text read: "the bit rate in
+   use is the one the answer arrived at".
 4. **Given** a single enrolled node, **When** it becomes SUSPECT, **Then** BUS_FAULT is
    declared (one node is all nodes) and the re-probe policy starts; a SUSPECT node in a
    two-node rig whose peer is ENROLLED declares nothing.
@@ -355,10 +361,21 @@ assert no bus fault.
   observe them.
 - **FR-011a**: The link layer MUST keep, per trunk address, a fixed-size counter block —
   transactions started, retries sent, timeouts, CRC-failed responses, frames discarded,
-  replays served (node side) — and, per bus, bit-rate changes and bus faults declared;
+  replays served (node side) — and, per bus, bit-rate changes, bus faults declared, and
+  frames discarded with no attributable address;
   counters MUST be readable by the layer above, resettable by it, never allocated after
   initialisation, and MUST be what this feature's own tests assert (e.g. "exactly two
   retries", "one replay served") instead of reaching into engine internals.
+  *(Ruled 2026-09-11, `OPEN-QUESTIONS.md` "Maintainer rulings … 2026-09-11" item 8, and the
+  maintainer's own comment on #144: the per-bus list gains "frames discarded with no
+  attributable address" so FR-011's unconditional "MUST be counted" is satisfiable as
+  written. Two discard classes have no address the engine may charge: a decoded frame that
+  fails the acceptance screen with no transaction awaiting a response (its `src` is
+  wire-derived and unauthenticated, and may name no address at all), and a CRC-failed frame
+  that did not open inside an awaiting transaction's window (it decodes to nothing, so only
+  its window could attribute it — and inside that window it counts as `crc_failures`, not as
+  a discard). The per-address discard counter therefore means "a decoded frame discarded
+  during that address's own transaction" and nothing else. Implementation: #144.)*
 - **FR-012**: The engine MUST model transmission time from the frame's stuffed length and
   the bit rate in use (10 bits per byte, 8N1) so that "final stop bit" instants — from
   which turnaround and timeout are measured — are computed, not assumed, and change
@@ -445,14 +462,32 @@ assert no bus fault.
   (115.2 kbit/s, from the generated symbol) and thereafter alternate per FR-026, and the
   transport abstraction MUST expose the bit-rate change so a scripted transport can
   observe and react to it.
-- **FR-026**: While BUS_FAULT is declared, the host MUST alternate its enrolment probes
-  between the reference and the fallback bit rate (one probe at each, in turn); the first
-  valid response at either rate MUST clear BUS_FAULT exactly once with a recovery
-  notification, and the bit rate that obtained the response MUST become the rate in use
-  until the layer above changes it. **Ruling (human, 2026-08-29;
-  `docs/OPEN-QUESTIONS.md`)**. Per-node health MUST resume normally afterwards: the
-  answering node becomes ENROLLED; the others keep their SUSPECT/OFFLINE state and timers
-  (their clocks were not paused by the fault).
+- **FR-026** *(rewritten 2026-09-13: F4, human 2026-09-06; ruling human 2026-09-13)*: While
+  BUS_FAULT is declared the link layer MUST send no status polls, and the scheduler above it
+  MUST issue no other traffic (an obligation on F3, `contracts/link-cpp.md` "What F3/F4 need";
+  nothing can be delivered to a SUSPECT or OFFLINE node) — probes are the only traffic; it MUST
+  alternate its probes
+  between the reference and the fallback bit rate (one probe at each, in turn) over every
+  address that is UNENROLLED, OFFLINE or SUSPECT (no address is ENROLLED while a fault is
+  declared) — except during a reference pass, when every probe goes out at the reference
+  rate. The host MUST prefer the reference rate: a valid response at the reference rate
+  MUST clear BUS_FAULT at the reference rate at once. A valid response at the fallback rate
+  MUST NOT clear BUS_FAULT by itself and MUST NOT yet change that node's health state: the
+  host MUST then probe every enrolled address once at the reference rate, in address order
+  (exactly |enrolled| probes); a valid response during that pass clears BUS_FAULT at the
+  reference rate; no response in the whole pass clears BUS_FAULT at the fallback rate, and
+  the node that answered at the fallback rate then becomes ENROLLED before the bus-fault rule
+  is next evaluated. BUS_FAULT clears exactly once per episode, with one recovery
+  notification, and the transport MUST expose each bit-rate change (FR-025). There is NO
+  automatic return from the fallback rate: nodes select their rate by strap or configuration
+  (trunk §2) and cannot hear the other rate, so the rate in use stands until the layer above
+  or a human changes it. Per-node health MUST resume normally afterwards: the other nodes
+  keep their SUSPECT/OFFLINE state and timers (their clocks were not paused by the fault).
+  The superseded text (human, 2026-08-29) read: "the first valid response at either rate MUST
+  clear BUS_FAULT exactly once with a recovery notification, and the bit rate that obtained
+  the response MUST become the rate in use until the layer above changes it" — its pinning
+  half is superseded by F4 in `docs/OPEN-QUESTIONS.md`; its no-automatic-return half is
+  reaffirmed 2026-09-13.
 
 **Timing and the clock (§9; CLAUDE.md rules 3–4)**
 

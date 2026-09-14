@@ -26,7 +26,7 @@ struct DeframerStats { uint32_t delivered; uint32_t discarded[static_cast<size_t
 enum class HealthState : uint8_t { UNENROLLED, ENROLLED, SUSPECT, OFFLINE };
 enum class Notice : uint8_t { ENROLLED, SUSPECT, OFFLINE, RECOVERED, BUS_FAULT, ALERT, BUS_RECOVERED };
 struct AddrStats { uint32_t transactions, retries, timeouts, crc_failures, discards, replays_served, late_responses; };
-struct BusStats  { uint32_t rate_changes, bus_faults; };
+struct BusStats  { uint32_t rate_changes, bus_faults, discards; };   // discards: no attributable address (#144)
 ```
 
 ## Frame codec (`frame.hpp`) — trunk §4
@@ -97,11 +97,25 @@ public:
 Behaviour (tests assert each): a new transaction uses the destination's next 4-bit
 sequence; retries reuse it and set `retry`; at most `TRUNK_retries` retries; response
 window `[tx_end, tx_end + TRUNK_T_resp_us)`; a CRC-failed frame in the window ends the
-attempt at once; frames failing any acceptance check are discarded and counted — against
-`dst` while `dst`'s response window is open (spec US2 AC6), otherwise against the frame's own
-claimed `src` when that is in range (a claimed `src` of `0x10..0xFE` is discarded and counted
-nowhere — an FR-011 tension recorded in `docs/OPEN-QUESTIONS.md` 2026-09-06, bus-level counter
-tracked in #138) — and a byte-for-byte drain: `poll()` reads every byte due at
+attempt at once; frames failing any acceptance check are discarded and counted — a decoded
+one against `dst` while `dst`'s own transaction is awaiting a response, otherwise against
+`BusStats.discards`, which also takes a CRC-failed frame that did not open inside an awaiting
+transaction's window (the two paths differ on purpose in that state: a decoded frame arrives
+during a transaction the host opened and so has an address to charge, a corrupt one decodes
+to nothing and can be attributed only by its window; pinned by "while dst's transaction is
+awaiting but the frame opened outside its window …". `AddrStats.discards` is therefore never
+written for a CRC-failed frame — in its own window that is `crc_failures`)
+(ruling 2026-09-11, `docs/OPEN-QUESTIONS.md`; #144 — it closes the FR-011 tension the
+2026-09-06 entries recorded, where a claimed `src` of `0x10..0xFE` was counted nowhere and an
+in-range one was charged to an unauthenticated wire byte. No address is charged for a frame
+merely because that frame claimed its address: true by construction of `drain_wire()`'s
+if/else, whose only `AddrStats` write is to `dst_` and which never indexes the wire-derived
+`src`; demonstrated by `test_link_master.cpp`'s "an idle-time discard claiming an in-range
+source …" and "… a source well past kAddrCount …". The wider "no address is charged for a
+frame it did not send" does **not** hold and is not claimed: while `dst`'s transaction is
+awaiting, a discarded frame is charged to `dst` whoever sent it, pinned by "inside dst's
+window, a THIRD station's frame is charged to dst …") — and a byte-for-byte drain:
+`poll()` reads every byte due at
 `now_us`, including those behind the byte that concluded an attempt; the next transmission
 starts no earlier than `last_activity + TRUNK_T_gap_us`, where `last_activity` is re-read on
 every `poll()` so a byte arriving during the deferral pushes the instant out. `begin()` drains
@@ -182,21 +196,32 @@ struct Probe { uint8_t addr; uint32_t bit_rate; };
 class HealthTracker {
 public:
     HealthTracker(Clock&, HealthListener&);
-    void on_result(uint8_t addr, bool ok, uint64_t now_us);   // one transaction outcome
+    void on_result(uint8_t addr, bool ok, uint64_t now_us);   // one transaction outcome (any kind; during a fault, a probe's)
     void tick(uint64_t now_us);                                // time-only transitions (SUSPECT → OFFLINE)
     HealthState state(uint8_t addr) const;
-    bool poll_due(uint8_t addr, uint64_t now_us) const;        // ENROLLED: true; SUSPECT: every 10×T_poll; else false
+    bool poll_due(uint8_t addr, uint64_t now_us) const;        // ENROLLED: true; SUSPECT: every 10×T_poll; else false;
+                                                               // while bus_fault(): false for every address (F4, 2026-09-13)
     void mark_polled(uint8_t addr, uint64_t now_us);
-    Probe next_probe(uint64_t now_us);                         // enrolment rotation; alternates rates while bus_fault()
+    Probe next_probe(uint64_t now_us);                         // enrolment rotation; alternates rates while bus_fault(),
+                                                               // except during a reference pass (F4, 2026-09-13). Each call
+                                                               // advances the rotation/alternation: F3 calls it once per probe
+                                                               // issued ("What F3/F4 need", obligation 2). During a pass the
+                                                               // yielded address is held in pass_addr until its outcome arrives
     bool bus_fault() const;
-    uint32_t bit_rate() const;                                 // rate in use after the last recovery
+    uint32_t bit_rate() const;                                 // rate in use after the last recovery: the reference if any node answered
+                                                               // there during the fault, else the fallback; no automatic return (F4;
+                                                               // data-model §7, amended 2026-09-13)
 };
 ```
 Rules: SUSPECT after `TRUNK_suspect_after_failures` consecutive failures; OFFLINE after
 `TRUNK_offline_after_suspect_ms` in SUSPECT without a valid response; any valid response
-→ ENROLLED; UNENROLLED never counts; BUS_FAULT when ≥ 1 node is enrolled and all enrolled
-nodes are SUSPECT/OFFLINE (declared once); alternating-rate re-probe; first valid answer
-clears the fault and pins the rate. Each transition notifies exactly once.
+→ ENROLLED, except that a fallback-rate answer during a fault is deferred to the clear
+(data-model §7, 2026-09-13); UNENROLLED never counts; BUS_FAULT when ≥ 1 node is enrolled and all enrolled
+nodes are SUSPECT/OFFLINE (declared once); alternating-rate probes while BUS_FAULT except during
+the reference pass; a valid answer at the reference rate clears the fault there at once, a valid
+answer at the fallback rate clears it only after a reference pass — every enrolled address once, at
+the reference rate, without alternating — draws nothing *(amended 2026-09-13, F4)*; no automatic
+return afterwards (data-model §7). Each transition notifies exactly once.
 
 ## What F3/F4 need (interface note, SC-010)
 
@@ -205,3 +230,12 @@ tick/mark_polled`, `HealthListener`, `Clock`. F4 (virtual rig): `ByteWire` (its 
 wire), `Responder` + `RequestHandler` (virtual backplane), `MockWire` step kinds as the
 mapping target for scenario YAML fault steps. All of it is in this contract and
 `byte-wire-and-clock.md`; nothing else is required.
+
+Two obligations on F3 that the health tracker's bus-fault rule (data-model §7, F4, 2026-09-13)
+relies on and cannot enforce from this side — **assumed** here, to be pinned by F3's own tests:
+1. While `bus_fault()` is true, issue only the probe `next_probe()` returns — no status polls
+   (`poll_due()` is already false) and no demand traffic. Every enrolled node is SUSPECT or
+   OFFLINE, so nothing could be delivered; this makes every `on_result` during a fault a probe's.
+2. Call `next_probe()` once per probe issued, when about to issue it. Each call advances the
+   enrolment rotation and, while `bus_fault()`, the rate alternation; polling it at every
+   superframe boundary while a transaction is still in flight would count phantom rate changes.

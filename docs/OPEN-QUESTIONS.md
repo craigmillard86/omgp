@@ -3263,6 +3263,197 @@ Three mutants survived the first suite (the `SINCE` window, the `state: 'open'` 
 
 ---
 
+## 2026-09-13 — Ruling recorded: unattributable discards are counted per bus (`BusStats.discards`), implemented in #144
+
+**Context:** the maintainer ruled on 2026-09-11 — in the "Maintainer rulings on the pending
+entries (session of 2026-09-11)" entry above, item 8, and in their own comment on issue #144 —
+that a frame discarded with no attributable address is **counted at bus level**. The field is
+#144's own proposal, `BusStats.discards` (a dedicated `orphan_discards` was named as equally
+inside the ruling; one field is used, because the entries it settles are one question). This
+entry records the ruling against the entries that carry it and states what landed, so the
+answer is findable from each of them.
+
+**Ruling:** option (a) — a frame discarded with no attributable address is counted at bus
+level, in `BusStats.discards`; ratified by the maintainer, 2026-09-11. Stated as a field line
+because the decision has to be *mechanically* findable, not only readable: `docs/GOVERNANCE.md`
+§1 reserves the merge click for any diff that records a ruling in this file, and since the
+2026-09-12 CODEOWNERS amendment only `agent-merge`'s guard enforces it. That guard reads a
+field name at the start of an added line; until this line every decision in the entry lived
+mid-line as `**Ruled: …**`, so the guard never fired and a ruling-recording diff was eligible
+for autonomous merge (round-4 review). **Demonstrated by** reading
+`.github/workflows/agent-merge.yml:199`'s pattern against the entry's added lines — a read of
+the regex, *not* a run of its harness.
+
+**Answers, by appending — the entries below keep their own text and history.** *Scope of the
+ruling, labelled (rule 11): the maintainer's item 8 and their comment on #144 name the
+**2026-09-07** CRC entry explicitly. That the same decision settles the three **2026-09-06**
+entries below is an **inference** by this pull request, not a quoted decision — it follows from
+the maintainer releasing #144, whose acceptance criteria are exactly the claimed-`src`
+attribution and are written "conditional on the ruling selecting option (a)". It is a sound
+reading and the whole feature rests on it, but it is this agent's reading; if the maintainer
+holds the ruling narrower, the two "Ruled: option (a)" lines below are what changes, and the
+code under them with it.*
+
+- **2026-09-06 "a discarded frame whose claimed src is out of range (0x10..0xFE) is counted
+  nowhere; FR-011 says every discard MUST be counted"** — **Ruled: option (a).** Such a frame
+  now increments `bus_stats().discards`.
+- **2026-09-06 "an idle-time discard is charged to the frame's CLAIMED in-range src; nothing
+  authenticates it"** — **Ruled: option (a).** The claimed-src attribution is removed
+  entirely; the in-range half goes to the same bus counter. Option (b) (keep it, document it
+  as unauthenticated) and option (c) (count idle-time discards nowhere) are both rejected.
+- **2026-09-06 "correction to the claimed-src entry above: the counting requirement is
+  FR-011/FR-011a, not AC6"** — its correction stands and is what the amended `spec.md` text
+  rests on; AC6 is not cited.
+- **2026-09-07 "a CRC-corrupt frame arriving with no transaction open moves no counter at
+  all"** — **Ruled: count it at bus level.** A CRC-failed frame outside any open attempt's
+  window increments the same counter. `crc_failures` stays per node.
+
+**What landed (#144):** `BusStats` gains `uint32_t discards`; `Master::drain_wire()` charges
+`stats_[dst_]` only while that address's own transaction is `awaiting`, and everything else to
+`bus_stats_.discards`; `spec.md` FR-011a's per-bus list gains "frames discarded with no
+attributable address"; `data-model.md` §8 and `contracts/link-cpp.md` carry the field and the
+split. `AddrStats::discards` now means "a **decoded** frame discarded during that address's
+own transaction" and nothing else.
+
+**The split's criterion, corrected (red team @25545f5 finding 1).** An earlier revision of
+this entry, and the three documents above, said `AddrStats::discards` counts frames
+"discarded while that address's own transaction is awaiting a response", and justified the
+bus counter with "a discard outside any open response window has no address the engine may
+charge". Neither survives the `awaiting`-but-out-of-window state, which this feature's own
+suite proves reachable: there a CRC-failed frame goes to `bus_stats().discards` while a
+decoded one is charged to `stats(dst).discards`. What decides it is whether the frame
+DECODED — a decoded frame arrives during a transaction this host itself opened, so there is
+an address it may charge; a corrupt frame decodes to nothing and can be attributed only by
+its window, inside which it is `crc_failures` and never `discards`. **Demonstrated by**
+`tests/unit/test_link_master.cpp` "while dst's transaction is awaiting but the frame opened
+outside its window, a DECODED discard is charged to dst and a CRC-failed one goes to the
+bus". The engine's behaviour is unchanged by the correction; only the statements about it
+are. *(Corrected in place, not superseded: the text amended is this entry as added by #144's
+own unmerged commit `722e859`/`25545f5`, part of the pull request under review rather than
+recorded history on `main`. No pre-existing entry is edited.)*
+
+**Claim labels (rule 11).** "No address is charged for a frame merely because that frame
+claimed its address" is **proved by construction** of `drain_wire()`'s if/else: the only
+`AddrStats` write on the discard path is to `dst_`, an address this engine itself addressed;
+the wire-derived `f.src` indexes no table. **Demonstrated by**
+`tests/unit/test_link_master.cpp` "an idle-time discard claiming an in-range source …", "… a
+source well past kAddrCount …" (under ASan), "a frame discarded while dst's own transaction is
+awaiting …" and "a CRC-corrupt frame arriving with no transaction open …". The **wider**
+property "no address is charged for a frame it did not send" is **false and not claimed** (an
+earlier revision of this entry, of the `link/master.cpp` comment and of a test name asserted
+it; red team @722e859 finding 1): while `dst_`'s transaction is awaiting, a discarded frame is
+charged to `dst_` whoever actually sent it, so a third station's frame under its own `src`
+lands on the polled node. That attribution predates #144, the ruling above leaves it alone,
+and it is **demonstrated by** the new case "inside dst's window, a THIRD station's frame is
+charged to dst …". Whether an innocent polled node should carry it is a separate question,
+open only once something consumes the counter. That no *other* code path writes
+`AddrStats::discards` is a **control** — the current contents of `link/` — not a guarantee. That nothing yet *reads* `BusStats::discards` is also a
+control: the counter is diagnostic today, and feeding it into trunk §7 SUSPECT/OFFLINE
+accounting remains a separate, ruling-bearing change (the claimed-src entry's own note).
+
+**Supersedes:** none. **Amends:** none — it records a ruling on the entries named.
+
+---
+
+## 2026-09-13 — structural Deframer discards are still invisible above the engine; #144's bus counter does not cover them
+
+**Context:** #144 (ruling above) closes FR-011's counting gap for the two discard classes
+`Master` itself decides: a decoded frame that fails the acceptance screen with no transaction
+awaiting a response, and a CRC-failed frame outside any awaiting transaction's window. It does **not** cover the
+Deframer's *structural* discards — `Discard::BadLength`, `BadEscape`, `TooLong`,
+`ReservedAddress` (`link/frame.cpp`). Those reach `drain_wire()` as `feed()` returning false
+with no `BadCrc` delta, take the `if (!delivered) continue` path, and are counted only in
+`DeframerStats`, which `Master` does not expose — so a rig emitting structurally malformed
+frames between transactions still reads zero on every counter the layer above can see. Pinned,
+not asserted as desired, by `tests/unit/test_link_master.cpp` "a structurally-discarded frame
+updates last_activity …", which now checks `bus_stats().discards == 0` alongside its existing
+`stats(ADDR_host).discards == 0`.
+
+**Why it may matter:** the 2026-09-07 entry's own argument for counting CRC corruption applies
+unchanged to a garbled length or a dangling escape — "a marginal transceiver, a babbling
+station whose bytes happen to form a bad frame" produces both, and trunk §4 makes discards the
+bus's own health signal. The asymmetry is an artefact of how `Master` observes the Deframer (it
+samples the `BadCrc` cell specifically), not a considered distinction.
+
+**Options:** (a) count every Deframer discard the drain observes at bus level, by comparing the
+*total* of `DeframerStats::discarded[]` across a `feed()` rather than the `BadCrc` cell alone —
+smallest change, keeps the counter's meaning "a frame-level discard with no attributable
+address"; (b) expose `DeframerStats` through `Master` as its own accessor, leaving `BusStats`
+to frame-level decisions — more observable, a contract addition, and two counters a caller must
+add up; (c) leave it: structural garbage is arguably not "a frame" in FR-011's sense, which
+enumerates frames that decode but are not the expected response.
+
+**Recommendation:** (a), as a separate change, because it alters what `bus_stats().discards`
+counts after this repo has begun asserting on it, and because "is a structurally malformed
+burst one discard or several?" (the Deframer can count several across one byte run) needs the
+same human eye as the entry above did. Nothing speculative implemented in #144.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none.
+
+---
+
+## 2026-09-13 — #463: a comment-only review-fix run is escalated, and the fixer may correct the PR description
+
+**Context:** PR #452 (`task/148`, T0) stalled for 40 minutes on 2026-09-13 and was merged by hand. Its round-2 review had one blocking finding, `[LOW]`, entirely in the PR description. The fixer confirmed it, could not act on it (`gh pr edit` was outside `review-fix.yml`'s allow-list, and that file is outside its bounds), and commented asking for a human. Under #361's detector that comment is production, so the attempt stood and nothing escalated; no new head meant no new review; `agent-merge` reported "review reported findings" every 20 minutes. Every other terminal state in the loop applies `needs-human`; this one only said so in prose.
+
+**Two changes:**
+- `tools/ci/agent-noop.js` reports `only_comment` on the fix path (the fixer's marker comment with an unchanged head), and `finalize` then applies `needs-human` with a comment saying the fixer answered without a commit. The attempt stays spent — it produced — and the job does not fail, because the fixer did what its prompt says. Pinned by `agent_noop_harness.js` and `test_rebuttal_only_fix_run_is_escalated_and_the_fixer_may_edit_the_body`.
+- `review-fix.yml`'s two Claude steps gain the exact command `Bash(gh pr edit <this PR> --body-file /tmp/pr-body.md)` — no wildcard — and `review-fix.md` dictates it and limits its use to correcting the description for a body-only finding, never title, base or labels. The round-budget ruling (2026-09-07) makes a false PR-body claim blocking at every round; without this grant the fixer is the one agent that cannot address the one class of finding that always blocks, so any body nit on the autonomous path becomes a human merge.
+
+**What this does not do:** it does not judge the rebuttal. A comment-only run is escalated whether the fixer was right or wrong; the human rules. `gh pr edit` can also change title, base and labels; the allow-list permits one exact command, so for the verb the restriction is mechanical, and the wiring test checks eleven other forms against the allow-list's own prefix semantics. What no allow-list bounds is the *content* of the new body: the closing references are guarded by the gate/detect comparison below, and everything else is the reviewers' to judge at the next head. The approval path (`gh pr review`, `gh pr merge`, `gh api`) stays ungranted, pinned by the same test.
+
+**Corrected after adversarial round 1 (@`ce5ccb1`).** Five findings between the review and the red team, all correct, two of them regressions this change introduced:
+- *The grant was a prefix glob over a verb that is not body-only.* `Bash(gh pr edit*)` permitted `--remove-label needs-human`, `--add-label risk:t0`, `--remove-label review-fix-<n>` and `--base` — the label surface `agent-merge` and the attempt budget read, so the fixer could clear the very escalation this entry adds. Round 1's answer, `Bash(gh pr edit <this PR> --body-file*)`, was **not a fix**: the trailing `*` spans the rest of the command line, so every one of those flags was still permitted written *after* `--body-file` (round 2, both reviewers). An earlier revision of this bullet said it was corrected; it was reordered. The grant is now the exact command the prompt dictates, `Bash(gh pr edit <this PR> --body-file /tmp/pr-body.md)`, with no wildcard, and the wiring test checks eleven forms — flags before and after the file, another file, another PR, a `;` chain — with the allow-list's own prefix semantics.
+- *The comment-only branch swallowed `is_error`.* It ran before the produced-then-errored branch and never consulted `noop`, so an errored or cancelled run whose only output was a comment exited green with a comment calling the crash a considered answer. It now requires `noop == false`; an errored one fails loudly as before.
+- *`finalize` had no case for the string `'false'`* the workflow sends on every ordinary run, and the workflow's three-line guard was pinned as a literal, not a condition. `finalize` now mirrors the guard explicitly, cases pass `'false'`, and the guard is executed under node for all four shapes.
+- *The body grant reached the `Closes`/`Fixes`/`Resolves` references* (round 2). `agent-merge` closes, and the exhaustion path releases, every issue the body names, and the fixer could now rewrite that text. The gate snapshots the set before the run (`none` when empty), `detect` compares it to the body afterwards, and a change is escalated with the before/now sets, the attempt kept spent, and the job failed. The prompt forbids touching them; the comparison is what enforces it.
+- *The `PARTIAL` clause of `finalize`'s early return was unpinned* (round 2): dropping it restored #361's AC1 regression with the suite green. Pinned.
+- *The reference guard compared only `KEYWORD #n`* (round 3): GitHub also closes on `GH-n`, `owner/repo#n` and the issue URL, so a reference added in those forms escaped; and the gate and `detect` carried two private copies of the regex, which could drift into a spurious failing escalation on every run. `closingRefs` in `tools/ci/agent-noop.js` is now the one implementation for every form, the gate loads it from its default-branch checkout, and the gate harness asserts the exported value. `agent-merge.yml`'s own release regex still reads only `#n` — pre-existing, filed as a follow-up, not changed here.
+- *The reference guard canonicalised, and ignored markup* (round 4): folding `o/r#465` to `465` hid a rewrite into a form `agent-merge`'s own `#n`-only parser does not read, so a closed issue would have kept `in-progress`; and a reference moved into a code block or an HTML comment, which GitHub does not honour, read as unchanged. References are now compared as spelled, code and comments are stripped first, linked and autolinked URLs count, and a cross-repo form counts only under this repo's owner. `closingIssues` gives the release paths their numbers. The header comment now claims the spellings it covers, not GitHub's parser.
+- *Round 5:* comparing the reference token alone still folded `Closes:#n`, `**Closes** #n` and `Closes [#n](url)` into `#n`, while `agent-merge`'s parser reads only `KEYWORD<space>#n`. Each element is now the whole spelling — keyword, separator and token, whitespace collapsed — so any re-spelling is a change; a line wrap is not.
+- *Round 5, red team:* replacing stripped markup with a space let `Closes` bind to a `#n` across a code span, a comment or a fence — a reference that existed only because the markup was removed; a sentinel now breaks the binding. `~~~` fences, longer backtick fences and indented code are code too. A markdown link's target is part of the spelling, and the release path trusts it only when it is this repo's issue with the same number as the display text. Round 4's owner filter on `owner/repo#n` was a blind spot the URL form did not share and is reversed: cross-owner references count, and `fixes core/scheduler#3` in prose is a documented false positive in the loud direction.
+- *Round 6, red team:* the guard modelled GitHub's parser, but the thing it protects — `agent-merge`'s release/close path and this workflow's exhaustion release — regexes the raw body with no stripping, so a reference added inside a fence, a code span, an HTML comment or a nested list item changed what the merge automation acts on while the guard said "unchanged"; and the round-5 indented-code strip treated every 4-space line as code, which CommonMark does not. The guard now compares two views, what `agent-merge` reads and what GitHub honours, and a change in either escalates; the release path reads the raw body like `agent-merge`; indented lines are code only after a blank line and outside a list; a missing snapshot fails closed.
+- *Round 7, red team:* the round-6 strip stripped only the first line of an indented code block. The block is now stripped whole; a fence's end and a thematic break end a paragraph. The same pass asked whether any CI job executes the JavaScript harnesses: it does — `tools/refimpl/test_agent_noop.py` and `test_workflow_scripts.py` run them under node from the `refimpl` stage of `pipeline.sh`, which the `native` job runs on every PR, with a named skip if node were absent.
+- *Round 8, red team:* three spellings of code the GitHub view did not strip — multi-backtick code spans, a fence at a list item's content column, an unterminated HTML comment — let a reference leave GitHub's honoured set with both views unchanged; on a hand merge, where `agent-merge` never runs, GitHub's auto-close is the only thing that closes the issue. The strip now follows CommonMark for code spans (6.1), fences (4.5) and HTML comments (4.6). What this establishes, labelled: a control over the spellings the stripper knows, checked against the cases named; GitHub's parser remains the authority.
+- *Round 9: the GitHub-renderer view is withdrawn.* Rounds 4-9 tried to model what GitHub's renderer honours with a hand-written stripper; each round found another CommonMark spelling it did not know, and the stripper itself opened holes. A partial markdown parser is a control that cannot be labelled honestly (rule 11). The guard now compares what the merge automation *reads* — the raw body's references, as spelled — and nothing else; that is proved by the shared function and pinned by the harness. **Residual, stated:** on a hand merge (T3), where `agent-merge` never runs, closure depends on GitHub's auto-close, and a fixer that wraps a live reference in code leaves that issue open — visible in the issue, recoverable by a human, forbidden by the prompt. Removing it is a small separate change: close and release the raw-referenced issues on *any* merged PR, so closure never depends on the renderer (filed as a follow-up issue).
+- *Round 10, red team:* the guard's own `KEYWORD #n` parser was narrower than `agent-merge`'s (a trailing-character restriction, a two-character emphasis cap), so `fixes #131-followup` was live for the merge automation and invisible to the guard. Widened, and the property that matters — the guard reads at least what `agent-merge` reads — is now pinned against `agent-merge.yml`'s own literal regex over a corpus of awkward bodies (`test_reference_guard_reads_at_least_what_agent_merge_reads`), so the two parsers cannot drift apart in the silent direction unnoticed. The shim for an older snapshot format is gone; an unrecognised format fails closed.
+- *Round 11, red team:* a lookbehind still hid `a**closes #131` from the guard while `agent-merge`'s word boundary matched it. Rather than another regex repair, the guard now carries `agent-merge`'s regex verbatim as a second reader (the wiring test pins the two literals equal), so the superset holds by construction; and the exhaustion release uses that reader alone, so it never writes a label for a form `agent-merge` would not close.
+- *Round 12:* round 11's union deduped `agent-merge`'s matches against the wider reader by text suffix, so `_closes #131_` (wider-reader only) swallowed a distinct `a**closes #131**` elsewhere that `agent-merge` acts on; and the superset test had drifted onto the release path, which by then *was* `agent-merge`'s regex — a tautology. `agent-merge`'s matches now carry their own `merge:` namespace and are dropped only when they lie inside a wider-reader match ending on the same token; the test reads the guard. The exhaustion release again releases every same-repo issue the body claims in a spelling GitHub honours (round 11 had narrowed it and left claimed issues' `in-progress` stale): a claim is a claim in any spelling.
+- *Round 13, red team:* the compared set was joined and re-split on `,`, and a markdown-link target may contain one, so a shredded element could stand in for a separate reference. Commas inside an element are percent-encoded (`%` first). Recorded, budget-moved: the reference regex backtracks quadratically on a 65 KB body (~9 s per parse) — bounded by GitHub's body limit, a cost rather than a hole, a follow-up.
+- *A body-only correction could not succeed autonomously* — a body edit does not move the head, so the run the grant enables was the run the escalation catches. The prompt now has the fixer push an empty commit after correcting the body, so the reviewers re-read it and the run counts as production. Whether a reviewer then passes it is the reviewer's call, as before.
+
+**Ruling:** PENDING — human. Recommended: adopt both. The allow-list widening is a workflow edit (T3); the maintainer's merge of the PR carrying this entry is the ruling.
+
+**Supersedes:** none. **Amends:** `.github/workflows/review-fix.yml`; `.github/agent-prompts/review-fix.md`; `tools/ci/agent-noop.js`.
+
+---
+
+## 2026-09-13 — F4's two deferred values: ruled, then withdrawn the same day — there is no automatic return from the fallback rate; the fallback rate is a bring-up rate
+
+**Context:** the F4 ruling (2026-09-06) made the bit rate a property of the trunk and said the host, while at the fallback rate, "re-probes the reference rate on a fixed cadence" and "returns to it as soon as a quorum of enrolled nodes answers there". Neither value existed anywhere in the repo, golden rule 4 forbids an inline timing constant, and #59 (T041) and #60 (T042) stopped on it. The maintainer ruled both values in session on 2026-09-13 (`T_rate_reprobe_ms = 1000`, one node per probe; a strict majority of live nodes) and they were carried into the YAML and the documents at `b85171d`.
+
+**Why they are withdrawn.** The round-1 red team on PR #472 read the amendment against trunk §2: a node's rate is set by *strap or configuration*, and no artefact in this repo specifies auto-baud, rate negotiation or a host-side way to change a node's rate. A node running at the fallback rate therefore hears a reference-rate probe as line noise and can never answer it; the return quorum is unreachable by construction, and the host would burn a poll slot every second probing a rate nobody listens at. The same pass showed the strict-majority quorum let one healthy node hold a two-node trunk at the fallback rate, and that the "seen within one health epoch" justification was true only for a single node. All correct. Rather than specify a node mechanism the hardware does not have, the maintainer withdrew the automatic return.
+
+**Ruling:** human, 2026-09-13 (in session; recorded by the maintainer's comments on #59 the same day, and ratified by the merge of the PR carrying this entry). **No automatic return.** F4's core stands: the host *prefers* the reference rate — while BUS_FAULT is declared, a valid answer at the reference rate clears the fault at the reference rate at once, and a valid answer at the fallback rate clears it at the fallback rate only after one reference-rate probe of every enrolled address (exactly |enrolled| probes, SUSPECT and OFFLINE alike, by `next_probe()` without alternating) has drawn no answer, so a single node strapped at the fallback rate does not pin a reference-rate rig *while any reference-rate node answers within that pass*. This is a control, not a guarantee (CLAUDE.md rule 11): the pass is |enrolled| probes, each issued at the reference rate one per superframe, at most 15 × T_poll = 30 ms whichever rate was in use before the fault (a superframe stretches only for the rate of the transaction it issues), and the fault was declared because every enrolled node was silent — a trunk-wide outage that outlasts the pass (a re-plugged cable, a brownout, a simultaneous reset) draws nothing, and the trunk then stays at the fallback rate until a human acts. That is the accepted cost of no automatic return, not a property the rule provides. While the fault is declared the alternating probes also reach SUSPECT addresses, not only OFFLINE and UNENROLLED ones (data-model §6 amended). Once the fault is cleared, the rate in use stands until the layer above or a human changes it: the fallback rate is a **bring-up** rate, and "restoring the reference rate later is an L4/human action" (the 2026-08-29 clarification) is reaffirmed. The 2026-09-06 F4 clauses "re-probes on a fixed cadence" and "returns when a quorum answers" are withdrawn; no `T_rate_reprobe_ms`, no `rate_return_quorum_pct`, no per-node `ref_ok`.
+
+**Refined after the round-4 red team on #472 (same day).** Enrolling the fallback answerer at once starved it: with one `bit_rate` field, its status polls during the reference pass went out at the reference rate it cannot hear, it fell to SUSPECT within the pass, and the recovery at the fallback rate was re-declared as a fault in the same evaluation — an oscillation that never settled. So: no status polls are sent while a fault is declared (`poll_due()` false for every address); the fallback answerer's enrolment is deferred until the fault clears at the fallback rate and applied before the declare rule is re-evaluated; the clear at the fallback rate is conditioned on a recorded answerer, not on `ref_pass_left == 0` alone. The pass is single-shot by this ruling — with no automatic return, a live reference-rate node that misses its one probe (three attempts, trunk §7) leaves the trunk at the fallback rate until a human acts; that is the accepted cost of not specifying a node-side mechanism, stated here rather than left silent. T041 and T042 in `tasks.md` carried the withdrawn clear-and-pin assertions and are amended in place.
+
+**Refined after the round-8 red team on #472:** `ref_pass_left` counts outcomes, not probes issued (a tick between the last probe and its result must not fire the clear); the pass-state reset happens after the deferred enrolment is applied; `quickstart.md` §6, a fifth artefact stating clear-and-pin, is amended; and F4's own sentence "`T_poll` and the §6 budget derive from the rate in use" is carried into trunk §7 and data-model §7 as a scaled superframe at the fallback rate, since §6's 2 ms schedule cannot run at 115.2 kbit/s. Recorded, not ruled: on a clear, every address frozen by "no status polls during a fault" is due at once — up to 15 status polls in one superframe, 3 × T_poll at the reference rate; trunk §6's carry-over rule absorbs it, and staggering `last_poll` on the clear would avoid it — a scheduler (F3) choice.
+
+**Refined after the round-9 red team on #472:** `ref_pass_left` is decremented only by pass-probe outcomes — which, under F3 obligation 1 (probes the only traffic during a fault — an assumption of this rule, round 12), are the only outcomes there are; and the rate-scaling of the superframe is keyed to the rate a transaction is *issued* at, since `bit_rate` is assigned only by a clear and every fault-time fallback probe is issued at a rate other than `bit_rate`.
+
+**Refined after the round-10 red team and review on #472:** rounds 9 and 10 specified a matcher for outcomes arriving out of order (`pass_addr`, then `outstanding` and a "nothing to issue" probe). Trunk §3 forbids the premise: the trunk is a strict master poll with one transaction at a time, so the fallback answer that starts a pass is the outcome of the only transaction there was, and every outcome during the pass is the pass probe's. That machinery is withdrawn. Round 11 then showed trunk §3 alone was not enough either: `on_result` reports every transaction, and a demand-slot outcome landing mid-pass would have ended the pass early — so FR-026 now requires that probes be the only traffic while a fault is declared. Suspending demand traffic is the scheduler's (F3's) to do, not this feature's — round 12 — so it is recorded as an obligation on F3 in the link contract's "What F3/F4 need" note and **assumed** here (rule 11), with a second obligation beside it: `next_probe()` is called once per probe issued. This layer's own control: the pass counts only the first outcome for `pass_addr`, the address of the pass probe in flight, which clears it; while an outcome is outstanding `next_probe()` re-yields that address and advances nothing, so a scheduler that mis-calls it still completes the pass (round 13: deleting that re-yield had made the mis-call a deadlock). What the control cannot do is told apart at this interface — a non-probe outcome for the just-probed address arriving before the probe's own — does not arise under obligation 1, which the rule assumes. Every pass probe is issued at the reference rate and a superframe stretches only for the rate of the transaction it issues, so the pass bound is 30 ms whichever rate was in use before the fault (round 12 settled the keying that rounds 10 and 11 had each stated differently).
+
+**Open, recorded with a recommendation rather than ruled here:** a rig strapped entirely at the fallback rate with no node ever enrolled never declares BUS_FAULT (`|enrolled| = 0`), so the alternating probes never start and the host, probing at the reference rate, never discovers it — "bring-up rate" is not delivered by the health machinery alone (round-5 review on #472). Recommended: bring-up at the fallback rate is an L4/human action through `Master::set_bit_rate` (contracts/link-cpp.md), the same path that restores the reference rate; if instead the enrolment rotation should alternate rates for never-answered addresses, that is a separate ruling with a cost in discovery time. **Ruling on this point:** PENDING — human.
+
+**Recorded as future options, not requirements** (each would need its own ruling and a node-side specification): a host-commanded rate switch as a new L3 opcode, where a node acknowledges at the old rate before switching — deterministic, makes a return quorum meaningful, but a protocol change (YAML opcode, codec, vectors, idempotency argument, trunk §2); or dual-rate listening in nodes (auto-baud on a break or preamble), which keeps the host simple and pushes complexity into every node's UART handling. Either would reopen this entry.
+
+**Where it lands** (seven artefacts, each with a dated 2026-09-13 marker): `docs/trunk-link-layer.md` §7; `specs/002-trunk-link-layer/data-model.md` §6 (`next_probe()` during a fault and during the pass; `poll_due()` false while faulted) and §7 (`BusState` gains three fields — `fallback_answerer`, the address to enrol on the clear; `ref_pass_left`; `pass_addr`, the pass probe in flight — and the clear rule as above; implemented by T043); `spec.md` FR-026 (rewritten as one rule), the 2026-08-29 clarification and US5 acceptance scenario 3; `contracts/link-cpp.md` `bit_rate()`, `poll_due()`, `next_probe()`, `on_result()`, the health Rules and the two F3 obligations in "What F3/F4 need"; `tasks.md` (US5 goal, T041, T042, T043); `research.md`; `quickstart.md` §6 — the last three stated the superseded clear-and-pin rule. `protocol/omgp-protocol.yaml` is unchanged at this head (the two keys were added at `b85171d` and removed again). The remainder of #155 (F1, F2(b), F3) is untouched here.
+
+**Supersedes:** the "re-probes on a fixed cadence … returns when a quorum answers" clauses of the 2026-09-06 F4 entry, which keeps its history; and this entry's own first revision at `b85171d`. **Amends:** the seven artefacts named above, each with a dated marker.
+
+---
+
 ## 2026-09-13 — `contracts/mock-wire.md:16`'s "(usually a real `Responder`)" still names a type that cannot occupy the seat #147 built
 
 **Context:** #147 retired item (1) of the 2026-09-01 entry above by implementing the
