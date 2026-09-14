@@ -552,7 +552,7 @@ def test_report_mixed_hunk_that_deletes_code_is_not_exempted(tmp_path):
     lines (red-team B1 on #558). So the removed half of the diff is read too: one deleted line
     that is not blank and not a `//` comment is mutable code the diff took away, and the file
     goes back under the blind-spot rule."""
-    removed = {"l3/x.cpp": ["    if (a > 9)", "        return 2;"]}
+    removed = {"l3/x.cpp": [{"text": "    if (a > 9)", "after": 3}, {"text": "        return 2;", "after": -1}]}
     root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": [[6, 6]]}, removed=removed)
     rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
     assert rc == 1, out
@@ -560,7 +560,8 @@ def test_report_mixed_hunk_that_deletes_code_is_not_exempted(tmp_path):
     assert "blank or a // comment" not in out, out
     # The same hunk with only comment lines deleted IS the shape the exemption is for.
     root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": [[6, 6]]},
-                           removed={"l3/x.cpp": ["    // cap check; only detail bytes differ", ""]})
+                           removed={"l3/x.cpp": [{"text": "    // cap check; only detail bytes differ", "after": 3},
+                                                 {"text": "", "after": -1}]})
     rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
     assert rc == 0 and "blank or a // comment" in out, out
 
@@ -633,6 +634,48 @@ def test_report_comment_added_after_a_spliced_line_is_not_exempted(tmp_path):
     assert "blind spot" in out and "l3/x.cpp" in out, out
 
 
+def test_report_comment_deleted_after_a_spliced_line_is_not_exempted(tmp_path):
+    """The mirror of the case above (round-8 review on #558): DELETING a `//` comment that sat
+    right after a `\\`-ended line re-splices the line below it into that logical line — the
+    pre-image's comment ended the macro; without it the next line is macro body. The deleted
+    line reads as a comment and its removal changed what compiles, so a deleted line whose
+    surviving predecessor ends in `\\` fails closed exactly as an added one does. The deleted
+    half arrives as text plus the post-image line of its predecessor (tools/mutate_ranges.py),
+    which is all the check needs."""
+    src = ["#define CLAMP(x) do { \\", "    (x) = (x) > 9 ? 9 : (x); \\", "} while (0)",
+           "int f(int a) { return a >= 4 ? 1 : 0; }", "// a note the diff added"]
+    removed = {"l3/x.cpp": [{"text": "    // the logical line ends here, not at `while`", "after": 1}]}
+    root, reports = _setup(tmp_path, src, [_mutant(4, 25, "cxx_ge_to_gt", "Survived")],
+                           {"l3/x.cpp": [[5, 5]]}, removed=removed)
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1, out
+    assert "blind spot" in out and "l3/x.cpp" in out, out
+    # A deleted comment whose predecessor was itself deleted is judged against THAT line.
+    removed = {"l3/x.cpp": [{"text": "#define OLD(x) ((x) + 1) \\", "after": 3},
+                            {"text": "    // continued", "after": -1}]}
+    root, reports = _setup(tmp_path, src, [_mutant(4, 25, "cxx_ge_to_gt", "Survived")],
+                           {"l3/x.cpp": [[5, 5]]}, removed=removed)
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1 and "blind spot" in out, out
+
+
+def test_mutate_ranges_names_the_predecessor_of_a_pure_deletion(tmp_path):
+    """For `@@ -a,b +c,0 @@` unified diff gives c as the post-image line BEFORE the deletion, so
+    the first deleted line's surviving predecessor is post line c (c-1 when the hunk also adds
+    lines); a deletion at the top of the file has none (0)."""
+    diff = ("diff --git a/l3/z.cpp b/l3/z.cpp\n--- a/l3/z.cpp\n+++ b/l3/z.cpp\n"
+            "@@ -1,1 +0,0 @@\n-// header\n@@ -4,2 +2,0 @@\n-    // gone\n-    // gone too\n")
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "mutate_ranges.py"),
+                        "--ranges-out", str(tmp_path / "rg.json"),
+                        "--removed-out", str(tmp_path / "rm.json")],
+                       input=diff, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads((tmp_path / "rg.json").read_text()) == {"l3/z.cpp": []}
+    assert json.loads((tmp_path / "rm.json").read_text()) == {"l3/z.cpp": [
+        {"text": "// header", "after": 0}, {"text": "    // gone", "after": 2},
+        {"text": "    // gone too", "after": -1}]}
+
+
 def test_mutate_ranges_feeds_the_gate_the_deleted_half_of_a_mixed_hunk(tmp_path):
     """End to end on a real `git diff -U0`, not a synthesised range list: tools/mutate_ranges.py
     is the one parser the gate reads, and a hunk that deletes two code lines and adds one
@@ -663,8 +706,12 @@ def test_mutate_ranges_feeds_the_gate_the_deleted_half_of_a_mixed_hunk(tmp_path)
     ranges = json.loads((tmp_path / "rg.json").read_text())
     removed = json.loads((tmp_path / "rm.json").read_text())
     assert ranges["l3/x.cpp"] == [[4, 4]], ranges
-    assert removed["l3/x.cpp"] == ["    if (a > 9)", "        return 2;"], removed
-    assert removed["l3/y.cpp"] == ["    int t = 1;", "    return t;"], removed
+    # Each deleted line names the POST-image line of its surviving predecessor (`after`), or -1
+    # when that predecessor was deleted too — what the splice check on the deleted half reads.
+    assert removed["l3/x.cpp"] == [{"text": "    if (a > 9)", "after": 3},
+                                   {"text": "        return 2;", "after": -1}], removed
+    assert removed["l3/y.cpp"] == [{"text": "    int t = 1;", "after": 1},
+                                   {"text": "    return t;", "after": -1}], removed
     assert ranges["l3/y.cpp"] == [[2, 2]], ranges
     # ... and the gate, handed exactly those two files, stays closed: one Elements report with
     # a mutant nowhere near the changed lines, i.e. zero in scope, as in the CI run.
@@ -718,7 +765,7 @@ def test_mutate_ranges_does_not_read_an_added_line_as_a_file_header(tmp_path):
     removed = json.loads((tmp_path / "rm.json").read_text())
     assert list(ranges) == ["l3/x.cpp"], ranges    # no fabricated key
     assert ranges["l3/x.cpp"] == [[2, 2], [6, 6]], ranges
-    assert removed["l3/x.cpp"] == ["    if (a > 4)"], removed
+    assert removed["l3/x.cpp"] == [{"text": "    if (a > 4)", "after": 5}], removed
     # ... and end to end: the survivor on the guard the diff changed is in scope and unlabelled.
     reports = tmp_path / "reports"
     reports.mkdir()
