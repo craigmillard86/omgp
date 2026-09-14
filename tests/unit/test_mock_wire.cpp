@@ -227,6 +227,24 @@ TEST_CASE("MockWire::receive releases queued RX bytes strictly in ascending star
     REQUIRE(drained == resp1);
 }
 
+TEST_CASE("Step::count holds Kind::Rate's bit-rate values at full width",
+          "[link][mock_wire][T030]") {
+    // contracts/mock-wire.md: Kind::Rate is "the node now hears only at `count` interpreted as
+    // bit rate (1 000 000 or 115 200)". Ruling 2026-09-03 (docs/OPEN-QUESTIONS.md 2026-09-02
+    // "Step::count (uint16_t) cannot represent Kind::Rate's bit-rate values"; issue #48): widen
+    // count to uint32_t atomically across the contract, data-model §10, research R-07 and
+    // mock_wire.hpp. Red at uint16_t: the assignment narrows 115 200 to 49 664 and 1 000 000
+    // to 16 960, so neither REQUIRE below can hold — the field cannot express either rate.
+    Step step{.node = 0x01, .kind = Kind::Rate};
+    step.count = static_cast<decltype(Step::count)>(omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(step.count == omgp::TRUNK_bit_rate_fallback);
+    step.count = static_cast<decltype(Step::count)>(omgp::TRUNK_bit_rate);
+    REQUIRE(step.count == omgp::TRUNK_bit_rate);
+    // The widths agree by construction once ruled: the field is at least as wide as the
+    // protocol's rate symbols, so no rate the YAML can name is unauthorable as a Rate step.
+    REQUIRE(sizeof(Step::count) >= sizeof(omgp::TRUNK_bit_rate));
+}
+
 TEST_CASE("MockWire's xorshift32 PRNG is byte-for-byte reproducible for a given Step::seed",
           "[link][mock_wire]") {
     // Garbage/Babble (T030) aren't implemented yet, so this exercises the PRNG mock_wire.hpp

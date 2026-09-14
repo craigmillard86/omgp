@@ -278,8 +278,9 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   (≈ 8.7×) the time of the same transaction at the reference rate, and the superframe that issues
   it is stretched accordingly — whether that is because `bit_rate` is the fallback rate, or
   because a fault-time fallback probe (§7, alternation) is issued at the fallback rate while
-  `bit_rate` still reads the reference rate (`bit_rate` is assigned only by a clear; during a
-  fault the probe's rate is the probe's own, round-9 red team on #472). Pass probes are issued at
+  `bit_rate` still reads the reference rate (`bit_rate` is assigned only by a clear or by the
+  layer above's `set_bit_rate`, ruling 2026-09-14; during a fault the probe's rate is the
+  probe's own, round-9 red team on #472). Pass probes are issued at
   the reference rate and are never stretched, so a reference pass is ≤ 15 × T_poll = 30 ms
   whichever rate was in use before the fault. One minimal status-poll transaction alone is
   ≈ 2.4 ms at 115.2 kbit/s, so §6's 2 ms superframe cannot hold one. Implemented where the
@@ -288,9 +289,28 @@ BusState { u32 bit_rate; bool fault; bool next_probe_fallback; u32 rate_changes;
   (trunk §2) and cannot hear a probe at the other rate, so once `!fault` the rate in use stands
   until the layer above or a human changes it. The fallback rate is a bring-up rate. A
   cadence-and-quorum return was ruled and withdrawn the same day; see `docs/OPEN-QUESTIONS.md`.
-- Fall back (while `!fault` and `bit_rate == TRUNK_bit_rate`): only through the declare rule
-  above — a fault is declared only when every enrolled node is SUSPECT/OFFLINE, so the host
-  never leaves the reference rate while any enrolled node answers at it.
+  Bring-up *at* the fallback rate is likewise the layer above's: a rig with no node ever
+  enrolled never declares a fault (`|enrolled| = 0`), so this tracker never alternates and
+  never discovers a cold fallback-rate rig — `Master::set_bit_rate` together with this
+  tracker's `set_bit_rate`, in the same step, is the path (ruling 2026-09-14; F3 obligation 3 in
+  `contracts/link-cpp.md`, added after the round-1 red team on #523 showed the Master call is a
+  wire pass-through that leaves `bit_rate` 8.7× wrong); while `!fault` the enrolment rotation
+  does not alternate rates for never-answered addresses (while `fault`, §6's alternation reaches
+  every address, UNENROLLED included — round-5 red team on #523).
+- Fall back (while `!fault` and `bit_rate == TRUNK_bit_rate`): through the declare rule above,
+  or through the layer above's `set_bit_rate` (ruling 2026-09-14; round-2 red team on #523). By
+  the declare rule alone the host never leaves the reference rate while any enrolled node answers
+  at it — a fault is declared only when every enrolled node is SUSPECT/OFFLINE. The layer above's
+  selection is not so guarded, and what follows from it is this section's own rules, not a
+  new one: dropping the rate while enrolled nodes answer at the reference rate polls them at a
+  rate they cannot hear, they fall SUSPECT, the fault is declared, the alternating probes reach
+  them at the reference rate and the first valid answer there clears the fault *at the
+  reference rate* — the health rules undo the selection (round-3 red team on #523; a round-2
+  wording had the opposite outcome and was wrong). Bring-up at the fallback rate is therefore a
+  bench action on a rig with nothing enrolled; on a live reference-rate rig it is self-correcting
+  through the declare/alternate/clear path, at the cost of one fault cycle, and this tracker
+  neither refuses the selection nor guards against it (rule 11: the assurance in the previous
+  sentence is the declare rule's, not the setter's).
 
 ## 8. Statistics (FR-011a)
 
@@ -333,7 +353,7 @@ each carries `addr` (0 for bus-level). Exactly one per transition (SC-006).
 ## 10. MockWire step
 
 ```
-Step { u8 node; Kind kind; u32 delay_us; u16 count; u32 seed }
+Step { u8 node; Kind kind; u32 delay_us; u32 count; u32 seed }   /* count widened u16 → u32 2026-09-14 (ruling 2026-09-03, #48): Rate reads it as a bit rate */
 Kind ∈ { Respond, Silence, Garbage, CrcError, Duplicate, Babble, Rate }
 ```
 Semantics in `contracts/mock-wire.md`. A script is an array of steps consumed in order

@@ -2,8 +2,9 @@
 // and the RX queue/transcript/PRNG machinery every later link/ engine test builds on.
 // contracts/mock-wire.md. Kind::CrcError/Duplicate are implemented below (T029's own
 // scope: test_link_master.cpp needs exactly these two, neither of which reads
-// Step::count); Garbage/Babble/Rate — and the Step::count widening ruling on issue #48 —
-// remain T030.
+// Step::count); Garbage/Babble/Rate remain T030. The Step::count widening the 2026-09-03
+// ruling on issue #48 directed was done by the maintainer 2026-09-14 (uint32_t, all four
+// artefacts at once).
 //
 // Respond/CrcError/Duplicate answer through the addressed node's registered
 // omgp::link::RequestHandler, as contracts/mock-wire.md:16 specifies — build_response()
