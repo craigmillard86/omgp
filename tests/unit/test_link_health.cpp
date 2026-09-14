@@ -383,8 +383,19 @@ TEST_CASE("poll_due is false for OFFLINE and UNENROLLED", "[link]") {
 
     REQUIRE_FALSE(tracker.poll_due(kAddr, 0)); // UNENROLLED: never touched
 
+    // As in the SUSPECT case above: without a peer that keeps answering, offline_addr is the
+    // rig's only enrolled node, its SUSPECT transition declares BUS_FAULT (ruling Q2) and
+    // nothing clears it — so the OFFLINE assertion below would return at poll_due's
+    // "no status polls while faulted" guard and never reach the §6 arm this case is named
+    // for. Demonstrated, not argued: with the peer removed, reversing the OFFLINE row of
+    // data-model.md §6 to `return true` leaves the whole 20-binary suite green (review
+    // round 3 on #530, finding 1).
+    enrol_peer(tracker);
+    REQUIRE_FALSE(tracker.bus_fault());
+
     uint8_t offline_addr = omgp::ADDR_backplane_min + 1;
     uint64_t suspect_since = drive_to_offline(tracker, offline_addr);
+    REQUIRE_FALSE(tracker.bus_fault());
     uint64_t offline_at = suspect_since + kThresholdUs;
     tracker.mark_polled(offline_addr, offline_at);
 
@@ -659,7 +670,14 @@ TEST_CASE("an earlier now_us than a stored stamp reads as zero elapsed, never a 
     RecordingListener listener;
     HealthTracker tracker(clock, listener);
 
+    // The peer keeps answering so kAddr fails as a strict subset and no bus fault is
+    // declared: while one IS declared poll_due is false for every address, which would mask
+    // the clamp the last assertion of this case pins. Demonstrated, not argued: with the peer
+    // removed, replacing poll_due's elapsed_us() with the raw subtraction leaves the whole
+    // 20-binary suite green (review round 3 on #530, finding 2).
+    enrol_peer(tracker);
     const uint64_t suspect_since = drive_to_suspect(tracker, kAddr, 1000);
+    REQUIRE_FALSE(tracker.bus_fault());
     const auto notices_after_suspect = listener.entries.size();
 
     tracker.tick(suspect_since - 1);
