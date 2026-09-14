@@ -211,6 +211,16 @@ public:
     uint32_t bit_rate() const;                                 // rate in use after the last recovery: the reference if any node answered
                                                                // there during the fault, else the fallback; no automatic return (F4;
                                                                // data-model §7, amended 2026-09-13)
+    const BusStats& bus_stats() const;                         // data-model §8: rate_changes and bus_faults as decided HERE — a rate
+                                                               // change each time a probe goes out at a rate other than the last one
+                                                               // used or a clear pins one, a fault each time one is declared.
+                                                               // BusStats::discards is the Master's field and is never written by the
+                                                               // tracker (it sees no frames), so the two engines' blocks are read
+                                                               // separately and never summed.
+                                                               // (Amended in the PR closing #59/#61 — pending a ruling. The T041 tests assert on these
+                                                               // counters and data-model §7/§8 specify them, but this contract declared
+                                                               // no accessor for them on HealthTracker; the maintainer's 2026-09-06
+                                                               // rescope of #59/#61 directs T043 to add it here.)
 };
 ```
 Rules: SUSPECT after `TRUNK_suspect_after_failures` consecutive failures; OFFLINE after
@@ -222,6 +232,13 @@ the reference pass; a valid answer at the reference rate clears the fault there 
 answer at the fallback rate clears it only after a reference pass — every enrolled address once, at
 the reference rate, without alternating — draws nothing *(amended 2026-09-13, F4)*; no automatic
 return afterwards (data-model §7). Each transition notifies exactly once.
+
+Two implementation notes the bus-fault rules rest on, recorded here because they are visible
+at this interface (T043, `link/health.cpp`): `on_result` carries no bit rate, so the rate an
+outcome arrived at is taken to be the rate `next_probe()` last handed out — sound exactly
+under F3 obligation 1 below, and ASSUMED, not enforced. And while a pass probe's outcome is
+outstanding, `next_probe()` re-yields that address and advances nothing, so a scheduler that
+breaks obligation 2 still completes the pass (data-model §6, round-13 red team on #472).
 
 ## What F3/F4 need (interface note, SC-010)
 

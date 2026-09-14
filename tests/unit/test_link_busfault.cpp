@@ -477,6 +477,10 @@ TEST_CASE("a pass that draws nothing clears the fault at the fallback rate and e
     uint64_t t = 11'000;
     for (int i = 0; i < 3; ++i) {
         const Probe p = tracker.next_probe(0);
+        // Exactly two rate changes over the whole pass (§8, counted where each is decided):
+        // the first pass probe moves the wire from the fallback rate that just answered to
+        // the reference rate, and the pass does not alternate afterwards.
+        REQUIRE(tracker.bus_stats().rate_changes == changes_before + 1);
         tracker.on_result(p.addr, false, t += 1'000);
     }
 
@@ -487,8 +491,8 @@ TEST_CASE("a pass that draws nothing clears the fault at the fallback rate and e
     REQUIRE(listener.count(Notice::BUS_FAULT) == 1);         // NOT re-declared on the same result
     REQUIRE(tracker.bus_stats().bus_faults == 1);
 
-    // The clear moved the rate in use, and that is a rate change like any other (§8).
-    REQUIRE(tracker.bus_stats().rate_changes == changes_before + 1);
+    // …and the clear pinning the fallback rate is the second: the rate in use moved back.
+    REQUIRE(tracker.bus_stats().rate_changes == changes_before + 2);
 
     // The recovery notice order: the deferred enrolment first, then the bus-level notice.
     const size_t n = listener.entries.size();
@@ -501,7 +505,7 @@ TEST_CASE("a pass that draws nothing clears the fault at the fallback rate and e
     // rate, with no reference-rate re-probe cadence of any kind.
     for (int i = 0; i < 4; ++i)
         REQUIRE(tracker.next_probe(0).bit_rate == omgp::TRUNK_bit_rate_fallback);
-    REQUIRE(tracker.bus_stats().rate_changes == changes_before + 1);
+    REQUIRE(tracker.bus_stats().rate_changes == changes_before + 2);
 }
 
 TEST_CASE("the nodes that did not answer keep their own SUSPECT clocks across the episode",
