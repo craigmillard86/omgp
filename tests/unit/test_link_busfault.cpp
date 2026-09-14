@@ -546,6 +546,42 @@ TEST_CASE("an outcome outstanding across an episode boundary is read at its own 
     REQUIRE(tracker.bus_stats().bus_faults == 2);
 }
 
+TEST_CASE("an abandoned probe does not freeze its address's rate record: the outstanding-probe "
+          "exemption expires with the outcome window",
+          "[timing:bit_rate_fallback][timing:T_resp]") {
+    // Round-7 red team on #530, finding 1 (their RT1, reproduced by the maintainer 2026-09-14):
+    // a probe whose outcome never arrives — dropped at L2, abandoned by the scheduler at a
+    // superframe boundary, a timeout F3 never reports — left `probe_live` set for ever, so the
+    // address was exempt from the per-episode reset in EVERY later episode and a later
+    // reference-rate answer from it (a pre-declare status poll's) was read at the stale
+    // fallback bit: the fault did not clear at the reference rate, the node stayed SUSPECT, and
+    // the pass drew nothing — the trunk pinned at the fallback rate. The bound: a probe's
+    // outcome arrives within TRUNK_T_resp_us (contracts/link-cpp.md, byte-wire-and-clock.md),
+    // so a record older than that owes nothing and the reset applies to it.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    ThreeNodeRig::build(tracker);
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(probe_until(tracker, kNodeA, omgp::TRUNK_bit_rate_fallback).addr == kNodeA); // t = 0
+    REQUIRE(probe_until(tracker, kNodeB, omgp::TRUNK_bit_rate).addr == kNodeB);          // never answered: A
+    tracker.on_result(kNodeB, true, 6'000); // episode 1 clears at the reference rate
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.state(kNodeA) == HealthState::SUSPECT);
+
+    fail_to_suspect(tracker, kNodeB, 10'000); // episode 2, 10 ms — 50 × T_resp — after A's probe
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+
+    tracker.on_result(kNodeA, true, 10'001); // a REFERENCE-rate answer (a pre-declare poll's)
+
+    REQUIRE_FALSE(tracker.bus_fault());                      // FR-026: clears at once…
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);     // …at the reference rate
+    REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED); // applied, not deferred to a pass
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 2);
+}
+
 TEST_CASE("an outstanding reference-rate probe answered in the next episode still clears at once",
           "[timing:bit_rate_fallback]") {
     // The other direction of the same reset, on an episode whose rate in use is the FALLBACK
