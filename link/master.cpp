@@ -103,17 +103,29 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     seq_ = next_seq_[dst];
     next_seq_[dst] = static_cast<uint8_t>((next_seq_[dst] + 1) & 0x0F);
     len_ = static_cast<uint8_t>(len);
+    // Whole input domain (#139), not one case: len_ is uint8_t, so the mutant's `len_ >= 0`
+    // holds for EVERY value it can take and the two predicates select different branches on
+    // exactly one input, len_ == 0. On that input the mutant runs memcpy(payload_, payload, 0)
+    // and the original runs nothing; for every other input both run the same copy. So the
+    // whole difference is a zero-length copy, and `payload` there is whatever the caller
+    // passed — including nullptr.
+    //
     // The guard exists for begin(dst, nullptr, 0): memcpy's pointer arguments are declared
     // non-null even for a zero count, so the unguarded call is UB. On the wire the two are
     // indistinguishable — do_transmit only reads the first len_ bytes of payload_ (FrameFields
     // into encode_frame's `for (i < f.len)`) — but NOT equivalent: UBSan's nonnull-attribute
     // check reports the unguarded call ("null pointer passed as argument 2, which is declared
-    // to never be null"), demonstrated on "…fallback bit rate…" (test_link_master.cpp:494,
-    // one of five begin(dst, nullptr, 0) callers) with the mutant emulated as `if (true)` — the
-    // source-level `len_ >= 0` does not compile under -Werror=type-limits. The native preset
-    // has no -fno-sanitize-recover (CMakeLists.txt:17), so that report is printed and the
-    // suite still exits 0 — the mutant survives by exit code, hence `accepted`, not
-    // `equivalent` (PR #137 review @41983fe, LOW).
+    // to never be null"), demonstrated on test_link_master's "a conforming node's answer is
+    // accepted at the fallback bit rate…" case (one of the ten begin(dst, nullptr, 0) callers
+    // the suite has at this commit) with the mutant emulated as
+    // `if (true)` — the source-level `len_ >= 0` does not compile under -Werror=type-limits.
+    // The native preset has no -fno-sanitize-recover (CMakeLists.txt:17), so that report is
+    // printed and the suite still exits 0 — the mutant survives by exit code, hence
+    // `accepted`, not `equivalent` (PR #137 review @41983fe, LOW). What "no test is warranted"
+    // rests on: with a non-null payload the mutant is a genuine no-op, and the one caller
+    // shape that differs (a null payload) differs only in a diagnostic no test can observe
+    // through the engine's API — killing it would need a build change (-fno-sanitize-recover),
+    // which is a gate change, not a test.
     // mutant-ok(accepted, cxx_gt_to_ge): differs only by memcpy(_, nullptr, 0) — UB, UBSan-only.
     if (len_ > 0)
         std::memcpy(payload_, payload, len_);
@@ -148,8 +160,14 @@ void Master::do_transmit(uint64_t at_us) {
     const bool retry = attempt_count_ > 0;
     const FrameFields f{dst_, host_addr_, /*response=*/false, retry, seq_, len_, payload_};
     uint8_t buf[kMaxWire];
-    // encode_frame's own first statement is `written = 0;` (link/frame.cpp) — unconditional,
-    // before any return path — so this initial value can never be read.
+    // encode_frame's own first statement is `written = 0;` (link/frame.cpp:14) —
+    // unconditional, before any return path — and nothing between this declaration and the
+    // encode_frame call below reads `written`. So the value written here is dead on every
+    // path, for every constant the mutator could substitute: the argument does not depend on
+    // WHICH constant that is, only on the store being unread. Rule 11: dead by construction of
+    // this function, but the "first statement" half is a property of link/frame.cpp as it
+    // stands (a control this repo's contents provide, not a language guarantee) — the
+    // static_assert below pins encode_frame's refusals, not its assignment order.
     // mutant-ok(equivalent, cxx_init_const): any constant here is behaviourally identical.
     size_t written = 0;
     // encode_frame cannot fail here — by construction, pinned (rule 11): its three refusals
@@ -247,6 +265,14 @@ void Master::fire_pending(uint64_t now_us) {
     // reports; open in #138 / docs/OPEN-QUESTIONS.md 2026-09-06 "rate change mid-stream").
     // Every protection claim below is therefore stated for a constant rate.
     uint64_t want_us = deadline_;
+    // Whole input domain (#139), in two steps, neither of them a representative case: (1) for
+    // all a, b, `a > b` and `a >= b` differ on exactly the inputs with a == b — everywhere
+    // else the mutant takes the same branch as the original, so nothing can differ; (2) on
+    // a == b (here: last_activity_ + T_gap == want_us) the guarded statement assigns want_us
+    // the value it already holds, so taking the branch is the identity. The `has_last_activity_`
+    // conjunct is untouched by the mutator and short-circuits identically either way. Hence no
+    // input to this function distinguishes the two, and no test can — by construction of these
+    // three lines, not by the tests that happen to reach them.
     // mutant-ok(equivalent, cxx_gt_to_ge): at equality the branch re-stores want_us's own value.
     if (has_last_activity_ && last_activity_ + omgp::TRUNK_T_gap_us > want_us)
         want_us = last_activity_ + omgp::TRUNK_T_gap_us;
@@ -313,6 +339,17 @@ void Master::end_attempt(uint64_t last_activity_us, MasterEvent::Reason reason,
     // review/red-team, MEDIUM). An unconditional overwrite here made that clause dead code:
     // a frame discarded just past deadline_ recorded its own (later) end, only for this
     // unconditional assignment to immediately rewind it back to the (earlier) deadline_.
+    // The `>`→`>=` mutant is equivalent over the whole input domain by the two-step argument
+    // at fire_pending()'s push clause (#139): the predicates differ only on
+    // last_activity_us == last_activity_, and there the guarded statement stores the value
+    // last_activity_ already holds. Note what is NOT claimed: dropping the guard (an
+    // unconditional store) is a different edit and is NOT equivalent — it is the rewind
+    // described above, and it is red on test_link_master "a CRC-failed frame outside the
+    // window gap-defers the retry from its own last byte, not from the earlier timeout
+    // instant" — at that case's `REQUIRE(wire.transcript_size() == 1)`, the third assertion
+    // after the timeout poll, which with the guard dropped finds the retry already gone out
+    // on the discarded frame's own last byte. (The two assertions before it — the poll's
+    // event kind and the timeouts count — pass with or without the guard.)
     // mutant-ok(equivalent, cxx_gt_to_ge): at equality the branch re-stores the same value.
     if (last_activity_us > last_activity_)
         last_activity_ = last_activity_us;
@@ -330,11 +367,37 @@ void Master::end_attempt(uint64_t last_activity_us, MasterEvent::Reason reason,
         // #137 review, MEDIUM) — not concluded a second time here.
         event.kind = MasterEvent::Failed;
         event.reason = reason;
-        // cxx_assign_const substitutes the type's zero value for an assignment's RHS
-        // (0/false/nullptr — see `written = 0`'s label in do_transmit()): open_ is already
-        // being assigned `false`, its own zero value, so the mutated statement is
-        // byte-for-byte identical to this one — nothing for any test to distinguish.
-        // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
+        // cxx_assign_const changes the constant this statement stores, and nothing else.
+        // An earlier wording here asserted it substitutes "the type's zero value", making the
+        // mutant byte-for-byte this statement; withdrawn (#139, rule 11) — nothing in this
+        // repo establishes that, and link/frame.cpp's own cxx_assign_const labels argue a
+        // shape that does not fit it ("only ==Hunting/==Escaped tested; else = InFrame" is an
+        // argument one needs only if the substituted value is NOT that type's zero value,
+        // State::Hunting). The equivalence does not depend on which constant it is:
+        //
+        // open_ is private and every read of it is a boolean context — busy(), begin()'s
+        // `if (open_)`, and the `open_ &&` conjuncts in fire_pending(), drain_wire() and
+        // poll(); that is the complete set in this translation unit, which is the whole
+        // program for this member. So the mutant differs from the original on exactly one
+        // condition: the substituted byte reading back true. On THAT condition it is killed,
+        // not survived — test_link_master "silence for the full response window triggers
+        // exactly two retries … then Failed{Timeout}" and "after a terminal Failed{Timeout},
+        // transactions is counted, busy() clears, and the next begin() is still gap-deferred
+        // from the failure's own instant" REQUIRE_FALSE(busy()) on the very poll that runs
+        // this branch, and the latter then requires the next begin() to be accepted rather
+        // than refused Busy. The mutant's survival in the whole-tree report (#139, main
+        // @eef9def) is therefore itself the evidence that the stored value reads back false,
+        // leaving nothing for any test to distinguish. Demonstrated by those two named tests
+        // plus that report — not assumed about the tool.
+        //
+        // One caveat the category does not cover, for the reader who checks: were the stored
+        // byte neither 0 nor 1, every later read of open_ would additionally be a UB bool load
+        // that -fsanitize=bool could report (the distinction that makes begin()'s memcpy guard
+        // `accepted` rather than `equivalent`). It changes nothing here — the mutation build
+        // has sanitizers off, so the gate cannot see it either way, and no engine behaviour
+        // differs — but `equivalent` is claimed of the engine's observable conduct, not of a
+        // sanitizer's opinion of the mutated program.
+        // mutant-ok(equivalent, cxx_assign_const): every read of open_ sees false either way.
         open_ = false;
     }
 }
@@ -394,7 +457,9 @@ void Master::drain_wire(MasterEvent& event) {
         last_rx_us_ = byte_end_us;
         // Not equivalent to an unconditional store: a byte drained AFTER a rate rise can end
         // before one drained at the slower rate (test "a rate rise between two polls does not
-        // rewind last_activity"). Only the equality case is behaviourally identical:
+        // rewind last_activity"). The `>`→`>=` mutant is a different edit, and equivalent over
+        // the whole domain by the two-step argument at fire_pending()'s push clause (#139):
+        // the predicates differ only at equality, where the store is the identity.
         // mutant-ok(equivalent, cxx_gt_to_ge): at equality the branch re-stores the same value.
         if (byte_end_us > last_activity_)
             last_activity_ = byte_end_us;
@@ -440,21 +505,39 @@ void Master::drain_wire(MasterEvent& event) {
         const FrameFields& f = view.f;
         if (awaiting && f.response && f.src == dst_ && f.dst == host_addr_ && f.seq == seq_ &&
             in_window) {
-            // As at begin()'s own memcpy guard above — a copy of zero bytes is
-            // unobservable, and ev.response.len == 0 tells the caller not to read
-            // response_buf_ beyond it.
+            // f.len is uint8_t, so the mutant's `f.len >= 0` holds for every value it can
+            // take: the two differ on exactly one input, f.len == 0, where the mutant runs
+            // memcpy(response_buf_, f.payload, 0). Both pointers are valid there — the
+            // destination is this object's own array, and a DELIVERED frame's payload is
+            // `buf_ + kHeaderLen` into the Deframer's accumulator (link/frame.cpp:153, in
+            // on_flag() — the only write of FrameView::payload in link/), never null — a
+            // control the current contents of link/ provide, not a type guarantee. So the call
+            // on that one input is a
+            // well-defined no-op, not UB. Hence `equivalent` here and `accepted` at begin()'s
+            // guard above: THAT one copies from a pointer the CALLER supplied, which the suite
+            // does pass as nullptr, and only the UBSan diagnostic separates the two. The
+            // difference is the provenance of the source pointer, not the zero-length copy
+            // (#139 — an earlier wording of this comment made the two cases equivalent to each
+            // other by analogy, which is what left the category difference unexplained).
+            // ev.response.len == 0 tells the caller not to read response_buf_ beyond it either
+            // way.
             // mutant-ok(equivalent, cxx_gt_to_ge): either way, no observable difference.
             if (f.len > 0)
                 std::memcpy(response_buf_, f.payload, f.len);
             event.kind = MasterEvent::Answered;
             event.response =
                 FrameFields{f.dst, f.src, f.response, f.retry, f.seq, f.len, response_buf_};
-            // cxx_assign_const substitutes the type's zero value for an assignment's RHS
-            // (0/false/nullptr — see `written = 0`'s label above): open_ is already being
-            // assigned `false`, its own zero value, so the mutated statement is
-            // byte-for-byte identical to this one. There is nothing for any test to
-            // distinguish (concurrent PR #137 review-fix pass, cross-checked here).
-            // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
+            // Same argument as end_attempt()'s terminal `open_ = false` (see there, rewritten
+            // under #139): the mutator changes only the stored constant, every read of open_
+            // is a boolean context, so the mutant differs only if the stored byte reads back
+            // true — and that is killed here by test_link_master "idle bus, node answers
+            // inside the response window: Answered with the payload, no retry"
+            // (REQUIRE_FALSE(busy()) on the poll that returns Answered) and "the F3 loop —
+            // begin() on the poll() that returned Answered — defers for a foreign frame …"
+            // (which then requires that begin() to be accepted, not refused Busy). Its
+            // survival in the #139 report is the evidence that it reads back false. The
+            // earlier "substitutes the type's zero value" wording is withdrawn there and here.
+            // mutant-ok(equivalent, cxx_assign_const): every read of open_ sees false either way.
             open_ = false;
             continue; // this byte's bus activity is already recorded above; keep draining
         }

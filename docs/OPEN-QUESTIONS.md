@@ -3717,3 +3717,115 @@ its **Correction**, which names FR-014 and data-model §5 as the only clauses in
 **Ruling:** human, 2026-09-14 (in session with Claude Code): the maintainer runs the whole-tree report locally and pastes it on the issue as the authority; the agent triages against that list. Adding a CI `workflow_dispatch` job that posts the report was considered and not taken now (a T3 workflow change to serve one issue); it becomes worth doing if a second issue needs the same. **Measured** at `main` @ `eef9def` (Mull 0.34.0 / LLVM 14 extracted from the release package, `./tools/mutate.sh --require`, whole tree): `mutants=1020 killed=982 survived=38 kill_rate=96.3% labelled[equivalent=28 accepted=10] unlabelled=0` — nine labelled survivors on `link/master.cpp`, no `UNLABELLED survivor:` line anywhere. Demonstrated by that run; CI's LLVM 18 package yielding the same set is assumed (the 2026-09-06 entry measured the two agreeing on #137's tree). What remains for the agent is whether each of the nine labels is true, not whether one is missing.
 
 **Amends:** none. **Supersedes:** none.
+
+---
+
+## 2026-09-14 — The mutation blind-spot rule reds a diff that changes only comment lines
+
+**Context:** PR #558 (task/139, `link/master.cpp`) failed the `deep-verify` diff-scoped
+mutation step: `mutation: mode=diff ... mutants=0 ...` then "scope is non-empty but Mull
+generated no mutants, and the following changed file(s) carry no `mutation-exempt(no-body)`
+marker — failing (blind spot: instrumentation is not reaching the code): link/master.cpp"
+(CI run 34847204694). The instrumentation was in fact reaching the code, and the same run says
+so three lines earlier: `test_link_master: Surviving mutants: 29`, with mutants in six further
+link/ binaries. What is zero is the count *after* the changed-line filter — every line this PR
+adds to `link/master.cpp` is a `//` comment, because the PR's whole content is rewritten
+`mutant-ok` justifications. `tools/mutate_report.py`'s "no mutants in a non-empty scope" rule
+reads that zero as the tool-failure signal it was written for, and fails.
+
+This is the 2026-08-30 entry's situation one level down. There the class was a *file* that can
+carry no mutant (a pure abstract interface); here it is a *line* — and unlike the file case,
+the argument needs no human judgement to check: backslash-newline is spliced in translation
+phase 2 and what is then a comment is replaced by a space in phase 3, both before any
+expression Mull could mutate exists, so no mutant can be located on a line that is still a
+comment after phase 2, whatever the instrumentation, the oracle or the ranges do. Nor is it
+rare: any PR
+that answers the mutation gate by writing or rewriting a justification produces exactly this
+diff, so the gate reds the very PRs it asks for.
+
+**Recommendation:** exempt a changed file from the blind-spot rule when every line the diff
+added or changed in it is blank or starts with `//` — alongside, not instead of, the
+`mutation-exempt(no-body)` marker, in both places that marker is honoured (the whole-scope rule
+and the per-changed-dir rule). No marker of its own, because the property is decidable from the
+diff. It fails closed: one changed line that is neither blank nor a `//` comment (a `/* */`
+continuation line included — deliberately, rather than widen this into a comment parser) puts
+the file back under the old rule, and so do a line the ranges name but the checked-out tree
+does not have, a `//` comment whose last character is `\` (phase 2 splices the line below it
+into the comment, so that changed line deletes mutable code — `-Werror=comment` fails such a
+build before this gate sees it, but that is a control in `CMakeLists.txt` and the predicate
+does not lean on it), and a file the diff touched with no added-or-changed line at all, which
+`tools/mutate.sh` records as an empty range list when every hunk in it is a pure deletion —
+there is nothing there for the predicate to have read. Because the exempted diff shape is
+precisely the shape that carries policy labels, the malformed-`mutant-ok` check moves ahead of
+the count-based rules and widens to every changed line (it previously ran only over files that
+had an in-scope mutant, so a malformed label in a comment-only PR was read by nothing): the
+exemption is from the blind-spot rule, never from the label syntax.
+
+Does not touch `tools/mutate.cfg [policy]`'s T3 constants (`max_unlabelled_survivors = 0`,
+`label_categories`): a changed *code* line with an unlabelled survivor gates exactly as before.
+Implemented as the safe default per CLAUDE.md ("proceed only if a safe default exists"), in
+`tools/mutate_report.py` (`changed_lines_all_comments`, `no_mutant_reason`), with
+`tools/refimpl/test_tooling.py` pinning all five edges — exempt, fails-closed on a changed code
+line, on a `\`-continued comment line and on a deletion-only range list, malformed label still
+fails. If a human ruling instead prefers that comment-only diffs be
+dropped from `tools/mutate.sh`'s scope entirely (which would also skip the instrumented build
+for such a PR, at the cost of the oracle's evidence that the dir is still reachable), that
+should supersede this entry.
+
+**Ruling:** PENDING — human. **Supersedes:** none — it extends the 2026-08-30 "pure-interface
+headers" entry (ratified 2026-09-03), whose per-file marker stands exactly as ruled.
+
+---
+
+## 2026-09-14 — The comment-only exemption must read both halves of the hunk
+
+**Context:** amends the 2026-09-14 entry above ("The mutation blind-spot rule reds a diff that
+changes only comment lines"), whose recommendation decides the exemption from the *added* lines
+alone — the range list `tools/mutate.sh` builds from `git diff -U0`. The red-team pass on
+PR #558 showed two shapes where a line that reads as a comment is not evidence that the diff
+changed no mutable code:
+
+1. **A mixed hunk.** `@@ -4,2 +4 @@`, deleting an `if (a > 9)` guard and adding
+   `// the guard is now the caller's job`, yields the range list `[[4, 4]]` — one comment line.
+   Deciding on that list certifies the file while reading strictly *less* of the diff than the
+   all-deletions case the same recommendation rejects, and prints a reason ("every line the diff
+   changed there is blank or a `//` comment") that is false of the two deleted lines. A PR under
+   `l3/`/`link/`/`core/` replacing a guard with a comment would green a gate that `main` reds.
+2. **`*/` on a changed line.** In the ordinary toggle idiom — `/* disabled:`, then the disabled
+   code, then `// */   return 2;` — the `*/` *ends* the block comment and what follows it on
+   that same line is executable. "Is this line a comment after phase 2" is not decidable one
+   line at a time, and `-Wcomment` does not fire on this shape (it warns about `/*` inside a
+   comment), so no control outside the predicate catches it.
+
+**Recommendation:** keep the exemption, with the predicate reading every line the diff *added
+or deleted*, not only the added ones. `tools/mutate_ranges.py` (new; the one parser of
+`git diff -U0`, driven from a real diff by `tools/refimpl/test_tooling.py`) writes the deleted
+lines' text alongside the ranges, `tools/mutate.sh` passes it as `--removed`, and a deleted line
+that is neither blank nor a `//` comment puts the file back under the blind-spot rule. The
+per-line test additionally rejects a line carrying `*/` (shape 2 above). Three further shapes
+fail closed for the same reason — the predicate must not certify what it did not read:
+`--removed` absent at all (an older caller: "nothing was deleted" and "nobody looked" are
+different answers); an added line whose predecessor in the tree ends with `\`, since inserting a
+comment into a spliced logical line truncates it and comments out the continuation without
+deleting any line; and a file containing `R"` anywhere, because inside a raw string literal a
+`//` line is string data, the literal may open on a line the diff never touched, and `R"x( )x"`
+delimiters are not decidable line by line — never parsed, never exempt.
+
+Still no marker (the property remains decidable from the diff), still nothing touched in
+`tools/mutate.cfg [policy]`, and still only an exemption from the blind-spot *heuristic* — the
+survivor triage, the malformed-label check and `max_unlabelled_survivors = 0` are unchanged. The
+predicate stays a set of syntactic refusals rather than a C++ comment parser: each refusal is
+one line with a named case in `tools/refimpl/test_tooling.py`, and every shape it cannot decide
+from what it is handed is a refusal — which is a control, not a guarantee (rule 11): it refuses
+the shapes it has been shown, and the round-8 review on #558 showed one it had not been. The
+added half carried the backslash-splice check (a `//` comment inserted after a `\`-ended line
+truncates the logical line) while the deleted half was judged by its text alone, so a `//`
+comment DELETED from right after a `\`-ended line — which re-splices the line below into the
+macro — was exempted. `tools/mutate_ranges.py` now hands over each deleted line with the
+post-image line of its surviving predecessor (`after`; -1 when that predecessor was deleted
+too, 0 at the top of the file), and the predicate applies the same check to both halves;
+a deleted half without positions is treated as never handed over.
+
+**Ruling:** PENDING — human, together with the entry it amends: a ruling that drops comment-only
+diffs from `tools/mutate.sh`'s scope entirely would supersede both. **Amends:** the 2026-09-14
+entry above. **Supersedes:** none.

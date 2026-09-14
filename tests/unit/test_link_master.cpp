@@ -693,6 +693,68 @@ TEST_CASE("a CRC-failed frame arriving outside any open attempt's own window is 
     REQUIRE(master.busy());
 }
 
+// The ACTIVITY half of the branch the case above pins (#139, triaging link/master.cpp's
+// deep-verify survivors): the case above stops at crc_end and asserts only that the frame did
+// not end the attempt. A CRC-bad frame outside the window is still bus activity — FR-010
+// measures idle from "the last byte transmitted or RECEIVED", whatever the Deframer then did
+// with it — so the retry the timeout schedules is gap-deferred from THAT frame's last byte,
+// not from the (earlier) timeout instant. Two edits this case is red for, both of them once
+// live, and each on a DIFFERENT assertion below — they leave last_activity_ at different
+// instants, so they are not interchangeable:
+//   - end_attempt() overwriting last_activity_ with its own `deadline_` argument instead of
+//     taking the later of the two: that rewinds it to tx_end + T_resp, whose gap has already
+//     elapsed by crc_end (the REQUIRE above pins exactly that), so the retry goes out AT
+//     crc_end and `REQUIRE(wire.transcript_size() == 1)` after the poll fails.
+//   - drain_wire()'s unconditional last_activity_/has_last_activity_ update confined to the
+//     outcome branches (a CRC discard is not one of them): the discarded frame's last byte
+//     records nothing, so last_activity_ stays at the PREVIOUS byte's end, one byte time
+//     (10 µs at TRUNK_bit_rate) before crc_end. The retry is then one byte time early, which
+//     the poll to crc_end does not see; `REQUIRE(wire.transcript_size() == 1)` at
+//     crc_end + T_gap - 1, the "not one microsecond early" assertion, is what fails.
+// (Both failures demonstrated by emulating each edit in turn and running `./pipeline.sh
+// build unit`; see the PR's falsification table.)
+//
+// Claim labelling (CLAUDE.md rule 11): this is a behavioural pin, NOT a mutant kill. The
+// whole-tree run on #139 (maintainer's comment, main @ eef9def) reports no surviving mutant
+// on those lines, so every mutant there is already killed by some existing case; this one
+// names the behaviour they hold up.
+TEST_CASE("a CRC-failed frame outside the window gap-defers the retry from its own last byte, "
+          "not from the earlier timeout instant",
+          "[link][timing:T_gap]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    const uint8_t dst = 0x0C;
+    const uint8_t payload[] = {0x11};
+    const Step late_crc[] = {{dst, Kind::CrcError, omgp::TRUNK_T_resp_us + 50}};
+    wire.set_script(dst, late_crc, 1);
+    Master master(wire, clock, omgp::ADDR_host);
+
+    REQUIRE(master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t tx_end = static_cast<uint64_t>(
+        request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us());
+    const uint64_t crc_end =
+        response_full_end(tx_end, dst, 0, payload, sizeof payload, omgp::TRUNK_T_resp_us + 50);
+    const uint64_t timeout_instant = tx_end + omgp::TRUNK_T_resp_us;
+    // Sanity, so the case cannot pass vacuously: the frame opens and closes after the window,
+    // and the gap measured from the TIMEOUT has already elapsed when its last byte lands —
+    // i.e. the two candidate instants are distinguishable and the wrong one is already due.
+    REQUIRE(crc_end > timeout_instant);
+    REQUIRE(timeout_instant + omgp::TRUNK_T_gap_us < crc_end);
+
+    MasterEvent ev = wire.advance_to(crc_end, master);
+    REQUIRE(ev.kind == MasterEvent::None); // timed out, retries remain
+    REQUIRE(master.stats(dst).timeouts == 1);
+    REQUIRE(wire.transcript_size() == 1); // NOT transmitted on the failing frame's own byte
+
+    wire.advance_to(crc_end + omgp::TRUNK_T_gap_us - 1, master);
+    REQUIRE(wire.transcript_size() == 1); // not one microsecond early
+    wire.advance_to(crc_end + omgp::TRUNK_T_gap_us, master);
+    REQUIRE(wire.transcript_size() == 2);
+    REQUIRE(wire.transcript(1).retry);
+    REQUIRE(wire.transcript(1).seq == 0); // a retry never advances seq
+    REQUIRE(wire.transcript(1).tx_start_us == crc_end + omgp::TRUNK_T_gap_us);
+}
+
 TEST_CASE("a CrcError response's wire length matches the real response's even when the "
           "real CRC high byte would need byte-stuffing",
           "[link]") {
