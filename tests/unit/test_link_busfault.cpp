@@ -653,6 +653,55 @@ TEST_CASE("an unrelated discovery probe does not keep an abandoned probe's recor
     REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED);
 }
 
+TEST_CASE("a duplicate fallback answer after the pass has probed the answerer does not clear "
+          "the fault at the reference rate",
+          "[timing:bit_rate_fallback]") {
+    // Round-8 red team on #530, finding 1 [HIGH]: the pass probe to the answerer goes out at
+    // the reference rate and note_probe() overwrites the answerer's own bit, so a second
+    // delivery of the SAME fallback answer (golden rule 2: retries at L2 are always safe, so a
+    // duplicate outcome is a legitimate input) read as a reference-rate one and cleared the
+    // fault at 1 Mbit — a false BUS_RECOVERED, the node enrolled at a rate it cannot hear, the
+    // reference pass bypassed, the fault re-declared on the next poll round. A node is strapped
+    // to ONE rate (trunk §2): the answerer cannot hear the pass probe, so an ok outcome for it
+    // while the pass runs is that answer again, never a reference-rate one, and it restarts the
+    // pass — the benign reading "a duplicate fallback answer before the first pass probe
+    // restarts an identical pass" already pins, now on the other side of the first pass probe.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    ThreeNodeRig::build(tracker);
+    REQUIRE(probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate_fallback).addr == kNodeC);
+    tracker.on_result(kNodeC, true, 10'000); // the fallback answer: the pass starts
+    uint64_t t = 11'000;
+    for (uint8_t expect : {kNodeA, kNodeB}) { // the pass draws nothing from A and B
+        const Probe p = tracker.next_probe(t);
+        REQUIRE(p.addr == expect);
+        REQUIRE(p.bit_rate == omgp::TRUNK_bit_rate);
+        tracker.on_result(p.addr, false, t += 1'000);
+    }
+    const Probe pc = tracker.next_probe(t); // the pass probes the answerer at the reference rate
+    REQUIRE(pc.addr == kNodeC);
+    REQUIRE(pc.bit_rate == omgp::TRUNK_bit_rate);
+
+    tracker.on_result(kNodeC, true, t + 10); // the fallback answer, delivered again
+
+    REQUIRE(tracker.bus_fault());                           // NOT a clear at 1 Mbit
+    REQUIRE(tracker.state(kNodeC) == HealthState::SUSPECT); // still deferred
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 0);
+    // The pass restarts and, drawing nothing, clears at the fallback rate — §7's only clear here.
+    t += 1'000;
+    for (int i = 0; i < 3; ++i) {
+        const Probe p = tracker.next_probe(t);
+        REQUIRE(p.bit_rate == omgp::TRUNK_bit_rate);
+        tracker.on_result(p.addr, false, t += 1'000);
+    }
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(tracker.state(kNodeC) == HealthState::ENROLLED);
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);
+}
+
 TEST_CASE(
     "a probe superseded by later handouts is read at the rate in use, not at its own stale rate",
     "[timing:bit_rate_fallback]") {
