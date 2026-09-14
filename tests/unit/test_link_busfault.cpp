@@ -912,6 +912,42 @@ TEST_CASE("the fallback-answerer record does not outlive its episode",
     REQUIRE(listener.count(Notice::BUS_RECOVERED) == 2);
 }
 
+TEST_CASE("a clear at the REFERENCE rate also empties the fallback-answerer record",
+          "[timing:bit_rate_fallback]") {
+    // Round-13 red team on #530, finding 1: clear_fault()'s single `fallback_seen = 0` is the
+    // only reset left (round 12 removed evaluate_declare()'s as unfalsifiable), and the case
+    // above pins it only through a FALLBACK-rate clear — making it conditional on that clear
+    // survived the suite, and a node that answered at the fallback rate in one episode was
+    // then barred for ever from clearing a later fault at the reference rate. Episode 1: C
+    // answers at the fallback rate (the pass starts), then B answers at the reference rate
+    // (the fault clears there, mid-pass). Episode 2: C answers a reference-rate probe and must
+    // clear the fault, not be read as "that fallback answer again".
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    ThreeNodeRig::build(tracker);
+    REQUIRE(probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate_fallback).addr == kNodeC);
+    tracker.on_result(kNodeC, true, 10'000); // C at the fallback rate: recorded, the pass starts
+    REQUIRE(tracker.bus_fault());
+    Probe p = tracker.next_probe(10'500); // the pass: A first (re-yielded until answered)
+    REQUIRE(p.addr == kNodeA);
+    tracker.on_result(kNodeA, false, 10'600);
+    p = tracker.next_probe(10'700); // then B, at the reference rate
+    REQUIRE(p.addr == kNodeB);
+    REQUIRE(p.bit_rate == omgp::TRUNK_bit_rate);
+    tracker.on_result(kNodeB, true, 11'000); // B answers at the reference rate, mid-pass
+    REQUIRE_FALSE(tracker.bus_fault());      // episode 1 clears at the reference rate
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+    fail_to_suspect(tracker, kNodeB, 20'000); // episode 2 (A and C are still SUSPECT)
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate).addr == kNodeC);
+    tracker.on_result(kNodeC, true, 30'000);             // C, a valid answer at the REFERENCE rate
+    REQUIRE_FALSE(tracker.bus_fault());                  // clears at once…
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate); // …at the reference rate
+    REQUIRE(tracker.state(kNodeC) == HealthState::ENROLLED);
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 2);
+}
+
 TEST_CASE("a second outstanding probe does not cancel the first's episode-boundary exemption",
           "[timing:bit_rate_fallback][timing:T_resp]") {
     // Round-10 review on #530, finding 1 [HIGH]: round 9's "newest handout supersedes" rule

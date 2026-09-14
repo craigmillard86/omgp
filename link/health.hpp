@@ -123,7 +123,8 @@ class HealthTracker {
         // every one of them, not the latest (round-11 red team on #530, finding 2). On a
         // fallback-rate clear every address here takes its deferred §6 transition (each
         // demonstrated it hears that rate), a superset of the data model's single answerer,
-        // labelled as such. Reset per episode by evaluate_declare() and on every clear.
+        // labelled as such. Emptied by every clear (clear_fault, at either rate — the one reset;
+        // every episode ends with a clear and a tracker starts empty, round 12/13).
         uint16_t fallback_seen = 0;
         // Reference-pass outcomes still owed; 0 = no pass running.
         uint8_t ref_pass_left = 0;
