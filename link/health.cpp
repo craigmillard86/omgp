@@ -98,6 +98,8 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     bool pass_ended = false;
     if (bus_.pass_addr == addr) {
         bus_.pass_addr = 0;
+        // Cannot wrap: pass_probe() sets pass_addr only while ref_pass_left > 0, and this is
+        // the only place ref_pass_left is decremented.
         pass_ended = --bus_.ref_pass_left == 0;
     }
 
