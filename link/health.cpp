@@ -404,6 +404,19 @@ Probe HealthTracker::pass_probe(uint64_t now_us) {
 }
 
 Probe HealthTracker::next_probe(uint64_t now_us) {
+    // A pass probe whose outcome never arrives is written off after the outcome window — the
+    // bound probe_live already lives under (kOutcomeWindowUs) — as "drew nothing": the pass
+    // advances, and if it was the last pass probe the fault clears at the fallback rate here.
+    // Unbounded, the re-yield below held one dead address for ever: bus_fault() stuck true,
+    // poll_due() false everywhere, one dropped frame a dead rig (round-14 red team on #530).
+    // Demonstrated by "an abandoned pass probe is written off after the outcome window ..." in
+    // tests/unit/test_link_busfault.cpp (still owed at exactly one window; written off after).
+    if (bus_.fault && bus_.pass_addr != 0 &&
+        elapsed_us(now_us, records_[bus_.pass_addr].probe_issued_us) > kOutcomeWindowUs) {
+        bus_.pass_addr = 0;
+        if (--bus_.ref_pass_left == 0)
+            clear_fault(omgp::TRUNK_bit_rate_fallback, now_us);
+    }
     if (bus_.fault && bus_.ref_pass_left > 0)
         return pass_probe(now_us);
 

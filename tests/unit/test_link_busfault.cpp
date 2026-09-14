@@ -1056,6 +1056,71 @@ TEST_CASE("an abandoned pass probe is written off after the outcome window and t
     REQUIRE(p.addr != kNodeC); // and what came back is an ordinary rotation probe, not the pass's
 }
 
+TEST_CASE("a stray outcome for another address mid-pass does not advance the pass",
+          "[timing:bit_rate_fallback]") {
+    // Round-14 red team on #530, follow-up 2: the pass-advance guard `pass_addr == addr` was
+    // pinned by nothing on its "and by nothing else" half — weakening it to `!= 0` let a
+    // leftover alternation probe's timeout, arriving mid-pass, consume a pass slot, so the
+    // pass ended early and the fault cleared at the fallback rate on evidence it never
+    // gathered. The pass still re-yields A and still takes exactly |enrolled| probes.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    ThreeNodeRig::build(tracker);
+    REQUIRE(probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate_fallback).addr == kNodeC);
+    tracker.on_result(kNodeC, true, 10'000); // the fallback answer: the pass starts
+    uint64_t t = 11'000;
+    Probe p = tracker.next_probe(t); // pass probe 1: A, outstanding
+    REQUIRE(p.addr == kNodeA);
+    tracker.on_result(kNodeB, false,
+                      t + 10);      // a stray outcome: B's old alternation probe timing out
+    p = tracker.next_probe(t + 20); // A is still the outstanding pass probe
+    REQUIRE(p.addr == kNodeA);
+    REQUIRE(tracker.bus_fault());
+    int probes = 1;
+    tracker.on_result(kNodeA, false, t += 1'000);
+    while (tracker.bus_fault() && probes < 6) {
+        p = tracker.next_probe(t);
+        ++probes;
+        tracker.on_result(p.addr, false, t += 1'000);
+    }
+    REQUIRE(probes == 3); // |enrolled| pass probes, the stray outcome counted for none of them
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+}
+
+TEST_CASE("a failed outcome for a recorded fallback answerer still takes its §6 transition",
+          "[timing:bit_rate_fallback]") {
+    // Round-14 red team on #530, follow-up 3: is_answerer's `ok` conjunct was pinned by
+    // nothing — without it a FAILED outcome for a recorded fallback answerer took the
+    // answerer no-op branch instead of apply_result(), so its consecutive failures stopped
+    // counting and a SUSPECT answerer could never reach OFFLINE. A answers at the fallback
+    // rate, its pass probe fails past the offline threshold: A goes OFFLINE (data-model §6),
+    // the pass goes on, and the fallback clear then brings A back as an answerer that hears
+    // that rate.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    ThreeNodeRig::build(tracker); // A SUSPECT since ~1'000 us
+    REQUIRE(probe_until(tracker, kNodeA, omgp::TRUNK_bit_rate_fallback).addr == kNodeA);
+    tracker.on_result(kNodeA, true, 10'000); // A's fallback answer: recorded, the pass starts
+    Probe p = tracker.next_probe(11'000);    // pass probe 1: A, at the reference rate
+    REQUIRE(p.addr == kNodeA);
+    const uint64_t late = 1'000 + kThresholdUs + 10'000;    // past A's offline threshold
+    tracker.on_result(kNodeA, false, late);                 // A's pass probe: nothing heard
+    REQUIRE(tracker.state(kNodeA) == HealthState::OFFLINE); // the failure was applied
+    REQUIRE(tracker.bus_fault());
+    uint64_t t = late + 1'000;
+    for (int i = 0; i < 2; ++i) { // B and C: nothing heard, the pass ends
+        p = tracker.next_probe(t);
+        REQUIRE(p.addr != kNodeA);
+        tracker.on_result(p.addr, false, t += 1'000);
+    }
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED); // the deferred transition on the clear
+}
+
 TEST_CASE("a second outstanding probe does not cancel the first's episode-boundary exemption",
           "[timing:bit_rate_fallback][timing:T_resp]") {
     // Round-10 review on #530, finding 1 [HIGH]: round 9's "newest handout supersedes" rule
