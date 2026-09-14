@@ -235,8 +235,14 @@ return afterwards (data-model §7). Each transition notifies exactly once.
 
 Two implementation notes the bus-fault rules rest on, recorded here because they are visible
 at this interface (T043, `link/health.cpp`): `on_result` carries no bit rate, so the rate an
-outcome arrived at is taken to be the rate `next_probe()` last handed out — sound exactly
-under F3 obligation 1 below, and ASSUMED, not enforced. And while a pass probe's outcome is
+outcome arrived at is taken to be the rate `next_probe()` last handed out **for that address**
+— sound exactly under F3 obligation 1 below, and ASSUMED, not enforced. Per address and not
+per wire, so that a `next_probe()` call made with an outcome still outstanding (obligation 2
+violated) cannot re-read an answer at a rate its own probe never used: that mis-read inverts
+both of §7's clear rules — upward, a node is enrolled at a rate it cannot hear and the fault
+oscillates; downward, a reference-rate answer downgrades the trunk permanently (red team round
+2 on #530). What remains assumed is narrower: two probes to the SAME address before the first
+one's outcome. And while a pass probe's outcome is
 outstanding, `next_probe()` re-yields that address and advances nothing, so a scheduler that
 breaks obligation 2 still completes the pass (data-model §6, round-13 red team on #472).
 

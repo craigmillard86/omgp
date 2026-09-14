@@ -314,8 +314,8 @@ TEST_CASE("an extra next_probe() call does not re-read a fallback-rate answer as
 
     ThreeNodeRig::build(tracker);
     probe_until(tracker, kNodeB, omgp::TRUNK_bit_rate_fallback);
-    tracker.next_probe(0);                      // the extra call: no probe was issued for it
-    tracker.on_result(kNodeB, true, 10'000);    // B answers — at the FALLBACK rate
+    tracker.next_probe(0);                   // the extra call: no probe was issued for it
+    tracker.on_result(kNodeB, true, 10'000); // B answers — at the FALLBACK rate
 
     REQUIRE(tracker.bus_fault());                           // §7: a fallback answer clears nothing
     REQUIRE(tracker.state(kNodeB) == HealthState::SUSPECT); // …and its §6 transition is deferred

@@ -48,7 +48,10 @@ class HealthTracker {
 
     // One transaction outcome. While bus_fault() that is a probe's — F3 obligation 1 (probes
     // are the only traffic during a fault) is what makes the rate this result arrived at
-    // knowable here: it is the rate next_probe() last handed out (data-model.md §7).
+    // knowable here: it is the rate next_probe() last handed out FOR THIS ADDRESS
+    // (data-model.md §7). Per address, not per wire: an extra next_probe() call moves the wire
+    // to another address's probe, and reading this outcome at that rate inverts the §7
+    // classification (red team round 2 on #530, finding 1).
     void on_result(uint8_t addr, bool ok, uint64_t now_us);
     void tick(uint64_t now_us); // time-only transitions: SUSPECT -> OFFLINE
 
@@ -101,17 +104,28 @@ class HealthTracker {
         uint8_t pass_addr;         // the pass probe in flight; 0 = none outstanding
         uint8_t pass_next_addr;    // the pass's own cursor, in address order
         // The rate the host last put on the wire — a probe's rate, or a rate pinned by a
-        // clear. Not a data-model.md §7 field: it is how this implementation both counts
-        // `rate_changes` (§8: at the point the change is decided) and tells a fallback-rate
-        // answer from a reference-rate one, since `on_result` carries no rate. Sound only
-        // under F3 obligation 1; before any probe has been issued it is the rate in use.
+        // clear. Not a data-model.md §7 field: it is how this implementation counts
+        // `rate_changes` (§8: at the point the change is decided). Before any probe has been
+        // issued it is the rate in use.
         uint32_t wire_rate;
+        // One bit per address (bit N = address N): set when the last probe to that address
+        // went out at TRUNK_bit_rate_fallback, clear when it went out at the reference rate.
+        // Not a data-model.md §7 field either: since `on_result` carries no rate, this is how
+        // the §7 classification ("a valid answer at the reference rate" vs "at the fallback
+        // rate") is made, and it is read per address rather than from `wire_rate` so that a
+        // next_probe() call with an outcome still outstanding (F3 obligation 2 violated)
+        // cannot re-read an answer at a rate its own probe never used — the consequence
+        // data-model.md §6 records for that violation, phantom `rate_changes`, is then the
+        // whole of it unless the SAME address is probed twice before its first outcome
+        // arrives, which obligation 1 assumes away. (Red team round 2 on #530, finding 1.)
+        uint16_t probe_fallback;
     };
 
     void notify(Notice notice, uint8_t addr);
     uint8_t next_backplane_addr(uint8_t addr) const; // wraps ADDR_backplane_min..ADDR_backplane_max
     void apply_result(uint8_t addr, bool ok, uint64_t now_us); // the §6 transition table alone
     void note_wire_rate(uint32_t bit_rate);                    // counts a change (§8)
+    void note_probe(uint8_t addr, uint32_t bit_rate);          // remembers that probe's rate
     void evaluate_declare();                                   // trunk §7 declare rule
     void clear_fault(uint32_t bit_rate, uint64_t now_us);      // trunk §7 clear, at that rate
     Probe pass_probe();                                        // one reference-pass probe

@@ -42,12 +42,21 @@ constexpr uint8_t kBusAddr = 0; // literal-ok: the data model's bus-level sentin
 // Number of backplane addresses in the enrolment rotation (trunk §5: 0x01..0x0F).
 constexpr size_t kBackplaneCount =
     static_cast<size_t>(omgp::ADDR_backplane_max) - omgp::ADDR_backplane_min + 1;
+// BusState::probe_fallback (health.hpp) is one bit per address: bit N is address N. Every
+// caller passes an address that has already passed is_node_addr or that came from the
+// rotation cursor, so the shift is in range BY CONSTRUCTION — and the assert below is what
+// keeps "in range" true if the address space ever grows past the width of that field.
+static_assert(kAddrCount <= 16, // literal-ok: the bit width of that uint16_t field
+              "BusState::probe_fallback holds one bit per address");
+constexpr uint16_t probe_bit(uint8_t addr) {
+    return static_cast<uint16_t>(1u << addr);
+}
 } // namespace
 
 HealthTracker::HealthTracker(Clock& clock, HealthListener& listener)
     : clock_(clock), listener_(listener), records_{}, next_probe_addr_(omgp::ADDR_backplane_max),
       bus_{omgp::TRUNK_bit_rate, false, false, 0, 0, 0, omgp::ADDR_backplane_min,
-           omgp::TRUNK_bit_rate},
+           omgp::TRUNK_bit_rate, 0},
       stats_{} {
     (void)clock_; // discarded read: see the clock_ declaration comment in health.hpp
 }
@@ -62,11 +71,21 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     if (!is_node_addr(addr))
         return;
 
-    // trunk §7 / data-model.md §7. The rate this outcome arrived at is the rate the last
-    // probe went out at (bus_.wire_rate) — knowable only because probes are the only traffic
-    // while a fault is declared (F3 obligation 1, contracts/link-cpp.md "What F3/F4 need",
-    // ASSUMED here, not enforced). Outside a fault the rate plays no part.
-    const bool at_reference = bus_.wire_rate == omgp::TRUNK_bit_rate;
+    // trunk §7 / data-model.md §7. The rate this outcome arrived at is the rate the last probe
+    // TO THIS ADDRESS went out at (bus_.probe_fallback, written by note_probe below) —
+    // knowable only because probes are the only traffic while a fault is declared (F3
+    // obligation 1, contracts/link-cpp.md "What F3/F4 need", ASSUMED here, not enforced).
+    // Per address, not the rate last put on the wire: one next_probe() call with this outcome
+    // still outstanding (obligation 2 violated by a single superframe) moves the wire to
+    // another address's probe, and reading this answer at that rate inverts §7's two clear
+    // rules — upward it enrols a node at a rate it cannot hear and oscillates declare/clear,
+    // downward it pins the trunk at the fallback rate with no automatic return (red team round
+    // 2 on #530, finding 1; the two "an extra next_probe() call ..." cases in
+    // tests/unit/test_link_busfault.cpp). What this still cannot tell apart, stated (rule 11):
+    // two probes to the SAME address before the first one's outcome — the second overwrites
+    // the first's rate. That is obligation 1's territory, ASSUMED, not enforced.
+    // Outside a fault the rate plays no part.
+    const bool at_reference = (bus_.probe_fallback & probe_bit(addr)) == 0;
     const bool fallback_answer = bus_.fault && ok && !at_reference;
 
     if (fallback_answer) {
@@ -74,9 +93,17 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
         // enrolling it here would have it status-polled at a rate it cannot hear, fail into
         // SUSPECT and re-declare the fault it just recovered (round-4 red team on #472). It
         // is recorded, and a reference pass over every enrolled address starts.
-        // No pass can already be running: every probe issued during one goes out at the
-        // reference rate (pass_probe below), so no outcome while a pass runs is a
-        // fallback-rate answer. True by construction, not by assumption.
+        // What IS true by construction: no outcome for an address whose PASS probe is
+        // outstanding reaches here, because every pass probe goes out at the reference rate
+        // (pass_probe below). The wider claim this comment once made — that no pass can
+        // already be running — is false, and labelled so per rule 11 (red team round 2 on
+        // #530, finding 2): a pass is running from the moment ref_pass_left is set below, and
+        // until its first probe goes out the answerer's remembered rate is still the fallback
+        // one, so a duplicate or late outcome for it re-enters this branch and recomputes the
+        // pass. Benign, and demonstrated so rather than asserted: |enrolled| cannot change in
+        // that window and the cursor is already at ADDR_backplane_min, so the recomputation
+        // reproduces the state it overwrites — "a duplicate fallback answer before the first
+        // pass probe restarts an identical pass" in tests/unit/test_link_busfault.cpp.
         bus_.fallback_answerer = addr;
         uint8_t enrolled = 0;
         for (const HealthRecord& r : records_)
@@ -250,6 +277,10 @@ Probe HealthTracker::pass_probe() {
         // routes here whenever fault && ref_pass_left > 0, and the two places that end a pass
         // (on_result's decrement, clear_fault) both zero `pass_addr` first. So wire_rate is
         // already TRUNK_bit_rate and note_wire_rate returns without touching rate_changes.
+        // By the same construction `pass_addr`'s remembered probe rate is already the
+        // reference rate — the loop below cleared its bit when it issued this very probe, and
+        // only a probe going out moves a bit — so there is no note_probe() call here: it could
+        // only restate that, and a call no test could falsify is what this file keeps out.
         // mutant-ok(equivalent, cxx_remove_void_call): a no-op call on this path.
         note_wire_rate(omgp::TRUNK_bit_rate);
         return Probe{bus_.pass_addr, omgp::TRUNK_bit_rate};
@@ -267,6 +298,7 @@ Probe HealthTracker::pass_probe() {
         if (records_[addr].state != HealthState::UNENROLLED) { // enrolled: ever answered
             bus_.pass_addr = addr;
             note_wire_rate(omgp::TRUNK_bit_rate);
+            note_probe(addr, omgp::TRUNK_bit_rate);
             return Probe{addr, omgp::TRUNK_bit_rate};
         }
     }
@@ -302,8 +334,10 @@ Probe HealthTracker::next_probe(uint64_t /*now_us*/) {
         next_probe_addr_ = next_backplane_addr(next_probe_addr_);
         const HealthState s = records_[next_probe_addr_].state;
         if (s == HealthState::UNENROLLED || s == HealthState::OFFLINE ||
-            (bus_.fault && s == HealthState::SUSPECT))
+            (bus_.fault && s == HealthState::SUSPECT)) {
+            note_probe(next_probe_addr_, rate);
             return Probe{next_probe_addr_, rate};
+        }
     }
     // No eligible address (e.g. every backplane node is ENROLLED/SUSPECT — the steady
     // state of a healthy rig): ADDR_host (0x00) is outside the rotation range and is
@@ -322,6 +356,22 @@ void HealthTracker::note_wire_rate(uint32_t bit_rate) {
         return;
     bus_.wire_rate = bit_rate;
     ++stats_.rate_changes;
+}
+
+void HealthTracker::note_probe(uint8_t addr, uint32_t bit_rate) {
+    // data-model.md §7 needs "a valid answer at the reference rate" told from one at the
+    // fallback rate, and on_result carries no rate — so each probe leaves the rate it went out
+    // at on its own address (health.hpp, BusState::probe_fallback). Per address, because the
+    // wire moves on: while a probe to this address is outstanding, another next_probe() call
+    // (F3 obligation 2 violated) puts a different address's probe on the wire at the other
+    // rate, and the classification must not follow it (red team round 2 on #530, finding 1).
+    // Every caller is a probe about to be issued for a rotation address, in range by the
+    // static_assert above; ADDR_host, which is the "nothing to probe" sentinel and never goes
+    // on the wire, is not one of them.
+    if (bit_rate == omgp::TRUNK_bit_rate_fallback)
+        bus_.probe_fallback = static_cast<uint16_t>(bus_.probe_fallback | probe_bit(addr));
+    else
+        bus_.probe_fallback = static_cast<uint16_t>(bus_.probe_fallback & ~probe_bit(addr));
 }
 
 void HealthTracker::evaluate_declare() {
