@@ -51,6 +51,10 @@ static_assert(kAddrCount <= 16, // literal-ok: the bit width of that uint16_t fi
 constexpr uint16_t probe_bit(uint8_t addr) {
     return static_cast<uint16_t>(1u << addr);
 }
+// Every address's bit at once, for evaluate_declare()'s per-episode reset. Derived from
+// kAddrCount rather than written as a mask, so it stays the whole field if the address space
+// grows — up to the width the static_assert above holds it to.
+constexpr uint16_t kAllProbeBits = static_cast<uint16_t>((1u << kAddrCount) - 1u);
 } // namespace
 
 HealthTracker::HealthTracker(Clock& clock, HealthListener& listener)
@@ -81,9 +85,13 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // rules — upward it enrols a node at a rate it cannot hear and oscillates declare/clear,
     // downward it pins the trunk at the fallback rate with no automatic return (red team round
     // 2 on #530, finding 1; the two "an extra next_probe() call ..." cases in
-    // tests/unit/test_link_busfault.cpp). What this still cannot tell apart, stated (rule 11):
-    // two probes to the SAME address before the first one's outcome — the second overwrites
-    // the first's rate. That is obligation 1's territory, ASSUMED, not enforced.
+    // tests/unit/test_link_busfault.cpp). And per episode: evaluate_declare() resets every bit
+    // to the rate in use, so an address this episode has not probed — its outcome answers
+    // something issued before the declare, at that rate — is not read at a bit some earlier
+    // episode left behind (red team round 5 on #530, finding 1). What this still cannot tell
+    // apart, stated (rule 11): two probes to the SAME address before the first one's outcome —
+    // the second overwrites the first's rate. That is obligation 1's territory, ASSUMED, not
+    // enforced.
     // Outside a fault the rate plays no part.
     const bool at_reference = (bus_.probe_fallback & probe_bit(addr)) == 0;
     const bool fallback_answer = bus_.fault && ok && !at_reference;
@@ -447,6 +455,21 @@ void HealthTracker::evaluate_declare() {
     // above is what makes that hold on entry to the episode.
     // mutant-ok(equivalent, cxx_assign_const): a dead write; no reachable read sees it.
     bus_.pass_next_addr = omgp::ADDR_backplane_min;
+    // The remembered probe rates are per EPISODE as well as per address, and unlike the four
+    // resets above this one is LIVE: on_result classifies every fault-time outcome by the bit
+    // for its address, and an outcome can arrive for an address this episode has not probed.
+    // F3 obligation 1 does not exclude that — it is an obligation to ISSUE ("while bus_fault()
+    // is true, issue only the probe next_probe() returns"), and the fault is declared BY an
+    // outcome, on the line below, so a status poll already on the wire in the superframe that
+    // declares it necessarily lands afterwards and cannot be un-issued. It went out at the rate
+    // in use, which is what every bit is set to here; a bit a PREVIOUS episode left behind is
+    // some other episode's rate, and reading an answer at it inverts both of §7's clear rules
+    // (red team round 5 on #530, finding 1). Set to the rate in use and not simply cleared:
+    // after a fallback-rate clear that rate IS the rate in use (no automatic return, ruling
+    // 2026-09-13), so a cleared bit would be just as wrong in the other direction. Both
+    // branches are DEMONSTRATED by the two "a new episode ..." cases in
+    // tests/unit/test_link_busfault.cpp, which fail without this line, one each.
+    bus_.probe_fallback = bus_.bit_rate == omgp::TRUNK_bit_rate_fallback ? kAllProbeBits : 0;
     ++stats_.bus_faults;
     notify(Notice::BUS_FAULT, kBusAddr);
     notify(Notice::ALERT, kBusAddr); // FR-024: one system alert per episode

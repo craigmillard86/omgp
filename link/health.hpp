@@ -118,6 +118,11 @@ class HealthTracker {
         // data-model.md §6 records for that violation, phantom `rate_changes`, is then the
         // whole of it unless the SAME address is probed twice before its first outcome
         // arrives, which obligation 1 assumes away. (Red team round 2 on #530, finding 1.)
+        // Reset per EPISODE by evaluate_declare(), to the rate in use: an outcome can arrive
+        // for an address the new episode has not probed — a poll issued in the superframe
+        // that declared the fault, which obligation 1 (an obligation to ISSUE) does not
+        // forbid — and it arrived at that rate, not at whatever a previous episode's last
+        // probe to that address used. (Red team round 5 on #530, finding 1.)
         uint16_t probe_fallback;
     };
 

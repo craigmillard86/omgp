@@ -241,7 +241,11 @@ per wire, so that a `next_probe()` call made with an outcome still outstanding (
 violated) cannot re-read an answer at a rate its own probe never used: that mis-read inverts
 both of §7's clear rules — upward, a node is enrolled at a rate it cannot hear and the fault
 oscillates; downward, a reference-rate answer downgrades the trunk permanently (red team round
-2 on #530). What remains assumed is narrower: two probes to the SAME address before the first
+2 on #530). Per episode too: the record is reset on every declare to the rate in use, because
+an outcome can arrive for an address the new episode has not probed — obligation 1 below is an
+obligation to *issue*, and the declare happens at the tail of `on_result`, so a poll already on
+the wire in that superframe lands after it and went out at the rate in use (red team round 5 on
+#530). What remains assumed is narrower: two probes to the SAME address before the first
 one's outcome. And while a pass probe's outcome is
 outstanding, `next_probe()` re-yields that address and advances nothing, so a scheduler that
 breaks obligation 2 still completes the pass (data-model §6, round-13 red team on #472).
