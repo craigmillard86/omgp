@@ -659,6 +659,47 @@ def test_report_comment_deleted_after_a_spliced_line_is_not_exempted(tmp_path):
     assert rc == 1 and "blind spot" in out, out
 
 
+def test_report_deleted_half_with_an_impossible_position_is_not_exempted(tmp_path):
+    """A deleted line whose `after` names a post-image line the checked-out tree does not have
+    (a stale or skewed removed map: the ranges and the tree disagree) cannot have its
+    predecessor checked, and an unchecked predecessor is exactly the shape the splice check
+    exists for — so the file is refused, not certified (round-8 red team on #558: this arm was
+    pinned by no case, and a `continue` in its place left the suite green)."""
+    src = ["// a note the diff added", "int f(int a) { return a >= 4 ? 1 : 0; }"]
+    for after in (3, 99):
+        removed = {"l3/x.cpp": [{"text": "    // gone", "after": after}]}
+        root, reports = _setup(tmp_path, src, [_mutant(2, 25, "cxx_ge_to_gt", "Survived")],
+                               {"l3/x.cpp": [[1, 1]]}, removed=removed)
+        rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+        assert rc == 1, (after, out)
+        assert "blind spot" in out and "l3/x.cpp" in out, (after, out)
+        assert "blank or a // comment" not in out, (after, out)
+    # -1 with no previous entry is the same refusal: a chained predecessor that does not exist.
+    removed = {"l3/x.cpp": [{"text": "    // gone", "after": -1}]}
+    root, reports = _setup(tmp_path, src, [_mutant(2, 25, "cxx_ge_to_gt", "Survived")],
+                           {"l3/x.cpp": [[1, 1]]}, removed=removed)
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1 and "blind spot" in out and "blank or a // comment" not in out, out
+
+
+def test_report_text_only_removed_map_is_treated_as_never_handed_over(tmp_path):
+    """The removed half's format is {"text", "after"} since the deleted-half splice check; an
+    older text-only list carries no positions, so the exemption must be UNAVAILABLE — the same
+    outcome as omitting --removed — and the refusal must be the clean blind-spot one, not a
+    TypeError on `e["text"]` (round-8 red team on #558: with the validator deleted the suite
+    stayed green while the predicate died on a str)."""
+    src = ["// a note the diff added", "int f(int a) { return a >= 4 ? 1 : 0; }"]
+    for removed in ({"l3/x.cpp": ["    // gone"]}, {"l3/x.cpp": [{"text": "    // gone"}]},
+                    {"l3/x.cpp": [["    // gone", 0]]}):
+        root, reports = _setup(tmp_path, src, [_mutant(2, 25, "cxx_ge_to_gt", "Survived")],
+                               {"l3/x.cpp": [[1, 1]]}, removed=removed)
+        rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+        assert rc == 1, (removed, out)
+        assert "blind spot" in out and "l3/x.cpp" in out, (removed, out)
+        assert "Traceback" not in out and "TypeError" not in out, (removed, out)
+        assert "blank or a // comment" not in out, (removed, out)
+
+
 def test_mutate_ranges_names_the_predecessor_of_a_pure_deletion(tmp_path):
     """For `@@ -a,b +c,0 @@` unified diff gives c as the post-image line BEFORE the deletion, so
     the first deleted line's surviving predecessor is post line c (c-1 when the hunk also adds

@@ -46,8 +46,11 @@ Policy (tools/mutate.cfg [policy] — T3 constants, never relaxed to get green):
         granularity, which is why it needs no marker (docs/OPEN-QUESTIONS.md 2026-09-14, and
         the amendment of the same date). Both halves of the diff are read, because a hunk that
         deletes a guard and puts a comment in its place has a comment-only added half; the
-        deleted lines arrive as --removed (tools/mutate_ranges.py) and are judged by the same
-        per-line test. See changed_lines_all_comments for the shapes it fails closed on: each
+        deleted lines arrive as --removed (tools/mutate_ranges.py), each with the post-image
+        line of its surviving predecessor, and are judged by the same per-line test plus the
+        predecessor splice check the added half gets (a `//` comment deleted from after a
+        `\`-ended line re-splices the line below into the macro; round-8 review on #558).
+        See changed_lines_all_comments for the shapes it fails closed on: each
         is a case where the predicate would otherwise certify what it did not read, and there
         zero mutants is the blind spot again.
     Because a comment-only diff is exactly the shape of a PR that rewrites `mutant-ok`
@@ -134,8 +137,10 @@ def main(argv=None) -> int:
     ap.add_argument("--scope-dirs", required=True, help="space-separated embedded-path directories")
     ap.add_argument("--ranges", required=True, help="JSON {rel_path: [[start, end], ...]}; {} = whole tree")
     ap.add_argument("--removed", default="",
-                    help="JSON {rel_path: [text of each line the diff deleted, ...]} "
-                         "(tools/mutate_ranges.py). Omitted = the deleted half of the diff was never "
+                    help="JSON {rel_path: [{\"text\": <deleted line>, \"after\": <post-image line of "
+                         "its surviving predecessor; -1 = that line was deleted too; 0 = top of "
+                         "file>}, ...]} (tools/mutate_ranges.py). Omitted, or any other shape "
+                         "(an older text-only list) = the deleted half of the diff was never "
                          "read, so the comment-only blind-spot exemption is unavailable")
     ap.add_argument("--source-ext", required=True,
                     help="space-separated source extensions (tools/mutate.cfg source_ext, passed by mutate.sh)")
