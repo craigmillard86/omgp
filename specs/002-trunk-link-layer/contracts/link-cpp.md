@@ -241,12 +241,16 @@ per wire, so that a `next_probe()` call made with an outcome still outstanding (
 violated) cannot re-read an answer at a rate its own probe never used: that mis-read inverts
 both of §7's clear rules — upward, a node is enrolled at a rate it cannot hear and the fault
 oscillates; downward, a reference-rate answer downgrades the trunk permanently (red team round
-2 on #530). Per episode too: the record is reset on every declare to the rate in use, because
-an outcome can arrive for an address the new episode has not probed — obligation 1 below is an
-obligation to *issue*, and the declare happens at the tail of `on_result`, so a poll already on
-the wire in that superframe lands after it and went out at the rate in use (red team round 5 on
-#530). What remains assumed is narrower: two probes to the SAME address before the first
-one's outcome. And while a pass probe's outcome is
+2 on #530). Per episode too: on every declare the record is reset to the rate in use *for every
+address this layer is owed no outcome by*, because an outcome can arrive for an address the new
+episode has not probed — obligation 1 below is an obligation to *issue*, and the declare happens
+at the tail of `on_result`, so a poll already on the wire in that superframe lands after it and
+went out at the rate in use (red team round 5 on #530). An address whose probe is still in
+flight is exempt, and for the same reason read the other way: its remembered bit is the rate of
+a frame already on the wire, which the new episode's rate in use says nothing about, so
+overwriting it inverts the same two clear rules (red team round 6 on #530). What remains assumed
+is narrower: more than one transaction outstanding to the SAME address at once — the newest
+probe's rate is what the first outcome back is read at. And while a pass probe's outcome is
 outstanding, `next_probe()` re-yields that address and advances nothing, so a scheduler that
 breaks obligation 2 still completes the pass (data-model §6, round-13 red team on #472).
 

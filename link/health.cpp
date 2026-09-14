@@ -59,9 +59,10 @@ constexpr uint16_t kAllProbeBits = static_cast<uint16_t>((1u << kAddrCount) - 1u
 
 HealthTracker::HealthTracker(Clock& clock, HealthListener& listener)
     : clock_(clock), listener_(listener), records_{}, next_probe_addr_(omgp::ADDR_backplane_max),
-      bus_{omgp::TRUNK_bit_rate, false, false, 0, 0, 0, omgp::ADDR_backplane_min,
-           omgp::TRUNK_bit_rate, 0},
-      stats_{} {
+      // Each BusState field's start-of-life value is declared beside the field in health.hpp,
+      // so this is aggregate initialisation from those and not a positional list to keep in
+      // step with the struct.
+      bus_{}, stats_{} {
     (void)clock_; // discarded read: see the clock_ declaration comment in health.hpp
 }
 
@@ -85,16 +86,24 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // rules — upward it enrols a node at a rate it cannot hear and oscillates declare/clear,
     // downward it pins the trunk at the fallback rate with no automatic return (red team round
     // 2 on #530, finding 1; the two "an extra next_probe() call ..." cases in
-    // tests/unit/test_link_busfault.cpp). And per episode: evaluate_declare() resets every bit
-    // to the rate in use, so an address this episode has not probed — its outcome answers
-    // something issued before the declare, at that rate — is not read at a bit some earlier
-    // episode left behind (red team round 5 on #530, finding 1). What this still cannot tell
-    // apart, stated (rule 11): two probes to the SAME address before the first one's outcome —
-    // the second overwrites the first's rate. That is obligation 1's territory, ASSUMED, not
-    // enforced.
+    // tests/unit/test_link_busfault.cpp). And per episode, EXCEPT where a probe is still
+    // outstanding: evaluate_declare() resets the bit of every address that owes this layer no
+    // outcome to the rate in use — such an outcome answers something issued before the declare,
+    // at that rate, and must not be read at a bit some earlier episode left behind (red team
+    // round 5 on #530, finding 1) — while an address with a probe in flight keeps its bit,
+    // because for it that bit is the only record of a rate already on the wire and the new
+    // episode's rate in use says nothing about it (red team round 6 on #530, finding 1).
+    // `bus_.probe_live` is what tells the two apart, and this is where a record is consumed.
+    // What this still cannot tell apart, stated (rule 11): more than one transaction
+    // outstanding to the SAME address at once — the newest probe's rate is what the first
+    // outcome back is read at. That is obligation 1's territory, ASSUMED, not enforced.
     // Outside a fault the rate plays no part.
     const bool at_reference = (bus_.probe_fallback & probe_bit(addr)) == 0;
     const bool fallback_answer = bus_.fault && ok && !at_reference;
+    // The probe this outcome answers is no longer in flight, so its record stops being the
+    // one thing a new episode must not overwrite. Unconditional: an outcome for an address
+    // with no outstanding probe clears a bit that is already clear.
+    bus_.probe_live = static_cast<uint16_t>(bus_.probe_live & ~probe_bit(addr));
 
     if (fallback_answer) {
         // §7: a fallback-rate answer neither clears the fault nor moves that node's state —
@@ -406,6 +415,10 @@ void HealthTracker::note_probe(uint8_t addr, uint32_t bit_rate) {
         bus_.probe_fallback = static_cast<uint16_t>(bus_.probe_fallback | probe_bit(addr));
     else
         bus_.probe_fallback = static_cast<uint16_t>(bus_.probe_fallback & ~probe_bit(addr));
+    // …and the record is owed an outcome from here until on_result reads it. That is what
+    // exempts this address from evaluate_declare()'s per-episode reset (health.hpp,
+    // BusState::probe_live; red team round 6 on #530, finding 1).
+    bus_.probe_live = static_cast<uint16_t>(bus_.probe_live | probe_bit(addr));
 }
 
 void HealthTracker::evaluate_declare() {
@@ -462,14 +475,25 @@ void HealthTracker::evaluate_declare() {
     // is true, issue only the probe next_probe() returns"), and the fault is declared BY an
     // outcome, on the line below, so a status poll already on the wire in the superframe that
     // declares it necessarily lands afterwards and cannot be un-issued. It went out at the rate
-    // in use, which is what every bit is set to here; a bit a PREVIOUS episode left behind is
-    // some other episode's rate, and reading an answer at it inverts both of §7's clear rules
-    // (red team round 5 on #530, finding 1). Set to the rate in use and not simply cleared:
-    // after a fallback-rate clear that rate IS the rate in use (no automatic return, ruling
-    // 2026-09-13), so a cleared bit would be just as wrong in the other direction. Both
-    // branches are DEMONSTRATED by the two "a new episode ..." cases in
-    // tests/unit/test_link_busfault.cpp, which fail without this line, one each.
-    bus_.probe_fallback = bus_.bit_rate == omgp::TRUNK_bit_rate_fallback ? kAllProbeBits : 0;
+    // in use, which is what those addresses' bits are set to here; a bit a PREVIOUS episode left
+    // behind is some other episode's rate, and reading an answer at it inverts both of §7's
+    // clear rules (red team round 5 on #530, finding 1). To the rate in use and not simply
+    // cleared: after a fallback-rate clear that rate IS the rate in use (no automatic return,
+    // ruling 2026-09-13), so a cleared bit would be just as wrong in the other direction.
+    //
+    // `probe_live` is the exception, and it is not a refinement but the other half of the rule
+    // (red team round 6 on #530, finding 1): for an address whose probe is still in flight the
+    // remembered bit is the rate of a frame ALREADY on the wire, which no later declare can
+    // change, so overwriting it inverts exactly the same two clear rules the reset exists to
+    // protect — a fallback-rate probe answered after the boundary would clear the new episode
+    // at the reference rate and enrol a node at a rate it has just failed to hear. The rate in
+    // use is the right answer only where this layer is owed nothing.
+    // All four combinations are DEMONSTRATED, one case each, by the two "a new episode ..." and
+    // two "... outstanding across an episode boundary" / "... answered in the next episode"
+    // cases in tests/unit/test_link_busfault.cpp.
+    const uint16_t in_use = bus_.bit_rate == omgp::TRUNK_bit_rate_fallback ? kAllProbeBits : 0;
+    bus_.probe_fallback = static_cast<uint16_t>((bus_.probe_fallback & bus_.probe_live) |
+                                                (in_use & ~bus_.probe_live));
     ++stats_.bus_faults;
     notify(Notice::BUS_FAULT, kBusAddr);
     notify(Notice::ALERT, kBusAddr); // FR-024: one system alert per episode

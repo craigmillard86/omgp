@@ -556,16 +556,23 @@ TEST_CASE("an outstanding reference-rate probe answered in the next episode stil
     //
     // D is never enrolled, which is what keeps its probe outstanding across the boundary: the
     // reference pass that ends episode 1 covers only addresses that have answered, so nothing
-    // in between delivers an outcome for D.
+    // in between delivers an outcome for D. probe_until() is deliberately NOT used to reach it
+    // — it walks the whole rotation, which would probe D a second time before its first outcome
+    // arrives, the one case this classification is documented as unable to tell apart.
     FakeClock clock;
     RecordingListener listener;
     HealthTracker tracker(clock, listener);
 
     ThreeNodeRig::build(tracker);
-    const Probe d = probe_until(tracker, kNodeD, omgp::TRUNK_bit_rate);
-    REQUIRE(d.addr == kNodeD); // outcome deliberately left outstanding
+    tracker.next_probe(0); // A @ fallback
+    tracker.next_probe(0); // B @ reference
+    const Probe c = tracker.next_probe(0);
+    const Probe d = tracker.next_probe(0);
+    REQUIRE(c.addr == kNodeC);
+    REQUIRE(c.bit_rate == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(d.addr == kNodeD);
+    REQUIRE(d.bit_rate == omgp::TRUNK_bit_rate); // outcome deliberately left outstanding
 
-    probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate_fallback);
     tracker.on_result(kNodeC, true, 10'000); // a fallback-rate answer: the pass starts
     uint64_t t = 11'000;
     for (int i = 0; i < 3; ++i) { // the pass covers A, B and C only, and draws nothing

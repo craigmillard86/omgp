@@ -95,19 +95,28 @@ class HealthTracker {
 
     // Bus state (data-model.md §7). `rate_changes`/`faults` of the data model's BusState live
     // in `stats_` (§8, the shape `bus_stats()` returns); the rest are here.
+    //
+    // Each field carries its own start-of-life value rather than a position in a brace list in
+    // health.cpp's constructor, which `bus_{}` now fills from here: with ten fields, six of them
+    // integers, a positional list is one transposition away from compiling with two values
+    // swapped. Still an aggregate (C++17) and still no dynamic allocation.
     struct BusState {
-        uint32_t bit_rate;         // the rate in use; assigned only by a clear
-        bool fault;                // BUS_FAULT declared
-        bool next_probe_fallback;  // the alternation's next rate; true (fallback) on declare
-        uint8_t fallback_answerer; // address to enrol on a clear at the fallback rate; 0 = none
-        uint8_t ref_pass_left;     // reference-pass outcomes still owed; 0 = no pass running
-        uint8_t pass_addr;         // the pass probe in flight; 0 = none outstanding
-        uint8_t pass_next_addr;    // the pass's own cursor, in address order
+        uint32_t bit_rate = omgp::TRUNK_bit_rate; // the rate in use; assigned only by a clear
+        bool fault = false;                       // BUS_FAULT declared
+        // The alternation's next rate; true (fallback) on declare.
+        bool next_probe_fallback = false;
+        // Address to enrol on a clear at the fallback rate; 0 = none recorded.
+        uint8_t fallback_answerer = 0;
+        // Reference-pass outcomes still owed; 0 = no pass running.
+        uint8_t ref_pass_left = 0;
+        uint8_t pass_addr = 0; // the pass probe in flight; 0 = none outstanding
+        // The pass's own cursor, in address order.
+        uint8_t pass_next_addr = omgp::ADDR_backplane_min;
         // The rate the host last put on the wire — a probe's rate, or a rate pinned by a
         // clear. Not a data-model.md §7 field: it is how this implementation counts
         // `rate_changes` (§8: at the point the change is decided). Before any probe has been
         // issued it is the rate in use.
-        uint32_t wire_rate;
+        uint32_t wire_rate = omgp::TRUNK_bit_rate;
         // One bit per address (bit N = address N): set when the last probe to that address
         // went out at TRUNK_bit_rate_fallback, clear when it went out at the reference rate.
         // Not a data-model.md §7 field either: since `on_result` carries no rate, this is how
@@ -122,8 +131,18 @@ class HealthTracker {
         // for an address the new episode has not probed — a poll issued in the superframe
         // that declared the fault, which obligation 1 (an obligation to ISSUE) does not
         // forbid — and it arrived at that rate, not at whatever a previous episode's last
-        // probe to that address used. (Red team round 5 on #530, finding 1.)
-        uint16_t probe_fallback;
+        // probe to that address used. (Red team round 5 on #530, finding 1.) That reset skips
+        // the addresses named by `probe_live` below, whose record is still owed to a probe.
+        uint16_t probe_fallback = 0;
+        // One bit per address: a probe has gone out to it and its outcome has not yet been
+        // read. Set by note_probe(), cleared by the on_result() that consumes the record.
+        // It is what makes the per-episode reset above safe: for an address with an
+        // OUTSTANDING probe the remembered rate is the only correct record in the system —
+        // the new episode's rate in use says nothing about a frame already on the wire — so
+        // that address keeps its bit across the boundary (red team round 6 on #530, finding
+        // 1). Not a data-model.md §7 field; like probe_fallback it exists only because
+        // on_result carries no rate.
+        uint16_t probe_live = 0;
     };
 
     void notify(Notice notice, uint8_t addr);
