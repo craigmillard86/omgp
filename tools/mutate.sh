@@ -16,11 +16,16 @@
 # The same holds line by line and needs no marker: a diff that changes only blank lines and
 # `//` comments (a PR rewriting `mutant-ok` justifications) leaves nothing a mutant can sit
 # on, so zero in-scope mutants there is structural, not a blind spot (docs/OPEN-QUESTIONS.md
-# 2026-09-14). One changed line that is neither blank nor a `//` comment fails as before, and
-# so do the two shapes that only look like comment-only: a `//` comment ending in `\` (phase 2
-# splices the line below into it, deleting code — -Werror=comment normally stops that reaching
-# here, but the check does not lean on it) and a file whose hunks are all deletions, which
-# reaches mutate_report.py as an empty range list with no changed line to read.
+# 2026-09-14). Both halves of the hunk count — the added lines and the deleted ones, which
+# tools/mutate_ranges.py records alongside the ranges — so a hunk that deletes a guard and
+# leaves a comment in its place fails as before, as does any added line that is neither blank
+# nor a `//` comment. So do the shapes that only look like comment-only, each named in
+# mutate_report.py's changed_lines_all_comments: a `//` line carrying `*/` (it ends the block
+# comment, and the code after it on that line is live), one ending in `\` (phase 2 splices the
+# line below into it, deleting code — -Werror=comment normally stops that reaching here, but
+# the check does not lean on it), one inserted after a `\`-continued line, a file containing a
+# raw string literal, and a file whose hunks are all deletions, which reaches mutate_report.py
+# as an empty range list with no added line to read.
 #
 # Oracle: for every scope dir with changed files, the tests/unit binaries named test_<dir>_*
 # (CMakeLists.txt omgp_add_catch_test) run under the runner. It was a hard-coded test_l3_*
@@ -214,24 +219,19 @@ echo "mutation: instrumented build done (mutated functions in library objects:$e
 # for a feature whose PRs mostly add files. The merge below keeps only mutants on lines
 # `git diff -U0 <ref>` marks as added/changed under scope_dirs.
 phase2_config > "$BUILD/mull.yml"
-# Changed-line ranges per in-scope file (new files are whole-file ranges), as JSON.
+# Both halves of the diff per in-scope file (tools/mutate_ranges.py, tested from a real
+# `git diff` in tools/refimpl/test_tooling.py): the added/changed line ranges the gate scopes
+# survivors to (new files are whole-file ranges), and the text of the deleted lines, which the
+# comment-only blind-spot exemption below reads so that a hunk deleting a guard in favour of a
+# comment is not certified on its added half alone.
 if [ -n "$REF" ]; then
   # shellcheck disable=SC2086
-  git diff -U0 "$REF" -- $SCOPE_DIRS | python3 -c '
-import json, re, sys
-ranges, cur = {}, None
-for line in sys.stdin:
-    if line.startswith("+++ "):
-        p = line[4:].strip()
-        cur = None if p == "/dev/null" else (p[2:] if p.startswith("b/") else p)
-        if cur: ranges.setdefault(cur, [])
-    elif line.startswith("@@") and cur:
-        m = re.match(r"@@ -\S+ \+(\d+)(?:,(\d+))? @@", line)
-        start, count = int(m.group(1)), int(m.group(2)) if m.group(2) is not None else 1
-        if count: ranges[cur].append([start, start + count - 1])
-json.dump(ranges, sys.stdout)' > "$BUILD/scope_ranges.json"
+  git diff -U0 "$REF" -- $SCOPE_DIRS |
+    python3 tools/mutate_ranges.py --ranges-out "$BUILD/scope_ranges.json" \
+      --removed-out "$BUILD/scope_removed.json"
 else
   echo '{}' > "$BUILD/scope_ranges.json"
+  echo '{}' > "$BUILD/scope_removed.json"
 fi
 
 # --- run the oracle binaries under the runner ----------------------------------------------------
@@ -268,7 +268,8 @@ done
 TREND=()
 [ -n "$TREND_LOG" ] && TREND=(--trend-log "$TREND_LOG")
 python3 tools/mutate_report.py --reports "$REPORTS" --root "$ROOT" --scope-dirs "$SCOPE_DIRS" \
-  --ranges "$BUILD/scope_ranges.json" --source-ext "$SOURCE_EXT" --ref "$REF" --out "$BUILD/report.json" \
+  --ranges "$BUILD/scope_ranges.json" --removed "$BUILD/scope_removed.json" \
+  --source-ext "$SOURCE_EXT" --ref "$REF" --out "$BUILD/report.json" \
   --max-unlabelled "$MAX_UNLABELLED" --categories "$CATEGORIES" "${TREND[@]}" || rc=1
 [ "$rc" -eq 0 ] && echo "mutation: PASS" || echo "mutation: FAIL" >&2
 exit $rc

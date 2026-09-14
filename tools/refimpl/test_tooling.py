@@ -348,8 +348,11 @@ def _mutant(line, col, mutator, status):
             "location": {"start": {"line": line, "column": col}, "end": {"line": line, "column": col + 1}}}
 
 
-def _setup(tmp_path, source_lines, mutants, ranges=None):
-    """A fake repo root with l3/x.cpp and one Elements report naming its mutants."""
+def _setup(tmp_path, source_lines, mutants, ranges=None, removed=None):
+    """A fake repo root with l3/x.cpp and one Elements report naming its mutants.
+
+    `removed` is the other half of the diff (tools/mutate_ranges.py): the text of the lines
+    each file's hunks deleted. Default {} = the diff deleted nothing anywhere."""
     root = tmp_path / "repo"
     (root / "l3").mkdir(parents=True, exist_ok=True)
     (root / "l3" / "x.cpp").write_text("\n".join(source_lines) + "\n")
@@ -358,6 +361,7 @@ def _setup(tmp_path, source_lines, mutants, ranges=None):
     (reports / "test_x.json").write_text(json.dumps(
         {"files": {str(root / "l3" / "x.cpp"): {"mutants": mutants}}}))
     (tmp_path / "ranges.json").write_text(json.dumps(ranges if ranges is not None else {}))
+    (tmp_path / "removed.json").write_text(json.dumps(removed if removed is not None else {}))
     return root, reports
 
 
@@ -367,12 +371,15 @@ def _cfg_source_ext() -> str:
     return cp["policy"]["source_ext"]
 
 
-def _report(tmp_path, root, reports, *extra, source_ext=None):
+def _report(tmp_path, root, reports, *extra, source_ext=None, pass_removed=True):
     # --source-ext is what mutate.sh passes from the cfg; the reporter has no default of its own.
+    # --removed likewise: pass_removed=False is a caller that never read the deleted half of the
+    # diff, which the comment-only exemption must fail closed on.
+    removed = ["--removed", str(tmp_path / "removed.json")] if pass_removed else []
     r = subprocess.run([sys.executable, str(REPORT), "--reports", str(reports), "--root", str(root),
                         "--scope-dirs", "l3 link core", "--ranges", str(tmp_path / "ranges.json"),
                         "--source-ext", source_ext if source_ext is not None else _cfg_source_ext(),
-                        "--out", str(tmp_path / "report.json"), *extra],
+                        *removed, "--out", str(tmp_path / "report.json"), *extra],
                        capture_output=True, text=True, cwd=ROOT)
     doc = json.loads((tmp_path / "report.json").read_text()) if (tmp_path / "report.json").exists() else {}
     return r.returncode, r.stdout + r.stderr, doc
@@ -535,6 +542,145 @@ def test_report_malformed_label_on_a_changed_comment_line_fails(tmp_path):
     rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
     assert rc == 1, out
     assert "unknown label category 'whatever'" in out, out
+
+
+def test_report_mixed_hunk_that_deletes_code_is_not_exempted(tmp_path):
+    """A hunk that deletes N code lines and adds one `//` comment leaves a range list holding
+    only the comment. Deciding the exemption from that list alone certifies the file while
+    reading strictly LESS of the diff than the deletion-only case above rejects, and prints a
+    reason ("every line the diff ... is blank or a // comment") that is false of the deleted
+    lines (red-team B1 on #558). So the removed half of the diff is read too: one deleted line
+    that is not blank and not a `//` comment is mutable code the diff took away, and the file
+    goes back under the blind-spot rule."""
+    removed = {"l3/x.cpp": ["    if (a > 9)", "        return 2;"]}
+    root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": [[6, 6]]}, removed=removed)
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1, out
+    assert "blind spot" in out and "l3/x.cpp" in out, out
+    assert "blank or a // comment" not in out, out
+    # The same hunk with only comment lines deleted IS the shape the exemption is for.
+    root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": [[6, 6]]},
+                           removed={"l3/x.cpp": ["    // cap check; only detail bytes differ", ""]})
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 0 and "blank or a // comment" in out, out
+
+
+def test_report_comment_only_exemption_needs_the_lines_the_diff_removed(tmp_path):
+    """The removed half is an input, not an assumption: a caller that does not hand it over
+    (an older tools/mutate.sh, or a hand-run of the reporter) has left the predicate unable to
+    see a deletion at all, so the exemption is unavailable and the rule applies as on main."""
+    root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": [[6, 6]]})
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main", pass_removed=False)
+    assert rc == 1, out
+    assert "blind spot" in out and "l3/x.cpp" in out, out
+    assert "blank or a // comment" not in out, out
+
+
+BLOCK_TOGGLE = [
+    "int f(int a) {",                # 1
+    "    if (a >= 4)",               # 2  the report's mutant sits here, off the changed line
+    "        return 1;",             # 3
+    "    /* disabled:",              # 4
+    "    if (a > 9)",                # 5
+    "// */   return 2;",             # 6  changed: starts with `//`, yet `return 2;` is LIVE
+    "    return 0;",                 # 7
+    "}",
+]
+
+
+def test_report_block_comment_terminator_on_a_changed_line_is_not_exempted(tmp_path):
+    """`text.strip().startswith("//")` is a line-local test, and "is this line a comment after
+    phase 2" is not decidable one line at a time: in the ordinary `/* ... // */ code` toggle
+    idiom the `*/` ENDS the block comment and what follows it on the same line is executable
+    (red-team B2 on #558). Nothing outside this predicate catches it — `-Wcomment` fires on
+    `/*` inside a comment, which this shape does not contain. A changed line carrying `*/` is
+    therefore never comment-only, whatever it starts with."""
+    root, reports = _setup(tmp_path, BLOCK_TOGGLE, [_mutant(2, 11, "cxx_ge_to_gt", "Survived")],
+                           {"l3/x.cpp": [[6, 6]]})
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1, out
+    assert "blind spot" in out and "l3/x.cpp" in out, out
+    assert "blank or a // comment" not in out, out
+
+
+def test_report_raw_string_literal_file_is_not_exempted(tmp_path):
+    """Inside a raw string literal a `//` line is string content, not a comment — and where
+    the literal opens is not visible from the changed line. The delimiters are not decidable
+    line by line either (`R"x(...)x"`), so a file containing `R"` anywhere is never exempt
+    rather than parsed."""
+    src = ["const char* k = R\"(", "// not a comment: this is string data", ")\";",
+           "int f(int a) { return a >= 4 ? 1 : 0; }"]
+    root, reports = _setup(tmp_path, src, [_mutant(4, 25, "cxx_ge_to_gt", "Survived")],
+                           {"l3/x.cpp": [[2, 2]]})
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1, out
+    assert "blind spot" in out and "l3/x.cpp" in out, out
+
+
+def test_report_comment_added_after_a_spliced_line_is_not_exempted(tmp_path):
+    """Phase 2 splices the line below a `\\`-ended line into it, so INSERTING a `//` comment
+    after one truncates the logical line — everything the continuation would have carried is
+    commented out, without any deleted line for the check above to see. The inserted line
+    reads as a comment and is not one (it is the tail of a macro), so a changed line whose
+    predecessor ends in `\\` fails closed too."""
+    src = ["#define CLAMP(x) do { \\", "    // the logical line ends here, not at `while`",
+           "    (x) = (x) > 9 ? 9 : (x); \\", "} while (0)",
+           "int f(int a) { return a >= 4 ? 1 : 0; }"]
+    root, reports = _setup(tmp_path, src, [_mutant(5, 25, "cxx_ge_to_gt", "Survived")],
+                           {"l3/x.cpp": [[2, 2]]})
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1, out
+    assert "blind spot" in out and "l3/x.cpp" in out, out
+
+
+def test_mutate_ranges_feeds_the_gate_the_deleted_half_of_a_mixed_hunk(tmp_path):
+    """End to end on a real `git diff -U0`, not a synthesised range list: tools/mutate_ranges.py
+    is the one parser the gate reads, and a hunk that deletes two code lines and adds one
+    comment must reach mutate_report.py as the comment (added range) AND both deleted lines
+    (removed text), so that the file is NOT certified comment-only — red-team B1's reproducer
+    on #558, which greened before this. The second file pins that a modification records its
+    old lines too."""
+    repo = tmp_path / "r"
+    (repo / "l3").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True)
+    (repo / "l3" / "x.cpp").write_text("int f(int a) {\n    if (a >= 4)\n        return 1;\n"
+                                       "    if (a > 9)\n        return 2;\n    return 0;\n}\n")
+    (repo / "l3" / "y.cpp").write_text("int g() {\n    int t = 1;\n    return t;\n}\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "b"],
+                   cwd=repo, check=True)
+    (repo / "l3" / "x.cpp").write_text("int f(int a) {\n    if (a >= 4)\n        return 1;\n"
+                                       "    // the a > 9 guard is now the caller's job\n"
+                                       "    return 0;\n}\n")
+    (repo / "l3" / "y.cpp").write_text("int g() {\n    return 1;\n}\n")
+    diff = subprocess.run(["git", "diff", "-U0", "HEAD", "--", "l3"], cwd=repo,
+                          capture_output=True, text=True, check=True).stdout
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "mutate_ranges.py"),
+                        "--ranges-out", str(tmp_path / "rg.json"),
+                        "--removed-out", str(tmp_path / "rm.json")],
+                       input=diff, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    ranges = json.loads((tmp_path / "rg.json").read_text())
+    removed = json.loads((tmp_path / "rm.json").read_text())
+    assert ranges["l3/x.cpp"] == [[4, 4]], ranges
+    assert removed["l3/x.cpp"] == ["    if (a > 9)", "        return 2;"], removed
+    assert removed["l3/y.cpp"] == ["    int t = 1;", "    return t;"], removed
+    assert ranges["l3/y.cpp"] == [[2, 2]], ranges
+    # ... and the gate, handed exactly those two files, stays closed: one Elements report with
+    # a mutant nowhere near the changed lines, i.e. zero in scope, as in the CI run.
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "test_x.json").write_text(json.dumps({"files": {
+        str(repo / "l3" / "x.cpp"): {"mutants": [_mutant(2, 11, "cxx_ge_to_gt", "Survived")]}}}))
+    r = subprocess.run([sys.executable, str(REPORT), "--reports", str(reports), "--root", str(repo),
+                        "--scope-dirs", "l3 link core", "--ranges", str(tmp_path / "rg.json"),
+                        "--removed", str(tmp_path / "rm.json"), "--source-ext", _cfg_source_ext(),
+                        "--ref", "HEAD", "--out", str(tmp_path / "report.json")],
+                       capture_output=True, text=True, cwd=ROOT)
+    out = r.stdout + r.stderr
+    assert r.returncode == 1, out
+    assert "blind spot" in out and "l3/x.cpp" in out and "l3/y.cpp" in out, out
+    assert "blank or a // comment" not in out, out
 
 
 def test_report_diff_mode_fails_when_a_changed_dir_has_no_executed_mutants(tmp_path):

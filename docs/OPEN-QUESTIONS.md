@@ -3692,3 +3692,50 @@ should supersede this entry.
 
 **Ruling:** PENDING — human. **Supersedes:** none — it extends the 2026-08-30 "pure-interface
 headers" entry (ratified 2026-09-03), whose per-file marker stands exactly as ruled.
+
+---
+
+## 2026-09-14 — The comment-only exemption must read both halves of the hunk
+
+**Context:** amends the 2026-09-14 entry above ("The mutation blind-spot rule reds a diff that
+changes only comment lines"), whose recommendation decides the exemption from the *added* lines
+alone — the range list `tools/mutate.sh` builds from `git diff -U0`. The red-team pass on
+PR #558 showed two shapes where a line that reads as a comment is not evidence that the diff
+changed no mutable code:
+
+1. **A mixed hunk.** `@@ -4,2 +4 @@`, deleting an `if (a > 9)` guard and adding
+   `// the guard is now the caller's job`, yields the range list `[[4, 4]]` — one comment line.
+   Deciding on that list certifies the file while reading strictly *less* of the diff than the
+   all-deletions case the same recommendation rejects, and prints a reason ("every line the diff
+   changed there is blank or a `//` comment") that is false of the two deleted lines. A PR under
+   `l3/`/`link/`/`core/` replacing a guard with a comment would green a gate that `main` reds.
+2. **`*/` on a changed line.** In the ordinary toggle idiom — `/* disabled:`, then the disabled
+   code, then `// */   return 2;` — the `*/` *ends* the block comment and what follows it on
+   that same line is executable. "Is this line a comment after phase 2" is not decidable one
+   line at a time, and `-Wcomment` does not fire on this shape (it warns about `/*` inside a
+   comment), so no control outside the predicate catches it.
+
+**Recommendation:** keep the exemption, with the predicate reading every line the diff *added
+or deleted*, not only the added ones. `tools/mutate_ranges.py` (new; the one parser of
+`git diff -U0`, driven from a real diff by `tools/refimpl/test_tooling.py`) writes the deleted
+lines' text alongside the ranges, `tools/mutate.sh` passes it as `--removed`, and a deleted line
+that is neither blank nor a `//` comment puts the file back under the blind-spot rule. The
+per-line test additionally rejects a line carrying `*/` (shape 2 above). Three further shapes
+fail closed for the same reason — the predicate must not certify what it did not read:
+`--removed` absent at all (an older caller: "nothing was deleted" and "nobody looked" are
+different answers); an added line whose predecessor in the tree ends with `\`, since inserting a
+comment into a spliced logical line truncates it and comments out the continuation without
+deleting any line; and a file containing `R"` anywhere, because inside a raw string literal a
+`//` line is string data, the literal may open on a line the diff never touched, and `R"x( )x"`
+delimiters are not decidable line by line — never parsed, never exempt.
+
+Still no marker (the property remains decidable from the diff), still nothing touched in
+`tools/mutate.cfg [policy]`, and still only an exemption from the blind-spot *heuristic* — the
+survivor triage, the malformed-label check and `max_unlabelled_survivors = 0` are unchanged. The
+predicate stays a set of syntactic refusals rather than a C++ comment parser: each refusal is
+one line with a named case in `tools/refimpl/test_tooling.py`, and every shape it cannot decide
+is a refusal.
+
+**Ruling:** PENDING — human, together with the entry it amends: a ruling that drops comment-only
+diffs from `tools/mutate.sh`'s scope entirely would supersede both. **Amends:** the 2026-09-14
+entry above. **Supersedes:** none.

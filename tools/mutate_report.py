@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge Mull "Mutation Testing Elements" reports and apply the triage gate (spec 001
+r"""Merge Mull "Mutation Testing Elements" reports and apply the triage gate (spec 001
 FR-027; ruling docs/OPEN-QUESTIONS.md 2026-08-29: the mutation gate is a triage of every
 survivor, never a percentage).
 
@@ -38,17 +38,18 @@ Policy (tools/mutate.cfg [policy] — T3 constants, never relaxed to get green):
         Reviewed like mutant-ok, at file granularity: a human sees the marker in the PR diff
         and judges whether the file truly has no mutable code (docs/OPEN-QUESTIONS.md
         2026-08-30); or
-      - the diff changed at least one line in it and every such line is blank or a `//`
-        comment that ends at its own newline. Phase 2 splices backslash-newline and phase 3
-        replaces what is then a comment by a space, both before anything Mull mutates exists,
-        so no mutator can place a mutant on such a line whatever the instrumentation does —
-        the same structural argument as the marker above, at line granularity, which is why it
-        needs no marker (docs/OPEN-QUESTIONS.md 2026-09-14). This fails closed: one changed
-        line that is not blank and does not start with `//` (a `/* */` continuation line
-        included) is code; so is a `//` comment ending in `\`, which splices the line below it
-        into the comment and therefore deletes code; and so is a file the diff touched with no
-        added-or-changed line at all (an all-deletions hunk), where nothing was read. In each
-        case zero mutants is the blind spot again.
+      - the diff added at least one line in it, and every line it added OR deleted there is
+        blank or a `//` comment that ends at its own newline. Phase 2 splices backslash-newline
+        and phase 3 replaces what is then a comment by a space, both before anything Mull
+        mutates exists, so no mutator can place a mutant on such a line whatever the
+        instrumentation does — the same structural argument as the marker above, at line
+        granularity, which is why it needs no marker (docs/OPEN-QUESTIONS.md 2026-09-14, and
+        the amendment of the same date). Both halves of the diff are read, because a hunk that
+        deletes a guard and puts a comment in its place has a comment-only added half; the
+        deleted lines arrive as --removed (tools/mutate_ranges.py) and are judged by the same
+        per-line test. See changed_lines_all_comments for the shapes it fails closed on: each
+        is a case where the predicate would otherwise certify what it did not read, and there
+        zero mutants is the blind spot again.
     Because a comment-only diff is exactly the shape of a PR that rewrites `mutant-ok`
     justifications, the malformed-label check below runs on every changed line before this
     exemption can return 0 — the exemption is from the blind-spot rule, never from the policy
@@ -132,6 +133,10 @@ def main(argv=None) -> int:
     ap.add_argument("--root", required=True, help="repository root (report paths are made relative to it)")
     ap.add_argument("--scope-dirs", required=True, help="space-separated embedded-path directories")
     ap.add_argument("--ranges", required=True, help="JSON {rel_path: [[start, end], ...]}; {} = whole tree")
+    ap.add_argument("--removed", default="",
+                    help="JSON {rel_path: [text of each line the diff deleted, ...]} "
+                         "(tools/mutate_ranges.py). Omitted = the deleted half of the diff was never "
+                         "read, so the comment-only blind-spot exemption is unavailable")
     ap.add_argument("--source-ext", required=True,
                     help="space-separated source extensions (tools/mutate.cfg source_ext, passed by mutate.sh)")
     ap.add_argument("--ref", default="", help="diff ref; empty = whole-tree trend mode")
@@ -153,6 +158,12 @@ def main(argv=None) -> int:
     # one line, handed over by mutate.sh — no copy here to drift from it (#141 review @d1fc20b).
     source_re = re.compile(r"\.(" + "|".join(re.escape(e) for e in args.source_ext.split()) + r")$")
     ranges = {rel: r for rel, r in json.load(open(args.ranges)).items() if source_re.search(rel)}
+    # None (not {}) when --removed is absent: "no file had a line deleted" and "nobody looked"
+    # are different answers, and only the first can support an exemption.
+    removed_lines = None
+    if args.removed:
+        removed_lines = {rel: t for rel, t in json.load(open(args.removed)).items()
+                         if source_re.search(rel)}
     reports = sorted(pathlib.Path(args.reports).glob("*.json"))
     diff_mode = bool(args.ref)
 
@@ -207,33 +218,62 @@ def main(argv=None) -> int:
                 return m.group(1).strip()
         return None
 
+    def carries_no_code(text: str) -> bool:
+        r"""One physical line that translation phases 2-3 leave empty, judged from the line
+        itself: blank, or a `//` comment that ends at its own newline and does not end a block
+        comment. The two exclusions are the shapes where a line READS as a comment and is not
+        one:
+          * `*/` anywhere on it — in the ordinary `/* disabled: ... \n// */ code` toggle the
+            `*/` closes the block comment and what follows on that same line is executable
+            (#558 red-team B2). `-Wcomment` does not fire on it (it warns about `/*` inside a
+            comment), so nothing outside this predicate catches the shape;
+          * a trailing `\` — phase 2 splices the NEXT line into the comment, so the line
+            deletes mutable code rather than containing none (#558 red-team B3). In this repo
+            -Wall's -Werror=comment fails such a build first, but that is a control in
+            CMakeLists.txt, not a property of this predicate."""
+        text = text.strip()
+        if not text:
+            return True
+        return text.startswith("//") and not text.endswith("\\") and "*/" not in text
+
     def changed_lines_all_comments(rel: str) -> bool:
-        """True when the diff changed at least one line in `rel` and every such line is blank
-        or a `//` comment that ends at its own newline. Such a line cannot carry a mutant by
-        construction of C++: phase 2 splices backslash-newline, phase 3 replaces what is then
-        a comment by a space, and only after that does anything Mull mutates exist. So an
-        empty in-scope count over those lines is not a blind spot. Fails closed on every other
-        shape, each a case where the predicate would otherwise certify what it did not read:
-          * no changed line at all — mutate.sh emits an empty range list for a file whose
-            hunks are all deletions (`@@ -a,b +c,0 @@`); nothing was analysed there;
-          * a `//` comment whose last character is `\\` — phase 2 splices the NEXT line into
-            it, so the changed line deletes mutable code rather than containing none. In this
-            repo -Wall's -Werror=comment fails the build first, but that is a control in
-            CMakeLists.txt, not a property of this predicate (#558 red-team B3);
-          * anything else on the line — code, a `/* */` continuation, a line the ranges name
-            but the checked-out tree does not have."""
+        r"""True when the diff added at least one line in `rel` and every line it added or
+        deleted there carries no code. Such a line cannot carry a mutant by construction of
+        C++: phase 2 splices backslash-newline, phase 3 replaces what is then a comment by a
+        space, and only after that does anything Mull mutates exist. So an empty in-scope
+        count over those lines is not a blind spot. Fails closed on every other shape, each a
+        case where the predicate would otherwise certify what it did not read:
+          * --removed absent — the deleted half of the diff was never handed over, so a
+            deletion cannot be ruled out (#558 red-team B1);
+          * a deleted line that carries code — a hunk that removes a guard and adds a `//`
+            comment in its place has a comment-only ADDED half, and certifying it would read
+            less of the diff than the empty-range-list case below rejects (same finding);
+          * no added line at all — mutate.sh emits an empty range list for a file whose hunks
+            are all deletions (`@@ -a,b +c,0 @@`); nothing there was analysed;
+          * an added line whose predecessor in the tree ends with `\` — inserting a comment
+            into a spliced logical line (a multi-line macro) truncates it, commenting out the
+            continuation without deleting any line for the check above to see;
+          * `R"` anywhere in the file — inside a raw string literal a `//` line is string
+            data, the literal may open on a line the diff never touched, and its delimiters
+            (`R"x( ... )x"`) are not decidable line by line. Never parsed, never exempt;
+          * anything else on an added line — code, a `/* */` continuation, a line the ranges
+            name but the checked-out tree does not have."""
         src = source_lines(rel)
         spans = ranges.get(rel, [])
-        if not spans:
+        if not spans or removed_lines is None:
+            return False
+        deleted = removed_lines.get(rel, [])
+        if any('R"' in t for t in src) or any('R"' in t for t in deleted):
+            return False
+        if not all(carries_no_code(t) for t in deleted):
             return False
         for a, b in spans:
             for ln in range(a, b + 1):
                 if ln > len(src):
                     return False
-                text = src[ln - 1].strip()
-                if not text:
-                    continue
-                if not text.startswith("//") or text.endswith("\\"):
+                if not carries_no_code(src[ln - 1]):
+                    return False
+                if ln >= 2 and src[ln - 2].rstrip().endswith("\\"):
                     return False
         return True
 
@@ -243,7 +283,7 @@ def main(argv=None) -> int:
         if marker is not None:
             return f"mutation-exempt(no-body): {marker}"
         if changed_lines_all_comments(rel):
-            return "every line the diff changed there is blank or a // comment"
+            return "every line the diff added or deleted there is blank or a // comment"
         return None
 
     def label_at(rel: str, line) -> Label | None:
@@ -357,7 +397,7 @@ def main(argv=None) -> int:
                       "(see above) — not a blind spot")
                 return 0
             print("mutation: scope is non-empty but Mull generated no mutants, and the following changed "
-                  "file(s) changed a line that is neither blank nor a `//` comment and carry no "
+                  "file(s) added or deleted a line that is neither blank nor a `//` comment and carry no "
                   "`mutation-exempt(no-body)` marker — failing (blind spot: instrumentation is not "
                   "reaching the code): " + ", ".join(sorted(unexempted)))
             return 1
