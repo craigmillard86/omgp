@@ -1634,3 +1634,148 @@ TEST_CASE("a burst of back-to-back requests is answered in full, none lost, pace
         REQUIRE(wire.transcript(static_cast<size_t>(i) + 1).seq == ((2 + i) & 0x0F));
     }
 }
+
+// --- #372, maintainer ruling 2026-09-11 (docs/OPEN-QUESTIONS.md "Maintainer rulings on the -
+// --- pending entries", item 5; spec FR-014 and data-model.md §5 both carry the marker): ----
+// --- the engine NEVER stops reading during a late wait. A completed request beyond ---------
+// --- kHeldRequests is discarded and COUNTED, so the engine's reading of the bus stays ------
+// --- complete and a late response keys down only on a bus it has read. The two cases below -
+// --- are the ruling's own evidence: the collision the hold-and-stop corner reproduced, and -
+// --- the conformant-load accounting it lost. -----------------------------------------------
+
+TEST_CASE("the hold filling during a late wait does not blind the engine: a third station's "
+          "frame arriving where the cap used to fire is never transmitted over",
+          "[link][timing:T_gap]") {
+    // Red team @6440074 finding 1, as re-measured in docs/OPEN-QUESTIONS.md 2026-09-07 ("the
+    // Responder's late path CAN transmit into a frame it has not read"): with kHeldRequests
+    // requests decoded during one late wait, poll() stopped before wire_.receive() and read
+    // nothing for the rest of the deferral -- up to max_frame + T_gap -- then fired at the cap
+    // against a bus it had not looked at since. Measured there: a third station's frame
+    // occupying [2631, 2721) transmitted over at tx = 2661. This case rebuilds that timeline
+    // from the suite's own helpers and asserts the ruled property instead.
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    // A: answered by this node; its answer is on the late path from defer_origin on.
+    const uint8_t pa[] = {0xA1};
+    const uint64_t end_a =
+        inject_request(wire, request_bytes(kMyAddr, kPeer, false, 1, pa, sizeof pa), 1000);
+    // B and C: two more requests to this node, back to back, filling the hold during the wait.
+    const uint8_t pb[] = {0xB2};
+    const uint8_t pc[] = {0xC3};
+    const uint64_t end_b = inject_request(
+        wire, request_bytes(kMyAddr, 0x07, false, 2, pb, sizeof pb), end_a + byte_us());
+    const uint64_t end_c = inject_request(
+        wire, request_bytes(kMyAddr, 0x07, false, 3, pc, sizeof pc), end_b + byte_us());
+
+    // D: a THIRD station's frame, addressed elsewhere, placed so that the cap the blind engine
+    // fell back to lands strictly inside it. Nothing about D violates trunk §3: the host timed
+    // this node out after T_resp long ago and may legitimately open a new transaction.
+    const uint64_t defer_origin = end_a + omgp::TRUNK_T_turn_max_us + 1;
+    const uint64_t max_frame_us = static_cast<uint64_t>(kMaxWire) * byte_us();
+    const uint64_t cap = defer_origin + max_frame_us + omgp::TRUNK_T_gap_us;
+    const uint8_t pd[] = {0xD4};
+    const std::vector<uint8_t> d = request_bytes(0x02, kPeer, false, 4, pd, sizeof pd);
+    const uint64_t start_d = cap - 3 * byte_us();
+    const uint64_t end_d = inject_request(wire, d, start_d);
+    REQUIRE(start_d < cap);
+    REQUIRE(cap < end_d); // the old cap fires strictly inside D -- that is the collision
+
+    for (uint64_t t = defer_origin; t <= end_d + 4 * omgp::TRUNK_T_gap_us; t += byte_us())
+        wire.advance_to(t, responder);
+
+    // The ruled property, asserted over every frame this node put on the wire: none of them
+    // overlaps D. An instant-only check would pass a transmission that STARTED before D and
+    // was still keying down when D began, so the whole occupancy is compared.
+    REQUIRE(wire.transcript_size() == 3);
+    for (size_t i = 0; i < wire.transcript_size(); ++i) {
+        const MockWire::TxRecord& tx = wire.transcript(i);
+        // The response's own wire length, by the same encoding the engine used.
+        const size_t n = request_bytes(tx.dst, tx.src, tx.retry, tx.seq, tx.payload, tx.len).size();
+        const uint64_t tx_end = tx.tx_start_us + static_cast<uint64_t>(n) * byte_us();
+        INFO("answer " << i << " [" << tx.tx_start_us << ", " << tx_end << ") vs D [" << start_d
+                       << ", " << end_d << ")");
+        REQUIRE((tx_end <= start_d || tx.tx_start_us >= end_d));
+    }
+
+    // A goes out T_gap after the last byte the engine read -- C's final byte -- which is
+    // 1.3 ms earlier than the cap the blind engine waited for, and long before D.
+    REQUIRE(wire.transcript(0).seq == 1);
+    REQUIRE(wire.transcript(0).tx_start_us >= end_c + omgp::TRUNK_T_gap_us);
+    REQUIRE(wire.transcript(0).tx_start_us < end_c + omgp::TRUNK_T_gap_us + byte_us());
+    REQUIRE(wire.transcript(0).tx_start_us < start_d);
+    // B and C were held through the wait and answered in arrival order; D was decoded, found
+    // to be another node's, and discarded and counted there and then.
+    REQUIRE(wire.transcript(1).seq == 2);
+    REQUIRE(wire.transcript(2).seq == 3);
+    REQUIRE(handler.calls == 3);
+    REQUIRE(responder.stats().transactions == 3);
+    REQUIRE(responder.stats().discards == 1);
+    REQUIRE(responder.stats().late_responses == 3);
+    REQUIRE(wire.pending_injected() == 0); // every injected byte was read, not left behind
+}
+
+TEST_CASE("a conformant offered load is fully accounted: every request is answered or counted "
+          "as discarded, and the wire's receive queue never overflows",
+          "[link]") {
+    // Red team @bab7378 finding 2, the finding the ruling turns on. One station offers this
+    // node a request every 300 us -- ~37% bus occupancy, nothing in it violating trunk §3 or
+    // §9 -- against a 1 ms poll(). Under hold-and-stop the engine answered 7 of 74, MockWire's
+    // own 568-byte receive queue overflowed at t = 23 ms, and stats().discards stayed 0: the
+    // loss happened at the wire, outside the engine, and nothing counted it. The ruling's
+    // property is accounting, not throughput -- an overloaded node may still fail to answer,
+    // but every request it consumed is either answered or counted.
+    FakeClock clock;
+    MockWire wire(clock);
+    RecordingHandler handler;
+    Responder responder(wire, clock, handler, kMyAddr);
+
+    constexpr uint8_t kOther = 0x07;
+    const uint8_t p[] = {0x5A, 0x5B, 0x5C};
+    const uint64_t offer_period = 300, poll_period = 1000;
+    const int offered = 74;
+    const size_t frame_len = request_bytes(kMyAddr, kOther, false, 0, p, sizeof p).size();
+    // ~37%: the occupancy the finding was measured at, recomputed from the codec rather than
+    // asserted as a comment (a stuffing change would otherwise move it silently).
+    INFO("frame_len=" << frame_len);
+    REQUIRE(frame_len * byte_us() * 100 / offer_period >= 35);
+    REQUIRE(frame_len * byte_us() < offer_period); // requests never overlap on the wire
+
+    uint64_t next_offer = 1000;
+    int injected = 0;
+    // Polls run on past the last offer so nothing is left in flight: the accounting below is
+    // exact rather than bounded.
+    const uint64_t last_offer = next_offer + static_cast<uint64_t>(offered - 1) * offer_period;
+    for (uint64_t t = 0; t <= last_offer + 40000; t += poll_period) {
+        while (injected < offered && next_offer < t + poll_period) {
+            const uint8_t seq = static_cast<uint8_t>(injected & 0x0F);
+            inject_request(wire, request_bytes(kMyAddr, kOther, false, seq, p, sizeof p),
+                           next_offer);
+            ++injected;
+            next_offer += offer_period;
+        }
+        wire.advance_to(t, responder);
+    }
+    REQUIRE(injected == offered);
+
+    // Full accounting: every offered request was read off the wire, and each is either a
+    // transaction (answered) or a counted discard. Nothing is lost silently, and nothing is
+    // still sitting unread in the wire's queue.
+    INFO("transactions=" << responder.stats().transactions
+                         << " discards=" << responder.stats().discards);
+    REQUIRE(wire.pending_injected() == 0);
+    REQUIRE(responder.stats().transactions + responder.stats().discards ==
+            static_cast<uint32_t>(offered));
+    REQUIRE(wire.transcript_size() == responder.stats().transactions);
+    REQUIRE(handler.calls == static_cast<int>(responder.stats().transactions));
+    // The loss under this load is real and this case does not pretend otherwise -- it is
+    // VISIBLE, which is the whole of what the ruling requires of an overloaded node.
+    REQUIRE(responder.stats().discards > 0);
+    REQUIRE(responder.stats().transactions > 0);
+    // No harness fault (MockWire REQUIREs on RX-queue overflow inside advance_to(), so a
+    // regression here fails as a harness fault rather than as an assertion; this is the
+    // explicit check that none was raised and swallowed).
+    REQUIRE(wire.take_fault() == nullptr);
+}
