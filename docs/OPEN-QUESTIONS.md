@@ -3832,6 +3832,98 @@ entry above. **Supersedes:** none.
 
 ---
 
+## 2026-09-14 — T042 (#60) AC3's `bus_stats().bus_faults` names no receiver, and `Master`'s has no writer
+
+**Context:** found while attempting T042 (#60). Its acceptance criterion 3 reads, verbatim:
+
+> Once every enrolled node is SUSPECT (or OFFLINE), exactly one `BUS_FAULT` and exactly one
+> `ALERT` notice fire (count equality, not "at least one"), and `bus_stats().bus_faults == 1`
+> (FR-024, SC-007).
+
+The receiver is unqualified — AC3 does not say *whose* `bus_stats()`, and T041's criterion is
+written the same bare way (`specs/002-trunk-link-layer/tasks.md:266`). Two objects can answer to
+it in `tests/unit/test_link_loop.cpp`: `Master`, the only `bus_stats()` in scope in that file
+today (`loop.master.bus_stats()`, e.g. `:786`), whose `bus_faults` nothing increments; and the
+real `HealthTracker` the same file already constructs alongside the `Loop` (`:1043`), which
+decides the fault and gains a `bus_stats()` in open PR #530. Which one AC3 means is unruled, and
+so is whether `Master`'s counter is ever written at all.
+
+*The quotation above is **demonstrated by** #60's body as read and quoted in PR #583's round-2
+review; the agent that wrote this entry cannot run `gh issue view`, so the wording is
+second-hand — check it against the issue before ruling. What is verified first-hand here is the
+rest: the receivers in scope, and the absence of a writer.*
+
+**Not part of this question: T041 (#59).** T041's `bus_faults == 1`
+(`specs/002-trunk-link-layer/tasks.md:266`) is already ruled and already implemented, so this
+entry does not ask about it. #59 was rescoped on 2026-09-06 (maintainer): the accessor T041's
+assertions read is "added by T043 inside this same PR", with the matching amendment to
+`specs/002-trunk-link-layer/contracts/link-cpp.md` "Health tracker" marked pending a ruling,
+and T041's criteria keep their `bus_stats()` assertions as written. Open PR #530 (`task/59`,
+T041+T043) does exactly that: `const BusStats& bus_stats() const` on `HealthTracker`,
+`++stats_.bus_faults` in `link/health.cpp`, the marked contract amendment, and
+`tracker.bus_stats().bus_faults == 1`/`== 2` in `tests/unit/test_link_busfault.cpp`.
+**Demonstrated by** reading #59's body and its 2026-09-06 maintainer comment and PR #530's diff
+at its current head — a control over that PR as it stands, not a guarantee of what merges. Nor
+is T043 confined to `link/health.cpp`: `specs/002-trunk-link-layer/tasks.md:271` (amended
+2026-09-14) has it implement `HealthTracker::set_bit_rate`, i.e. new public API in
+`link/health.hpp`.
+
+**What is open.** `BusStats::bus_faults` is declared at `link/link_types.hpp:124` and specified
+at `specs/002-trunk-link-layer/contracts/link-cpp.md:29` and
+`specs/002-trunk-link-layer/data-model.md:319`, whose §8 rule is "incremented at the point the
+event is decided" (`data-model.md:321-322`). On `Master` nothing increments it. A whole-tree
+search at `ac0f36f` (`grep -rn bus_faults` over `link/ core/ sim/ tests/ specs/`) returns nine
+hits and no writer among them: the declaration, the two artefact lines above,
+`specs/002-trunk-link-layer/tasks.md:266` (T041's criterion), and five test reads, all of which
+assert it is *unchanged* or `== 0` (`tests/unit/test_link_master.cpp:3162,3616,4321`,
+`tests/unit/test_link_loop.cpp:786`, `tests/unit/test_link_types.cpp:118`). No increment
+anywhere. This is **demonstrated by that search over the current repo contents** — a control, not
+a guarantee: it says no writer exists today, not that none can.
+
+Nor can the layer that decides the fault reach that counter. This too is a **control over the
+contents of these files at `ac0f36f`**, not a proof by construction — the tasks under discussion
+add public API, and `link/health.hpp` gains an accessor in #530:
+
+- `Master` owns `BusStats` and cannot be told a fault occurred. `Master::set_bit_rate`
+  (`link/master.cpp:24-44`) bumps `rate_changes` only, and `link/master.hpp:66-83` exposes no
+  method through which trunk-health policy could report a declare.
+- `HealthTracker` decides the fault and owns the count internally — `data-model.md:227` lists
+  `BusState.faults` and `:231` makes `faults++` part of the declare rule. On this branch it
+  exposes no accessor for it (`link/health.hpp:60-61` has `bus_fault()` and `bit_rate()` and no
+  counter, and the contract listing `contracts/link-cpp.md` "Health tracker" likewise names
+  `bus_fault()`/`bit_rate()`/`set_bit_rate()` and no count); #530 adds one.
+
+So T042's rig can observe a declare only through the tracker, while the only `bus_stats()` its
+file has in scope today is `Master`'s — and whether `Master`'s `bus_faults` is ever written, by
+F3 mirroring the `BUS_FAULT` notice or not at all, is unruled against `data-model.md:321-322`.
+None of the three F3 obligations in `contracts/link-cpp.md` "What F3/F4 need" mirrors a declare
+into it either. Left unruled, T042 has to choose a receiver for AC3 by itself: on `Master`'s
+counter it lands asserting `== 0` forever or drops the criterion; on the tracker's it satisfies
+AC3's words as written, but decides silently that `Master`'s counter is somebody else's. SC-007
+("a bus fault is declared exactly once") is the success criterion T042 exists to prove at loop
+level, so which counter carries it is a ruling, not an implementation detail.
+
+**Recommendation:** rule that AC3's `bus_stats()` is the tracker's — the accessor #530 adds to
+`HealthTracker`, which `tests/unit/test_link_loop.cpp` already constructs alongside the `Loop`
+(`:1043`) — since that is the object that decides the fault and keeps the number. On that ruling
+#60's text needs no amendment: AC3 as written is satisfied by
+`tracker.bus_stats().bus_faults == 1`. Leave `BusStats::bus_faults` on `Master` for the layer
+above (F3) to mirror if it wants one number per bus; the two-counters-two-questions precedent is
+already set for `rate_changes` (`contracts/link-cpp.md` "Health tracker", round-3 red team on
+#523). If that is the ruling, say so in `contracts/link-cpp.md` "Health tracker" and
+`data-model.md` §8 in the same change, so `Master::bus_stats().bus_faults` is recorded as
+F3-owned and unwritten at L2 rather than reading as an unimplemented counter. Alternative, if
+the two counters must stay one: F3 wires the `BUS_FAULT` notice to a new `Master` method — not
+recommended here, because it puts trunk health policy inside the frame engine.
+
+This entry records the question only; no code, test or contract change is proposed unilaterally,
+since `contracts/link-cpp.md` and `data-model.md` are human-ruling artefacts
+(`docs/OPERATING-POLICY.md` §2).
+
+**Ruling:** PENDING — human. **Amends:** none. **Supersedes:** none.
+
+---
+
 ## 2026-09-14 — T043: an outstanding probe's rate record across an episode boundary — what the tracker can and cannot tell apart
 
 **Context:** `on_result` carries no bit rate, so the health tracker classifies "a valid answer at the reference rate" versus "at the fallback rate" (data-model §7) by the rate the last probe to that address went out at (`BusState::probe_fallback`, one bit per address). Rounds 5–10 of the adversarial loop on PR #530 (T041+T043) each found a way to make that record wrong at an episode boundary, and each fix reopened another: (5) no per-episode reset — a bit from an earlier episode misread; (6) an unconditional reset overwrote the record of a probe still outstanding at the boundary; (7) the exemption for outstanding probes (`probe_live`) had no lifetime, so a probe whose outcome never arrives froze its address for ever; (9) bounding it by `T_resp` from issue was shorter than a fallback-rate request's own transmission, and one stamp for the set was re-armed by any later probe; (9→10) "only the newest handout stays live" contradicted the F3 obligations as written (two outstanding probes violate neither) and reinstated round 6; (8→10) reading a repeated answer from the recorded fallback answerer as a fresh one restarted the pass, and a retried or babbling answerer starved the trunk.
