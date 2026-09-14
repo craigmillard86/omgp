@@ -391,6 +391,109 @@ TEST_CASE("a reference-rate probe clears the fallback record of the address it g
     REQUIRE(tracker.bus_stats().bus_faults == 1); // one episode, not an oscillation
 }
 
+TEST_CASE("a new episode reads an answer to a pre-declare poll at the rate that poll went out at",
+          "[timing:bit_rate_fallback]") {
+    // BusState::probe_fallback is per EPISODE as well as per address (link/health.cpp,
+    // evaluate_declare). An outcome can arrive for an address the current episode has not
+    // probed at all, and F3 obligation 1 does not exclude it: that obligation is one to ISSUE
+    // ("while bus_fault() is true, issue only the probe next_probe() returns"), and the fault
+    // is declared BY an outcome, at the tail of on_result — so a status poll already on the
+    // wire in the superframe that declares it necessarily lands afterwards and cannot be
+    // un-issued. That poll went out at the rate in use; a bit LEFT OVER from a previous
+    // episode is some other episode's rate.
+    //
+    // Here A's bit is set by episode 1's fallback-rate probe and episode 1 clears at the
+    // reference rate, so the bit outlives it. Read as the rate of A's answer in episode 2 it
+    // inverts FR-026: the reference-rate answer clears nothing, starts a reference pass, and a
+    // pass that draws nothing pins the trunk at the fallback rate with no automatic return
+    // (ruling 2026-09-13) — from an answer that arrived at the reference rate.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    ThreeNodeRig::build(tracker);
+    probe_until(tracker, kNodeA, omgp::TRUNK_bit_rate_fallback);
+    tracker.on_result(kNodeA, false, 5'000); // A is silent at the fallback rate: its bit is set
+    probe_until(tracker, kNodeB, omgp::TRUNK_bit_rate);
+    tracker.on_result(kNodeB, true, 6'000); // B clears episode 1 at the reference rate
+
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate); // the rate in use from here
+    REQUIRE(tracker.state(kNodeA) == HealthState::SUSPECT);
+
+    // Episode 2: B is the only node answering, so when it stops every enrolled node is SUSPECT
+    // again. A is SUSPECT and poll_due, so F3 polled it in that same superframe — at the rate
+    // in use, the reference rate — and its answer lands after the declare.
+    fail_to_suspect(tracker, kNodeB, 10'000);
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+    const size_t before = listener.entries.size();
+
+    tracker.on_result(kNodeA, true, 10'001);
+
+    REQUIRE_FALSE(tracker.bus_fault());                  // FR-026: it clears at once…
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate); // …at the reference rate, not downgraded
+    REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED); // applied, not deferred to a pass
+    REQUIRE(listener.entries.size() == before + 2);
+    REQUIRE(listener.entries[before].notice == Notice::RECOVERED);
+    REQUIRE(listener.entries[before].addr == kNodeA);
+    REQUIRE(listener.entries[before + 1].notice == Notice::BUS_RECOVERED);
+    REQUIRE(listener.entries[before + 1].addr == kBusAddr);
+    REQUIRE(tracker.bus_stats().bus_faults == 2); // two episodes, not an oscillation
+}
+
+TEST_CASE("a new episode at the fallback rate reads a pre-declare poll's answer as a fallback one",
+          "[timing:bit_rate_fallback]") {
+    // The other direction of the same per-episode reset, and why it is to the RATE IN USE and
+    // not simply to zero. Episode 1 clears at the fallback rate, and its reference pass leaves
+    // every enrolled address's bit CLEAR. If those bits stood into episode 2, A's answer — to a
+    // poll that went out at the fallback rate, the rate in use — would be read as a
+    // reference-rate one and clear the fault AT the reference rate: A is enrolled at a rate it
+    // cannot hear, fails back into SUSPECT and re-declares the fault it just cleared, which is
+    // the oscillation data-model §7's "prefer the reference rate" rule exists to avoid.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    ThreeNodeRig::build(tracker);
+    probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate_fallback);
+    tracker.on_result(kNodeC, true, 10'000); // C answers at the fallback rate
+    uint64_t t = 11'000;
+    for (int i = 0; i < 3; ++i) { // the pass draws nothing: clear at the fallback rate
+        const Probe p = tracker.next_probe(0);
+        tracker.on_result(p.addr, false, t += 1'000);
+    }
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback); // the rate in use from here
+    REQUIRE(tracker.state(kNodeC) == HealthState::ENROLLED);
+    REQUIRE(tracker.state(kNodeA) == HealthState::SUSPECT);
+
+    // Episode 2, declared when C stops answering. A's poll went out at the fallback rate.
+    fail_to_suspect(tracker, kNodeC, 20'000);
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+
+    tracker.on_result(kNodeA, true, 20'001);
+
+    REQUIRE(tracker.bus_fault()); // §7: a fallback-rate answer clears nothing on its own…
+    REQUIRE(tracker.state(kNodeA) == HealthState::SUSPECT); // …and its §6 transition is deferred
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback); // no upgrade from that answer
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);          // still only episode 1's
+
+    // What it did start is a reference pass, and that pass drawing nothing is what clears
+    // episode 2 — at the fallback rate, applying A's deferred enrolment.
+    uint64_t t2 = 21'000;
+    for (int i = 0; i < 3; ++i) {
+        const Probe p = tracker.next_probe(0);
+        REQUIRE(p.bit_rate == omgp::TRUNK_bit_rate);
+        tracker.on_result(p.addr, false, t2 += 1'000);
+    }
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED);
+    REQUIRE(tracker.bus_stats().bus_faults == 2);
+}
+
 // --------------------------------------------------- clear at the reference rate (FR-026) --
 
 TEST_CASE("a valid answer at the reference rate clears the fault at the reference rate at once",
