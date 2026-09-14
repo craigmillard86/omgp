@@ -1538,8 +1538,13 @@ TEST_CASE("a request arriving when the hold is already full is discarded WHOLE a
     const uint64_t end_d = inject_request(
         wire, request_bytes(kMyAddr, kPeer, false, 4, pd, sizeof pd), end_c + byte_us());
 
-    for (uint64_t t = end_a + omgp::TRUNK_T_turn_max_us + 1; t <= end_d + 40000; t += byte_us())
-        wire.advance_to(t, responder);
+    // CLAUDE.md rule 5 on the path this case exists for: the slot-full discard allocates
+    // nothing. Only the engine call is wrapped -- wire.advance_to()'s own REQUIRE machinery
+    // may allocate, and MockWire is host-only test code (as at :145).
+    for (uint64_t t = end_a + omgp::TRUNK_T_turn_max_us + 1; t <= end_d + 40000; t += byte_us()) {
+        wire.advance_to(t);
+        HEAP_FREE_SCOPE({ responder.poll(t); });
+    }
 
     // A, B and C answered in arrival order; D discarded and counted, exactly one discard for
     // exactly one frame. Full accounting: four offered, three answered, one counted.

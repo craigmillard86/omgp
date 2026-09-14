@@ -320,21 +320,25 @@ void Responder::poll(uint64_t now_us) {
     // arrived stay where they are — in the wire's receive queue, exactly as they would in
     // a UART's RX FIFO — and are picked up, intact, by the first poll() after the wire is
     // free. So several requests queued ahead of an infrequent poll() call are each
-    // answered in turn (FR-014: late ones counted, none dropped), a queued trunk §7 retry
+    // answered in turn (FR-014: late ones counted; past what one late wait can hold,
+    // discarded and counted too -- below), a queued trunk §7 retry
     // is replayed (FR-015), and a later request can never overwrite a response still
     // pending in buffer_ (red team @e510b29 finding 1; docs/OPEN-QUESTIONS.md
     // 2026-09-06). A response already due is flushed ahead of every byte, not just once
     // at the end, so a queued request is decoded the instant the wire is free.
     //
     // The other side of that rule, stated rather than hidden: one accepted request leaves
-    // Listening and ends this drain, so a single poll() answers at most ONE queued
-    // request, oldest first, and nothing bounds the backlog's age or depth or counts a
-    // request that waits in it (red team + review @17554c8 finding 1: requests arriving
-    // faster than poll() is called starve a later one indefinitely, every answer late,
-    // stats() otherwise unmoved). FR-014 ("MUST still transmit") and FR-017 ("never
-    // outside a response window") pull opposite ways on a stale queued request; which
-    // bound applies is docs/OPEN-QUESTIONS.md 2026-09-06 ("held-request queue is
-    // unbounded"), pending human -- not decided here.
+    // Listening and ends this drain, so a single poll() answers at most ONE queued request,
+    // oldest first, and a node polled far more slowly than it is addressed answers a small
+    // fraction of what it is offered (red team + review @17554c8 finding 1). What has changed
+    // under the 2026-09-11 ruling (#372) is the SILENCE, not the throughput: the backlog no
+    // longer accumulates unread on the wire, because everything the wire holds is read at
+    // every poll and everything read is either answered or counted in stats().discards. Two
+    // held requests deep is what one wait can carry; the rest is counted loss, visible to the
+    // layer above. FR-014 ("MUST still transmit") and FR-017 ("never outside a response
+    // window") still pull opposite ways on a stale queued request; which bound applies is
+    // docs/OPEN-QUESTIONS.md 2026-09-06 ("held-request queue is unbounded"), pending human --
+    // not decided here, and the 2026-09-11 ruling says so in terms.
     for (;;) {
         transmit_if_due(now_us, /*queue_drained=*/false);
         const bool listening = state_ == State::Listening;
