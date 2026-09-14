@@ -166,10 +166,11 @@ class HealthTracker {
         // set — was shorter than a fallback-rate request's own transmission and re-armed by
         // any later probe; both corrected round 9. Demonstrated by the sweep, the
         // discovery-probe and the abandoned-probe cases in tests/unit/test_link_busfault.cpp;
-        // the in-window half by the "... across an episode boundary" case. And at most ONE
-        // bit is set: a handout to any address supersedes every earlier live bit, because
-        // under F3 obligation 1 one transaction is on the wire at a time — a probe still
-        // "live" after a later handout is an abandoned record (round 9, finding 2).
+        // the in-window half by the two "... across an episode boundary" cases. Several bits
+        // may be set: two outstanding probes violate neither F3 obligation (obligation 2 is
+        // one call per probe issued, not one outcome before the next), so a later handout
+        // never drops an earlier live bit — the window is the only bound (round 9's "newest
+        // handout supersedes" rule reinstated round 6's oscillation; withdrawn at round 10).
         uint16_t probe_live = 0;
     };
 

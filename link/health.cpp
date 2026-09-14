@@ -111,17 +111,28 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // outcome back is read at. That is obligation 1's territory, ASSUMED, not enforced.
     // Outside a fault the rate plays no part.
     const bool at_reference = (bus_.probe_fallback & probe_bit(addr)) == 0;
-    // The recorded fallback answerer is strapped to the fallback rate (trunk §2: one rate per
-    // node, no auto-baud), so it cannot hear the pass probe the pass sends it at the reference
-    // rate, and an ok outcome for it while the fault stands is its fallback answer delivered
-    // again (golden rule 2: an L2 retry, a legitimate input) — never a reference-rate answer.
-    // Read at its overwritten bit (the pass probe's, reference) it cleared the fault at 1 Mbit,
-    // enrolled the node at a rate it cannot hear and bypassed the pass (round-8 red team on
-    // #530, finding 1). It is read as the fallback answer it is: the pass restarts, as the
-    // pre-first-probe duplicate already does. Demonstrated by "a duplicate fallback answer
-    // after the pass has probed the answerer ..." in tests/unit/test_link_busfault.cpp.
+    // The recorded fallback answerer answered at the fallback rate. trunk §2 says every node
+    // supports both rates and the active one is selected by strap or configuration; the
+    // inference this branch rests on — a node configured at the fallback rate does not answer
+    // a reference-rate probe — follows from that selection, and is labelled as inference, not
+    // quoted (round-10 review, finding 4). So an ok outcome for it while the fault stands is
+    // its fallback answer delivered again (golden rule 2: an L2 retry, a legitimate input),
+    // never a reference-rate answer. Read at its overwritten bit (the pass probe's) it cleared
+    // the fault at 1 Mbit and bypassed the pass (round-8 red team, finding 1). Demonstrated by
+    // "a duplicate fallback answer after the pass has probed the answerer ..." and "a fallback
+    // answerer that keeps answering cannot stop the pass from ending".
     const bool is_answerer = bus_.fallback_answerer != 0 && addr == bus_.fallback_answerer;
-    const bool fallback_answer = bus_.fault && ok && (!at_reference || is_answerer);
+    if (bus_.fault && ok && is_answerer) {
+        // The same answer, recorded again: a NO-OP. Not a clear at the reference rate (round 8:
+        // the pass probe overwrote the answerer's bit and a duplicate cleared at 1 Mbit), and not
+        // a fresh fallback answer either (round 10: recomputing the pass rewound its cursor, so
+        // a retried or babbling answerer kept the pass from ever ending — no clear at either
+        // rate, no polls while faulted, one module starving the trunk). Nothing here moves:
+        // the pass keeps its progress, the pass probe to this address (if outstanding) is still
+        // owed its own outcome, the deferred §6 transition still waits for the clear.
+        return;
+    }
+    const bool fallback_answer = bus_.fault && ok && !at_reference;
     // The probe this outcome answers is no longer in flight, so its record stops being the
     // one thing a new episode must not overwrite. Unconditional: an outcome for an address
     // with no outstanding probe clears a bit that is already clear.
@@ -133,16 +144,19 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
         // SUSPECT and re-declare the fault it just recovered (round-4 red team on #472). It
         // is recorded, and a reference pass over every enrolled address starts.
         // What IS true by construction: no outcome for an address whose PASS probe is
-        // outstanding reaches here, because every pass probe goes out at the reference rate
-        // (pass_probe below). The wider claim this comment once made — that no pass can
-        // already be running — is false, and labelled so per rule 11 (red team round 2 on
-        // #530, finding 2): a pass is running from the moment ref_pass_left is set below, and
-        // until its first probe goes out the answerer's remembered rate is still the fallback
-        // one, so a duplicate or late outcome for it re-enters this branch and recomputes the
-        // pass. Benign, and demonstrated so rather than asserted: |enrolled| cannot change in
-        // that window and the cursor is already at ADDR_backplane_min, so the recomputation
-        // reproduces the state it overwrites — "a duplicate fallback answer before the first
-        // pass probe restarts an identical pass" in tests/unit/test_link_busfault.cpp.
+        // outstanding reaches here — every pass probe goes out at the reference rate
+        // (pass_probe below), and the one address whose outcome could still read as a
+        // fallback one, the recorded answerer, returned early above (round-10 red team,
+        // finding 3: round 8's `|| is_answerer` disjunct had falsified this sentence and the
+        // benign-restart argument below it). The wider claim this comment once made — that no pass
+        // can already be running — is false, and labelled so per rule 11 (red team round 2 on #530,
+        // finding 2): a pass is running from the moment ref_pass_left is set below, and until its
+        // first probe goes out the answerer's remembered rate is still the fallback one, so a
+        // duplicate or late outcome for it re-enters this branch and recomputes the pass. Benign,
+        // and demonstrated so rather than asserted: |enrolled| cannot change in that window and the
+        // cursor is already at ADDR_backplane_min, so the recomputation reproduces the state it
+        // overwrites — "a duplicate fallback answer before the first pass probe restarts an
+        // identical pass" in tests/unit/test_link_busfault.cpp.
         bus_.fallback_answerer = addr;
         uint8_t enrolled = 0;
         for (const HealthRecord& r : records_)
@@ -190,10 +204,10 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
         pass_ended = --bus_.ref_pass_left == 0;
     }
 
-    if (bus_.fault && ok && at_reference && !is_answerer) {
+    if (bus_.fault && ok && at_reference) {
         // §7: the host prefers the reference rate — a valid answer there clears at once,
-        // mid-pass or not. `addr` has already taken its own §6 transition above. Never the
-        // recorded fallback answerer: its ok outcomes are its fallback answer again (above).
+        // mid-pass or not. `addr` has already taken its own §6 transition above. The recorded
+        // fallback answerer never reaches here: its ok outcomes returned early above.
         clear_fault(omgp::TRUNK_bit_rate, now_us);
     } else if (pass_ended) {
         // §7: the pass drew nothing, so the fallback rate is the rate that works. `pass_ended`
@@ -445,13 +459,13 @@ void HealthTracker::note_probe(uint8_t addr, uint32_t bit_rate, uint64_t now_us)
     // froze the record for ever; round 9: per address, and the whole transaction's window,
     // not T_resp from issue). The stamp is this address's own: a single stamp for the set was
     // re-armed by every later probe to any other address.
-    // Only the newest handout is live: F3 obligation 1 puts one transaction on the wire at a
-    // time, so a handout to any address means the previous probe's transaction is over — its
-    // outcome was consumed, or it was abandoned and will never be read. A live bit that
-    // survived a later handout is exactly the abandoned record round 7 and round 9 (finding 2:
-    // an unrelated discovery probe kept it alive) describe. The time bound below is for the
-    // other case: an abandoned probe with no later handout at all.
-    bus_.probe_live = probe_bit(addr);
+    // Every outstanding probe keeps its record until its outcome arrives or its window
+    // closes: two outstanding probes violate neither F3 obligation (obligation 2 is one call per
+    // probe issued, not one outcome before the next call — the "an extra next_probe() call"
+    // cases), so a later handout must not drop an earlier live bit. Round 9 tried "only the
+    // newest handout is live" and reinstated round 6's oscillation for every other outstanding
+    // probe (round-10 review, finding 1); withdrawn.
+    bus_.probe_live = static_cast<uint16_t>(bus_.probe_live | probe_bit(addr));
     records_[addr].probe_issued_us = now_us;
 }
 
