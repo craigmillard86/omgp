@@ -358,6 +358,39 @@ TEST_CASE("an extra next_probe() call does not re-read a reference-rate answer a
     REQUIRE(tracker.bus_stats().bus_faults == 1);
 }
 
+TEST_CASE("a reference-rate probe clears the fallback record of the address it goes to",
+          "[timing:bit_rate_fallback]") {
+    // The other half of note_probe's per-address record (link/health.cpp): setting the bit for
+    // a fallback-rate probe is only one branch — the reference-rate branch must CLEAR that
+    // address's bit, or the address stays marked "last heard at the fallback rate" for the
+    // rest of the episode and its later reference-rate answer is read as a fallback one:
+    // instead of clearing at once (FR-026) the trunk runs a reference pass, and a pass that
+    // draws nothing leaves it pinned at the fallback rate (ruling 2026-09-13).
+    //
+    // No case above reaches this: each one probes its node at only ONE rate, and the two
+    // "an extra next_probe() call ..." cases above turn on a reference-rate probe to a
+    // DIFFERENT address leaving B's bit alone. So B is probed here at the fallback rate
+    // first, is silent, and is probed again at the reference rate.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    ThreeNodeRig::build(tracker);
+    const Probe fb = probe_until(tracker, kNodeB, omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(fb.addr == kNodeB);
+    tracker.on_result(kNodeB, false, 5'000); // B is silent at the fallback rate
+
+    const Probe ref = probe_until(tracker, kNodeB, omgp::TRUNK_bit_rate);
+    REQUIRE(ref.addr == kNodeB); // the same address, now at the reference rate
+    tracker.on_result(kNodeB, true, 10'000);
+
+    REQUIRE_FALSE(tracker.bus_fault()); // FR-026: a reference-rate answer clears at once
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate); // not downgraded
+    REQUIRE(tracker.state(kNodeB) == HealthState::ENROLLED);
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);
+    REQUIRE(tracker.bus_stats().bus_faults == 1); // one episode, not an oscillation
+}
+
 // --------------------------------------------------- clear at the reference rate (FR-026) --
 
 TEST_CASE("a valid answer at the reference rate clears the fault at the reference rate at once",
