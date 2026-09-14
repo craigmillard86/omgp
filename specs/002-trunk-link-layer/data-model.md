@@ -333,7 +333,7 @@ each carries `addr` (0 for bus-level). Exactly one per transition (SC-006).
 ## 10. MockWire step
 
 ```
-Step { u8 node; Kind kind; u32 delay_us; u16 count; u32 seed }
+Step { u8 node; Kind kind; u32 delay_us; u32 count; u32 seed }   /* count widened u16 → u32 2026-09-14 (ruling 2026-09-03, #48): Rate reads it as a bit rate */
 Kind ∈ { Respond, Silence, Garbage, CrcError, Duplicate, Babble, Rate }
 ```
 Semantics in `contracts/mock-wire.md`. A script is an array of steps consumed in order

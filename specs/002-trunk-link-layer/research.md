@@ -143,8 +143,9 @@ from the tree on 2026-08-29; facts about the trunk protocol come from
 ## R-07 — Scripted transport (`MockWire`): step table in `tests/support/`, deterministic PRNG
 
 - **Decision**: `tests/support/mock_wire.{hpp,cpp}` implements `ByteWire` plus a
-  `FakeClock`. A `Step { uint8_t node; Kind kind; uint32_t delay_us; uint16_t count;
-  uint32_t seed; }` table per node (`Kind ∈ {Respond, Silence, Garbage, CrcError,
+  `FakeClock`. A `Step { uint8_t node; Kind kind; uint32_t delay_us; uint32_t count;
+  uint32_t seed; }` table per node (`count` widened from `uint16_t` 2026-09-14, ruling
+  2026-09-03 / #48: `Rate` reads it as a bit rate, and neither rate fits 16 bits) (`Kind ∈ {Respond, Silence, Garbage, CrcError,
   Duplicate, Babble, Rate}`); on every transmitted frame the mock deframes it (the
   test-side parser is the same `Deframer`), looks up the addressed node's next step,
   and schedules RX bytes at computed start-bit instants (`tx_end + delay`, one byte every
