@@ -3829,3 +3829,55 @@ a deleted half without positions is treated as never handed over.
 **Ruling:** PENDING — human, together with the entry it amends: a ruling that drops comment-only
 diffs from `tools/mutate.sh`'s scope entirely would supersede both. **Amends:** the 2026-09-14
 entry above. **Supersedes:** none.
+
+---
+
+## 2026-09-14 — `BusStats::bus_faults` has no writer, and no layer is currently positioned to be one
+
+**Context:** found while attempting T042 (#60); applies equally to T041 (#59). Both tasks are
+asked to assert `bus_faults == 1` on a declared bus fault — #60's acceptance criterion 3
+(`bus_stats().bus_faults == 1`) and `specs/002-trunk-link-layer/tasks.md:266` (T041, in
+`tests/unit/test_link_busfault.cpp`) — and neither assertion is satisfiable today.
+
+The counter exists and nothing writes it. `BusStats::bus_faults` is declared at
+`link/link_types.hpp:124` and specified at `contracts/link-cpp.md:29` and `data-model.md:319`.
+A whole-tree search at `ac0f36f` (`grep -rn bus_faults` over `link/ core/ sim/ tests/ specs/`)
+finds only the declaration, the two artefact lines, and five test reads, all of which assert it
+is *unchanged* or `== 0` (`test_link_master.cpp:3162,3616,4321`, `test_link_loop.cpp:786`,
+`test_link_types.cpp:118`). No increment anywhere. This is **demonstrated by that search over
+the current repo contents** — a control, not a guarantee: it says no writer exists today, not
+that none can.
+
+That no layer is positioned to become the writer is **proved by construction** from the two
+headers:
+
+- `Master` owns `BusStats` and cannot be told a fault occurred. `Master::set_bit_rate`
+  (`link/master.cpp:24-44`) bumps `rate_changes` only, and `link/master.hpp:66-83` exposes no
+  method through which trunk-health policy could report a declare.
+- `HealthTracker` decides the fault and owns the count internally — `data-model.md:227` lists
+  `BusState.faults` and `:231` makes `faults++` part of the declare rule — but exposes no
+  accessor for it. `link/health.hpp:60-61` has `bus_fault()` and `bit_rate()` and no counter;
+  the contract listing (`contracts/link-cpp.md` "Health tracker", the `class HealthTracker`
+  block) likewise names `bus_fault()`/`bit_rate()`/`set_bit_rate()` and no count.
+
+T043 (#61) is scoped to `link/health.cpp`, which cannot reach `Master`'s counter. So both
+assertions are unsatisfiable *regardless of how T043 is implemented*: this is an artefact gap,
+not an implementation gap. Left unruled, both tasks would either land asserting `== 0` forever
+or silently drop the criterion — and SC-007 ("a bus fault is declared exactly once") is the
+success criterion those two tasks exist to prove.
+
+**Recommendation:** add a fault count to `HealthTracker` — `uint32_t bus_faults() const` (or a
+`BusState`-shaped accessor) — since that is the object that decides the fault and already keeps
+the number, and read *that* in both tests. Leave `BusStats::bus_faults` on `Master` for the
+layer above (F3) to mirror if it wants one number per bus; the two-counters-two-questions
+precedent is already set for `rate_changes` (`contracts/link-cpp.md` "Health tracker",
+round-3 red team on #523). Amend `contracts/link-cpp.md` "Health tracker", `data-model.md`
+§7/§8, `tasks.md:266-267` and #60's acceptance criterion 3 in the same change. Alternative, if
+the two counters must stay one: F3 wires the `BUS_FAULT` notice to a new `Master` method —
+not recommended here, because it puts trunk health policy inside the frame engine.
+
+This entry records the question only; no code, test or contract change is proposed unilaterally,
+since `contracts/link-cpp.md` and `data-model.md` are human-ruling artefacts
+(`docs/OPERATING-POLICY.md` §2).
+
+**Ruling:** PENDING — human. **Amends:** none. **Supersedes:** none.
