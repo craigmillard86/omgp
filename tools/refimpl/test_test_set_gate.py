@@ -54,6 +54,15 @@ SOURCES = sorted(   # the same recursive set pipeline.sh's unit_sources() and th
 )
 ON_CI = bool(os.environ.get("GITHUB_ACTIONS"))
 HAVE_CTEST = shutil.which("ctest") is not None
+# make_tree() copies the REAL pipeline.sh, so the REAL UNIT_TEST_FLOOR gates these fake trees
+# too. Read, never restated: the default fake count below is a literal, and at the T032/#50
+# checkpoint raise (582360 -> 606565) it stopped clearing the floor for the ONE scenario that
+# runs a single binary — which surfaced as that scenario's "below floor" assertion, not as
+# anything about the set gate it exists to test. The single-binary scenario now sizes itself
+# from this value; test_fixture_counts_still_clear_the_floor below names the file the day the
+# two-binary scenarios stop clearing it as well.
+FLOOR = int(re.search(r"^UNIT_TEST_FLOOR=(\d+)", (ROOT / "pipeline.sh").read_text(), re.M).group(1))
+DEFAULT_EXECUTED = 600000
 
 
 def _need(cond, why):
@@ -78,7 +87,7 @@ def make_tree(
     registered=None,      # targets with an add_test line
     disabled=(),          # registered targets marked DISABLED
     binaries=None,        # targets with a binary on disk
-    executed=600000,      # what each fake binary prints as EXECUTED: (two of them clear the floor)
+    executed=DEFAULT_EXECUTED,  # what each fake binary prints as EXECUTED: (two of them clear the floor)
     ctest=True,           # False: no CTestTestfile.cmake -> stage_unit takes the bootstrap path
     args=None,            # {target: "argument"} — add_test registers the command WITH that argument
     scripts=None,         # {target: bash body} — what the fake binary runs instead of the EXECUTED echo
@@ -179,6 +188,19 @@ def snapshot(root: Path, build: Path = None) -> Path:
 VERIFIED = re.compile(r"^unit: verified (\d+) test binar(?:y|ies) \(compiled, registered, executed; ctest path\)$", re.M)
 
 
+def test_fixture_counts_still_clear_the_floor():
+    """Most scenarios here run TWO fake binaries at DEFAULT_EXECUTED each and assert something
+    other than the floor; they are only meaningful while that pair clears the real
+    UNIT_TEST_FLOOR the copied pipeline.sh carries. That was an unstated assumption until the
+    T032/#50 raise broke its single-binary half, and the breakage read as an unrelated
+    assertion. Asserted here so the next raise that invalidates it names this file and this
+    number. Sizing the DEFAULT upward is the fix; lowering the floor is not."""
+    assert 2 * DEFAULT_EXECUTED > FLOOR, (
+        f"DEFAULT_EXECUTED={DEFAULT_EXECUTED}: two fake binaries no longer clear "
+        f"UNIT_TEST_FLOOR={FLOOR}; raise DEFAULT_EXECUTED (and the literal 1200000 totals "
+        f"asserted in this file) rather than the floor")
+
+
 # --- ctest path: the four outcomes -------------------------------------------------------
 
 @pytest.mark.skipif(not HAVE_CTEST and not ON_CI, reason="no ctest on PATH: the ctest-path scenarios need it")
@@ -195,9 +217,11 @@ class TestCtestPath:
         assert log.count("EXECUTED: 600000") == 2
 
     def test_built_but_not_registered_is_named(self, tmp_path):
-        # Escape 1: test_b compiles and links; its add_test line is gone. The floor is cleared
-        # by test_a alone (600000 > 509360), so only the set check can see it.
-        root = make_tree(tmp_path, registered=("test_a",))
+        # Escape 1: test_b compiles and links; its add_test line is gone. Only test_a executes,
+        # so its own count must clear the floor on its own — sized from pipeline.sh's current
+        # UNIT_TEST_FLOOR rather than restated, because a stale literal here makes this scenario
+        # fail on the COUNT gate and say nothing about the set gate it exists to test.
+        root = make_tree(tmp_path, registered=("test_a",), executed=FLOOR + 1)
         r = run_unit(root)
         assert r.returncode != 0
         assert "tests/unit/test_b.cpp" in r.stderr and "not registered" in r.stderr, r.stderr
@@ -213,8 +237,9 @@ class TestCtestPath:
 
     def test_registered_but_not_executed_is_named(self, tmp_path):
         # Escape 3: DISABLED. ctest exits 0 ("Not Run (Disabled)"), the log block has no
-        # EXECUTED line, and the floor is still cleared by test_a.
-        root = make_tree(tmp_path, disabled=("test_b",))
+        # EXECUTED line, and the floor is still cleared by test_a — which is the only binary
+        # that runs here, so its count is sized from the floor for the same reason as Escape 1.
+        root = make_tree(tmp_path, disabled=("test_b",), executed=FLOOR + 1)
         r = run_unit(root)
         assert r.returncode != 0
         assert "tests/unit/test_b.cpp" in r.stderr and "did not run" in r.stderr, r.stderr
