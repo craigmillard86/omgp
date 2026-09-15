@@ -173,11 +173,21 @@ boundary tests for `T_resp`, `T_gap` and `retries`.
     refused, not routed around).
   - The raise found one real coupling, fixed in the same PR: `tools/refimpl/test_test_set_gate.py`
     builds fake trees that copy the REAL `pipeline.sh`, and its fake binaries printed a
-    hard-coded `EXECUTED: 600000`. Crossing 600000 made the two single-binary scenarios fail on
-    the COUNT gate instead of exercising the SET gate they exist to test. Those two now size
-    their count from `UNIT_TEST_FLOOR` (read, not restated), and a new
-    `test_fixture_counts_still_clear_the_floor` names that file the day the two-binary default
-    stops clearing the floor as well. No assertion was weakened or removed.
+    hard-coded `EXECUTED: 600000`. Crossing 600000 made **every** scenario that executes a
+    single fake binary — fourteen by the red team's own enumeration at @`e6a104b` (finding 1),
+    not the two the first attempt named — fail on the COUNT gate instead of exercising the SET gate they exist
+    to test, so their `assert r.returncode != 0` no longer witnessed that the set gate fails the
+    stage. `DEFAULT_EXECUTED` is now derived from `UNIT_TEST_FLOOR` (read, not restated) and
+    every count in the file derives from it, so no future raise can repeat this for one-binary
+    or two-binary scenarios alike; `test_fixture_counts_still_clear_the_floor` asserts the
+    single-binary form of the invariant, `test_one_default_binary_clears_the_floor_on_its_own`
+    demonstrates it end-to-end through the real `pipeline.sh`, and `run_unit()` itself now
+    refuses a run whose stderr carries the floor message unless the scenario opted in
+    (`floor_may_fire=True`, which only `test_floor_and_set_check_fail_independently` does) —
+    the masking is a named failure for every scenario in the file, not only the two that
+    assert on stderr. Demonstrated: with `DEFAULT_EXECUTED` temporarily put back to the literal
+    600000 the `refimpl` stage goes red, 15 tests failing and 28 runs naming the masking. No
+    assertion was weakened or removed.
   - What the first bullet's "other files in scope" clause demands is a **whole-tree** triage,
     and `tools/mutate.cfg` says whole-tree runs "report the kill rate as a trend only — never a
     gate". Whether that clause is an acceptance criterion at all is recorded as a pending human
