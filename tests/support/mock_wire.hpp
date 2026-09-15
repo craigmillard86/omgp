@@ -244,8 +244,19 @@ class MockWire : public omgp::link::ByteWire {
     // (also emitted when a different node is polled)". Fires the pending Babble step at the
     // head of every OTHER node's own script — `addressed`'s is handled by transmit()'s
     // switch — so a scripted babbler transmits outside any window of its own (the trunk §3
-    // violation the Kind exists to stage).
+    // violation the Kind exists to stage). A node that cannot hear the wire's current rate is
+    // skipped and keeps its step, exactly as the addressed node's is kept: see
+    // hears_current_rate() and docs/OPEN-QUESTIONS.md 2026-09-15 "A node deafened by
+    // `Kind::Rate`: does its pending `Kind::Babble` step still fire?".
     void fire_foreign_babble(uint8_t addressed, uint64_t tx_end);
+    // Whether `node` can hear traffic at the wire's CURRENT bit rate: true for every node until
+    // a Kind::Rate step arms it (the node_rate_ == 0 sentinel below), and thereafter only while
+    // the wire runs at the rate that step named. Pure — deaf_to_current_rate() is the arm that
+    // also puts the wrong-rate branch's noise on the wire. Shared so a node's hearing is decided
+    // in ONE place for both the addressed node and a foreign babbler.
+    // Precondition: node < omgp::link::kAddrCount (both callers check, transmit() by refusing
+    // the request outright).
+    bool hears_current_rate(uint8_t node) const;
     // Kind::Rate's standing effect on a node that cannot hear the current wire rate: nothing
     // at all when the arming step's seed was 0, a noise burst otherwise. Returns true when it
     // handled the request (i.e. the node is deaf), leaving the node's script untouched.

@@ -492,16 +492,31 @@ void MockWire::fire_foreign_babble(uint8_t addressed, uint64_t tx_end) {
         const Step& s = scripts_[n][script_pos_[n]];
         if (s.kind != Kind::Babble)
             continue;
+        // A node deafened by a Kind::Rate step did not hear THIS request either, so its script
+        // does not advance here any more than it does for the addressed node three lines below
+        // transmit()'s call to this — the Babble step stays at the head, waiting for the first
+        // request the node does hear. The Babble row's independence is of the ADDRESSEE;
+        // deafness is a different axis and no artefact speaks to it, so both readings (and why
+        // this one) are in docs/OPEN-QUESTIONS.md 2026-09-15 "A node deafened by `Kind::Rate`:
+        // does its pending `Kind::Babble` step still fire?". Without this check the Kind became
+        // addressee-DEPENDENT for exactly the nodes carrying both — a burst for another node's
+        // poll, silence for its own (PR #610 red-team round 1, finding 1).
+        if (!hears_current_rate(n))
+            continue;
         ++script_pos_[n]; // consumed: a babbler emits once per step, it does not latch
         schedule_noise(tx_end + s.delay_us, s.count, s.seed);
     }
 }
 
-bool MockWire::deaf_to_current_rate(uint8_t node, uint64_t tx_end) {
+bool MockWire::hears_current_rate(uint8_t node) const {
     const uint32_t hears = node_rate_[node];
     // 0 is the "no Kind::Rate step seen" sentinel (mock_wire.hpp): the node hears whatever the
     // wire uses, which is every node's state until a Rate step arms it.
-    if (hears == 0 || hears == bit_rate_)
+    return hears == 0 || hears == bit_rate_;
+}
+
+bool MockWire::deaf_to_current_rate(uint8_t node, uint64_t tx_end) {
+    if (hears_current_rate(node))
         return false;
     // contracts/mock-wire.md's Rate row: "requests at another rate behave as `Silence` (or
     // `Garbage` if `seed != 0`)". The seed and delay are the ARMING step's — this request has
