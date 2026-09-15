@@ -17,6 +17,7 @@
 #include <functional>
 #include <initializer_list>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace omgp::link;
@@ -1064,5 +1065,485 @@ TEST_CASE("A registered RequestHandler is not invoked for traffic it does not ow
         REQUIRE(handler.invocations == 0);
         wire.advance_to(tx_end + 10000);
         REQUIRE(drain_all(wire).empty());
+    }
+}
+
+// --- contracts/mock-wire.md Step table: Kind::Garbage / Kind::Babble / Kind::Rate (T028) ---
+// The three rows tasks.md leaves to this task; `CrcError`/`Duplicate` landed above with T029
+// (PR #137). Everything here is asserted at the harness level only — which bytes reach the RX
+// queue, when they start, and what the REAL Deframer makes of them. The engine-level
+// consequences (timeout, SUSPECT/OFFLINE, BUS_FAULT, the SC-005 §7-mode mapping) belong to
+// test_link_master.cpp / test_link_loop.cpp / test_link_busfault.cpp, not here.
+
+namespace {
+
+// How many frames a fresh REAL Deframer delivers from `bytes`. contracts/mock-wire.md's
+// Garbage row ("never containing a valid frame — checked at generation") and trunk §4 are both
+// statements about that parser, so these cases ask it rather than applying a byte-pattern rule
+// of their own.
+size_t frames_in(const std::vector<uint8_t>& bytes) {
+    Deframer d;
+    FrameView view{};
+    size_t n = 0;
+    for (uint8_t b : bytes)
+        if (d.feed(b, view))
+            ++n;
+    return n;
+}
+
+// drain_all(), plus EVERY released byte's start instant: its two-out-param overload reports
+// only the first and last, which cannot express an interleaved two-source stream.
+std::vector<uint8_t> drain_with_starts(MockWire& wire, std::vector<uint64_t>& starts) {
+    std::vector<uint8_t> out;
+    uint8_t byte = 0;
+    uint64_t start_us = 0;
+    while (wire.receive(byte, start_us)) {
+        out.push_back(byte);
+        starts.push_back(start_us);
+    }
+    return out;
+}
+
+// contracts/mock-wire.md "Scheduling": byte i of a burst starting at t0 fires at
+// t0 + i * byte_time_us(rate). Checked for every byte, not just the first and last — a burst at
+// any other cadence than the wire's byte time would otherwise survive.
+void require_byte_cadence(const std::vector<uint64_t>& starts, uint64_t t0, uint64_t bt) {
+    for (size_t i = 0; i < starts.size(); ++i) {
+        CAPTURE(i);
+        REQUIRE(starts[i] == t0 + static_cast<uint64_t>(i) * bt);
+    }
+}
+
+// A burst that is PRNG output rather than a constant run: "contains no valid frame" is
+// satisfied by a stream of identical bytes too, so every case checking the former checks this.
+void require_not_constant(const std::vector<uint8_t>& bytes) {
+    REQUIRE_FALSE(bytes.empty());
+    REQUIRE(std::adjacent_find(bytes.begin(), bytes.end(), std::not_equal_to<>()) != bytes.end());
+}
+
+} // namespace
+
+TEST_CASE("Kind::Garbage emits count PRNG bytes at request_end + delay_us that contain no valid "
+          "frame, and then nothing",
+          "[link][mock_wire]") {
+    // contracts/mock-wire.md's Garbage row: "`count` PRNG bytes (never containing a valid frame
+    // — checked at generation) starting at `request_end + delay_us`, then nothing".
+    constexpr uint32_t kCount = 64; // non-trivial: longer than a whole minimal frame's wire form
+    constexpr uint32_t kDelay = 30;
+    FakeClock clock;
+    static const Step garbage_step[] = {{0x01, Kind::Garbage, kDelay, kCount, 0xC0FFEEu}};
+    MockWire wire(clock);
+    wire.set_script(0x01, garbage_step, 1);
+
+    const std::vector<uint8_t> req = encode_request(0x01, 0);
+    uint64_t tx_end = 0;
+    // Allocation-free, like every other scheduling path (contracts/mock-wire.md preamble).
+    HEAP_FREE_SCOPE({ tx_end = wire.transmit(req.data(), req.size(), 0); });
+
+    const uint64_t bt = byte_time_us(omgp::TRUNK_bit_rate);
+    wire.advance_to(tx_end + kDelay + static_cast<uint64_t>(kCount - 1) * bt);
+
+    std::vector<uint64_t> starts;
+    const std::vector<uint8_t> drained = drain_with_starts(wire, starts);
+    REQUIRE(drained.size() == kCount);
+    require_byte_cadence(starts, tx_end + kDelay, bt);
+    REQUIRE(frames_in(drained) == 0);
+    require_not_constant(drained);
+
+    // "then nothing": no answer frame trails the burst, however far time is advanced — this is
+    // what separates Garbage from "a corrupted response" (Kind::CrcError).
+    wire.advance_to(tx_end + kDelay + 10000 * bt);
+    REQUIRE(drain_all(wire).empty());
+    // The request itself was still decoded and transcribed: Garbage governs the ANSWER only.
+    // transcript_size() also REQUIREs the mock recorded no fault (mock_wire.cpp), so this case
+    // cannot pass while the kind is merely deferring a "not implemented" fault.
+    REQUIRE(wire.transcript_size() == 1);
+    REQUIRE(wire.transcript(0).dst == 0x01);
+}
+
+TEST_CASE("Kind::Garbage and Kind::Babble bursts are byte-for-byte reproducible for a given "
+          "Step::seed, and differ for a different one",
+          "[link][mock_wire]") {
+    // contracts/mock-wire.md "Scheduling": "All randomness from `Step::seed` through an
+    // xorshift32 in the mock; the same script reproduces byte-for-byte." Asserted by running the
+    // same script twice rather than by predicting the stream from xorshift32_next(): predicting
+    // it would pin one extraction rule (the low byte of each output), which the contract does
+    // not state, and would go red on an equally-conforming change.
+    constexpr uint32_t kCount = 48;
+    auto burst = [](Kind kind, uint32_t seed) {
+        FakeClock clock;
+        const Step steps[] = {{0x01, kind, 30, kCount, seed}};
+        // Declared after `steps` so ~MockWire() runs while the script it points at is alive
+        // (mock_wire.hpp: "`steps` must outlive this MockWire").
+        MockWire wire(clock);
+        wire.set_script(0x01, steps, 1);
+        const std::vector<uint8_t> req = encode_request(0x01, 0);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        wire.advance_to(tx_end + 30 +
+                        static_cast<uint64_t>(kCount) * byte_time_us(omgp::TRUNK_bit_rate));
+        return drain_all(wire);
+    };
+
+    for (Kind kind : {Kind::Garbage, Kind::Babble}) {
+        CAPTURE(static_cast<int>(kind));
+        const std::vector<uint8_t> a = burst(kind, 0xABCDEFu);
+        const std::vector<uint8_t> b = burst(kind, 0xABCDEFu);
+        const std::vector<uint8_t> other = burst(kind, 0x00123456u);
+        REQUIRE(a.size() == kCount);
+        REQUIRE(a == b);
+        require_not_constant(a);
+        // Not vacuous: a generator ignoring the seed entirely would also satisfy a == b.
+        REQUIRE(a != other);
+        REQUIRE(frames_in(a) == 0);
+        REQUIRE(frames_in(other) == 0);
+    }
+}
+
+TEST_CASE("Kind::Babble emits its burst on a request addressed to a DIFFERENT node — outside any "
+          "response window of its own — and is consumed once, not latched",
+          "[link][mock_wire]") {
+    // contracts/mock-wire.md's Babble row: "`count` PRNG bytes at `request_end + delay_us`
+    // **regardless of addressee** (also emitted when a different node is polled, i.e. outside
+    // any window)". docs/trunk-link-layer.md §3 makes transmitting outside one's own response
+    // window the violation this Kind exists to stage; a step that only fired when its own node
+    // was polled could not stage it at all.
+    constexpr uint32_t kCount = 24;
+    constexpr uint32_t kDelay = 50;
+    FakeClock clock;
+    static const Step babbler[] = {{0x03, Kind::Babble, kDelay, kCount, 0x0B0BB1Eu}};
+    // Two steps, so the second poll below is silent for a reason of its own rather than falling
+    // through to the exhausted-script default Respond.
+    static const Step polled[] = {{0x01, Kind::Silence, 0}, {0x01, Kind::Silence, 0}};
+    MockWire wire(clock);
+    wire.set_script(0x03, babbler, 1);
+    wire.set_script(0x01, polled, 2);
+
+    // The host polls node 0x01. Node 0x03 is never addressed, here or below.
+    const std::vector<uint8_t> req = encode_request(0x01, 0);
+    uint64_t tx_end = 0;
+    HEAP_FREE_SCOPE({ tx_end = wire.transmit(req.data(), req.size(), 0); });
+
+    const uint64_t bt = byte_time_us(omgp::TRUNK_bit_rate);
+    wire.advance_to(tx_end + kDelay + static_cast<uint64_t>(kCount - 1) * bt);
+
+    std::vector<uint64_t> starts;
+    const std::vector<uint8_t> drained = drain_with_starts(wire, starts);
+    // Node 0x01 said nothing (Kind::Silence), so every byte here is node 0x03's babble.
+    REQUIRE(drained.size() == kCount);
+    require_byte_cadence(starts, tx_end + kDelay, bt);
+    REQUIRE(frames_in(drained) == 0);
+    require_not_constant(drained);
+
+    // Consumed, not latched: node 0x03's one-step script is now exhausted, so a second poll of
+    // node 0x01 puts nothing at all on the wire.
+    const std::vector<uint8_t> req2 = encode_request(0x01, 1);
+    const uint64_t tx_end2 = wire.transmit(req2.data(), req2.size(), clock.now_us());
+    wire.advance_to(tx_end2 + kDelay + 10000 * bt);
+    REQUIRE(drain_all(wire).empty());
+}
+
+TEST_CASE("Kind::Babble fires for the addressed node too, and its burst coexists with another "
+          "node's scheduled answer in start-instant order",
+          "[link][mock_wire]") {
+    const uint64_t bt = byte_time_us(omgp::TRUNK_bit_rate);
+
+    SECTION("the babbling node is itself the addressee") {
+        constexpr uint32_t kCount = 16;
+        FakeClock clock;
+        static const Step babbler[] = {{0x03, Kind::Babble, 45, kCount, 0x5EED01u}};
+        MockWire wire(clock);
+        wire.set_script(0x03, babbler, 1);
+
+        const std::vector<uint8_t> req = encode_request(0x03, 2);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        wire.advance_to(tx_end + 45 + static_cast<uint64_t>(kCount - 1) * bt);
+
+        std::vector<uint64_t> starts;
+        const std::vector<uint8_t> drained = drain_with_starts(wire, starts);
+        REQUIRE(drained.size() == kCount);
+        require_byte_cadence(starts, tx_end + 45, bt);
+        // Never an answer as well: a Babble step replaces the node's response, it does not
+        // precede one.
+        REQUIRE(frames_in(drained) == 0);
+    }
+
+    SECTION("a third node babbles while the addressed node answers normally") {
+        constexpr uint32_t kCount = 16;
+        // Far enough after the answer that the two bursts do not overlap: this case is about
+        // both reaching the wire in start-instant order, not about tie-breaking equal instants.
+        constexpr uint32_t kBabbleDelay = 500;
+        FakeClock clock;
+        static const Step answerer[] = {{0x01, Kind::Respond, 30}};
+        static const Step babbler[] = {{0x03, Kind::Babble, kBabbleDelay, kCount, 0x5EED02u}};
+        MockWire wire(clock);
+        wire.set_script(0x01, answerer, 1);
+        wire.set_script(0x03, babbler, 1);
+
+        const std::vector<uint8_t> req = encode_request(0x01, 4);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        const std::vector<uint8_t> answer = expected_respond_answer(req);
+        REQUIRE(30 + answer.size() * bt < kBabbleDelay); // the two bursts really are disjoint
+
+        wire.advance_to(tx_end + kBabbleDelay + static_cast<uint64_t>(kCount - 1) * bt);
+        std::vector<uint64_t> starts;
+        const std::vector<uint8_t> drained = drain_with_starts(wire, starts);
+
+        REQUIRE(drained.size() == answer.size() + kCount);
+        const std::vector<uint8_t> got_answer(drained.begin(),
+                                              drained.begin() + static_cast<long>(answer.size()));
+        const std::vector<uint8_t> got_babble(drained.begin() + static_cast<long>(answer.size()),
+                                              drained.end());
+        REQUIRE(got_answer == answer); // node 0x01's own answer is untouched by the babble
+        REQUIRE(frames_in(got_babble) == 0);
+        REQUIRE(starts.front() == tx_end + 30);
+        REQUIRE(starts[answer.size()] == tx_end + kBabbleDelay);
+        for (size_t i = 1; i < starts.size(); ++i)
+            REQUIRE(starts[i] > starts[i - 1]); // strictly ascending across BOTH sources
+    }
+
+    SECTION("two nodes babbling at once both reach the wire") {
+        // Pins that the addressee-independent sweep covers every scripted node, not just the
+        // first one it finds: with only one burst emitted the size below reads 20, not 40.
+        constexpr uint32_t kCount = 20;
+        FakeClock clock;
+        static const Step babbler_a[] = {{0x03, Kind::Babble, 60, kCount, 0x5EED03u}};
+        static const Step babbler_b[] = {{0x05, Kind::Babble, 60, kCount, 0x5EED04u}};
+        static const Step polled[] = {{0x01, Kind::Silence, 0}};
+        MockWire wire(clock);
+        wire.set_script(0x03, babbler_a, 1);
+        wire.set_script(0x05, babbler_b, 1);
+        wire.set_script(0x01, polled, 1);
+
+        const std::vector<uint8_t> req = encode_request(0x01, 6);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        wire.advance_to(tx_end + 60 + static_cast<uint64_t>(kCount) * bt);
+        const std::vector<uint8_t> drained = drain_all(wire);
+        REQUIRE(drained.size() == 2 * kCount);
+        REQUIRE(frames_in(drained) == 0);
+    }
+}
+
+TEST_CASE("Kind::Rate makes the node deaf to every other bit rate: silence when seed == 0, "
+          "garbage when seed != 0, and a normal answer at the rate it hears",
+          "[link][mock_wire][timing:bit_rate][timing:bit_rate_fallback]") {
+    // contracts/mock-wire.md's Rate row: "the node now 'hears' only at `count` interpreted as
+    // bit rate (1 000 000 or 115 200); requests at another rate behave as `Silence` (or
+    // `Garbage` if `seed != 0`)" — research.md R-07 says the same ("a probe at another rate
+    // yields silence (or garbage, when the step says so)"). This is the primitive trunk §7's
+    // wrong-rate probe and its simultaneous-failure BUS_FAULT rule are eventually built on
+    // (T042); nothing here asserts either — this case is the mock's own contract.
+    const uint64_t ref_bt = byte_time_us(omgp::TRUNK_bit_rate);
+    const uint64_t slow_bt = byte_time_us(omgp::TRUNK_bit_rate_fallback);
+
+    SECTION("seed == 0: a request at the wrong rate is silence, and consumes no later step") {
+        FakeClock clock;
+        // Hears at the FALLBACK rate; the wire below starts at the reference rate.
+        static const Step steps[] = {{0x01, Kind::Rate, 30, omgp::TRUNK_bit_rate_fallback, 0},
+                                     {0x01, Kind::Respond, 30}};
+        MockWire wire(clock);
+        wire.set_script(0x01, steps, 2);
+        REQUIRE(wire.bit_rate() == omgp::TRUNK_bit_rate);
+
+        // The request carrying the Rate step is itself subject to it ("the node NOW hears only
+        // at `count`"): unheard, so nothing is transmitted.
+        const std::vector<uint8_t> req = encode_request(0x01, 0);
+        uint64_t now = 0;
+        HEAP_FREE_SCOPE({ now = wire.transmit(req.data(), req.size(), now); });
+        wire.advance_to(now + 10000 * ref_bt);
+        REQUIRE(drain_all(wire).empty());
+
+        // Still deaf on the next request, the wire not having moved.
+        const std::vector<uint8_t> req2 = encode_request(0x01, 1);
+        now = wire.transmit(req2.data(), req2.size(), clock.now_us());
+        wire.advance_to(now + 10000 * ref_bt);
+        REQUIRE(drain_all(wire).empty());
+
+        // Move the wire to the rate the node hears at: it answers again — and answers from the
+        // `Respond` step with delay 30, NOT the exhausted-script default at TRUNK_T_turn_min_us.
+        // That is what proves the two unheard requests consumed no script step: had they, this
+        // answer would start at + TRUNK_T_turn_min_us instead.
+        static_assert(omgp::TRUNK_T_turn_min_us != 30,
+                      "the delay below must distinguish the scripted step from the default");
+        wire.set_bit_rate(omgp::TRUNK_bit_rate_fallback);
+        const std::vector<uint8_t> req3 = encode_request(0x01, 2);
+        const uint64_t tx_end = wire.transmit(req3.data(), req3.size(), clock.now_us());
+        const std::vector<uint8_t> answer = expected_respond_answer(req3);
+        wire.advance_to(tx_end + 30 + static_cast<uint64_t>(answer.size()) * slow_bt);
+
+        std::vector<uint64_t> starts;
+        const std::vector<uint8_t> drained = drain_with_starts(wire, starts);
+        REQUIRE(drained == answer);
+        require_byte_cadence(starts, tx_end + 30, slow_bt);
+    }
+
+    SECTION("seed != 0: a request at the wrong rate is garbage, reproducibly") {
+        auto wrong_rate_burst = [&] {
+            FakeClock clock;
+            const Step steps[] = {
+                {0x01, Kind::Rate, 40, omgp::TRUNK_bit_rate_fallback, 0xDEADBEEFu}};
+            MockWire wire(clock);
+            wire.set_script(0x01, steps, 1);
+            const std::vector<uint8_t> req = encode_request(0x01, 0);
+            const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+            wire.advance_to(tx_end + 40 + 10000 * ref_bt);
+            std::vector<uint64_t> starts;
+            const std::vector<uint8_t> drained = drain_with_starts(wire, starts);
+            REQUIRE_FALSE(starts.empty());
+            // "at request_end + delay_us", at the wire's own byte cadence. The burst LENGTH is
+            // deliberately not asserted: the Rate row spends `count` on the bit rate and `seed`
+            // on selecting this branch, so it names no length, and pinning the mock's chosen one
+            // here would be inventing contract rather than checking it.
+            require_byte_cadence(starts, tx_end + 40, ref_bt);
+            return drained;
+        };
+
+        const std::vector<uint8_t> a = wrong_rate_burst();
+        const std::vector<uint8_t> b = wrong_rate_burst();
+        REQUIRE_FALSE(a.empty());   // garbage, not the seed == 0 branch's silence
+        REQUIRE(frames_in(a) == 0); // "no valid frame", the Garbage row's own property
+        require_not_constant(a);
+        REQUIRE(a == b); // deterministic for a fixed script (the Scheduling section's rule)
+    }
+
+    SECTION("a request at the rate the node hears is answered normally") {
+        FakeClock clock;
+        // count == the wire's own rate: the step changes what the node hears to what it already
+        // hears, so nothing about the exchange changes.
+        static const Step steps[] = {{0x01, Kind::Rate, 30, omgp::TRUNK_bit_rate, 0}};
+        MockWire wire(clock);
+        wire.set_script(0x01, steps, 1);
+
+        const std::vector<uint8_t> req = encode_request(0x01, 3);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        const std::vector<uint8_t> answer = expected_respond_answer(req);
+        wire.advance_to(tx_end + 30 + static_cast<uint64_t>(answer.size()) * ref_bt);
+
+        std::vector<uint64_t> starts;
+        const std::vector<uint8_t> drained = drain_with_starts(wire, starts);
+        REQUIRE(drained == answer);
+        require_byte_cadence(starts, tx_end + 30, ref_bt);
+    }
+
+    SECTION("the deafness is per node, not wire-wide") {
+        FakeClock clock;
+        static const Step deaf[] = {{0x01, Kind::Rate, 30, omgp::TRUNK_bit_rate_fallback, 0}};
+        MockWire wire(clock);
+        wire.set_script(0x01, deaf, 1);
+
+        const std::vector<uint8_t> to_deaf = encode_request(0x01, 0);
+        const uint64_t now = wire.transmit(to_deaf.data(), to_deaf.size(), 0);
+        wire.advance_to(now + 10000 * ref_bt);
+        REQUIRE(drain_all(wire).empty());
+
+        // Node 0x02 never saw a Rate step and still answers at the wire's rate.
+        const std::vector<uint8_t> to_hearing = encode_request(0x02, 1);
+        const uint64_t tx_end = wire.transmit(to_hearing.data(), to_hearing.size(), clock.now_us());
+        const std::vector<uint8_t> answer = expected_respond_answer(to_hearing);
+        wire.advance_to(tx_end + omgp::TRUNK_T_turn_min_us +
+                        static_cast<uint64_t>(answer.size()) * ref_bt);
+        REQUIRE(drain_all(wire) == answer);
+    }
+}
+
+// --- MockWire::inject_bytes(), directly (tasks.md T028: "plus a direct test of
+// `MockWire::inject_bytes()`", PR #137 red-team @050f397, NOT EXAMINED) ----------------------
+// The helper is exercised heavily through test_link_master.cpp and test_link_loop.cpp, but its
+// own contract — raw bytes from ANOTHER station: same RX queue, same cadence, no transcript
+// entry, no scheduled answer — was never asserted as a unit. The two #148 cases above cover the
+// pending/acknowledge accounting only, not what reaches the wire.
+
+TEST_CASE("MockWire::inject_bytes queues raw bytes at the requested instants without "
+          "transcribing them or answering them",
+          "[link][mock_wire]") {
+    const uint64_t bt = byte_time_us(omgp::TRUNK_bit_rate);
+
+    SECTION("even a perfectly valid request frame is wire content, not a request to answer") {
+        FakeClock clock;
+        MockWire wire(clock);
+        // The very bytes a Master would transmit to node 0x01 — but arriving from the bus, not
+        // handed to transmit(). mock_wire.hpp: "these bytes model another station's
+        // transmission, not a request addressed to a node".
+        const std::vector<uint8_t> frame = encode_request(0x01, 5);
+        const uint64_t start = 1000;
+        HEAP_FREE_SCOPE({ wire.inject_bytes(frame.data(), frame.size(), start); });
+
+        // Not decoded into the transcript, and no script step consumed: the mock's parser_ never
+        // sees these bytes. (transcript_size() also REQUIREs no fault was recorded.)
+        REQUIRE(wire.transcript_size() == 0);
+
+        wire.advance_to(start + static_cast<uint64_t>(frame.size() - 1) * bt);
+        std::vector<uint64_t> starts;
+        const std::vector<uint8_t> drained = drain_with_starts(wire, starts);
+        REQUIRE(drained == frame); // byte for byte, in order
+        require_byte_cadence(starts, start, bt);
+
+        // No answer was scheduled for it, however far time runs on.
+        wire.advance_to(start + 10000 * bt);
+        REQUIRE(drain_all(wire).empty());
+        REQUIRE(wire.pending_injected() == 0);
+    }
+
+    SECTION("an opened frame that stops mid-flight leaves the Deframer accumulating") {
+        // inject_bytes()'s motivating case (mock_wire.hpp): schedule_respond/crc_error/duplicate
+        // all emit COMPLETE frames, so none can leave a receiver mid-accumulation. A transmitter
+        // that stalls mid-frame is a trunk §7 failure class, and only raw injection reaches it.
+        FakeClock clock;
+        MockWire wire(clock);
+        const uint8_t truncated[4] = {omgp::TRUNK_flag_byte, 0x00, omgp::ADDR_host, 0x10};
+        const uint64_t start = 200;
+        wire.inject_bytes(truncated, sizeof truncated, start);
+        wire.advance_to(start + 3 * bt);
+
+        Deframer d;
+        FrameView view{};
+        uint8_t byte = 0;
+        uint64_t start_us = 0;
+        size_t delivered = 0, drained = 0;
+        while (wire.receive(byte, start_us)) {
+            ++drained;
+            if (d.feed(byte, view))
+                ++delivered;
+        }
+        REQUIRE(drained == sizeof truncated);
+        REQUIRE(delivered == 0);
+        REQUIRE(d.in_frame()); // still accumulating, which is the whole point of the case
+        REQUIRE(wire.pending_injected() == 0);
+    }
+
+    SECTION("injected bytes interleave with a scheduled answer in start-instant order") {
+        FakeClock clock;
+        static const Step answerer[] = {{0x01, Kind::Respond, 30}};
+        MockWire wire(clock);
+        wire.set_script(0x01, answerer, 1);
+
+        const std::vector<uint8_t> req = encode_request(0x01, 8);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        const std::vector<uint8_t> answer = expected_respond_answer(req);
+        REQUIRE(answer.size() >= 3);
+
+        // Two bytes landing strictly BETWEEN the answer's own byte instants, so the merged order
+        // is unambiguous (no equal start instants to tie-break).
+        const uint8_t noise[2] = {0x5A, 0xA5};
+        const uint64_t noise_start = tx_end + 30 + bt / 2;
+        wire.inject_bytes(noise, sizeof noise, noise_start);
+
+        wire.advance_to(tx_end + 30 + static_cast<uint64_t>(answer.size()) * bt);
+        std::vector<uint64_t> starts;
+        const std::vector<uint8_t> drained = drain_with_starts(wire, starts);
+
+        std::vector<std::pair<uint64_t, uint8_t>> expected;
+        for (size_t i = 0; i < answer.size(); ++i)
+            expected.emplace_back(tx_end + 30 + static_cast<uint64_t>(i) * bt, answer[i]);
+        for (size_t i = 0; i < sizeof noise; ++i)
+            expected.emplace_back(noise_start + static_cast<uint64_t>(i) * bt, noise[i]);
+        std::stable_sort(expected.begin(), expected.end(),
+                         [](const std::pair<uint64_t, uint8_t>& a,
+                            const std::pair<uint64_t, uint8_t>& b) { return a.first < b.first; });
+
+        std::vector<std::pair<uint64_t, uint8_t>> got;
+        for (size_t i = 0; i < drained.size(); ++i)
+            got.emplace_back(starts[i], drained[i]);
+        REQUIRE(got == expected);
+        REQUIRE(wire.pending_injected() == 0);
     }
 }
