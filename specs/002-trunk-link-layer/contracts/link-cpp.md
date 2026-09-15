@@ -220,6 +220,7 @@ public:
                                                                // advances the rotation/alternation: F3 calls it once per probe
                                                                // issued ("What F3/F4 need", obligation 2). During a pass the
                                                                // yielded address is held in pass_addr until its outcome arrives
+                                                               // or its outcome window closes (kOutcomeWindowUs; then "drew nothing")
     bool bus_fault() const;
     uint32_t bit_rate() const;                                 // rate in use: assigned by a clear (the reference if any node answered
                                                                // there during the fault, else the fallback; no automatic return — F4,

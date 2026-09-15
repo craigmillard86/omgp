@@ -43,8 +43,11 @@ struct Probe {
 };
 
 // Fixed 16-entry health table keyed by trunk address (data-model.md §6). `on_result` and
-// `tick` are the only ways a record changes state; every transition notifies `listener`
-// exactly once (SC-006).
+// `tick` change records, and so does `next_probe` on one path: writing off an abandoned pass
+// probe after the outcome window can end the pass and clear the fault at the fallback rate,
+// which applies the deferred §6 transitions and notifies (round 14). Every transition notifies
+// `listener` exactly once (SC-006); `on_notice` must not re-enter the tracker from any of the
+// three.
 class HealthTracker {
   public:
     HealthTracker(Clock& clock, HealthListener& listener);
@@ -197,7 +200,8 @@ class HealthTracker {
 
     // Stored for the constructor-signature parity with Master/Responder (link-cpp.md
     // "Health tracker"). Every method takes `now_us` explicitly — including the bus-fault
-    // rules, which are driven by outcomes and never by elapsed time — so clock_ itself is
+    // rules, which are driven by outcomes and, since round 14, by the outcome window closing
+    // on a probe that never got one — so clock_ itself is
     // still not read; the constructor body performs one discarded read, which silences
     // clang's -Wunused-private-field (fuzz preset) without [[maybe_unused]] — some gcc
     // versions reject that attribute on a data member under -Werror=attributes (observed

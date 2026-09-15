@@ -109,7 +109,8 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // What this still cannot tell apart, stated (rule 11): more than one transaction
     // outstanding to the SAME address at once — the newest probe's rate is what the first
     // outcome back is read at. That is obligation 1's territory, ASSUMED, not enforced.
-    // Outside a fault the rate plays no part.
+    // Outside a fault the rate decides one thing: whether a late fault-time answer counts
+    // (other_rate).
     const bool at_reference = (bus_.probe_fallback & probe_bit(addr)) == 0;
     // The recorded fallback answerer answered at the fallback rate. trunk §2 says every node
     // supports both rates and the active one is selected by strap or configuration; the
@@ -137,9 +138,21 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // with no outstanding probe clears a bit that is already clear.
     bus_.probe_live = static_cast<uint16_t>(bus_.probe_live & ~probe_bit(addr));
 
-    if (is_answerer) {
-        // Recorded already — nothing to record, nothing to apply; the pass-advance block
-        // below still consumes this outcome if it is the outstanding pass probe's.
+    // Outside a fault, an ok outcome for a probe that went out at a rate OTHER than the rate
+    // now in use is not evidence its node hears the rate in use, and moves no §6 state: it is
+    // the late answer to a fault-time probe (a written-off pass probe at the reference rate
+    // after a fallback clear; an alternation probe at the fallback rate after a reference
+    // clear), and enrolling on it strands the node as ENROLLED on a trunk it cannot hear, or
+    // status-polls it straight back into SUSPECT and a re-declared fault (round-15 red team
+    // on #530). It does not undo the clear: past the window the tracker acted as if the node
+    // were silent, and there is no automatic return (ruling 2026-09-13) — the node stays
+    // SUSPECT, visibly. Demonstrated by the two "... does not enrol its node ..." cases.
+    const bool other_rate =
+        !bus_.fault && ok && at_reference != (bus_.bit_rate == omgp::TRUNK_bit_rate);
+    if (is_answerer || other_rate) {
+        // Recorded already, or answered at the other rate — nothing to record, nothing to
+        // apply; the pass-advance block below still consumes this outcome if it is the
+        // outstanding pass probe's.
     } else if (fallback_answer) {
         // §7: a fallback-rate answer neither clears the fault nor moves that node's state —
         // enrolling it here would have it status-polled at a rate it cannot hear, fail into
@@ -371,8 +384,14 @@ Probe HealthTracker::pass_probe(uint64_t now_us) {
         // already TRUNK_bit_rate and note_wire_rate returns without touching rate_changes.
         // By the same construction `pass_addr`'s remembered probe rate is already the
         // reference rate — the loop below cleared its bit when it issued this very probe, and
-        // only a probe going out moves a bit — so there is no note_probe() call here: it could
-        // only restate that, and a call no test could falsify is what this file keeps out.
+        // only a probe going out moves a bit — so there is no note_probe() call here, and
+        // DELIBERATELY: note_probe() also stamps `probe_issued_us`, the epoch the write-off in
+        // next_probe() reads, and the epoch is the FIRST issue. A re-yield is the same probe,
+        // not a re-issue: F3 obligation 2 is one call per probe issued, and a scheduler that
+        // calls again with the probe in flight is handed the same address so that it does not
+        // walk the cursor past the frame on the wire (round-13 red team on #472). If it
+        // re-transmits on that re-yield, the second frame's own window is not this layer's to
+        // track (round-15 review): restamping here would reopen round 7's unbounded hold.
         // mutant-ok(equivalent, cxx_remove_void_call): a no-op call on this path.
         note_wire_rate(omgp::TRUNK_bit_rate);
         return Probe{bus_.pass_addr, omgp::TRUNK_bit_rate};
