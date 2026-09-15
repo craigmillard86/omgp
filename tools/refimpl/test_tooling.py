@@ -338,6 +338,609 @@ def test_mutate_diff_with_no_unit_oracle_fails_closed(tmp_path):
     assert "blind spot" in out and "core" in out and "no unit-test oracle" in out, out
 
 
+# --- tools/mutate.sh: a test-only change is ATTESTED, never gated (#146) ------------------------
+# Until now `--diff <ref>` scoped by changed SOURCES alone, so a PR whose whole purpose is
+# killing surviving mutants took the `nothing in scope` fast path and got no machine
+# attestation at all (observed on #142, where four kills rested only on the author's local
+# runs). Ruling docs/OPEN-QUESTIONS.md 2026-09-14, Option A: a diff that changes
+# tests/unit/test_<dir>_* and no source under <dir> derives a TEST scope, runs that dir's
+# mutants in TREND mode and reports. No FINDING of that run gates — survivors, labels and the
+# kill rate all sit on lines the diff did not change, and gating on one is the Option B that
+# ruling rejected — while a run that cannot happen (no oracle, no source, no report, no
+# mutant) still fails closed, as everywhere else in this harness. What stays exactly as it
+# was: a diff that does change a source in scope.
+
+def attest_line(out):
+    lines = [l for l in out.splitlines() if l.startswith("mutation: mode=attest")]
+    assert len(lines) == 1, out
+    return lines[0]
+
+
+def scope_line(out):
+    lines = [l for l in out.splitlines() if l.startswith("mutation: scope:")]
+    assert len(lines) == 1, out
+    return lines[0].split(":", 2)[2].split()
+
+
+def _commit(clone, rel, content):
+    p = clone / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content)
+    subprocess.run(["git", "add", rel], cwd=clone, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"],
+                   cwd=clone, check=True)
+
+
+TEST_EDIT = "// rewritten by test_tooling.py: a test-only change under tests/unit\n"
+
+
+def test_mutate_test_only_change_is_attested_not_skipped(tmp_path):
+    """A diff that touches only tests/unit/test_link_*.cpp must NOT take the fast path: it
+    names one greppable attest line (mode, ref, dirs, the changed test files) and derives the
+    same oracle the source path would. The source scope it derives is the whole attested
+    directory — trend mode has no changed-line ranges to narrow it to."""
+    clone = shared_clone(tmp_path, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    rc, out, dt = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 0, out
+    assert "nothing in scope" not in out, out
+    line = attest_line(out)
+    assert "ref=HEAD~1" in line and "dirs=link" in line, line
+    assert "tests=tests/unit/test_link_master.cpp" in line, line
+    scope = scope_line(out)
+    assert scope and all(f.startswith("link/") for f in scope), scope
+    assert "link/master.cpp" in scope, scope
+    oracle = oracle_line(out)
+    assert oracle and all(b.startswith("test_link_") for b in oracle), oracle
+    assert set(oracle) <= unit_binaries(), oracle
+    assert dt < 60, dt
+
+
+def test_mutate_unrelated_test_change_is_still_nothing_in_scope(tmp_path):
+    """The test scope is `tests/unit/test_<dir>_*` for <dir> in scope_dirs, nothing wider:
+    tests/unit/test_mock_wire.cpp names no scope dir, so the diff is still empty and the fast
+    path (and its exact message) is unchanged."""
+    clone = shared_clone(tmp_path, "tests/unit/test_mock_wire.cpp", TEST_EDIT)
+    rc, out, dt = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", timeout=90)
+    assert rc == 0, out
+    assert "mutation: nothing in scope (HEAD~1) — no changed sources under: l3 link core" in out, out
+    assert "mode=attest" not in out, out
+    assert dt < 60, dt
+
+
+def test_mutate_test_only_attestation_never_gates_on_survivors(tmp_path):
+    """Two halves, labelled. (a) The shell states the mode it will run the reporter in, and
+    passes it the empty ref that selects trend mode — proved for the printed claim by this
+    run, and for the reporter call by reading the single call site (mutate.sh is not run to
+    completion here: that needs Mull). (b) The reporter in that mode does not gate on the
+    rule this case is about: the very input that exits 1 with --ref exits 0 without it, while
+    still LISTING the unlabelled survivor and recording where the attestation came from.
+
+    Survivors are ONE of mutate_report.py's exit-1 rules; the others are in
+    test_mutate_attestation_gates_on_a_broken_run_never_on_its_findings, because generalising
+    "does not gate" from this case alone is what made the #593 body's claim false."""
+    clone = shared_clone(tmp_path, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 0, out
+    line = attest_line(out)
+    assert "report=trend" in line and "gate=blind-spot-only" in line, line
+    sh = MUTATE.read_text()
+    assert len(re.findall(r"^python3 tools/mutate_report\.py", sh, re.M)) == 1, "more than one reporter call site"
+    assert '--ref "$REPORT_REF"' in sh, "the reporter must be called with the mode-selecting ref variable"
+    assert re.search(r'^\s*ATTEST=1; REPORT_REF=""', sh, re.M), "attest mode must clear the reporter's ref"
+
+    root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": [[1, 8]]})
+    rc_gate, out_gate, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc_gate == 1, out_gate            # the discriminating half: this input DOES gate in diff mode
+    # The attested dir is the one this report's mutants were executed in: attesting any other
+    # is the blind spot test_mutate_attestation_fails_closed_when_an_attested_dir_ran_no_mutant
+    # pins, not a survivor question.
+    attest = ("--attest-ref", "origin/main", "--attest-tests", "tests/unit/test_l3_payload.cpp",
+              "--attest-dirs", "l3")
+    rc, out, doc = _report(tmp_path, root, reports, *attest)
+    assert rc == 0, out
+    assert doc["mode"] == "trend", doc["mode"]
+    assert doc["unlabelled"] == 1 and any(s["label"] is None for s in doc["survivors"]), doc
+    assert "UNLABELLED survivor: l3/x.cpp:2:11 cxx_ge_to_gt" in out, out
+    # Provenance lives in the file, not only in stdout (data-model §7 keys are all still there).
+    assert doc["attest"] == {"origin": "changed-tests", "diff_ref": "origin/main",
+                             "tests": ["tests/unit/test_l3_payload.cpp"], "dirs": ["l3"]}, doc
+    assert {"mode", "diff_ref", "mutants_total", "killed", "survived", "not_covered", "kill_rate",
+            "labelled", "unlabelled", "max_unlabelled", "survivors", "stale_labels",
+            "malformed_labels"} <= set(doc), sorted(doc)
+    # And the two are mutually exclusive by construction: an attestation is never a diff-mode run.
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main", *attest)
+    assert rc == 2 and "--attest-" in out, out
+
+
+def test_mutate_attestation_is_never_appended_to_the_whole_tree_trend_log(tmp_path):
+    """An attestation mutates one or two dirs; the trend log the nightly whole-tree run
+    appends to (build/mutate/trend.jsonl, .github/workflows/nightly.yml) records whole-tree
+    scores. Appending one to the other would silently put a partial score in the series, so
+    --trend-log is disclosed and dropped on that path — and the decision is taken early enough
+    that --dry-run shows it (this run needs no Mull)."""
+    clone = shared_clone(tmp_path, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    log = tmp_path / "trend.jsonl"
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--trend-log", str(log), "--dry-run")
+    assert rc == 0, out
+    assert "--trend-log not appended for a test-only attestation" in out, out
+    assert not log.exists(), log
+    # The whole-tree run it belongs to still takes it.
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--trend-log", str(log), "--dry-run")
+    assert rc == 0 and "not appended" not in out, out
+
+
+def test_mutate_source_change_scoping_is_unchanged(tmp_path):
+    """Changing a test must never widen what can fail a PR: with a source in scope the run is
+    byte-identical whether or not the same diff also touches tests/unit."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    src_only = shared_clone(tmp_path / "a", "link/zz_probe.cpp", "int zz_probe() { return 1; }\n")
+    rc_a, out_a, _ = run(src_only / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    both = shared_clone(tmp_path / "b", "link/zz_probe.cpp", "int zz_probe() { return 1; }\n")
+    _commit(both, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    rc_b, out_b, _ = run(both / "tools" / "mutate.sh", "--diff", "HEAD~2", "--dry-run")
+    assert rc_a == 0 and rc_b == 0, out_a + out_b
+    assert "mode=attest" not in out_b and "mode=attest" not in out_a, out_b
+    assert scope_line(out_a) == scope_line(out_b) == ["link/zz_probe.cpp"], (out_a, out_b)
+    assert oracle_line(out_a) == oracle_line(out_b), (out_a, out_b)
+    assert out_a.replace("HEAD~1", "<ref>") == out_b.replace("HEAD~2", "<ref>"), (out_a, out_b)
+
+
+def test_mutate_test_only_scope_without_oracle_fails_closed(tmp_path):
+    """The attested dir's oracle is the same test_<dir>_* set the source path computes, and
+    fails closed the same way: a test file naming a dir with no registered unit binary can
+    never kill a mutant, so the run fails before any build, with the blind spot named — it
+    does not fall back to the fast path and call that an attestation."""
+    clone = shared_clone(tmp_path, "tests/unit/test_core_health.cpp",
+                         "// a unit test for a dir with no registered unit binary\n")
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 1, out
+    assert "no unit-test oracle for changed dir 'core/'" in out and "blind spot" in out, out
+    assert "nothing in scope" not in out, out
+
+
+def test_mutate_test_scope_requires_a_source_extension(tmp_path):
+    """The test scope is `tests/unit/test_<dir>_*.<ext>` for <ext> in source_ext — the one
+    list. Without the extension anchor any `tests/unit/test_link_*` path buys a full link/
+    mutation run: a note, a fixture, a JSON blob. Red-team round 1 on #593 showed the AC's
+    cited evidence (test_source_extensions_have_one_source_of_truth) is as green with the
+    anchor deleted as with it, so this is the case that discriminates — it fails if the
+    `$EXT_RE` anchor is dropped from the test-scope grep (mutate.sh) and passes with it."""
+    for rel in ("tests/unit/test_link_notes.md", "tests/unit/test_link_master.cpp.bak"):
+        sub = tmp_path / rel.rsplit("/", 1)[1]
+        sub.mkdir()
+        clone = shared_clone(sub, rel, "not a source file\n")
+        rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", timeout=90)
+        assert rc == 0, (rel, out)
+        assert "mode=attest" not in out, (rel, out)
+        assert "mutation: nothing in scope (HEAD~1) — no changed sources under: l3 link core" in out, (rel, out)
+
+
+def test_mutate_attested_dir_with_no_source_fails_closed(tmp_path):
+    """The other blind spot on the attest path (mutate.sh, after the oracle rule): the changed
+    tests name a dir that holds no source file, so no mutant can exist there and the tests
+    attest nothing. That must fail closed, not report a green attestation over an empty scope.
+    Unreachable in today's tree — every scope dir that owns a test_<dir>_* binary also owns
+    sources — so the case is built: link/'s sources go in one commit (the directory itself
+    stays, or `find` would fail the script before this rule), the test edit in the next, and
+    the run is scoped to the second commit alone."""
+    clone = shared_clone(tmp_path, "docs/zz_probe.md", "a file outside every scope dir\n")
+    sources = [str(p.relative_to(clone)) for p in (clone / "link").iterdir() if p.is_file()]
+    subprocess.run(["git", "rm", "-q", "--", *sources], cwd=clone, check=True)
+    (clone / "link").mkdir(exist_ok=True)   # git drops the now-empty directory
+    (clone / "link" / "notes.md").write_text("the dir survives its sources\n")
+    subprocess.run(["git", "add", "link/notes.md"], cwd=clone, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"],
+                   cwd=clone, check=True)
+    _commit(clone, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 1, out
+    assert "no source file under the attested dir(s) 'link'" in out and "blind spot" in out, out
+    assert "nothing in scope" not in out, out
+    # The oracle rule ran first and was satisfied: this is the source blind spot, not that one.
+    assert "no unit-test oracle" not in out, out
+    assert oracle_line(out), out
+
+
+def _strip_sources(clone, d):
+    """Leave `d/` in the tree with no source file in it (the directory itself survives, or
+    `find` would fail the script before the rule under test)."""
+    sources = [str(p.relative_to(clone)) for p in (clone / d).iterdir() if p.is_file()]
+    subprocess.run(["git", "rm", "-q", "--", *sources], cwd=clone, check=True)
+    (clone / d).mkdir(exist_ok=True)
+    (clone / d / "notes.md").write_text("the dir survives its sources\n")
+    subprocess.run(["git", "add", f"{d}/notes.md"], cwd=clone, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"],
+                   cwd=clone, check=True)
+
+
+def test_mutate_attested_dir_with_no_source_fails_closed_inside_a_union(tmp_path):
+    """The same blind spot, per attested DIR rather than over their union (#593 red-team
+    round 4). A union attestation is the ordinary shape #146 exists to serve
+    (test_mutate_attestation_scope_is_the_union_of_the_changed_tests_dirs), and a whole-scope
+    test of the derived source scope passes one through whenever ANY attested dir has
+    sources: `find l3 link` is non-empty on l3/ alone, so `link` is named in `dirs=`, puts
+    seven test_link_* binaries in the oracle, and attests a directory in which no mutant can
+    exist. The control is the single-dir case above, which fails closed — if the exit were
+    independent of link/ being sourceless, neither would be evidence."""
+    clone = shared_clone(tmp_path, "docs/zz_probe.md", "a file outside every scope dir\n")
+    _strip_sources(clone, "link")
+    _commit(clone, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    _commit(clone, "tests/unit/test_l3_payload.cpp", TEST_EDIT)
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~2", "--dry-run")
+    assert "dirs=l3 link" in attest_line(out), attest_line(out)   # the union really is derived
+    assert rc == 1, out
+    assert "no source file under the attested dir(s) 'link'" in out and "blind spot" in out, out
+    # It names the sourceless dir and only it: l3/ does carry sources and attests fine.
+    assert "'l3 link'" not in out and "'l3'" not in out, out
+    assert "nothing in scope" not in out, out
+    assert "no unit-test oracle" not in out, out
+
+
+def test_mutate_attestation_scope_is_the_union_of_the_changed_tests_dirs(tmp_path):
+    """Nothing bounds an attestation to one directory: a diff touching both dirs' unit tests
+    attests both. This is the reachable MAXIMUM, and the number `deep-verify`'s 45-minute
+    budget has to hold — the #146 estimate reasoned about link/ alone (7 of 17 binaries),
+    which red-team round 1 on #593 showed is not the worst case. The wall clock itself stays
+    unmeasured here (Mull is absent; see docs/OPEN-QUESTIONS.md 2026-09-15): what this case
+    pins is the SIZE the measurement has to be taken at, not the time."""
+    clone = shared_clone(tmp_path, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    _commit(clone, "tests/unit/test_l3_payload.cpp", TEST_EDIT)
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~2", "--dry-run")
+    assert rc == 0, out
+    assert "dirs=l3 link" in attest_line(out), attest_line(out)
+    scope = scope_line(out)
+    assert {f.split("/")[0] for f in scope} == {"l3", "link"}, scope
+    oracle = oracle_line(out)
+    assert set(oracle) <= unit_binaries(), oracle
+    assert {b.split("_")[1] for b in oracle} == {"l3", "link"}, oracle
+    # Against the whole tree it contrasts itself with: the majority of the binaries, not 7/17.
+    assert len(oracle) > len(unit_binaries()) / 2, (len(oracle), len(unit_binaries()))
+
+
+def test_mutate_attestation_gates_on_a_broken_run_never_on_its_findings(tmp_path):
+    """What "never gates" means, rule by rule, against every `return 1` in mutate_report.py
+    that an attestation can reach — the previous case generalised from the unlabelled-survivor
+    rule alone and the PR body's "every gate rule is guarded on diff_mode" was false of the
+    other three (red-team round 1 on #593).
+
+    FINDINGS never gate: an attestation changes no source line, so every survivor and every
+    `mutant-ok` label it can read is pre-existing debt outside its diff. Gating on one is
+    Option B, which docs/OPEN-QUESTIONS.md 2026-09-14 rejected precisely because it fails PRs
+    on debt they did not touch.
+
+    A BROKEN RUN still fails closed: no reports and no mutants say the attestation did not
+    happen, so there is nothing to report and exit 0 would be a false green — the same
+    blind-spot rule the shell already applies for a missing oracle or an empty source scope."""
+    # l3/ is where this fixture's mutants were executed; attesting a dir the runner never
+    # entered is its own blind spot, pinned by
+    # test_mutate_attestation_fails_closed_when_an_attested_dir_ran_no_mutant.
+    ATTEST = ("--attest-ref", "origin/main", "--attest-tests", "tests/unit/test_l3_payload.cpp",
+              "--attest-dirs", "l3")
+
+    # (a) a malformed label already on main: gates without the attestation, listed with it.
+    for bad, msg in ((" // mutant-ok(whatever): not a category", "unknown label category 'whatever'"),
+                     (" // mutant-ok(equivalent):", "malformed label")):
+        src = list(SRC)
+        src[3] = "    if (a < 0)" + bad
+        root, reports = _setup(tmp_path, src, MUTANTS)
+        rc_gate, out_gate, _ = _report(tmp_path, root, reports)
+        assert rc_gate == 1 and msg in out_gate, out_gate     # discriminating: it DOES gate otherwise
+        rc, out, doc = _report(tmp_path, root, reports, *ATTEST)
+        assert rc == 0, out
+        assert msg in out, out                                # still reported, on stdout …
+        assert any(msg in m for m in doc["malformed_labels"]), doc   # … and in report.json
+        assert doc["attest"]["dirs"] == ["l3"], doc
+
+    # (b) a stale label stays a reported warning: suppressing the gate must not suppress the
+    # information the attestation exists to produce.
+    root, reports = _setup(tmp_path, SRC, [_mutant(4, 11, "cxx_lt_to_le", "Killed")])
+    rc, out, doc = _report(tmp_path, root, reports, *ATTEST)
+    assert rc == 0, out
+    assert doc["stale_labels"] and "warning: stale label: l3/x.cpp:4" in out, (doc, out)
+
+    # (c) the run did not happen: both blind spots still fail, and say which.
+    root, reports = _setup(tmp_path, SRC, [])
+    rc, out, _ = _report(tmp_path, root, reports, *ATTEST)
+    assert rc == 1 and "no mutants" in out and "blind spot" in out, out
+    for f in reports.glob("*.json"):
+        f.unlink()
+    rc, out, _ = _report(tmp_path, root, reports, *ATTEST)
+    assert rc == 1 and "no Mull reports" in out and "blind spot" in out, out
+
+    # (d) and the shell's own disclosure says exactly that, not "no gate at all".
+    clone = shared_clone(tmp_path / "shell", "tests/unit/test_link_master.cpp", TEST_EDIT)
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 0, out
+    assert "gate=none" not in attest_line(out), attest_line(out)
+    assert "gate=blind-spot-only" in attest_line(out), attest_line(out)
+
+
+def test_mutate_attestation_fails_closed_when_an_attested_dir_ran_no_mutant(tmp_path):
+    """The blind spot the attest path opens, and the one rule it is NOT covered by
+    (#593 red-team round 3, MEDIUM). mutate_report.py's per-changed-dir rule — written for an
+    `includePaths` regex that reaches one scope dir but not another — is guarded on
+    `diff_mode and ranges`, and an attestation is trend mode with no ranges, so that rule is
+    unreachable on the new path. Yet the attest path is the ONLY one that names specific
+    directories in report.json: the `test_<dir>_*` oracle binaries carry sibling dirs' mutants
+    too, so one mutant anywhere in scope keeps `total > 0`, the global "no mutants" rule stays
+    silent, and the run records a kill rate for a directory in which nothing was executed.
+
+    Same report, same rules, only `--attest-dirs` differing — if the reporter's exit were
+    independent of which dir is attested, the control below would be indistinguishable from
+    the attack and neither would be evidence."""
+    root, reports = _setup(tmp_path, SRC, MUTANTS)      # every mutant is in l3/x.cpp
+
+    def attest(dirs):
+        return ("--attest-ref", "origin/main",
+                "--attest-tests", " ".join(f"tests/unit/test_{d}_x.cpp" for d in dirs.split()),
+                "--attest-dirs", dirs)
+
+    rc, out, _ = _report(tmp_path, root, reports, *attest("link"))
+    assert rc == 1, out
+    assert "link/" in out and "blind spot" in out, out
+    assert "no mutant" in out, out
+    # A union attestation fails on the dir that ran nothing and names only that one.
+    rc, out, _ = _report(tmp_path, root, reports, *attest("l3 link"))
+    assert rc == 1, out
+    failed_on = [l for l in out.splitlines() if "blind spot" in l]
+    assert len(failed_on) == 1, out
+    assert "link/" in failed_on[0] and "l3/" not in failed_on[0], failed_on
+    # The discriminating control: attest the dir the mutants are actually in — exit 0, with the
+    # findings still listed and never gated (that is what the cases above pin).
+    rc, out, doc = _report(tmp_path, root, reports, *attest("l3"))
+    assert rc == 0, out
+    assert doc["attest"]["dirs"] == ["l3"], doc
+    assert doc["unlabelled"] == 1, doc
+
+
+def _two_dir_report(tmp_path, l3_status):
+    """One Elements report: both l3/x.cpp mutants at `l3_status`, one Killed link/y.cpp
+    mutant. The link/ mutant is why the global "no mutants in a non-empty scope" rule stays
+    silent — a dir's test_<dir>_* oracle binaries carry the sibling scope dirs' mutants too,
+    so the only rule left to notice l3/ is the per-dir one."""
+    root, reports = _setup(tmp_path, SRC, [])
+    (root / "link").mkdir(exist_ok=True)
+    (root / "link" / "y.cpp").write_text("int g(int a) {\n    if (a >= 4)\n        return 1;\n"
+                                         "    return 0;\n}\n")
+    (reports / "test_x.json").write_text(json.dumps({"files": {
+        str(root / "l3" / "x.cpp"): {"mutants": [_mutant(2, 11, "cxx_ge_to_gt", l3_status),
+                                                 _mutant(4, 11, "cxx_lt_to_le", l3_status)]},
+        str(root / "link" / "y.cpp"): {"mutants": [_mutant(2, 11, "cxx_ge_to_gt", "Killed")]}}}))
+    return root, reports
+
+
+def test_report_blind_spot_rules_count_mutants_the_runner_RAN_not_ones_it_listed(tmp_path):
+    """Both per-dir blind-spot rules ask whether the runner EXECUTED a mutant under a
+    directory, and a mutant in the Elements report is not evidence that it did: Mull reports
+    `NoCoverage` for a mutant no binary reached (the very shape RANK's own comment describes,
+    and the same thing the rules mean by "the oracle does not reach this directory"), and
+    `Ignored`/`Pending` for ones it never ran at all. Counting those made an attestation of a
+    directory whose mutants ALL came back unexecuted exit 0 at 100 % — the exact failure the
+    rule was written for (#593 red-team round 4).
+
+    An unknown status counts as not executed too: a Mull release adding one must fail closed,
+    not silently satisfy the rule."""
+    def attest(dirs):
+        return ("--attest-ref", "origin/main",
+                "--attest-tests", " ".join(f"tests/unit/test_{d}_x.cpp" for d in dirs.split()),
+                "--attest-dirs", dirs)
+
+    for status in ("NoCoverage", "Ignored", "Pending", "SomeStatusMullAddsLater"):
+        root, reports = _two_dir_report(tmp_path, status)
+        rc, out, doc = _report(tmp_path, root, reports, *attest("l3"))
+        assert rc == 1, (status, out)
+        assert "l3/" in out and "blind spot" in out and "no mutant" in out, (status, out)
+        # And the green it used to produce is exactly what must not be on offer.
+        assert "mutation: PASS" not in out, (status, out)
+
+    # The discriminating control, same fixture and same rule: a status that means a binary
+    # really ran the mutant attests fine, so the exit is not independent of the status.
+    for status in ("Survived", "Killed"):
+        root, reports = _two_dir_report(tmp_path, status)
+        rc, out, doc = _report(tmp_path, root, reports, *attest("l3"))
+        assert rc == 0, (status, out)
+        assert doc["attest"]["dirs"] == ["l3"], (status, doc)
+
+    # The same question in diff mode, where the per-changed-dir rule was already reachable:
+    # l3/x.cpp's changed lines produce only NoCoverage mutants, so `not_covered` keeps the
+    # global rule quiet while nothing under l3/ was ever executed.
+    root, reports = _two_dir_report(tmp_path, "NoCoverage")
+    (tmp_path / "ranges.json").write_text(json.dumps({"l3/x.cpp": [[1, 8]]}))
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc == 1, out
+    assert "no mutants under l3/" in out and "blind spot" in out, out
+
+
+def test_report_attest_flags_are_all_or_nothing(tmp_path):
+    """`--attest-*` suppresses the malformed-label gate, so a caller must not be able to
+    switch it off by accident: any ONE of the three flags used to do it (#593 red-team round 3),
+    which meant an ordinary whole-tree run with a stray `--attest-dirs` lost the gate
+    `test_report_malformed_label_fails_in_every_mode` exists to hold, and recorded
+    `origin: changed-tests` with `tests: []` — a provenance false on its face. The three
+    describe one attestation and are now required together; anything partial is a usage error
+    (exit 2), never a quietly suppressed gate."""
+    src = list(SRC)
+    src[3] = "    if (a < 0) // mutant-ok(whatever): unknown category, malformed"
+    root, reports = _setup(tmp_path, src, MUTANTS)
+    ALL = ("--attest-ref", "origin/main", "--attest-tests", "tests/unit/test_l3_x.cpp",
+           "--attest-dirs", "l3")
+    # The gate this is about, with no attest flag at all: it fails, in trend mode.
+    rc, out, _ = _report(tmp_path, root, reports)
+    assert rc == 1 and "malformed mutant-ok label(s) — failing" in out, out
+    # One or two of the three — all six non-empty proper subsets, the sixth being
+    # {--attest-ref, --attest-dirs}, red-team round 3's stray flag with a ref attached: a
+    # usage error, and the gate is NOT suppressed on the way.
+    for partial in (ALL[:2], ALL[2:4], ALL[4:], ALL[:4], ALL[2:], ALL[:2] + ALL[4:]):
+        rc, out, _ = _report(tmp_path, root, reports, *partial)
+        assert rc == 2, (partial, out)
+        assert "must be given together" in out, (partial, out)
+        assert "NOT gated" not in out, (partial, out)
+    # All three — the only caller shape mutate.sh produces — still suppresses it, as the
+    # 2026-09-14 ruling requires.
+    rc, out, doc = _report(tmp_path, root, reports, *ALL)
+    assert rc == 0, out
+    assert "malformed mutant-ok label(s) in the attested dir(s) — reported, NOT gated" in out, out
+    assert doc["attest"]["tests"] == ["tests/unit/test_l3_x.cpp"], doc
+
+
+def test_report_attest_flags_reject_a_blank_value(tmp_path):
+    """The all-or-nothing rule is about CONTENT, not truthiness: a single space is a truthy
+    Python string, so `all()` accepted it while `.split()` gave [] — the gate suppressed, the
+    per-attested-dir blind-spot rule iterating nothing, and `report.json` carrying
+    `origin: changed-tests` with `tests: []` and `dirs: []`, verbatim the provenance-false-on-
+    its-face shape the all-or-nothing rule exists to prevent (#593 red-team round 4). The
+    threat model is a caller's mis-expanded flag (`--attest-dirs "$DIRS "` with DIRS unset),
+    the same one round 3's finding had, so a blank value must be the same exit-2 usage error
+    an empty one already is. tools/mutate.sh cannot emit one (ATTEST_DIRS is non-empty
+    whenever ATTEST=1), so this is the reporter's own guard, not a reachable CI path."""
+    src = list(SRC)
+    src[3] = "    if (a < 0) // mutant-ok(whatever): unknown category, malformed"
+    root, reports = _setup(tmp_path, src, MUTANTS)
+    GOOD = ["origin/main", "tests/unit/test_l3_x.cpp", "l3"]
+    for blank in (" ", "\t", "  \n "):
+        for i in range(len(GOOD)):
+            vals = list(GOOD)
+            vals[i] = blank
+            rc, out, _ = _report(tmp_path, root, reports, "--attest-ref", vals[0],
+                                 "--attest-tests", vals[1], "--attest-dirs", vals[2])
+            assert rc == 2, (blank, i, out)
+            assert "must be given together" in out, (blank, i, out)
+            assert "NOT gated" not in out, (blank, i, out)
+        # All three blank is the same usage error, not a quietly ungated whole-tree run.
+        rc, out, _ = _report(tmp_path, root, reports, "--attest-ref", blank,
+                             "--attest-tests", blank, "--attest-dirs", blank)
+        assert rc == 2, (blank, out)
+        assert "must be given together" in out and "NOT gated" not in out, (blank, out)
+    # The discriminating control: the same three flags with content are accepted, and no
+    # attest flag at all still leaves the gate where it was.
+    rc, out, _ = _report(tmp_path, root, reports, "--attest-ref", GOOD[0],
+                         "--attest-tests", GOOD[1], "--attest-dirs", GOOD[2])
+    assert rc == 0 and "NOT gated" in out, out
+    rc, out, _ = _report(tmp_path, root, reports)
+    assert rc == 1 and "malformed mutant-ok label(s) — failing" in out, out
+
+
+# --- tools/mutate.sh -> tools/mutate_report.py: the attestation is HANDED OVER, end to end ------
+# Every other mutate.sh case above stops at --dry-run or at the missing-Mull skip, so the half
+# of the script that hands the attestation to the reporter — ATTEST_ARGS, --ref "$REPORT_REF",
+# the runner loop — was covered by a regex over the script's own source text alone. Red-team
+# round 2 on #593 emptied ATTEST_ARGS and the whole file stayed green: with the --attest-* args
+# gone the reporter sees a plain trend run, where a malformed `mutant-ok` label already on main
+# exits 1 — the Option-B failure (redding a PR for debt it never touched) that
+# docs/OPEN-QUESTIONS.md 2026-09-14 rejected and this path exists to prevent.
+#
+# Mull is absent here and in CI's `native` job, so the runner, cmake and clang++ are shimmed,
+# the way tools/fuzz-smoke.sh's cases shim the five fuzzers (#141 review): what is REAL in this
+# case is tools/mutate.sh, tools/mutate_report.py and everything that passes between them. What
+# it does NOT cover, and what still needs a run with Mull installed: the instrumented build,
+# the phase-2 includePaths filter, and the shape of a real Elements report.
+_MULL_SHIM = r"""#!/usr/bin/env bash
+# Stand-in for mull-runner: writes one canned Elements report for the target binary, says
+# "No mutants found" for the rest of the oracle, and exits non-zero — the real runner does that
+# whenever survivors exist, and mutate.sh must not read it as a failure.
+name=""; dir="reports"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --report-name) name="$2"; shift 2 ;;
+    --report-dir) dir="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+mkdir -p "$dir"
+root=$(cd ../.. && pwd -P)     # the runner's cwd is the build dir (mutate.sh cds there)
+if [ "$name" = "$MULL_SHIM_TARGET" ]; then
+  cat > "$dir/$name.json" <<JSON
+{"files": {"$root/$MULL_SHIM_FILE": {"mutants": [
+  {"id": "cxx_ge_to_gt:$MULL_SHIM_LINE:9", "mutatorName": "cxx_ge_to_gt", "status": "Survived",
+   "location": {"start": {"line": $MULL_SHIM_LINE, "column": 9},
+                "end": {"line": $MULL_SHIM_LINE, "column": 10}}}]}}}
+JSON
+  echo "Surviving mutants: 1"
+else
+  echo "No mutants found"
+fi
+exit 1
+"""
+
+_CMAKE_SHIM = r"""#!/usr/bin/env bash
+# Stand-in for cmake: configuring is a no-op, and `--build <dir> ... --target a b c` drops an
+# executable stub for every named target — all the runner loop needs to get past its
+# "oracle binary was not built" blind-spot rule.
+if [ "$1" = "--build" ]; then
+  dir=$2; shift 2
+  in_targets=0
+  for a in "$@"; do
+    [ "$a" = "--target" ] && { in_targets=1; continue; }
+    case "$a" in --*) continue ;; esac
+    [ "$in_targets" = 1 ] && { printf '#!/bin/sh\nexit 0\n' > "$dir/$a"; chmod +x "$dir/$a"; }
+  done
+fi
+exit 0
+"""
+
+# An UNTRACKED source under the attested dir: `git diff` never lists untracked files, so the
+# diff stays test-only (asserted below) while `find link -type f` — the attestation's scope —
+# picks it up. Its label is malformed on purpose: that is the rule which gates in trend mode
+# and must not gate on an attestation.
+PROBE_REL = "link/zz_attest_probe.cpp"
+PROBE_SRC = ("// an untracked probe source: in the attested dir, not in the diff\n"
+             "int zz_attest_probe(int a) {\n"
+             "    if (a >= 4) // mutant-ok(whatever): not a category — malformed, and already on main\n"
+             "        return 1;\n"
+             "    return 0;\n"
+             "}\n")
+PROBE_MUTANT_LINE = 3
+
+
+def test_mutate_attestation_is_handed_to_the_reporter_end_to_end(tmp_path):
+    """mutate.sh run to completion on a test-only diff, with the runner shimmed: the reporter
+    must receive the attestation (`--attest-ref/--attest-tests/--attest-dirs`) and the empty ref,
+    so a malformed label already in the attested dir is REPORTED and the run exits 0. Drop the
+    ATTEST_ARGS block from mutate.sh and this case fails on both halves — exit 1 and no
+    `attest` key in report.json — which is what no other case in this file does."""
+    clone = shared_clone(tmp_path, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    (clone / PROBE_REL).write_text(PROBE_SRC)
+    changed = subprocess.run(["git", "diff", "--name-only", "HEAD~1"], cwd=clone,
+                             capture_output=True, text=True, check=True).stdout.split()
+    # The diff is test-only: the probe is untracked, and nothing under a scope dir is in it.
+    # (tools/mutate.sh itself can be: shared_clone copies the working-tree script in.)
+    assert "tests/unit/test_link_master.cpp" in changed, changed
+    assert not [f for f in changed if f.split("/")[0] in ("l3", "link", "core")], changed
+
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "cmake").write_text(_CMAKE_SHIM)
+    (shim / "clang++").write_text('#!/usr/bin/env bash\necho "clang version 18.1.8"\nexit 0\n')
+    (shim / "mull-runner").write_text(_MULL_SHIM)
+    for tool in ("cmake", "clang++", "mull-runner"):
+        (shim / tool).chmod(0o755)
+    (shim / "mull-ir-frontend").write_text("not a real plugin; mutate.sh only tests -f\n")
+
+    env = {"PATH": f"{shim}:{os.environ['PATH']}", "OMGP_CLANG_MAJOR": "18",
+           "MULL_RUNNER": str(shim / "mull-runner"), "MULL_PLUGIN": str(shim / "mull-ir-frontend"),
+           "MULL_SHIM_TARGET": "test_link_master", "MULL_SHIM_FILE": PROBE_REL,
+           "MULL_SHIM_LINE": str(PROBE_MUTANT_LINE)}
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--require",
+                     env_overrides=env, timeout=300)
+    assert rc == 0, out
+    assert "mutation: PASS" in out, out
+    assert "gate=blind-spot-only" in attest_line(out), out
+    # The mull-present line: this run really did get past the tool check into the runner loop.
+    assert "test-only attestation of link — trend only; no finding gates" in out, out
+    assert "mutation: test_link_master: Surviving mutants: 1" in out, out
+    doc = json.loads((clone / "build" / "mutate" / "report.json").read_text())
+    # The provenance the shell derived, as the reporter recorded it — the whole point of the
+    # call site this case exists to cover.
+    assert doc["attest"] == {"origin": "changed-tests", "diff_ref": "HEAD~1",
+                             "tests": ["tests/unit/test_link_master.cpp"], "dirs": ["link"]}, doc
+    assert doc["mode"] == "trend", doc
+    # … and the finding that would have gated a trend run is reported, not gated.
+    assert any("unknown label category 'whatever'" in m for m in doc["malformed_labels"]), doc
+    assert f"ERROR: {PROBE_REL}:{PROBE_MUTANT_LINE}: unknown label category 'whatever'" in out, out
+    assert "malformed mutant-ok label(s) in the attested dir(s) — reported, NOT gated" in out, out
+
+
 # --- tools/mutate_report.py: the triage gate on synthetic Elements reports --------------------
 
 REPORT = ROOT / "tools" / "mutate_report.py"
