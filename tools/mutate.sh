@@ -36,9 +36,15 @@
 # gate"): a diff that changes tests/unit/test_<dir>_* and NO source under <dir> has no changed
 # line to gate, so it used to end at "nothing in scope" — a PR whose whole purpose is killing
 # mutants was attested by nothing (observed on #142). That diff now mutates the changed tests'
-# directories whole, in TREND mode: survivors are reported, and because trend mode never
-# gates, a test-only PR can still not fail on survivors sitting on lines it did not change
-# (Option B, rejected). A diff that does change a source in scope is untouched by this.
+# directories whole, in TREND mode, and NO FINDING of that run gates: not a survivor, not a
+# malformed `mutant-ok` label, not the kill rate. All of them sit on lines the diff did not
+# change, so gating on one is the Option B that ruling rejected. What still fails, here and
+# in mutate_report.py, is the run failing to HAPPEN — no oracle binary for an attested dir,
+# no source file under one, no Mull report, no mutant in a non-empty scope — because an
+# empty attestation reported green is a false green. That is the blind-spot rule the rest of
+# this script already applies, not a gate on the PR's content: `gate=blind-spot-only` on the
+# mode line says exactly that. A diff that does change a source in scope is untouched by all
+# of this.
 #
 #   ./tools/mutate.sh --diff origin/main --require     # CI: fail if Mull is missing
 #   ./tools/mutate.sh --diff HEAD~1                    # local: disclosed skip if Mull is missing
@@ -147,8 +153,8 @@ if [ -n "$TEST_SCOPE" ]; then
   ATTEST=1; REPORT_REF=""
   # `#` as the sed delimiter: DIRS_RE is an alternation, so `|` would end the expression.
   ATTEST_DIRS=$(echo "$TEST_SCOPE" | sed -E "s#^tests/unit/test_($DIRS_RE)_.*#\1#" | sort -u)
-  echo "mutation: mode=attest ref=$REF dirs=$(oneline "$ATTEST_DIRS") report=trend gate=none tests=$(oneline "$TEST_SCOPE")"
-  echo "mutation: that diff changes no source under $SCOPE_DIRS, only unit tests of the dir(s) above — mutating them whole and reporting; a survivor on a line this diff did not change is listed, never gated (#146, docs/OPEN-QUESTIONS.md 2026-09-14)"
+  echo "mutation: mode=attest ref=$REF dirs=$(oneline "$ATTEST_DIRS") report=trend gate=blind-spot-only tests=$(oneline "$TEST_SCOPE")"
+  echo "mutation: that diff changes no source under $SCOPE_DIRS, only unit tests of the dir(s) above — mutating them whole and reporting; no finding of this run gates (a survivor or a malformed label on a line this diff did not change is listed, never gated), but a run that cannot happen at all still fails closed (#146, docs/OPEN-QUESTIONS.md 2026-09-14)"
   # Trend mode has no changed-line ranges to narrow to, so the dirs' own sources are the scope.
   # shellcheck disable=SC2086
   SCOPE=$(find $ATTEST_DIRS -type f \( "${FIND_EXT[@]}" \) 2>/dev/null | sort)
@@ -215,7 +221,7 @@ if ! command -v "$RUNNER" >/dev/null 2>&1 || [ ! -f "$PLUGIN" ] || ! command -v 
   exit 0
 fi
 if [ "$ATTEST" -eq 1 ]; then
-  echo "mutation: mull $VERSION via $RUNNER (clang $CLANG_MAJOR); test-only attestation of $(oneline "$ATTEST_DIRS") — trend only, no gate"
+  echo "mutation: mull $VERSION via $RUNNER (clang $CLANG_MAJOR); test-only attestation of $(oneline "$ATTEST_DIRS") — trend only; no finding gates, a blind spot still does"
 elif [ -n "$REF" ]; then
   echo "mutation: mull $VERSION via $RUNNER (clang $CLANG_MAJOR); gate: max ${MAX_UNLABELLED} unlabelled survivor(s) on changed lines"
 else

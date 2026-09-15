@@ -18,13 +18,23 @@ Policy (tools/mutate.cfg [policy] — T3 constants, never relaxed to get green):
     with <category> in `label_categories` (equivalent | accepted). Naming mutators restricts
     the label to those mutators on that line; a label without names covers every mutant on
     the line. An unknown category, or an empty justification, is a malformed label and
-    fails the run in every mode (it is a policy syntax error, not a score).
+    fails the run in diff and trend mode (it is a policy syntax error, not a score). The one
+    exception is an attestation (--attest-*, below): it has no changed source line, so every
+    label it can read was already on main and gating on one would fail a PR for debt it did
+    not touch — there it is reported and recorded, never gated.
   * --ref given (diff-scoped; CI deep-verify): survivors on lines the diff added or changed
     must all be labelled — exit 1 when the unlabelled count exceeds
     `max_unlabelled_survivors` (0).
   * no --ref (whole tree; nightly): the score is a trend, reported (and appended to
     --trend-log when given) and never gated. Exit 1 only for tool failures: no reports,
     no mutants in a non-empty scope, malformed labels.
+  * --attest-* given (a test-only PR's attestation; tools/mutate.sh, #146, ruling
+    docs/OPEN-QUESTIONS.md 2026-09-14 "Option A — attest, never gate"): trend mode over the
+    dirs whose unit tests the diff changed. NO finding of the run gates — not a survivor,
+    not a label, not the kill rate — because the diff changed no source line, so every
+    finding is pre-existing debt and gating on it is the Option B that ruling rejected.
+    What still exits 1 is the run failing to happen: no reports, or no mutants in a
+    non-empty scope. Those say the attestation is empty, and exit 0 would be a false green.
   * A label whose line has no surviving mutant it could cover is STALE (the test was
     written or the code moved) — reported as a warning, never counted as a survivor.
   * "No mutants in a non-empty scope" is a tool-failure signal (blind spot: instrumentation
@@ -418,8 +428,9 @@ def main(argv=None) -> int:
         report["attest"] = {"origin": "changed-tests", "diff_ref": args.attest_ref,
                             "tests": args.attest_tests.split(), "dirs": args.attest_dirs.split()}
         print(f"mutation: attested from changed tests ({args.attest_tests or '?'}) at "
-              f"{args.attest_ref or '?'}: {mode} mode over {args.attest_dirs or '?'} — survivors are "
-              f"listed above and never gate (#146)")
+              f"{args.attest_ref or '?'}: {mode} mode over {args.attest_dirs or '?'} — no finding of "
+              f"this run gates (survivors, labels and the kill rate are all listed, never exit 1); "
+              f"a run that did not happen still does (#146)")
     out = pathlib.Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2) + "\n")
@@ -430,8 +441,17 @@ def main(argv=None) -> int:
     if malformed:
         # Before the count-based rules: a malformed label is a policy syntax error in every
         # mode and at every count, including the zero-mutant exemptions just below.
-        print(f"mutation: {len(malformed)} malformed mutant-ok label(s) — failing (policy syntax, see ERROR lines)")
-        return 1
+        # Not on an attestation, though: with no changed source line, `in_scope` is
+        # directory-wide, so this scan reads every label in the attested dirs — all of them
+        # already on main. Failing there would red a test-only PR for debt it never touched,
+        # which is exactly the Option B docs/OPEN-QUESTIONS.md 2026-09-14 rejected (#146).
+        # Reported and recorded in report.json either way; the gate is the next PR that
+        # changes a line under it, or the nightly whole-tree run.
+        if not attest:
+            print(f"mutation: {len(malformed)} malformed mutant-ok label(s) — failing (policy syntax, see ERROR lines)")
+            return 1
+        print(f"mutation: {len(malformed)} malformed mutant-ok label(s) in the attested dir(s) — reported, "
+              f"NOT gated: this diff changed no source line, so they are pre-existing (see ERROR lines, #146)")
     if total + not_covered == 0:
         # Every changed file in scope (ranges' keys — diff mode only; whole-tree has no
         # single file list to check) structurally unable to carry a mutant on a changed line —

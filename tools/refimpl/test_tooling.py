@@ -344,9 +344,11 @@ def test_mutate_diff_with_no_unit_oracle_fails_closed(tmp_path):
 # attestation at all (observed on #142, where four kills rested only on the author's local
 # runs). Ruling docs/OPEN-QUESTIONS.md 2026-09-14, Option A: a diff that changes
 # tests/unit/test_<dir>_* and no source under <dir> derives a TEST scope, runs that dir's
-# mutants in TREND mode and reports. Trend mode never gates, so the attestation cannot fail a
-# PR on survivors sitting on lines it did not change (Option B, rejected). What stays exactly
-# as it was: a diff that does change a source in scope.
+# mutants in TREND mode and reports. No FINDING of that run gates — survivors, labels and the
+# kill rate all sit on lines the diff did not change, and gating on one is the Option B that
+# ruling rejected — while a run that cannot happen (no oracle, no source, no report, no
+# mutant) still fails closed, as everywhere else in this harness. What stays exactly as it
+# was: a diff that does change a source in scope.
 
 def attest_line(out):
     lines = [l for l in out.splitlines() if l.startswith("mutation: mode=attest")]
@@ -405,18 +407,22 @@ def test_mutate_unrelated_test_change_is_still_nothing_in_scope(tmp_path):
     assert dt < 60, dt
 
 
-def test_mutate_test_only_attestation_never_gates(tmp_path):
+def test_mutate_test_only_attestation_never_gates_on_survivors(tmp_path):
     """Two halves, labelled. (a) The shell states the mode it will run the reporter in, and
     passes it the empty ref that selects trend mode — proved for the printed claim by this
     run, and for the reporter call by reading the single call site (mutate.sh is not run to
-    completion here: that needs Mull). (b) The reporter in that mode does not gate: the very
-    input that exits 1 with --ref exits 0 without it, while still LISTING the unlabelled
-    survivor and recording where the attestation came from."""
+    completion here: that needs Mull). (b) The reporter in that mode does not gate on the
+    rule this case is about: the very input that exits 1 with --ref exits 0 without it, while
+    still LISTING the unlabelled survivor and recording where the attestation came from.
+
+    Survivors are ONE of mutate_report.py's exit-1 rules; the others are in
+    test_mutate_attestation_gates_on_a_broken_run_never_on_its_findings, because generalising
+    "does not gate" from this case alone is what made the #593 body's claim false."""
     clone = shared_clone(tmp_path, "tests/unit/test_link_master.cpp", TEST_EDIT)
     rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
     assert rc == 0, out
     line = attest_line(out)
-    assert "report=trend" in line and "gate=none" in line, line
+    assert "report=trend" in line and "gate=blind-spot-only" in line, line
     sh = MUTATE.read_text()
     assert len(re.findall(r"^python3 tools/mutate_report\.py", sh, re.M)) == 1, "more than one reporter call site"
     assert '--ref "$REPORT_REF"' in sh, "the reporter must be called with the mode-selecting ref variable"
@@ -444,7 +450,8 @@ def test_mutate_test_only_attestation_never_gates(tmp_path):
 
 
 def test_mutate_attestation_is_never_appended_to_the_whole_tree_trend_log(tmp_path):
-    """An attestation mutates one or two dirs; metrics/mutation-trend.jsonl records whole-tree
+    """An attestation mutates one or two dirs; the trend log the nightly whole-tree run
+    appends to (build/mutate/trend.jsonl, .github/workflows/nightly.yml) records whole-tree
     scores. Appending one to the other would silently put a partial score in the series, so
     --trend-log is disclosed and dropped on that path — and the decision is taken early enough
     that --dry-run shows it (this run needs no Mull)."""
@@ -517,6 +524,7 @@ def test_mutate_attested_dir_with_no_source_fails_closed(tmp_path):
     clone = shared_clone(tmp_path, "docs/zz_probe.md", "a file outside every scope dir\n")
     sources = [str(p.relative_to(clone)) for p in (clone / "link").iterdir() if p.is_file()]
     subprocess.run(["git", "rm", "-q", "--", *sources], cwd=clone, check=True)
+    (clone / "link").mkdir(exist_ok=True)   # git drops the now-empty directory
     (clone / "link" / "notes.md").write_text("the dir survives its sources\n")
     subprocess.run(["git", "add", "link/notes.md"], cwd=clone, check=True)
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"],
