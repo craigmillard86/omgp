@@ -1188,6 +1188,83 @@ TEST_CASE("a late fallback-rate answer after a reference-rate clear does not enr
     REQUIRE_FALSE(tracker.bus_fault());
 }
 
+TEST_CASE("after a clear, ordinary status-poll answers at the rate in use recover and keep a node "
+          "whatever rate its last fault-time probe used",
+          "[timing:bit_rate_fallback]") {
+    // Round-16 review and red team on #530 [HIGH]: the round-15 rule read the rate of the
+    // node's LAST PROBE (`probe_fallback`, written only by probes, never by status polls) and
+    // suppressed every later ok that disagreed with the rate in use — for ever. After a
+    // fallback-rate clear, A (last probed by the pass at the reference rate) answered every
+    // status poll and stayed SUSPECT until it aged to OFFLINE; C, enrolled by the clear, never
+    // had its failure count reset and three failures spread across any number of good polls
+    // drove it to SUSPECT and a re-declared fault on a trunk answering every poll. The rule
+    // now applies only to a fault-time probe still outstanding inside its outcome window;
+    // an ordinary poll answer, seconds later, is what it always was.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    ThreeNodeRig::build(tracker);
+    REQUIRE(probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate_fallback).addr == kNodeC);
+    tracker.on_result(kNodeC, true, 10'000); // C's fallback answer: the pass starts
+    uint64_t t = 11'000;
+    for (int i = 0; i < 3; ++i) { // the pass draws nothing: cleared at the fallback rate
+        const Probe p = tracker.next_probe(t);
+        tracker.on_result(p.addr, false, t += 1'000);
+    }
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(tracker.state(kNodeA) == HealthState::SUSPECT);
+    REQUIRE(tracker.state(kNodeC) == HealthState::ENROLLED);
+    // A, strapped to 115 200 too, answers a status poll at the rate in use, seconds later.
+    tracker.mark_polled(kNodeA, 10'000'000);
+    tracker.on_result(kNodeA, true, 10'000'000);
+    REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED);
+    // C answers polls with two failures between good answers: never three in a row.
+    uint64_t tc = 10'100'000;
+    for (int i = 0; i < 4; ++i) {
+        tracker.on_result(kNodeC, false, tc += 1'000);
+        tracker.on_result(kNodeC, false, tc += 1'000);
+        tracker.on_result(kNodeC, true, tc += 1'000); // the good answer resets the count
+    }
+    REQUIRE(tracker.state(kNodeC) == HealthState::ENROLLED);
+    REQUIRE_FALSE(tracker.bus_fault());
+}
+
+TEST_CASE("a late failure for a written-off pass probe is not applied as a fresh §6 failure",
+          "[timing:bit_rate_fallback][timing:T_resp]") {
+    // Round-16 red team on #530, follow-up 2: the write-off already spent B's pass probe as
+    // "drew nothing"; its late outcome inside the window — ok OR failure — is that same
+    // probe's, not new evidence. A late failure applied again pushed a SUSPECT node past its
+    // offline threshold on one probe counted twice. Outside the window, or for an address with
+    // no probe outstanding, an outcome is ordinary.
+    constexpr uint64_t kWindow =
+        2ull * kMaxWire * byte_time_us(omgp::TRUNK_bit_rate_fallback) + omgp::TRUNK_T_resp_us;
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    ThreeNodeRig::build(tracker); // B SUSPECT since ~2'000 us
+    REQUIRE(probe_until(tracker, kNodeC, omgp::TRUNK_bit_rate_fallback).addr == kNodeC);
+    // Let B age past its offline threshold before anything else, so a counted failure would
+    // move it to OFFLINE and an ignored one would not.
+    const uint64_t t1 = 2'000 + kThresholdUs + 1'000;
+    tracker.on_result(kNodeC, true, t1);    // C's fallback answer: the pass starts
+    Probe p = tracker.next_probe(t1 + 100); // pass probe A
+    REQUIRE(p.addr == kNodeA);
+    tracker.on_result(kNodeA, false, t1 + 200);
+    const uint64_t tb = t1 + 300;
+    p = tracker.next_probe(tb); // pass probe B — abandoned
+    REQUIRE(p.addr == kNodeB);
+    p = tracker.next_probe(tb + kWindow + 1); // B written off; pass probe C
+    REQUIRE(p.addr == kNodeC);
+    tracker.on_result(kNodeC, false, tb + kWindow + 2); // the pass ends: cleared at 115 200
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.state(kNodeB) == HealthState::SUSPECT);
+    const size_t offline_before = listener.count(Notice::OFFLINE);
+    tracker.on_result(kNodeB, false, tb + kWindow + 3);     // the late failure for the spent probe
+    REQUIRE(tracker.state(kNodeB) == HealthState::SUSPECT); // not counted twice
+    REQUIRE(listener.count(Notice::OFFLINE) == offline_before);
+}
+
 TEST_CASE("a second outstanding probe does not cancel the first's episode-boundary exemption",
           "[timing:bit_rate_fallback][timing:T_resp]") {
     // Round-10 review on #530, finding 1 [HIGH]: round 9's "newest handout supersedes" rule
