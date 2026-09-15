@@ -1691,6 +1691,36 @@ TEST_CASE("A Garbage, Babble or Rate step the mock cannot honour is refused by n
         wire.advance_to(tx_end + 10000 * bt);
         REQUIRE(drain_all(wire).empty());
     }
+
+    SECTION("Kind::Babble in the 0xFF wildcard script") {
+        FakeClock clock;
+        // contracts/mock-wire.md:21 makes Babble fire "regardless of addressee" and :25 makes a
+        // 0xFF step "apply to every node" — but the two together name no burst count for a
+        // single request, and fire_foreign_babble() deliberately scans per-node scripts only
+        // (mock_wire.cpp), so a wildcard Babble could otherwise only reach the ADDRESSED node
+        // and would be Kind::Garbage wearing another Kind's name. Refused by name rather than
+        // honoured as that narrower thing: docs/OPEN-QUESTIONS.md 2026-09-15 "A `Kind::Babble`
+        // step in the 0xFF wildcard script".
+        static const Step steps[] = {{0xFF, Kind::Babble, 50, 24, 0x0B0BB1Eu}};
+        MockWire wire(clock);
+        wire.set_script(0xFF, steps, 1);
+        const std::vector<uint8_t> req = encode_request(0x01, 0);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        const char* fault = wire.take_fault();
+        REQUIRE(fault != nullptr);
+        REQUIRE(std::string(fault).find("wildcard") != std::string::npos);
+        wire.advance_to(tx_end + 10000 * bt);
+        REQUIRE(drain_all(wire).empty());
+
+        // Refused, not silently skipped past: the step was drawn (the wildcard cursor moved),
+        // so the next poll of the same node falls through to the exhausted-script default
+        // Respond rather than raising the same fault a second time.
+        const std::vector<uint8_t> req2 = encode_request(0x01, 1);
+        const uint64_t tx_end2 = wire.transmit(req2.data(), req2.size(), clock.now_us());
+        REQUIRE(wire.take_fault() == nullptr);
+        wire.advance_to(tx_end2 + omgp::TRUNK_T_turn_min_us + 10000 * bt);
+        REQUIRE(frames_in(drain_all(wire)) == 1);
+    }
 }
 
 // --- MockWire::inject_bytes(), directly (tasks.md T028: "plus a direct test of
