@@ -4034,3 +4034,28 @@ ship a timeout. No timeout, cap or budget constant is introduced here: `tools/mu
 **Ruling:** PENDING — human (the measurement above; the A/B question is already ruled).
 **Amends:** the 2026-09-14 "#146 … Option A" entry (records its implementation and the one
 undischarged evidence item). **Supersedes:** none.
+
+---
+
+## 2026-09-15 — #62 (T044) AC6: the 2026-09-12 empty-scope discharge applies; cites PR #530
+
+**Context:** #62 (T044)'s fourth acceptance criterion, a "local mutation run", is the same shape
+the 2026-09-12 T040/#58 ruling already decided: #62's own diff (`pipeline.sh`, a comment table,
+`tasks.md`) touches nothing under `tools/mutate.cfg`'s `scope_dirs` (`l3 link core`), so any run
+it could produce would be vacuous — `tools/mutate.sh:105-108` exits "nothing in scope" before the
+Mull presence check even runs. claude[bot]'s three dispatch attempts on #62 (2026-09-15 06:47,
+06:52, 19:33) found this independently each time and cited where the real evidence for `link/`'s
+scoped sources actually lives: **PR #530** (issues #59+#61), whose CI `deep-verify` mutation run
+drove the triage that now lives in-tree as `mutant-ok` labels across `link/` — 38 total, verified
+here by `grep -rc mutant-ok link/`: `health.cpp` 15, `responder.cpp` 10, `master.cpp` 9,
+`frame.cpp` 3, `responder.hpp` 1.
+
+**Ruling:** human, 2026-09-15. Applying the 2026-09-12 ruling's own terms ("a human ticks it, or
+rules the clause discharged here"): **AC6 is discharged for #62**, citing PR #530's `deep-verify`
+run and the `mutant-ok` triage above. This is the standing 2026-09-12 principle applied to a
+second checkpoint, not a new one — recorded per-issue because `tasks.md` still asks for the
+clause literally, and #146's attestation mechanism (delivered 2026-09-15, previous entry) is what
+will eventually make this mechanical instead of a fresh ruling per checkpoint.
+
+**Amends:** none — applies the 2026-09-12 T040/#58 ruling's stated principle to #62.
+**Supersedes:** none.
