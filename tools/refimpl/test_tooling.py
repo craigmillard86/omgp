@@ -431,8 +431,11 @@ def test_mutate_test_only_attestation_never_gates_on_survivors(tmp_path):
     root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": [[1, 8]]})
     rc_gate, out_gate, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
     assert rc_gate == 1, out_gate            # the discriminating half: this input DOES gate in diff mode
-    attest = ("--attest-ref", "origin/main", "--attest-tests", "tests/unit/test_link_master.cpp",
-              "--attest-dirs", "link")
+    # The attested dir is the one this report's mutants were executed in: attesting any other
+    # is the blind spot test_mutate_attestation_fails_closed_when_an_attested_dir_ran_no_mutant
+    # pins, not a survivor question.
+    attest = ("--attest-ref", "origin/main", "--attest-tests", "tests/unit/test_l3_payload.cpp",
+              "--attest-dirs", "l3")
     rc, out, doc = _report(tmp_path, root, reports, *attest)
     assert rc == 0, out
     assert doc["mode"] == "trend", doc["mode"]
@@ -440,7 +443,7 @@ def test_mutate_test_only_attestation_never_gates_on_survivors(tmp_path):
     assert "UNLABELLED survivor: l3/x.cpp:2:11 cxx_ge_to_gt" in out, out
     # Provenance lives in the file, not only in stdout (data-model §7 keys are all still there).
     assert doc["attest"] == {"origin": "changed-tests", "diff_ref": "origin/main",
-                             "tests": ["tests/unit/test_link_master.cpp"], "dirs": ["link"]}, doc
+                             "tests": ["tests/unit/test_l3_payload.cpp"], "dirs": ["l3"]}, doc
     assert {"mode", "diff_ref", "mutants_total", "killed", "survived", "not_covered", "kill_rate",
             "labelled", "unlabelled", "max_unlabelled", "survivors", "stale_labels",
             "malformed_labels"} <= set(doc), sorted(doc)
@@ -574,8 +577,11 @@ def test_mutate_attestation_gates_on_a_broken_run_never_on_its_findings(tmp_path
     A BROKEN RUN still fails closed: no reports and no mutants say the attestation did not
     happen, so there is nothing to report and exit 0 would be a false green — the same
     blind-spot rule the shell already applies for a missing oracle or an empty source scope."""
-    ATTEST = ("--attest-ref", "origin/main", "--attest-tests", "tests/unit/test_link_master.cpp",
-              "--attest-dirs", "link")
+    # l3/ is where this fixture's mutants were executed; attesting a dir the runner never
+    # entered is its own blind spot, pinned by
+    # test_mutate_attestation_fails_closed_when_an_attested_dir_ran_no_mutant.
+    ATTEST = ("--attest-ref", "origin/main", "--attest-tests", "tests/unit/test_l3_payload.cpp",
+              "--attest-dirs", "l3")
 
     # (a) a malformed label already on main: gates without the attestation, listed with it.
     for bad, msg in ((" // mutant-ok(whatever): not a category", "unknown label category 'whatever'"),
@@ -589,7 +595,7 @@ def test_mutate_attestation_gates_on_a_broken_run_never_on_its_findings(tmp_path
         assert rc == 0, out
         assert msg in out, out                                # still reported, on stdout …
         assert any(msg in m for m in doc["malformed_labels"]), doc   # … and in report.json
-        assert doc["attest"]["dirs"] == ["link"], doc
+        assert doc["attest"]["dirs"] == ["l3"], doc
 
     # (b) a stale label stays a reported warning: suppressing the gate must not suppress the
     # information the attestation exists to produce.

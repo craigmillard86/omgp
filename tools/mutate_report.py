@@ -30,11 +30,14 @@ Policy (tools/mutate.cfg [policy] — T3 constants, never relaxed to get green):
     no mutants in a non-empty scope, malformed labels.
   * --attest-* given (a test-only PR's attestation; tools/mutate.sh, #146, ruling
     docs/OPEN-QUESTIONS.md 2026-09-14 "Option A — attest, never gate"): trend mode over the
-    dirs whose unit tests the diff changed. NO finding of the run gates — not a survivor,
-    not a label, not the kill rate — because the diff changed no source line, so every
-    finding is pre-existing debt and gating on it is the Option B that ruling rejected.
-    What still exits 1 is the run failing to happen: no reports, or no mutants in a
-    non-empty scope. Those say the attestation is empty, and exit 0 would be a false green.
+    dirs whose unit tests the diff changed. The three flags are one unit and must be given
+    together — any one of them alone would switch the label rule below off. NO finding of the
+    run gates — not a survivor, not a label, not the kill rate — because the diff changed no
+    source line, so every finding is pre-existing debt and gating on it is the Option B that
+    ruling rejected. What still exits 1 is the run failing to happen: no reports, no mutants
+    in a non-empty scope, or no mutant executed under an attested dir (the per-dir blind spot
+    below, which the diff-mode guard cannot reach here). Those say the attestation is empty,
+    and exit 0 would be a false green.
   * A label whose line has no surviving mutant it could cover is STALE (the test was
     written or the code moved) — reported as a warning, never counted as a survivor.
   * "No mutants in a non-empty scope" is a tool-failure signal (blind spot: instrumentation
@@ -168,7 +171,16 @@ def main(argv=None) -> int:
     ap.add_argument("--trend-log", default="", help="JSONL file to append the trend line to (trend mode)")
     ap.add_argument("--list-limit", type=int, default=200)
     args = ap.parse_args(argv)
-    attest = bool(args.attest_ref or args.attest_tests or args.attest_dirs)
+    # All three or none: the flags describe ONE attestation, and `any` would let a stray
+    # --attest-dirs on an ordinary whole-tree run switch the malformed-label gate off while
+    # recording `origin: changed-tests` with no ref and no tests — a provenance false on its
+    # face (#593 red-team round 3). A partial set is a usage error, never a suppressed gate.
+    attest_flags = (args.attest_ref, args.attest_tests, args.attest_dirs)
+    if any(attest_flags) and not all(attest_flags):
+        ap.error("--attest-ref/--attest-tests/--attest-dirs describe one test-derived "
+                 "attestation and must be given together (a partial set would suppress the "
+                 "malformed-label gate and record a provenance that never happened)")
+    attest = all(attest_flags)
     if attest and args.ref:
         # An attestation IS the trend mode (it has no changed line to gate on): the two
         # cannot be asked for at once, or the caller would get a gate it did not intend.
@@ -494,6 +506,25 @@ def main(argv=None) -> int:
             print("mutation: the runner executed no mutants under " + ", ".join(f"{d}/" for d in silent)
                   + " although the diff changes sources there — failing (blind spot: the run-time path "
                   "filter or instrumentation is not reaching that directory)")
+            return 1
+    if attest:
+        # The same rule, per ATTESTED dir, and the one place it is reachable on this path: an
+        # attestation is trend mode with no ranges, so the block above (guarded on
+        # `diff_mode and ranges`) never runs — while this is the only mode that NAMES specific
+        # directories in report.json. The oracle binaries of a dir's unit tests carry sibling
+        # scope dirs' mutants too, so one mutant anywhere in scope keeps total > 0 and the
+        # global "no mutants" rule stays silent while the attested dir itself ran nothing:
+        # report.json would then claim a kill rate for a directory that was never mutated
+        # (#593 red-team round 3). mutate.sh has already failed closed on an attested dir with
+        # no source file at all, so zero here is the run-time path filter or the
+        # instrumentation, not an empty directory. This is a blind spot, not a finding: it
+        # says the attestation did not happen, which is what an attestation still gates on.
+        silent = [d for d in args.attest_dirs.split() if not executed_by_dir.get(d, 0)]
+        if silent:
+            print("mutation: the attestation names " + ", ".join(f"{d}/" for d in silent)
+                  + " but the runner executed no mutant there — failing (blind spot: the run-time "
+                  "path filter or instrumentation is not reaching that directory, so a kill rate "
+                  "would be recorded for a directory that was never mutated; #146)")
             return 1
     if diff_mode:
         if len(unlabelled) > args.max_unlabelled:

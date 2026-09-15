@@ -40,7 +40,9 @@
 # malformed `mutant-ok` label, not the kill rate. All of them sit on lines the diff did not
 # change, so gating on one is the Option B that ruling rejected. What still fails, here and
 # in mutate_report.py, is the run failing to HAPPEN — no oracle binary for an attested dir,
-# no source file under one, no Mull report, no mutant in a non-empty scope — because an
+# no source file under one, no Mull report, no mutant in a non-empty scope, no mutant executed
+# under an attested dir (its own rule: the oracle carries sibling dirs' mutants, so a total
+# over the whole scope says nothing about the dir being attested) — because an
 # empty attestation reported green is a false green. That is the blind-spot rule the rest of
 # this script already applies, not a gate on the PR's content: `gate=blind-spot-only` on the
 # mode line says exactly that. A diff that does change a source in scope is untouched by all
