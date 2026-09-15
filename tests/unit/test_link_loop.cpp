@@ -980,6 +980,17 @@ struct RecordingHealthListener : HealthListener {
     }
 };
 
+// kNode is the only address these SC-005 scripts ever enrol, so trunk §7's bus-fault rule
+// (US5/T043: declare when EVERY enrolled node is SUSPECT or worse; ruling Q2, "a single
+// enrolled node counts as all") fires on its SUSPECT transition and clears on its next valid
+// answer -- at the reference rate, the rate in use, which FR-026 says clears at once. The
+// bus-level notices of data-model.md §9 are therefore part of the stream these cases see:
+// two per declare (BUS_FAULT, ALERT) and one per clear (BUS_RECOVERED), each with addr 0.
+// The rules themselves are tests/unit/test_link_busfault.cpp's subject; here they are
+// counted so the wiring assertions stay exact.
+constexpr size_t kDeclareNotices = 2;
+constexpr size_t kClearNotices = 1;
+
 // Runs one transaction to completion and feeds its outcome to `tracker` -- the wiring
 // tasks.md T039 asks for: on_result invoked from the loop driver, once, after
 // run_transaction()'s own terminal MasterEvent is already known, at the SAME clock instant
@@ -1045,11 +1056,14 @@ TEST_CASE("SC-005 SUSPECT: three consecutive failed transactions drive a real He
     drive_to_suspect(loop, tracker);
 
     REQUIRE(tracker.state(kNode) == HealthState::SUSPECT);
-    REQUIRE(listener.entries.size() == 2);
+    REQUIRE(listener.entries.size() == 2 + kDeclareNotices);
     REQUIRE(listener.entries[0].notice == Notice::ENROLLED);
     REQUIRE(listener.entries[0].addr == kNode);
     REQUIRE(listener.entries[1].notice == Notice::SUSPECT);
     REQUIRE(listener.entries[1].addr == kNode);
+    REQUIRE(listener.entries[2].notice == Notice::BUS_FAULT);
+    REQUIRE(listener.entries[3].notice == Notice::ALERT);
+    REQUIRE(tracker.bus_fault()); // the rig's only node is SUSPECT: trunk §7's declare rule
 }
 
 TEST_CASE("SC-005 OFFLINE: SUSPECT persists past the offline threshold via a real "
@@ -1062,9 +1076,12 @@ TEST_CASE("SC-005 OFFLINE: SUSPECT persists past the offline threshold via a rea
     drive_to_offline(loop, tracker);
 
     REQUIRE(tracker.state(kNode) == HealthState::OFFLINE);
-    REQUIRE(listener.entries.size() == 3);
-    REQUIRE(listener.entries[2].notice == Notice::OFFLINE);
-    REQUIRE(listener.entries[2].addr == kNode);
+    REQUIRE(listener.entries.size() == 3 + kDeclareNotices);
+    REQUIRE(listener.entries.back().notice == Notice::OFFLINE);
+    REQUIRE(listener.entries.back().addr == kNode);
+    // The declare came with the SUSPECT transition; ageing to OFFLINE is not a second
+    // episode (FR-024: once per episode), so no further bus notice follows.
+    REQUIRE(tracker.bus_fault());
 }
 
 TEST_CASE("SC-005 RECOVERED: a Respond step after OFFLINE drives a real HealthTracker back to "
@@ -1087,9 +1104,15 @@ TEST_CASE("SC-005 RECOVERED: a Respond step after OFFLINE drives a real HealthTr
     // public proxy for the data-model.md §6 "OFFLINE | ok | ENROLLED (failures = 0) |
     // RECOVERED" row -- the only one this driver-level test can observe.
     REQUIRE(tracker.state(kNode) == HealthState::ENROLLED);
-    REQUIRE(listener.entries.size() == 4);
-    REQUIRE(listener.entries[3].notice == Notice::RECOVERED);
-    REQUIRE(listener.entries[3].addr == kNode);
+    REQUIRE(listener.entries.size() == 4 + kDeclareNotices + kClearNotices);
+    const size_t n = listener.entries.size();
+    REQUIRE(listener.entries[n - 2].notice == Notice::RECOVERED);
+    REQUIRE(listener.entries[n - 2].addr == kNode);
+    // The answer arrived at the rate in use (the reference rate — nothing has changed it),
+    // so FR-026 clears the fault at once, on the same result.
+    REQUIRE(listener.entries[n - 1].notice == Notice::BUS_RECOVERED);
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
 
     // #57 AC3: "the node is ENROLLED again with a zero failure count" -- consecutive_failures
     // has no accessor, so the only public proxy for "reset to 0" (rather than left at 3) is one
@@ -1104,7 +1127,7 @@ TEST_CASE("SC-005 RECOVERED: a Respond step after OFFLINE drives a real HealthTr
         loop, tracker, kNode, post_recovery_payload, sizeof post_recovery_payload, drop_all);
     REQUIRE(one_more_failure.kind == MasterEvent::Failed);
     REQUIRE(tracker.state(kNode) == HealthState::ENROLLED);
-    REQUIRE(listener.entries.size() == 4);
+    REQUIRE(listener.entries.size() == 4 + kDeclareNotices + kClearNotices);
 }
 
 // --- FR-015/FR-016: the replay key's SEQUENCE conjunct, exercised end to end --------------

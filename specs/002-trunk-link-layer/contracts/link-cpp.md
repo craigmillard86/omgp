@@ -220,6 +220,7 @@ public:
                                                                // advances the rotation/alternation: F3 calls it once per probe
                                                                // issued ("What F3/F4 need", obligation 2). During a pass the
                                                                // yielded address is held in pass_addr until its outcome arrives
+                                                               // or its outcome window closes (kOutcomeWindowUs; then "drew nothing")
     bool bus_fault() const;
     uint32_t bit_rate() const;                                 // rate in use: assigned by a clear (the reference if any node answered
                                                                // there during the fault, else the fallback; no automatic return — F4,
@@ -239,17 +240,51 @@ public:
                                                                // was told; what the rate in use did), deliberately (round-3 red
                                                                // team on #523). Called in the same step as Master::set_bit_rate
                                                                // ("What F3/F4 need", obligation 3). Tests first in T041; T043
+    const BusStats& bus_stats() const;                         // data-model §8: rate_changes and bus_faults as decided HERE — a rate
+                                                               // change each time a probe goes out at a rate other than the last one
+                                                               // used or a clear pins one, a fault each time one is declared.
+                                                               // BusStats::discards is the Master's field and is never written by the
+                                                               // tracker (it sees no frames), so the two engines' blocks are read
+                                                               // separately and never summed.
+                                                               // (Amended in PR #530 — pending a ruling. The T041 tests assert on these
+                                                               // counters and data-model §7/§8 specify them, but this contract declared
+                                                               // no accessor for them on HealthTracker; the maintainer's 2026-09-06
+                                                               // rescope of #59/#61 directs T043 to add it here.)
 };
 ```
 Rules: SUSPECT after `TRUNK_suspect_after_failures` consecutive failures; OFFLINE after
 `TRUNK_offline_after_suspect_ms` in SUSPECT without a valid response; any valid response
 → ENROLLED, except that a fallback-rate answer during a fault is deferred to the clear
-(data-model §7, 2026-09-13); UNENROLLED never counts; BUS_FAULT when ≥ 1 node is enrolled and all enrolled
+(data-model §7, 2026-09-13) and that, outside a fault, the late outcome — ok or failure — of a
+fault-time probe still outstanding inside its outcome window and issued at a rate other than
+the rate now in use moves no state (it is that probe's outcome, already written off, not
+evidence about the rate in use; round 15/16 on #530, T043); UNENROLLED never counts; BUS_FAULT when ≥ 1 node is enrolled and all enrolled
 nodes are SUSPECT/OFFLINE (declared once); alternating-rate probes while BUS_FAULT except during
 the reference pass; a valid answer at the reference rate clears the fault there at once, a valid
 answer at the fallback rate clears it only after a reference pass — every enrolled address once, at
 the reference rate, without alternating — draws nothing *(amended 2026-09-13, F4)*; no automatic
 return afterwards (data-model §7). Each transition notifies exactly once.
+
+Two implementation notes the bus-fault rules rest on, recorded here because they are visible
+at this interface (T043, `link/health.cpp`): `on_result` carries no bit rate, so the rate an
+outcome arrived at is taken to be the rate `next_probe()` last handed out **for that address**
+— sound exactly under F3 obligation 1 below, and ASSUMED, not enforced. Per address and not
+per wire, so that a `next_probe()` call made with an outcome still outstanding (obligation 2
+violated) cannot re-read an answer at a rate its own probe never used: that mis-read inverts
+both of §7's clear rules — upward, a node is enrolled at a rate it cannot hear and the fault
+oscillates; downward, a reference-rate answer downgrades the trunk permanently (red team round
+2 on #530). Per episode too: on every declare the record is reset to the rate in use *for every
+address this layer is owed no outcome by*, because an outcome can arrive for an address the new
+episode has not probed — obligation 1 below is an obligation to *issue*, and the declare happens
+at the tail of `on_result`, so a poll already on the wire in that superframe lands after it and
+went out at the rate in use (red team round 5 on #530). An address whose probe is still in
+flight is exempt, and for the same reason read the other way: its remembered bit is the rate of
+a frame already on the wire, which the new episode's rate in use says nothing about, so
+overwriting it inverts the same two clear rules (red team round 6 on #530). What remains assumed
+is narrower: more than one transaction outstanding to the SAME address at once — the newest
+probe's rate is what the first outcome back is read at. And while a pass probe's outcome is
+outstanding, `next_probe()` re-yields that address and advances nothing, so a scheduler that
+breaks obligation 2 still completes the pass (data-model §6, round-13 red team on #472).
 
 ## What F3/F4 need (interface note, SC-010)
 
