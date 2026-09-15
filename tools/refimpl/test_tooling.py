@@ -615,6 +615,74 @@ def test_mutate_attestation_gates_on_a_broken_run_never_on_its_findings(tmp_path
     assert "gate=blind-spot-only" in attest_line(out), attest_line(out)
 
 
+def test_mutate_attestation_fails_closed_when_an_attested_dir_ran_no_mutant(tmp_path):
+    """The blind spot the attest path opens, and the one rule it is NOT covered by
+    (#593 red-team round 3, MEDIUM). mutate_report.py's per-changed-dir rule — written for an
+    `includePaths` regex that reaches one scope dir but not another — is guarded on
+    `diff_mode and ranges`, and an attestation is trend mode with no ranges, so that rule is
+    unreachable on the new path. Yet the attest path is the ONLY one that names specific
+    directories in report.json: the `test_<dir>_*` oracle binaries carry sibling dirs' mutants
+    too, so one mutant anywhere in scope keeps `total > 0`, the global "no mutants" rule stays
+    silent, and the run records a kill rate for a directory in which nothing was executed.
+
+    Same report, same rules, only `--attest-dirs` differing — if the reporter's exit were
+    independent of which dir is attested, the control below would be indistinguishable from
+    the attack and neither would be evidence."""
+    root, reports = _setup(tmp_path, SRC, MUTANTS)      # every mutant is in l3/x.cpp
+
+    def attest(dirs):
+        return ("--attest-ref", "origin/main",
+                "--attest-tests", " ".join(f"tests/unit/test_{d}_x.cpp" for d in dirs.split()),
+                "--attest-dirs", dirs)
+
+    rc, out, _ = _report(tmp_path, root, reports, *attest("link"))
+    assert rc == 1, out
+    assert "link/" in out and "blind spot" in out, out
+    assert "no mutant" in out, out
+    # A union attestation fails on the dir that ran nothing and names only that one.
+    rc, out, _ = _report(tmp_path, root, reports, *attest("l3 link"))
+    assert rc == 1, out
+    failed_on = [l for l in out.splitlines() if "blind spot" in l]
+    assert len(failed_on) == 1, out
+    assert "link/" in failed_on[0] and "l3/" not in failed_on[0], failed_on
+    # The discriminating control: attest the dir the mutants are actually in — exit 0, with the
+    # findings still listed and never gated (that is what the cases above pin).
+    rc, out, doc = _report(tmp_path, root, reports, *attest("l3"))
+    assert rc == 0, out
+    assert doc["attest"]["dirs"] == ["l3"], doc
+    assert doc["unlabelled"] == 1, doc
+
+
+def test_report_attest_flags_are_all_or_nothing(tmp_path):
+    """`--attest-*` suppresses the malformed-label gate, so a caller must not be able to
+    switch it off by accident: any ONE of the three flags used to do it (#593 red-team round 3),
+    which meant an ordinary whole-tree run with a stray `--attest-dirs` lost the gate
+    `test_report_malformed_label_fails_in_every_mode` exists to hold, and recorded
+    `origin: changed-tests` with `tests: []` — a provenance false on its face. The three
+    describe one attestation and are now required together; anything partial is a usage error
+    (exit 2), never a quietly suppressed gate."""
+    src = list(SRC)
+    src[3] = "    if (a < 0) // mutant-ok(whatever): unknown category, malformed"
+    root, reports = _setup(tmp_path, src, MUTANTS)
+    ALL = ("--attest-ref", "origin/main", "--attest-tests", "tests/unit/test_l3_x.cpp",
+           "--attest-dirs", "l3")
+    # The gate this is about, with no attest flag at all: it fails, in trend mode.
+    rc, out, _ = _report(tmp_path, root, reports)
+    assert rc == 1 and "malformed mutant-ok label(s) — failing" in out, out
+    # One or two of the three: a usage error, and the gate is NOT suppressed on the way.
+    for partial in (ALL[:2], ALL[2:4], ALL[4:], ALL[:4], ALL[2:]):
+        rc, out, _ = _report(tmp_path, root, reports, *partial)
+        assert rc == 2, (partial, out)
+        assert "must be given together" in out, (partial, out)
+        assert "NOT gated" not in out, (partial, out)
+    # All three — the only caller shape mutate.sh produces — still suppresses it, as the
+    # 2026-09-14 ruling requires.
+    rc, out, doc = _report(tmp_path, root, reports, *ALL)
+    assert rc == 0, out
+    assert "malformed mutant-ok label(s) in the attested dir(s) — reported, NOT gated" in out, out
+    assert doc["attest"]["tests"] == ["tests/unit/test_l3_x.cpp"], doc
+
+
 # --- tools/mutate.sh -> tools/mutate_report.py: the attestation is HANDED OVER, end to end ------
 # Every other mutate.sh case above stops at --dry-run or at the missing-Mull skip, so the half
 # of the script that hands the attestation to the reporter — ATTEST_ARGS, --ref "$REPORT_REF",
