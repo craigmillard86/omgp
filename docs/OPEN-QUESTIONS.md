@@ -3938,7 +3938,14 @@ because the diff changed no source line, so every finding is pre-existing debt, 
 is the Option B this ruling rejected. The label rule, which did gate at PR #593's first head, is
 now reported-not-gated on that path alone. What still exits 1 is the run failing to HAPPEN: no
 oracle binary for an attested dir, no source file under one, no Mull report, no mutant in a
-non-empty scope. Those are the harness's blind-spot rules, not a gate on the PR's content — a
+non-empty scope, and — added after red-team round 3 on PR #593 — **no mutant executed under an
+attested dir**. That last one needed its own rule: the pre-existing per-changed-dir rule is
+guarded on `diff_mode and ranges`, which an attestation (trend mode, no ranges) can never
+satisfy, while a dir's `test_<dir>_*` oracle binaries carry the sibling scope dirs' mutants too,
+so a non-zero total over the whole scope said nothing about the dir being attested — and the
+attest path is the only one that names directories in `report.json`. Without it an attestation of
+`link/` could record a 100 % kill rate having executed no `link/` mutant at all. Those are the
+harness's blind-spot rules, not a gate on the PR's content — a
 green empty attestation would be a false green — and the mode line says so:
 `gate=blind-spot-only`. FR-027 is **not** superseded: its
 gate ("survivors on a changed line", exit 1 on an unlabelled one) is reached on exactly the diffs
@@ -3956,13 +3963,22 @@ outside the dispatch allow-list, the same wall recorded on 2026-09-12 (T040) and
 
 What is known, and it is an **estimate, not a measurement**: the attest run for `link/` builds 7
 instrumented binaries (`test_link_frame|health|interfaces|loop|master|responder|types`) rather
-than the 17 of a whole-tree run, and executes only `link/` mutants under the phase-2
-`includePaths` filter. The recorded points are PR #137 round 19 (12 cores): whole-tree
-instrumented build of 17 binaries ~15 min of a 17-min run; `test_link_master` 4050 mutants /
-14m30s unfiltered → 260 / 43 s filtered. Scaling the build by binary count and taking the 7
-binaries' filtered runs at the same order as that 43 s suggests single-digit minutes of run time
-on top of a build in the 5-10 min range — **assumed**, on a 12-core machine, where GitHub's
-runner has 4.
+than the 17 of a whole-tree run. The first draft of this entry added "and executes only `link/`
+mutants under the phase-2 `includePaths` filter"; **that is false, proved by construction** and
+falsified by red-team round 3 on PR #593: `SCOPE_DIRS` is assigned once (`tools/mutate.sh:69`,
+from `cfg scope_dirs` = `l3 link core`) and `phase2_config` emits one `includePaths` regex per
+entry of it (`:94`) — nothing on the attest path narrows the filter to the attested dirs. An
+attest run of `link` therefore executes every `l3/`, `link/` and `core/` mutant its 7
+`test_link_*` binaries reach, so the run-time half of the estimate below is scaled from the wrong
+population and is, if anything, optimistic. The recorded points are PR #137 round 19 (12 cores):
+whole-tree instrumented build of 17 binaries ~15 min of a 17-min run; `test_link_master` 4050
+mutants / 14m30s unfiltered → 260 / 43 s filtered — and that 43 s was measured under the same
+3-dir filter, so the *number* survives even though the mechanism stated for it did not. Scaling
+the build by binary count and taking the 7 binaries' filtered runs at the same order as that 43 s
+suggests single-digit minutes of run time on top of a build in the 5-10 min range — **assumed**,
+on a 12-core machine, where GitHub's runner has 4. Narrowing `includePaths` to the attested dirs
+would make the run smaller and the claim true; it is a behaviour change outside #146's acceptance
+criteria and is left for an issue, not taken in PR #593.
 
 **`link/` alone is NOT the worst case**, and the measurement should not be taken as if it were
 (red-team round 1 on PR #593, `--dry-run`-confirmed): nothing bounds an attestation to one
