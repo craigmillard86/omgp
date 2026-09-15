@@ -4332,3 +4332,71 @@ the `Babble` row against the "Steps with `node == 0xFF` apply to every node" sen
 **Amends:** none. **Supersedes:** none. **Related:** the 2026-09-01 "MockWire (T010) design
 choices…" entry, item (2) (wildcard-script ordering, ruled 2026-09-03), and the 2026-09-15 "A
 node deafened by `Kind::Rate`…" entry (the other axis the `Babble` row leaves open).
+
+---
+
+## 2026-09-15 — T032's mutation clause: the T040 ruling applied, and what the tasks.md note adds on top of it
+
+**Context:** T032 (#50) is the US2 checkpoint. Its fourth acceptance criterion asks for
+`tools/mutate.sh --diff origin/main` run locally "against the diff that introduced
+`link/master.hpp`, `link/master.cpp`, and `tests/support/mock_wire.{hpp,cpp}`", reporting zero
+unlabelled survivors. Three separate facts bear on it, and only the first is already ruled:
+
+1. **The empty-scope shape, ruled 2026-09-12** ("T040's 'local mutation run': an empty diff
+   scope discharges it, and the criterion is the defect"). A checkpoint branch that adds no
+   source under `tools/mutate.cfg`'s `scope_dirs` (`l3 link core`) can only produce a vacuous
+   run: `tools/mutate.sh` prints "nothing in scope" and exits 0 before the Mull presence check.
+   That ruling's general half — "a checkpoint task must not demand diff-scoped mutation
+   evidence from a diff that contains no in-scope source … Checkpoint criteria should require
+   the mutation gate *where the scoped source changed*, and otherwise cite it" — reads on T032
+   exactly as it read on T040. This branch's `scope_dirs` diff is empty (`pipeline.sh`,
+   `tasks.md`, this file), so the clause is discharged by citation, not by a local run. The
+   citation: `link/master.{hpp,cpp}`'s diff-scoped gate ran on PR #137's `deep-verify`, and its
+   thirteen reported survivors were triaged to completion by **#139** (closed), whose own
+   criteria required the whole-tree run at that head to print no `UNLABELLED survivor:
+   link/master.cpp:…` line. The nine surviving labels are readable in-tree today at
+   `link/master.cpp:129, 171, 276, 320, 353, 400, 463, 524, 540` (*demonstrated* — grep of the
+   working tree; the runs that produced them are *assumed*, not re-demonstrated here).
+
+2. **`tests/support/mock_wire.{hpp,cpp}` has never been in mutation scope at all, and cannot
+   be.** `scope_dirs` is `l3 link core`, so the diff filter (`mutate.sh:129`) never selects it;
+   and #146's attestation path matches only `^tests/unit/test_(l3|link|core)_…`, which
+   `tests/unit/test_mock_wire.cpp` does not. So the T028/T030 work (#46, #48) produced an
+   empty scope *and* an empty attestation. AC4 names those files as if the gate covered them;
+   it does not, by construction from `mutate.cfg` and `mutate.sh`. This is stated so that "the
+   mutation clause is discharged" is not read as "the mock is mutation-covered".
+
+3. **The open question this entry actually asks.** The `tasks.md` T032 note (added with #139)
+   says what keeps T032 open includes "the same triage for the other files in scope (`l3/`,
+   `link/{frame,health,responder}.cpp` — 29 of the run's 38 survivors)". Those 29 are survivors
+   of a **whole-tree** run, and `tools/mutate.cfg` says in terms that whole-tree runs "report
+   the kill rate as a trend only — never a gate"; `mutate.sh` only gates with `--diff`. Each of
+   those files was gated diff-scoped when its own lines changed, and each carries labels in-tree
+   today — `link/health.cpp` 15, `link/responder.cpp` 10, `link/frame.cpp` 3, plus the ring note
+   in `link/responder.hpp`, and under `l3/` a further 11 (`l3_descriptor.cpp` 6, `l3_utf8.hpp` 3,
+   `l3_payload.cpp` 2) (*demonstrated* by `grep -rc 'mutant-ok(' link/ l3/ core/` at this head;
+   that those labels are each still *true* is assumed, not re-checked here). So either the note
+   imports a
+   whole-tree triage obligation that no gate in the repo asserts — in which case T032 cannot be
+   closed by any mechanism `mutate.sh` offers — or the note is describing a nightly trend and
+   is not an acceptance criterion.
+
+**Recommended:** (3) is the note describing a trend, not a criterion: T032's mutation clause is
+the diff-scoped gate on US2's own source, and that is discharged by #139 per (1). The whole-tree
+kill rate on `l3/` and `link/{frame,health,responder}.cpp` stays what `mutate.cfg` and
+GOVERNANCE §2 already make it — a weekly signal routed through `nightly-failure` issues, never a
+merge gate and never a checkpoint box. Not recommended: treating it as a criterion, which would
+make every future checkpoint task inherit the whole tree's trend; and equally not recommended is
+deleting the note, which records real work someone may still want done as its own issue.
+
+**Applied on this branch:** (1) and (2) are stated as evidence in PR for #50 with their claim
+labels; (3) is left as this pending question and T032's box is **not** ticked, mirroring how
+T040's box was left in `tasks.md` after PR #401.
+
+**Ruling:** PENDING — human (checkpoint acceptance criteria; `specs/002-trunk-link-layer/tasks.md`
+T032's note and `tools/mutate.cfg` `[policy]`, which is T3).
+
+**Amends:** none. **Supersedes:** none. **Related:** the 2026-09-12 entries "Does an empty
+mutation scope discharge a checkpoint task's 'local mutation run' clause?" (ANSWERED) and
+"T040's 'local mutation run'…" (the ruling this applies), and #146 (mutation attestation for a
+PR that changes no scoped source).

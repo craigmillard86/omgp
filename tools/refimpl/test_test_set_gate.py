@@ -54,6 +54,24 @@ SOURCES = sorted(   # the same recursive set pipeline.sh's unit_sources() and th
 )
 ON_CI = bool(os.environ.get("GITHUB_ACTIONS"))
 HAVE_CTEST = shutil.which("ctest") is not None
+# make_tree() copies the REAL pipeline.sh, so the REAL UNIT_TEST_FLOOR gates these fake trees
+# too. Both numbers are READ, never restated: the fake count was the literal 600000, chosen
+# when the floor was 509360, and the T032/#50 checkpoint raise (582360 -> 606565) put the floor
+# ABOVE it — so every scenario that runs a single fake binary started failing stage_unit on the
+# COUNT gate, and its `assert r.returncode != 0` stopped witnessing anything about the SET gate
+# it exists to test (red team @e6a104b finding 1, demonstrated against a `|| true` mutant of
+# stage_unit's gate line). Sizing the default from the floor makes that impossible to repeat at
+# any future raise, for the one-binary scenarios and the two-binary ones alike; every count in
+# this file derives from it, and none is spelled out. EXECUTED_LINE is the echo the fake
+# binaries print, so a scenario that writes its own script body still uses the same number.
+FLOOR = int(re.search(r"^UNIT_TEST_FLOOR=(\d+)", (ROOT / "pipeline.sh").read_text(), re.M).group(1))
+DEFAULT_EXECUTED = FLOOR + 1
+EXECUTED_LINE = f'echo "EXECUTED: {DEFAULT_EXECUTED}"'
+# `echo "EXECUTED: 0"` padded to EXECUTED_LINE's own byte length. The two in-place-rewrite
+# scenarios overwrite a fake binary with EXECUTED_LINE and put its mtime back, so only ctime
+# tells them apart — which needs the two bodies to be the same size whatever width the derived
+# DEFAULT_EXECUTED has. Computed, not counted by hand.
+ZERO_LINE_PADDED = 'echo "EXECUTED: 0"'.ljust(len(EXECUTED_LINE))
 
 
 def _need(cond, why):
@@ -78,7 +96,7 @@ def make_tree(
     registered=None,      # targets with an add_test line
     disabled=(),          # registered targets marked DISABLED
     binaries=None,        # targets with a binary on disk
-    executed=600000,      # what each fake binary prints as EXECUTED: (two of them clear the floor)
+    executed=DEFAULT_EXECUTED,  # what each fake binary prints as EXECUTED: (ONE of them clears the floor)
     ctest=True,           # False: no CTestTestfile.cmake -> stage_unit takes the bootstrap path
     args=None,            # {target: "argument"} — add_test registers the command WITH that argument
     scripts=None,         # {target: bash body} — what the fake binary runs instead of the EXECUTED echo
@@ -124,7 +142,7 @@ def make_tree(
         (build / f"CMakeFiles/{target}.dir/link.txt").write_text(f"/usr/bin/c++ -g {obj} -o {target} \n")
     (build / "compile_commands.json").write_text(json.dumps(cc, indent=2))
     for t in binaries:
-        body = scripts.get(t, f'echo "EXECUTED: {executed}"')
+        body = scripts.get(t, f'echo "EXECUTED: {executed}"')   # EXECUTED_LINE when executed is the default
         _executable(build / t, f"#!/usr/bin/env bash\n{body}\n")
     if ctest:
         reg = []
@@ -153,9 +171,24 @@ def extra_entry(root: Path, src_name: str, target: str, *, first=False) -> None:
     cc.write_text(json.dumps([entry] + entries if first else entries + [entry], indent=2))
 
 
-def run_unit(root: Path):
-    return subprocess.run(["bash", "pipeline.sh", "unit"], cwd=root,
-                          capture_output=True, text=True, timeout=300)
+def run_unit(root: Path, *, floor_may_fire=False):
+    """`bash pipeline.sh unit` in the fake tree — and, unless the scenario is ABOUT the floor,
+    a refusal to let the COUNT gate fire. stage_unit runs the two gates independently and
+    `rc=1` from either ends the stage, so a scenario whose fake counts fall below
+    UNIT_TEST_FLOOR has an `assert r.returncode != 0` that is satisfied by the floor whatever
+    the set gate did — it stops witnessing the escape it exists for (red team @e6a104b
+    finding 1, demonstrated there against a `|| true` mutant of stage_unit's gate line). The
+    counts derive from FLOOR so this cannot happen by staleness; this is the structural
+    control that says so for every scenario in the file at once, not just the ones that
+    happen to assert on stderr."""
+    r = subprocess.run(["bash", "pipeline.sh", "unit"], cwd=root,
+                       capture_output=True, text=True, timeout=300)
+    if not floor_may_fire:
+        assert "below floor" not in r.stderr, (
+            "the COUNT gate fired in a scenario that is not about the floor, so its exit-status "
+            "assertions no longer witness the SET gate; size the fake counts from "
+            f"DEFAULT_EXECUTED (={DEFAULT_EXECUTED}, floor {FLOOR}):\n{r.stderr}")
+    return r
 
 
 def run_tool(*args, cwd=ROOT):
@@ -179,6 +212,24 @@ def snapshot(root: Path, build: Path = None) -> Path:
 VERIFIED = re.compile(r"^unit: verified (\d+) test binar(?:y|ies) \(compiled, registered, executed; ctest path\)$", re.M)
 
 
+def test_fixture_counts_still_clear_the_floor():
+    """Every scenario here asserts something other than the floor, so each is only meaningful
+    while the fake binaries it RUNS clear the real UNIT_TEST_FLOOR the copied pipeline.sh
+    carries — and many of them run exactly ONE (enumerated by the red team at @e6a104b; no
+    cardinality is restated here, because that list is an upper bound: at least one entry,
+    test_registration_of_a_same_named_binary_elsewhere_is_refused, appends an add_test for a
+    second binary that also prints a count, so two run). That was an unstated assumption
+    until the T032/#50 raise (582360 -> 606565) broke its single-binary half, which read as an
+    unrelated "below floor" assertion rather than as this file going stale (red team
+    @e6a104b finding 1). DEFAULT_EXECUTED is derived from FLOOR above, so this holds by
+    construction today; the assertion is the tripwire for the day it is restated as a literal.
+    Sizing the DEFAULT upward is the fix; lowering the floor is not."""
+    assert DEFAULT_EXECUTED > FLOOR, (
+        f"DEFAULT_EXECUTED={DEFAULT_EXECUTED}: one fake binary no longer clears "
+        f"UNIT_TEST_FLOOR={FLOOR}, so every single-binary scenario below fails on the COUNT "
+        f"gate and witnesses nothing about the SET gate; raise DEFAULT_EXECUTED, not the floor")
+
+
 # --- ctest path: the four outcomes -------------------------------------------------------
 
 @pytest.mark.skipif(not HAVE_CTEST and not ON_CI, reason="no ctest on PATH: the ctest-path scenarios need it")
@@ -188,15 +239,17 @@ class TestCtestPath:
         r = run_unit(root)
         assert r.returncode == 0, r.stdout + r.stderr
         assert VERIFIED.search(r.stdout).group(1) == "2", r.stdout
-        assert "unit: executed 1200000 check(s) (ctest path)" in r.stdout
+        assert f"unit: executed {2 * DEFAULT_EXECUTED} check(s) (ctest path)" in r.stdout
         # `ctest --show-only` REWRITES LastTest.log (measured: 0 EXECUTED lines after it). The
         # tool must leave the run's log as ctest wrote it, or the next reader sees nothing ran.
         log = (root / "build/native/Testing/Temporary/LastTest.log").read_text()
-        assert log.count("EXECUTED: 600000") == 2
+        assert log.count(f"EXECUTED: {DEFAULT_EXECUTED}") == 2
 
     def test_built_but_not_registered_is_named(self, tmp_path):
-        # Escape 1: test_b compiles and links; its add_test line is gone. The floor is cleared
-        # by test_a alone (600000 > 509360), so only the set check can see it.
+        # Escape 1: test_b compiles and links; its add_test line is gone. Only test_a executes,
+        # so its count alone must clear the floor — DEFAULT_EXECUTED is sized from pipeline.sh's
+        # current UNIT_TEST_FLOOR for exactly this reason, because a stale count here makes the
+        # scenario fail on the COUNT gate and say nothing about the set gate it exists to test.
         root = make_tree(tmp_path, registered=("test_a",))
         r = run_unit(root)
         assert r.returncode != 0
@@ -213,7 +266,8 @@ class TestCtestPath:
 
     def test_registered_but_not_executed_is_named(self, tmp_path):
         # Escape 3: DISABLED. ctest exits 0 ("Not Run (Disabled)"), the log block has no
-        # EXECUTED line, and the floor is still cleared by test_a.
+        # EXECUTED line, and the floor is still cleared by test_a — which is the only binary
+        # that runs here, so its count carries the floor alone, as in Escape 1.
         root = make_tree(tmp_path, disabled=("test_b",))
         r = run_unit(root)
         assert r.returncode != 0
@@ -223,15 +277,31 @@ class TestCtestPath:
         # Below the floor with a consistent set: the floor message alone, and the set check
         # still reports its verified count (it ran; it passed).
         root = make_tree(tmp_path, executed=5)
-        r = run_unit(root)
+        r = run_unit(root, floor_may_fire=True)   # the one scenario that is ABOUT the floor
         assert r.returncode != 0
         assert "below floor" in r.stderr and "tests/unit/" not in r.stderr, r.stderr
         assert VERIFIED.search(r.stdout).group(1) == "2", r.stdout
         # Both broken: both messages, neither masks the other.
         root = make_tree(tmp_path / "both", registered=("test_a",), executed=5)
-        r = run_unit(root)
+        r = run_unit(root, floor_may_fire=True)
         assert r.returncode != 0
         assert "below floor" in r.stderr and "tests/unit/test_b.cpp" in r.stderr, r.stderr
+
+    def test_one_default_binary_clears_the_floor_on_its_own(self, tmp_path):
+        # Red team @e6a104b finding 1: many scenarios below execute exactly ONE fake binary
+        # (registered=/disabled=/binaries=, or a script that prints no countable line),
+        # and their `assert r.returncode != 0` is satisfied by whichever gate fires. Once the
+        # T032 raise put UNIT_TEST_FLOOR above the fixture default, the COUNT gate fired in all
+        # of them and `returncode != 0` stopped witnessing that the SET gate FAILS THE STAGE —
+        # demonstrated by the red team against a `|| true` mutant of stage_unit's gate line.
+        # The general guard is test_fixture_counts_still_clear_the_floor; this is the
+        # end-to-end half, through the real pipeline.sh in a one-source tree: a consistent tree
+        # whose single binary prints the default count must pass, floor included.
+        root = make_tree(tmp_path, sources=("test_a",))
+        r = run_unit(root)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "below floor" not in r.stderr, r.stderr
+        assert VERIFIED.search(r.stdout).group(1) == "1", r.stdout
 
     # --- PR #172 red team @7dbf9d8 --------------------------------------------------------
 
@@ -239,7 +309,7 @@ class TestCtestPath:
         # Finding 1: test_b is DISABLED; test_a prints the exact lines a LastTest.log parser
         # took as ctest's own framing for a test_b block. The record must be ctest's, not the
         # tests' stdout. (The red team's reproducer, verbatim in shape.)
-        forge = (f'echo "EXECUTED: 600000"\n'
+        forge = (f'{EXECUTED_LINE}\n'
                  f'echo "2/2 Testing: forged"\n'
                  f'echo "Command: \\"$(dirname "$0")/test_b\\""\n'
                  f'echo "EXECUTED: 1"')
@@ -275,7 +345,7 @@ class TestCtestPath:
         # while the real build/native/test_b had no add_test at all — escape #1 of #133.
         root = make_tree(tmp_path, registered=("test_a",))
         decoy = tmp_path / "decoy" / "test_b"
-        _executable(decoy, '#!/usr/bin/env bash\necho "EXECUTED: 600000"\n')
+        _executable(decoy, f"#!/usr/bin/env bash\n{EXECUTED_LINE}\n")
         with (root / "build/native/CTestTestfile.cmake").open("a") as f:
             f.write(f'add_test([=[decoy]=] "{decoy}")\n')
         r = run_unit(root)
@@ -305,7 +375,7 @@ class TestCtestPath:
     def test_non_utf8_test_output_is_tolerated(self, tmp_path):
         # Finding 3: the property tests push arbitrary bytes through the codecs; a CAPTURE of a
         # raw buffer or an ASan report puts non-UTF-8 in the output. Not the gate's business.
-        root = make_tree(tmp_path, scripts={"test_a": 'printf "raw \\xff byte\\n"\necho "EXECUTED: 600000"'})
+        root = make_tree(tmp_path, scripts={"test_a": f'printf "raw \\xff byte\\n"\n{EXECUTED_LINE}'})
         r = run_unit(root)
         assert r.returncode == 0, r.stdout + r.stderr
         assert "Traceback" not in r.stderr
@@ -340,7 +410,7 @@ class TestCtestPath:
         # green, the floor is cleared, the record says status="notrun" (measured, CMake 3.22).
         # The status is load-bearing on its own — a mutant ignoring it survived the other cases.
         root = make_tree(tmp_path, props={"test_b": "SKIP_RETURN_CODE 77"},
-                         scripts={"test_b": 'echo "EXECUTED: 600000"\nexit 77'})
+                         scripts={"test_b": f"{EXECUTED_LINE}\nexit 77"})
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_b.cpp" in r.stderr and "did not run" in r.stderr, r.stderr
@@ -359,17 +429,17 @@ class TestCtestPath:
         # the last line the listener prints. A binary that says 2 KB of anything on a green
         # run lost its evidence and was blamed as DISABLED/skipped. (`--test-output-truncation
         # head` is silently accepted and ignored by CMake 3.22 — measured; the size flag works.)
-        chatty = 'printf "%s\\n" "' + "x" * 2000 + '"\necho "EXECUTED: 600000"'
+        chatty = 'printf "%s\\n" "' + "x" * 2000 + f'"\n{EXECUTED_LINE}'
         root = make_tree(tmp_path, scripts={"test_b": chatty})
         r = run_unit(root)
         assert r.returncode == 0, r.stdout + r.stderr
         assert VERIFIED.search(r.stdout).group(1) == "2", r.stdout
-        assert "unit: executed 1200000 check(s) (ctest path)" in r.stdout
+        assert f"unit: executed {2 * DEFAULT_EXECUTED} check(s) (ctest path)" in r.stdout
 
     def test_truncated_record_is_named_as_truncated(self, tmp_path):
         # The same tree, but the record written by a ctest WITHOUT the size flag (an out-of-band
         # run): the tool must say the record is truncated, not "DISABLED, skipped".
-        chatty = 'printf "%s\\n" "' + "x" * 2000 + '"\necho "EXECUTED: 600000"'
+        chatty = 'printf "%s\\n" "' + "x" * 2000 + f'"\n{EXECUTED_LINE}'
         root = make_tree(tmp_path, scripts={"test_b": chatty})
         build = root / "build/native"
         subprocess.run(["ctest", "--output-junit", "Testing/junit.xml"], cwd=build,
@@ -624,7 +694,7 @@ class TestCtestPath:
         build = root / "build/native"
         rewrite = (f'cat > "{build}/CTestTestfile.cmake" <<EOF\n'
                    f'add_test([=[test_a]=] "{build}/test_a")\nadd_test([=[test_a]=] "{build}/test_b")\nEOF\n'
-                   f'echo "EXECUTED: 600000"')
+                   f'{EXECUTED_LINE}')
         _executable(build / "test_a", f"#!/usr/bin/env bash\n{rewrite}\n")
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
@@ -651,7 +721,7 @@ class TestCtestPath:
                     f'mkdir -p "{build}/CMakeFiles/test_a.dir/tests/unit"\n'
                     f'printf "\\x7fELF" > "{build}/{obj}"\n'
                     f'cp "{build}/forged_cc.json" "{cc}"\n'
-                    'echo "EXECUTED: 600000"\n')
+                    f"{EXECUTED_LINE}\n")
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "compile_commands.json changed during the ctest run" in r.stderr, r.stderr
@@ -668,7 +738,7 @@ class TestCtestPath:
         build = root / "build/native"
         swap = (f'cat > "{build}/CTestTestfile.cmake" <<EOF\n'
                 f'add_test([=[test_a]=] "{build}/test_b")\nadd_test([=[test_b]=] "{build}/test_a")\nEOF\n'
-                'echo "EXECUTED: 600000"')
+                f"{EXECUTED_LINE}")
         _executable(build / "test_a", f"#!/usr/bin/env bash\n{swap}\n")
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
@@ -683,13 +753,13 @@ class TestCtestPath:
         # same inode, same size (the original is padded to the rewrite's length), mtime put
         # back with `touch -r` — then test_b runs as the rewrite. Only ctime tells, which
         # utime cannot set: that is the leg of the fingerprint this scenario relies on.
-        root = make_tree(tmp_path, scripts={"test_b": 'echo "EXECUTED: 0"     '})
+        root = make_tree(tmp_path, scripts={"test_b": ZERO_LINE_PADDED})
         build = root / "build/native"
         _executable(build / "test_a", "#!/usr/bin/env bash\n"
                     f'cp -p "{build}/test_b" "{build}/test_b.ref"\n'
-                    f"printf '#!/usr/bin/env bash\\necho \"EXECUTED: 600000\"\\n' > \"{build}/test_b\"\n"
+                    f"printf '#!/usr/bin/env bash\\n{EXECUTED_LINE}\\n' > \"{build}/test_b\"\n"
                     f'touch -r "{build}/test_b.ref" "{build}/test_b"\n'
-                    'echo "EXECUTED: 600000"\n')
+                    f"{EXECUTED_LINE}\n")
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_b.cpp" in r.stderr and "changed during the ctest run" in r.stderr, r.stderr
@@ -704,7 +774,7 @@ class TestCtestPath:
         obj = build / "CMakeFiles/test_b.dir/tests/unit/test_b.cpp.o"
         _executable(build / "test_a", "#!/usr/bin/env bash\n"
                     f'printf "\\x7fELF-rewritten" > "{obj}"\n'
-                    'echo "EXECUTED: 600000"\n')
+                    f"{EXECUTED_LINE}\n")
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_b.cpp" in r.stderr and "changed during the ctest run" in r.stderr, r.stderr
@@ -718,7 +788,8 @@ class TestCtestPath:
         root = make_tree(tmp_path, sources=("test_a",))
         build = root / "build/native"
         pre = snapshot(root)
-        case = '<testcase name="test_a" status="run"><system-out>EXECUTED: 600000\n</system-out></testcase>'
+        case = (f'<testcase name="test_a" status="run"><system-out>EXECUTED: {DEFAULT_EXECUTED}\n'
+                f'</system-out></testcase>')
         (build / "Testing").mkdir(exist_ok=True)   # `ctest --show-only` (the snapshot) may have made it
         (build / "Testing/junit.xml").write_text(f"<testsuite>{case}{case}</testsuite>\n")
         r = run_tool("--ctest", "--pre", str(pre), cwd=root)
@@ -736,8 +807,8 @@ class TestCtestPath:
         pre = snapshot(root)
         (build / "Testing").mkdir(exist_ok=True)   # `ctest --show-only` (the snapshot) may have made it
         (build / "Testing/junit.xml").write_text(
-            '<testsuite><testcase name="test_a" status="run"><system-out>EXECUTED: 600000\n'
-            '</system-out></testcase></testsuite>\n')
+            f'<testsuite><testcase name="test_a" status="run"><system-out>EXECUTED: {DEFAULT_EXECUTED}\n'
+            f'</system-out></testcase></testsuite>\n')
         r = run_tool("--ctest", "--pre", str(pre), cwd=root)
         assert r.returncode != 0, r.stdout
         assert "registration set differs from the run's record" in r.stderr, r.stderr
@@ -753,7 +824,7 @@ class TestCtestPath:
         build = root / "build/native"
         _executable(build / "test_a", "#!/usr/bin/env bash\n"
                     f'rm -f "{root}/tests/unit/test_b.cpp"\n'
-                    'echo "EXECUTED: 600000"\n')
+                    f"{EXECUTED_LINE}\n")
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "source set changed during the ctest run" in r.stderr, r.stderr
@@ -772,7 +843,7 @@ class TestCtestPath:
                     f'cp -p "{src}" "{src}.ref"\n'
                     f"printf '// stub tost_b\\n' > \"{src}\"\n"
                     f'touch -r "{src}.ref" "{src}"\n'
-                    'echo "EXECUTED: 600000"\n')
+                    f"{EXECUTED_LINE}\n")
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_b.cpp" in r.stderr and "source changed during the ctest run" in r.stderr, r.stderr
@@ -834,7 +905,7 @@ class TestCtestPath:
         _executable(build / "test_a", "#!/usr/bin/env bash\n"
                     f"printf '/usr/bin/c++ -g CMakeFiles/test_a.dir/tests/unit/test_a.cpp.o "
                     f"CMakeFiles/test_a.dir/tests/unit/test_b.cpp.o -o test_a\\n' > \"{link}\"\n"
-                    'echo "EXECUTED: 600000"\n')
+                    f"{EXECUTED_LINE}\n")
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_b.cpp" in r.stderr and "changed during the ctest run" in r.stderr, r.stderr
@@ -931,17 +1002,27 @@ class TestCtestPath:
     def test_executed_line_must_stand_alone(self, tmp_path):
         # Red team @3713ab0 [LOW]: EXECUTED_RE is anchored at both ends (^EXECUTED: (\d+)$) and
         # no scenario failed with either anchor dropped. A line that merely CONTAINS the marker
-        # is not the run's own count: `EXECUTED: 600000 (cached)` kills the trailing anchor
-        # (the red team's mutant), `note: EXECUTED: 600000` the leading one (`^` dropped AND
-        # match -> search; either alone still anchors at the line start, so it is one mutant).
-        for sub, line in (("tail", 'echo "EXECUTED: 600000 (from the previous run, cached)"'),
-                          ("head", 'echo "note: EXECUTED: 600000"')):
+        # is not the run's own count: a trailing ` (cached)` kills the trailing anchor (the red
+        # team's mutant), a leading `note: ` the leading one (`^` dropped AND match -> search;
+        # either alone still anchors at the line start, so it is one mutant).
+        # What clears the floor here is NOT what clears the tool (red team @b05da68 [LOW],
+        # which caught this comment claiming otherwise): stage_unit's ctest-path sum greps
+        # UNANCHORED (pipeline.sh:273, `grep -o 'EXECUTED: [0-9]\+'`), so it credits the
+        # contaminated line as well as test_a's — the floor is cleared twice over, asserted
+        # below as 2 * DEFAULT_EXECUTED so a change to either path shows up here. The SET
+        # gate is the one that refuses it: check_test_set.py's EXECUTED_RE is anchored, does
+        # not credit the line, and names test_b as not run. That anchored/unanchored split is
+        # the subject of this scenario; do not restate the tool's property as the floor's.
+        for sub, line in (("tail", f'echo "EXECUTED: {DEFAULT_EXECUTED} (from the previous run, cached)"'),
+                          ("head", f'echo "note: EXECUTED: {DEFAULT_EXECUTED}"')):
             (tmp_path / sub).mkdir()
             root = make_tree(tmp_path / sub, scripts={"test_b": line})
             r = run_unit(root)
             assert r.returncode != 0, sub + "\n" + r.stdout + r.stderr
             assert "tests/unit/test_b.cpp" in r.stderr and "did not run" in r.stderr, sub + "\n" + r.stderr
             assert "verified" not in r.stdout, sub
+            # The unanchored floor sum counted the contaminated line too (see above).
+            assert f"unit: executed {2 * DEFAULT_EXECUTED} check(s) (ctest path)" in r.stdout, sub + "\n" + r.stdout
 
     def test_symlinked_source_is_refused(self, tmp_path):
         # The file case of the same rule (supersedes the @2f40596 lead-b statement that a
@@ -985,7 +1066,7 @@ class TestBootstrapPath:
         r = run_unit(root)
         assert r.returncode == 0, r.stdout + r.stderr
         assert "unit: verified 2 test binaries (built and executed; bootstrap path)" in r.stdout
-        assert "unit: executed 1200000 check(s) (bootstrap path)" in r.stdout
+        assert f"unit: executed {2 * DEFAULT_EXECUTED} check(s) (bootstrap path)" in r.stdout
 
     def test_source_without_a_binary_is_named(self, tmp_path):
         # Before #133 the loop walked build/native/test_* — a source whose binary was never
@@ -1038,7 +1119,7 @@ class TestBootstrapPath:
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/link/test_a.cpp" in r.stderr and "tests/unit/test_a.cpp" in r.stderr, r.stderr
         assert "same basename" in r.stderr, r.stderr
-        assert "verified" not in r.stdout and "executed 1800000" not in r.stdout, r.stdout
+        assert "verified" not in r.stdout and f"executed {3 * DEFAULT_EXECUTED}" not in r.stdout, r.stdout
 
     def test_same_basename_twice_is_refused_despite_a_quoted_sibling(self, tmp_path):
         # Red team @6fbdebf finding 2 [LOW]: unit_sources_unique() fed the sorted source list
@@ -1052,10 +1133,10 @@ class TestBootstrapPath:
         twin.parent.mkdir(parents=True)
         twin.write_text("// same basename as tests/unit/test_z.cpp\n")
         (root / "tests/unit/test_z.cpp").write_text("// stub\n")
-        _executable(root / "build/native/test_z", '#!/usr/bin/env bash\necho "EXECUTED: 600000"\n')
+        _executable(root / "build/native/test_z", f"#!/usr/bin/env bash\n{EXECUTED_LINE}\n")
         quoted = "test_a'q"
         (root / "tests/unit" / f"{quoted}.cpp").write_text("// an unmatched quote in the name\n")
-        _executable(root / "build/native" / quoted, '#!/usr/bin/env bash\necho "EXECUTED: 600000"\n')
+        _executable(root / "build/native" / quoted, f"#!/usr/bin/env bash\n{EXECUTED_LINE}\n")
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/sub/test_z.cpp" in r.stderr and "tests/unit/test_z.cpp" in r.stderr, r.stderr
@@ -1086,26 +1167,26 @@ class TestBootstrapPath:
         root = make_tree(tmp_path, ctest=False, compiled={"test_a": "test_a"}, binaries=("test_a",))
         build = root / "build/native"
         _executable(build / "test_a", "#!/usr/bin/env bash\n"
-                    f'printf "#!/usr/bin/env bash\\necho \\"EXECUTED: 600000\\"\\n" > "{build}/test_b"\n'
+                    f'printf "#!/usr/bin/env bash\\necho \\"EXECUTED: {DEFAULT_EXECUTED}\\"\\n" > "{build}/test_b"\n'
                     f'chmod +x "{build}/test_b"\n'
-                    'echo "EXECUTED: 600000"\n')
+                    f"{EXECUTED_LINE}\n")
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_b.cpp" in r.stderr and "no binary" in r.stderr, r.stderr
-        assert "verified" not in r.stdout and "executed 1200000" not in r.stdout, r.stdout
+        assert "verified" not in r.stdout and f"executed {2 * DEFAULT_EXECUTED}" not in r.stdout, r.stdout
 
     def test_binary_rewritten_during_the_run_is_refused_here_too(self, tmp_path):
         # The other half of the same finding: a binary that EXISTS before the run but is
         # overwritten by an earlier test (in place, size and mtime put back) is not the file
         # stage_build produced; the pre-run fingerprint (dev, ino, size, mtime, ctime) refuses
         # it after the run, as the ctest path's does.
-        root = make_tree(tmp_path, ctest=False, scripts={"test_b": 'echo "EXECUTED: 0"     '})
+        root = make_tree(tmp_path, ctest=False, scripts={"test_b": ZERO_LINE_PADDED})
         build = root / "build/native"
         _executable(build / "test_a", "#!/usr/bin/env bash\n"
                     f'cp -p "{build}/test_b" "{build}/test_b.ref"\n'
-                    f"printf '#!/usr/bin/env bash\\necho \"EXECUTED: 600000\"\\n' > \"{build}/test_b\"\n"
+                    f"printf '#!/usr/bin/env bash\\n{EXECUTED_LINE}\\n' > \"{build}/test_b\"\n"
                     f'touch -r "{build}/test_b.ref" "{build}/test_b"\n'
-                    'echo "EXECUTED: 600000"\n')
+                    f"{EXECUTED_LINE}\n")
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "tests/unit/test_b.cpp" in r.stderr and "changed during the run" in r.stderr, r.stderr
@@ -1119,7 +1200,7 @@ class TestBootstrapPath:
         build = root / "build/native"
         _executable(build / "test_a", "#!/usr/bin/env bash\n"
                     f'rm -f "{root}/tests/unit/test_b.cpp"\n'
-                    'echo "EXECUTED: 600000"\n')
+                    f"{EXECUTED_LINE}\n")
         r = run_unit(root)
         assert r.returncode != 0, r.stdout + r.stderr
         assert "source set changed during the run" in r.stderr and "tests/unit/test_b.cpp" in r.stderr, r.stderr

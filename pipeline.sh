@@ -110,9 +110,28 @@ unit_sources_plain() {
 # (test_link_interfaces, 6 checks) leaves 582359, below the floor — demonstrated by that
 # arithmetic over this run's per-binary EXECUTED lines, and only while no binary shrinks to
 # 5 checks or fewer.
+# 606565 = 606570 executed (20 binaries) minus 5 slack — raised 2026-09-15 at the T032/#50
+# US2 checkpoint (contracts/tooling.md "pipeline.sh": "raised to the new total minus 5, never
+# lowered"). Was 582360. Measured on the ctest path at this commit and reproduced identically
+# by a second consecutive run at the same head (reproducible on this host; cross-host
+# stability is what CI's own run establishes, not this measurement).
+# Where the +24205 since T040's 582365 comes from, stated only as far as the evidence goes
+# (rule 11): 19 binaries became 20 — test_link_busfault (587 checks here) did not exist at
+# that raise (`git merge-base --is-ancestor 1bdae09 3ad363c` is false), and it is US5 work
+# (T041/T042), not US2's. test_link_master is 313287 here against the 312884 the entry above
+# records, i.e. +403. The remaining ~+23215 is growth inside binaries whose T040-run figures
+# were never recorded, so it is measured here and NOT attributed — in particular the share
+# contributed by US2's own T028/T030 additions to test_mock_wire (6372 here) is unknown, not
+# zero. What IS established by the dates: the two US2 binaries themselves (test_link_master,
+# test_mock_wire) were on main before the T040 raise, so this checkpoint's raise is the
+# ratchet catching up to the measured total, not US2 binaries arriving.
+# At total-5 the gate still fires if ANY ONE of the 20 binaries stops reporting: the smallest
+# (test_link_interfaces, 6 checks) leaves 606564, below the floor — demonstrated by that
+# arithmetic over this run's per-binary EXECUTED lines, and only while no binary shrinks to
+# 5 checks or fewer, which is a property of the repo's current contents, not a guarantee.
 # The floor is the COUNT gate. The SET gate — every tests/{unit,property}/test_*.cpp compiled,
 # registered and executed, by name — is tools/check_test_set.py in stage_unit (#133).
-UNIT_TEST_FLOOR=582360
+UNIT_TEST_FLOOR=606565
 
 stage_codegen() {
   # Constants + vectors header from the YAML, then prove the human-authored docs tables
