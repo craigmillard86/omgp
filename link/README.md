@@ -55,9 +55,15 @@ instant finishes and gets its full gap, whereas a station still transmitting whe
 expires is transmitted over — see the contract's "That push-out is bounded". The constancy is
 load-bearing, not a footnote: deferral and cap are both byte times at the rate the host's own
 wire is set to, and `ByteWire` reports a received byte's start instant but not its duration, so
-a frame put on the wire at the trunk's *other* rate is perceived as short bytes with holes
-wider than `TRUNK_T_gap_us` between them and gets no protection from this courtesy at all — the
-engine keys down inside it. That is recorded, not resolved: `docs/OPEN-QUESTIONS.md` 2026-09-06,
+each byte is recorded as ending one of *the host's* byte times after its start bit, and only
+one of the two mismatched directions loses the courtesy. A frame put on the wire *slower* than
+the host's own rate — `TRUNK_bit_rate_fallback` traffic while the host's wire is at
+`TRUNK_bit_rate` — is perceived as short bytes with holes wider than `TRUNK_T_gap_us` between
+them, and gets no protection from this courtesy at all: the engine keys down inside it. The
+opposite mismatch is not symmetric and is not a hole in the courtesy: a frame *faster* than the
+host's own rate has each byte recorded as ending later than it truly does, and the last-activity
+instant only ever moves forward, so the deferral over-runs that frame rather than falling short.
+That is recorded, not resolved: `docs/OPEN-QUESTIONS.md` 2026-09-06,
 "a bit-rate change while another station's frame is still arriving", with `master.cpp`'s claims
 narrowed to a constant rate until it is ruled); the gap rule is the `Master`'s, and the
 `Responder` takes it on, cap and all, only when it answers late — inside the turnaround window trunk §3
