@@ -4400,3 +4400,64 @@ T032's note and `tools/mutate.cfg` `[policy]`, which is T3).
 mutation scope discharge a checkpoint task's 'local mutation run' clause?" (ANSWERED) and
 "T040's 'local mutation run'…" (the ruling this applies), and #146 (mutation attestation for a
 PR that changes no scoped source).
+
+---
+
+## 2026-09-15 — #62 (T044) AC2, corroborated by execution: the bootstrap branch is unreachable from the dispatch job, and no PATH grant can reach it
+
+**Context:** the 2026-09-15 entry "#62 (T044) AC2: the bootstrap grant lifts the denial but does
+not mask `cmake`" left its ruling PENDING and proved its fact (1) — that `apt-get install cmake`
+puts a `cmake` in `/usr/bin`, so `PATH=/usr/bin:/bin` does not mask it — *by construction from the
+package layout*, noting it could not be measured from the review sandbox and naming the falsifier:
+"a genuine bootstrap run prints `build: cmake not found -> bootstrap g++ build`; its absence is the
+tell." This dispatch ran inside the `implement` job, so the measurement is now available. It agrees
+with the entry, and adds one fact the entry did not have.
+
+**Measured this run, on `task/62` at `78d140f`:**
+
+1. **Fact (1) holds — *demonstrated by execution*, not by package layout.** `PATH=/usr/bin:/bin
+   ./pipeline.sh build` (the granted literal) printed `Preset CMake variables: …`, `-- Build files
+   have been written to: /home/runner/work/omgp/omgp/build/native`, and the CMake target lines. The
+   named falsifier — `build: cmake not found -> bootstrap g++ build` — **did not appear**. Had
+   `/usr/bin/cmake` been absent, that line is the one `pipeline.sh`'s `stage_build` would have
+   printed instead, so this output distinguishes the two branches rather than being consistent with
+   both. The later `unit` stage confirms it independently: `unit: executed 609585 check(s) (ctest
+   path)` — the ctest predicate, which is the CMake path's, not the bootstrap path's.
+2. **Fact (2) holds — *demonstrated by execution*.** `PATH=/usr/bin:/bin ./pipeline.sh` (all default
+   stages) exits non-zero at `quality`, before any build branch: `quality: clang-format 18.1.8 is
+   required on CI, found '18.1.3' — pip install -r tools/requirements.txt`. `/usr/bin/clang-format`
+   is 18.1.3; the pin lives in setup-python's toolcache bin dir, which that PATH hides.
+3. **New — the near-miss workaround does not exist, and is denied anyway.** `which cmake` in this
+   job answers `/usr/local/bin/cmake`, which is *not* the apt copy, so a PATH that keeps the
+   toolcache bin and `/usr/bin:/bin` while dropping `/usr/local/bin` looks at first like a fourth
+   option needing no artefact change — it would mask the runner image's `cmake` and keep the pinned
+   `clang-format`. It is not: the apt copy at `/usr/bin/cmake` is still found, which is exactly what
+   (1) measures. Separately, that invocation is refused by the dispatch allow-list
+   (`Bash(PATH=/usr/bin:/bin ./pipeline.sh*)` is a literal prefix, not a pattern over PATH values) —
+   *demonstrated by the denial in this run*. So the option is void on both counts, and the entry
+   above's "No PATH value fixes this" is confirmed against the one candidate it did not enumerate.
+
+**What this run could reach.** `PATH=/usr/bin:/bin ./pipeline.sh build unit refimpl diffcheck
+scenarios` — the granted literal with `quality` dropped — is green through `unit` (20/20, 609585
+checks) and then reds at `refimpl` with `/usr/bin/python3: No module named pytest`, the same
+toolcache-masking cause as (2). Neither that nor any `quality`-less invocation is AC2 evidence: both
+take the CMake branch, so they demonstrate the *stages* under a narrowed PATH, never the *bootstrap
+build*. Recorded so the transcript is not mistaken for a partial discharge.
+
+**Recommended:** unchanged — **option B** (a `bootstrap` job in `ci.yml` that installs
+`tools/requirements.txt` but not `cmake`/`ninja`, running the full default stages). Option A (a
+force-bootstrap selector) is now slightly worse than the entry above judged it: with `/usr/bin/cmake`
+present regardless, a selector proves the branch while the *detection* `stage_build` performs is
+never exercised anywhere in CI, so the gap the criterion exists to close would stay open. T049 asks
+for the same bootstrap-path evidence ("with `cmake` masked from PATH"), so whichever option is taken
+disposes of two criteria, not one.
+
+**Ruling:** PENDING — human, unchanged. This entry adds evidence, not a decision; A→C remains a
+GOVERNANCE §3 choice over `ci.yml`/`pipeline.sh`. Nothing speculative was implemented on `task/62`:
+AC4's floor raise is the whole source diff.
+
+**Amends:** the 2026-09-15 "#62 (T044) AC2" entry — its facts (1) and (2) move from proved-by-
+construction to demonstrated-by-execution, and its "No PATH value fixes this" gains the
+`/usr/local/bin` candidate it did not name. **Supersedes:** none. **Related:** T049 (`tasks.md`),
+which carries the same bootstrap-path clause, and the 2026-09-12 T040/#58 ruling (the
+amend-the-criterion precedent, option C).

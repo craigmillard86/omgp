@@ -314,7 +314,7 @@ enrolment rotation and one notification per transition.
 ### Implementation for User Story 5
 
 - [ ] T043 [US5] Implement the bus-fault logic in `link/health.cpp` per data-model.md §7 (declare rule, alternation in `next_probe`, clear-and-pin on the first valid answer *(amended 2026-09-13, F4: a reference-rate answer clears at once; a fallback answer starts a reference pass of every enrolled address, `BusState.fallback_answerer` (the address to enrol on the clear, 0 = none)/`ref_pass_left`/`pass_addr`; no automatic return — data-model §7; assumes the three F3 obligations in `contracts/link-cpp.md` "What F3/F4 need"; implements `HealthTracker::set_bit_rate`, the layer above's rate selection — ruling 2026-09-14)*, `BusStats`), citing `trunk §7` — make T041 and T042 pass
-- [ ] T044 [US5] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; local mutation run
+- [ ] T044 [US5] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; local mutation run — *box left unticked deliberately (#62): the CMake-path run, the esp32 build, the floor raise (606565 → 609580) and the mutation clause are all discharged, but the **bootstrap-path** half is unsatisfiable from the job that would claim it — `apt-get install cmake` puts a `cmake` in `/usr/bin`, so no PATH masks `cmake` without also hiding `g++`/`python3`. Demonstrated by execution, docs/OPEN-QUESTIONS.md 2026-09-15 "#62 (T044) AC2, corroborated by execution"; options A/B/C there are PENDING — human. Same clause blocks T049. Mirrors how T040's and T032's boxes were left*
 
 **Checkpoint**: SC-007 demonstrated; every §7 mode has a script (SC-005 table complete).
 
