@@ -174,8 +174,11 @@ boundary tests for `T_resp`, `T_gap` and `retries`.
   - The raise found one real coupling, fixed in the same PR: `tools/refimpl/test_test_set_gate.py`
     builds fake trees that copy the REAL `pipeline.sh`, and its fake binaries printed a
     hard-coded `EXECUTED: 600000`. Crossing 600000 made **every** scenario that executes a
-    single fake binary — fourteen by the red team's own enumeration at @`e6a104b` (finding 1),
-    not the two the first attempt named — fail on the COUNT gate instead of exercising the SET gate they exist
+    single fake binary — many more than the two the first attempt named; the red team enumerated
+    them at @`e6a104b` (finding 1), but that list is an upper bound and no count is restated here,
+    because at least one entry (`test_registration_of_a_same_named_binary_elsewhere_is_refused`)
+    appends an `add_test` for a second binary that also prints a count, so two run —
+    fail on the COUNT gate instead of exercising the SET gate they exist
     to test, so their `assert r.returncode != 0` no longer witnessed that the set gate fails the
     stage. `DEFAULT_EXECUTED` is now derived from `UNIT_TEST_FLOOR` (read, not restated) and
     every count in the file derives from it, so no future raise can repeat this for one-binary

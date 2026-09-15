@@ -215,8 +215,10 @@ VERIFIED = re.compile(r"^unit: verified (\d+) test binar(?:y|ies) \(compiled, re
 def test_fixture_counts_still_clear_the_floor():
     """Every scenario here asserts something other than the floor, so each is only meaningful
     while the fake binaries it RUNS clear the real UNIT_TEST_FLOOR the copied pipeline.sh
-    carries — and many of them run exactly ONE (fourteen, by the red team's enumeration at
-    @e6a104b; the count is theirs, not re-derived here). That was an unstated assumption
+    carries — and many of them run exactly ONE (enumerated by the red team at @e6a104b; no
+    cardinality is restated here, because that list is an upper bound: at least one entry,
+    test_registration_of_a_same_named_binary_elsewhere_is_refused, appends an add_test for a
+    second binary that also prints a count, so two run). That was an unstated assumption
     until the T032/#50 raise (582360 -> 606565) broke its single-binary half, which read as an
     unrelated "below floor" assertion rather than as this file going stale (red team
     @e6a104b finding 1). DEFAULT_EXECUTED is derived from FLOOR above, so this holds by
