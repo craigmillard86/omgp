@@ -3920,7 +3920,12 @@ This entry records the question only; no code, test or contract change is propos
 since `contracts/link-cpp.md` and `data-model.md` are human-ruling artefacts
 (`docs/OPERATING-POLICY.md` §2).
 
-**Ruling:** PENDING — human. **Amends:** none. **Supersedes:** none.
+**Ruling:** ANSWERED, human, 2026-09-15 (settled together with #574, "BusStats has two disjoint
+owners", entry below) — this entry's own recommendation: AC3's `bus_stats()` is the tracker's.
+`Master`'s `bus_faults` stays declared-but-unwritten, F3-owned per the two-counters-two-questions
+precedent this entry already named for `rate_changes`, now generalised. `contracts/link-cpp.md`
+"Health tracker" and `data-model.md` §8 are amended in the same change, as this entry asked.
+**Amends:** none. **Supersedes:** none.
 
 ---
 
@@ -4496,3 +4501,46 @@ wording is unsatisfiable in the `implement` job as configured" — is likewise n
 *under the current allow-list grant*, not unsatisfiable *in that environment*. **Supersedes:** none.
 **Related:** T049 (`tasks.md`), which carries the same bootstrap-path clause, and the 2026-09-12
 T040/#58 ruling (the amend-the-criterion precedent, option C).
+
+---
+
+## 2026-09-15 — BusStats has two disjoint owners: ruled by design, never summed (#574)
+
+**Context:** `BusStats` (`data-model.md` §8) is produced by two engines — `Master`'s own
+instance and `HealthTracker`'s own — each incrementing only the fields it decides:
+`Master.discards` and `Master.rate_changes` (one per `set_bit_rate` call it makes — "what the
+wire was told"); `HealthTracker.rate_changes` (one per change of the rate *in use* — §7's
+declare/alternate/clear rules) and `HealthTracker.bus_faults` (one per declare). `Master`'s
+`bus_faults` field and `HealthTracker`'s `discards` field are each declared but never written
+by their owner — `Master` decides no faults, the tracker sees no frames. `contracts/link-cpp.md`
+"Health tracker" already marked this "pending a ruling" (amended in PR #530), and `spec.md`
+FR-011a's singular "a fixed-size counter block … per bus" reads as one block where the
+implementation has two. #574 (filed from #530's review) asked for the ruling; enrichment on
+2026-09-15 found the question could not be released as a code task until answered, and split
+it: this ruling (T3, human), and a follow-up code issue for `HealthTracker::reset_stats()`
+once ruled.
+
+A narrower instance of the same question was already on file: the 2026-09-14 entry
+"T042 (#60) AC3's `bus_stats().bus_faults` names no receiver, and `Master`'s has no writer",
+whose own recommendation is the answer below — ruled together with this entry, not separately,
+so the two cannot land in opposite directions.
+
+**Ruling:** human, 2026-09-15. **By design, not an omission: the two `BusStats` blocks are read
+and reset separately and never summed.** They answer different questions — `Master`'s block is
+what the wire was told and what it decided to discard; `HealthTracker`'s is what the rate in
+use did and what it declared — matching the two-counters-two-questions precedent already ruled
+for `rate_changes` alone (`contracts/link-cpp.md`, round-3 red team on #523), now generalised to
+the whole block. `Master.bus_faults` and `HealthTracker.discards` stay declared-but-unwritten:
+neither engine has the information to decide the other's field, and nothing here manufactures a
+combined view — F3 (not yet built) is where an aggregated view, if ever wanted, belongs.
+`HealthTracker::reset_stats()` does not exist yet; `Master` has one and the tracker does not,
+which is the one real asymmetry here (not a ruling question, an implementation gap) — filed as
+a follow-up task, T2, dispatchable once this ruling lands, since it is ordinary code-to-contract
+work with no ambiguity left once the ruling is recorded.
+
+`spec.md` FR-011a, `data-model.md` §8 and `contracts/link-cpp.md` "Health tracker" are amended
+in this same change to say so explicitly, clearing PR #530's "pending a ruling" marker.
+
+**Amends:** none — this is the first ruling on the question; the PR #530 contract marker it
+clears was never itself a ruling, only a flag that one was owed. **Supersedes:** none.
+**Related:** settles the 2026-09-14 "T042 (#60) AC3…" entry above in the same direction.
