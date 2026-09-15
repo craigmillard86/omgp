@@ -273,6 +273,11 @@ def test_agent_approval_wiring():
     assert set(aon["issue_comment"]["types"]) == {"created", "edited"}
     approve = approve_wf["jobs"]["approve"]
     assert "issue.pull_request" in approve["if"] and "VERDICT(" in approve["if"]
+    # The author guard is the fence around the surface `edited` widens, so pin it here too:
+    # dropping it from the job `if:` used to pass this test (red team on #614, F4). Runtime
+    # impact of dropping it is nil — the script re-checks it — but a gate's `if:` is exactly
+    # where a fence is expected to be readable.
+    assert "comment.user.login == 'claude[bot]'" in approve["if"]
     assert approve["permissions"] == {"contents": "read", "pull-requests": "write"}
     steps = approve["steps"]
     checkout = next(s for s in steps if "actions/checkout" in s.get("uses", ""))
@@ -287,6 +292,30 @@ def test_agent_approval_wiring():
     assert "VERDICT(red-team):" in rt_prompt
     cfg = (ROOT / ".github" / "agent-config.yml").read_text()
     assert "auto_approve_max_tier: 2" in cfg
+
+
+def test_issue_comment_gates_are_action_agnostic():
+    """Every `issue_comment` gate must decide the same way on `created` and on `edited`.
+
+    This is the ENTIRE argument for why widening a trigger to `[created, edited]` (PR #614,
+    live gap on #610) needs no script change — and before this test it was asserted only in
+    prose, in a workflow comment and a test comment (red team on #614, F3). CLAUDE.md rule 11:
+    a claim that holds only by the current contents of a file is a control, not a guarantee,
+    unless something executable pins it. This is that pin.
+
+    Established BY THIS TEST over the checked-in scripts (not by construction): none of these
+    gates branches on the webhook action, so an edit of a verdict comment is judged on the body
+    it now has, exactly as a fresh comment would be. A future script that does branch on it
+    must say so here and argue the `edited` path explicitly.
+    """
+    for workflow, job in (("agent-approve.yml", "approve"),
+                          ("review-followups.yml", "file"),
+                          ("review-fix.yml", "gate")):
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / workflow).read_text())
+        for src in (wf["jobs"][job]["if"], _script(workflow, job)):
+            assert "payload.action" not in src and "github.event.action" not in src, (
+                f"{workflow}: the gate branches on the webhook action, so `edited` is no longer "
+                "a no-op for it — re-argue the edited path before landing this")
 
 
 def test_bot_triggered_agent_workflows_allow_their_bot_actors():
@@ -347,7 +376,13 @@ def test_review_fix_wiring():
     on = wf[True] if True in wf else wf["on"]
     # Default-branch definition runs (same rationale as agent-approve): a PR cannot rewrite
     # this loop's own bounds in its own diff.
-    assert on["issue_comment"]["types"] == ["created"]
+    # KNOWN GAP (#614 red team, 2026-09-15): `edited` is missing here for the #610 reason — a
+    # `findings` verdict that claude-code-action edits into its placeholder never starts this
+    # loop. Unlike review-followups this one fails SAFE (the gate rescans comments, so a missed
+    # verdict stalls the PR rather than merging it), which is why the membership is not pinned:
+    # the assertion below stays green both before and after the one-line trigger widening, so it
+    # neither hides the gap nor trips the fix.
+    assert "created" in set(on["issue_comment"]["types"])
     gate, fix = wf["jobs"]["gate"], wf["jobs"]["fix"]
     assert "claude[bot]" in gate["if"] and "VERDICT(" in gate["if"]
     checkout = next(s for s in gate["steps"] if "actions/checkout" in s.get("uses", ""))
@@ -468,7 +503,17 @@ def test_review_followups_wiring():
     privilege, and it files `task` only — never a label that releases work to the dispatcher."""
     wf = yaml.safe_load(REVIEW_FOLLOWUPS.read_text())
     on = wf[True] if True in wf else wf["on"]
-    assert on["issue_comment"]["types"] == ["created"]
+    assert "created" in set(on["issue_comment"]["types"])
+    # KNOWN GAP (#614 red team, 2026-09-15, BLOCKING there): `edited` is load-bearing HERE in a
+    # way it is not for the other two gates, and it is still missing. This filer reads only
+    # `context.payload.comment` and never calls `listComments` — pinned below — so a
+    # `## FOLLOW-UPS` section that claude-code-action edits into its placeholder has NO later
+    # event able to recover it: those proposals are not filed late, they are never filed, which
+    # is exactly what GOVERNANCE.md's "scheduled, not dropped" promises cannot happen. The fix is
+    # `types: [created, edited]`; it needs a push with the `workflows` permission.
+    assert "listComments" not in _script("review-followups.yml", "file"), (
+        "this filer has gained a rescan — re-read the KNOWN GAP above, since the `edited` "
+        "trigger is only load-bearing while no rescan exists")
     perms = wf["permissions"]
     assert perms["issues"] == "write" and perms.get("contents", "read") == "read" and "id-token" not in perms
     job = wf["jobs"]["file"]

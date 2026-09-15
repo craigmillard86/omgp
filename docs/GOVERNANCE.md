@@ -132,7 +132,17 @@ the enforcement.
     in the PR body. Every other real finding is routed to `## FOLLOW-UPS`
     and filed as a `task` issue by `review-followups.yml` — scheduled, not
     dropped — and the comment must say the budget applied and which
-    findings it moved.
+    findings it moved. (Amended 2026-09-15, red team on PR #614 — OPEN, not
+    yet fixed: "scheduled, not dropped" depends on the filer actually SEEING
+    the verdict comment, and `review-followups.yml` triggers on `created`
+    only while reading no comment but the trigger's own. A `## FOLLOW-UPS`
+    section that claude-code-action edits into its placeholder is therefore
+    never filed at all, silently, with no rescan able to recover it — it is
+    the only one of the three `issue_comment` gates with no rescan, so it is
+    the only one for which the `edited` trigger is load-bearing rather than
+    parity. Until `types: [created, edited]` lands there, this promise holds
+    only for verdicts whose FOLLOW-UPS section was present when the comment
+    was created.)
   - **What this deliberately gives up.** A clean verdict past the budget
     can now co-exist with known, filed, non-HIGH weaknesses, and
     `agent-approve`/`agent-merge` act on that verdict. That is the trade:
