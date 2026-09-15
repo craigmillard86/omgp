@@ -245,11 +245,11 @@ public:
                                                                // used or a clear pins one, a fault each time one is declared.
                                                                // BusStats::discards is the Master's field and is never written by the
                                                                // tracker (it sees no frames), so the two engines' blocks are read
-                                                               // separately and never summed.
-                                                               // (Amended in PR #530 — pending a ruling. The T041 tests assert on these
-                                                               // counters and data-model §7/§8 specify them, but this contract declared
-                                                               // no accessor for them on HealthTracker; the maintainer's 2026-09-06
-                                                               // rescope of #59/#61 directs T043 to add it here.)
+                                                               // separately and never summed — BY DESIGN, not pending (ruled
+                                                               // 2026-09-15, data-model §8, #574): they answer different questions,
+                                                               // and nothing in this feature aggregates them.
+    void reset_stats();                                        // matches Master::reset_stats(); accepted by the same ruling, not
+                                                               // yet implemented — a follow-up PR, tests first.
 };
 ```
 Rules: SUSPECT after `TRUNK_suspect_after_failures` consecutive failures; OFFLINE after

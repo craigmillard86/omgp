@@ -321,6 +321,20 @@ BusStats  { u32 rate_changes, bus_faults, discards }
 Readable via `stats(addr)` / `bus_stats()`, `reset_stats()`; incremented at the point the
 event is decided (e.g. `retries` when the retry frame is handed to the wire).
 
+`BusStats` has two live instances, not one — `Master`'s own and `HealthTracker`'s own — read
+and reset separately, never summed (ruled 2026-09-15, `OPEN-QUESTIONS.md` "BusStats has two
+disjoint owners", #574). `Master`'s block: `discards` (§8 above) and `rate_changes` (one per
+`set_bit_rate` call it makes — "what the wire was told"); its `bus_faults` field is declared
+but never written, since `Master` decides no faults. `HealthTracker`'s block: `rate_changes`
+(one per change of the rate *in use* — §7's declare/alternate/clear rules) and `bus_faults`
+(one per declare, §7); its `discards` field is never written, since the tracker sees no
+frames. The two `rate_changes` counters answer different questions by design (already ruled
+for this pair alone in `contracts/link-cpp.md` "Health tracker", round-3 red team on #523;
+this ruling generalises it to the whole block and to `bus_faults`/`discards` with it) — nothing
+in this feature aggregates them, and F3 (not yet built) is where a combined view, if ever
+needed, would live. `HealthTracker::reset_stats()` does not exist yet; adding it (to match
+`Master`'s) is a follow-up, not part of this ruling.
+
 `AddrStats::discards` counts **decoded** frames — those that passed CRC and then failed the
 acceptance screen — discarded while that address's own transaction is awaiting a response.
 `BusStats::discards` counts every other frame-level discard the Master decides: a decoded
