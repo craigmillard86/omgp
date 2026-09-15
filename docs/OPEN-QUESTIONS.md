@@ -4408,6 +4408,102 @@ PR that changes no scoped source).
 
 ---
 
+## 2026-09-15 — #62 (T044) AC2, corroborated by execution: what the dispatch job measured, and why the blocker is the allow-list rather than the environment
+
+**Context:** the 2026-09-15 entry "#62 (T044) AC2: the bootstrap grant lifts the denial but does
+not mask `cmake`" left its ruling PENDING and proved its fact (1) — that `apt-get install cmake`
+puts a `cmake` in `/usr/bin`, so `PATH=/usr/bin:/bin` does not mask it — *by construction from the
+package layout*, noting it could not be measured from the review sandbox and naming the falsifier:
+"a genuine bootstrap run prints `build: cmake not found -> bootstrap g++ build`; its absence is the
+tell." This dispatch ran inside the `implement` job, so the measurement is now available. It agrees
+with the entry's two facts, adds one the entry did not have, and **narrows the universal the entry
+drew from them** — see (4), added after the red-team pass at `7f51da1` falsified it as worded.
+
+**Measured this run, on `task/62` at `78d140f`:**
+
+1. **Fact (1) holds — *demonstrated by execution*, not by package layout.** `PATH=/usr/bin:/bin
+   ./pipeline.sh build` (the granted literal) printed `Preset CMake variables: …`, `-- Build files
+   have been written to: /home/runner/work/omgp/omgp/build/native`, and the CMake target lines. The
+   named falsifier — `build: cmake not found -> bootstrap g++ build` — **did not appear**. Had
+   `/usr/bin/cmake` been absent, that line is the one `pipeline.sh`'s `stage_build` would have
+   printed instead, so this output distinguishes the two branches rather than being consistent with
+   both. The later `unit` stage confirms it independently: `unit: executed 609585 check(s) (ctest
+   path)` — the ctest predicate, which is the CMake path's, not the bootstrap path's.
+2. **Fact (2) holds — *demonstrated by execution*.** `PATH=/usr/bin:/bin ./pipeline.sh` (all default
+   stages) exits non-zero at `quality`, before any build branch: `quality: clang-format 18.1.8 is
+   required on CI, found '18.1.3' — pip install -r tools/requirements.txt`. `/usr/bin/clang-format`
+   is 18.1.3; the pin lives in setup-python's toolcache bin dir, which that PATH hides.
+3. **New — the near-miss workaround does not exist, and is denied anyway.** `which cmake` in this
+   job answers `/usr/local/bin/cmake`, which is *not* the apt copy, so a PATH that keeps the
+   toolcache bin and `/usr/bin:/bin` while dropping `/usr/local/bin` looks at first like a fourth
+   option needing no artefact change — it would mask the runner image's `cmake` and keep the pinned
+   `clang-format`. It is not: the apt copy at `/usr/bin/cmake` is still found, which is exactly what
+   (1) measures. Separately, that invocation is refused by the dispatch allow-list
+   (`Bash(PATH=/usr/bin:/bin ./pipeline.sh*)` is a literal prefix, not a pattern over PATH values) —
+   *demonstrated by the denial in this run*. So that candidate is void on both counts. It does
+   **not** confirm the entry above's "No PATH value fixes this", which is a universal over PATHs
+   and is false as worded — (4).
+4. **Correction — "No PATH value fixes this" holds only for PATHs built out of the existing system
+   `bin` directories.** That sentence, and the one-line summary of it this branch first wrote into
+   `tasks.md` ("no PATH masks `cmake` without also hiding `g++`/`python3`"), are true of *directory
+   subsets*: `cmake`, `g++`, `python3`, `git` and `find` share `/usr/bin` on this image, so no
+   selection of whole `bin` directories separates them — that is what facts (1) and (3) measure.
+   They are false of PATHs in general. A scratch directory of symlinks to every tool on the current
+   PATH *except* `cmake` masks `cmake` and leaves the bootstrap toolchain whole, and `stage_build`
+   picks its branch with `command -v cmake` (`pipeline.sh:218`), so such a PATH takes the bootstrap
+   branch. *Proved by construction from that line plus the symlink set; **demonstrated** on this
+   runner by the red-team pass at `7f51da1`, which built such a directory and observed `cmake ->
+   None` with `g++`, `python3`, `git`, `make`, `bash` and `ninja` all still resolving — not re-run
+   here, my own allow-list refused it.* Recorded as an amendment, per the append-only rule: the
+   2026-09-15 entry above is **not** edited — only this one, which is still unmerged on `task/62`,
+   so correcting it in place amends a draft rather than landed history (review-fix pass 1, PR #644).
+
+   **What survives the correction:** AC2 is still **not** demonstrated. The obstacle measured in
+   this job is the **dispatch allow-list** — it grants the literal prefix `Bash(PATH=/usr/bin:/bin
+   ./pipeline.sh*)` and no other PATH value, so `PATH=<shim-dir> ./pipeline.sh build` is refused
+   (*demonstrated by the denials in this run and in the red-team pass*) — **not** the environmental
+   impossibility this entry first asserted. Whether the bootstrap branch compiles and runs `link/`'s
+   bus-fault sources green is unexamined by anyone, here or in CI; AC2 is the criterion that would
+   close that gap and it remains open.
+
+**What this run could reach.** `PATH=/usr/bin:/bin ./pipeline.sh build unit refimpl diffcheck
+scenarios` — the granted literal with `quality` dropped — is green through `unit` (20/20, 609585
+checks) and then reds at `refimpl` with `/usr/bin/python3: No module named pytest`, the same
+toolcache-masking cause as (2). Neither that nor any `quality`-less invocation is AC2 evidence: both
+take the CMake branch, so they demonstrate the *stages* under a narrowed PATH, never the *bootstrap
+build*. Recorded so the transcript is not mistaken for a partial discharge.
+
+**Recommended:** unchanged — **option B** (a `bootstrap` job in `ci.yml` that installs
+`tools/requirements.txt` but not `cmake`/`ninja`, running the full default stages). Option A (a
+force-bootstrap selector) is now slightly worse than the entry above judged it: with `/usr/bin/cmake`
+present regardless, a selector proves the branch while the *detection* `stage_build` performs is
+never exercised anywhere in CI, so the gap the criterion exists to close would stay open. T049 asks
+for the same bootstrap-path evidence ("with `cmake` masked from PATH"), so whichever option is taken
+disposes of two criteria, not one.
+
+**A fourth option, which (4) puts on the table: D. a shim-directory PATH** — a scratch directory of
+symlinks to the current PATH's tools minus `cmake`, used by whoever produces the bootstrap evidence.
+It needs no `pipeline.sh` change and no `ci.yml` job, only a Bash grant admitting the PATH value (a
+pattern, not today's literal), and unlike A it exercises the *detection* AC2 words rather than
+bypassing it. Not implemented and **not run** here (allow-list): only that the bootstrap branch is
+*selectable* that way is established — that it *builds green* is unexamined. B is still recommended
+over D, on the same ground as before: D yields a transcript, B yields a standing gate.
+
+**Ruling:** PENDING — human, unchanged. This entry adds evidence, not a decision; A→D remains a
+GOVERNANCE §3 choice over `ci.yml`/`pipeline.sh`/the dispatch allow-list. Nothing speculative was
+implemented on `task/62`: AC4's floor raise is the whole source diff.
+
+**Amends:** the 2026-09-15 "#62 (T044) AC2" entry — its facts (1) and (2) move from proved-by-
+construction to demonstrated-by-execution; its "No PATH value fixes this" gains the
+`/usr/local/bin` candidate it did not name, and is **narrowed by (4)** to PATHs composed of the
+existing system `bin` directories, its universal form being false. Its conclusion — "AC2's literal
+wording is unsatisfiable in the `implement` job as configured" — is likewise narrowed: unsatisfiable
+*under the current allow-list grant*, not unsatisfiable *in that environment*. **Supersedes:** none.
+**Related:** T049 (`tasks.md`), which carries the same bootstrap-path clause, and the 2026-09-12
+T040/#58 ruling (the amend-the-criterion precedent, option C).
+
+---
+
 ## 2026-09-15 — BusStats has two disjoint owners: ruled by design, never summed (#574)
 
 **Context:** `BusStats` (`data-model.md` §8) is produced by two engines — `Master`'s own
