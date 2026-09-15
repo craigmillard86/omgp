@@ -3937,9 +3937,15 @@ an attest run gates — not a survivor, not a malformed `mutant-ok` label, not t
 because the diff changed no source line, so every finding is pre-existing debt, and gating on one
 is the Option B this ruling rejected. The label rule, which did gate at PR #593's first head, is
 now reported-not-gated on that path alone. What still exits 1 is the run failing to HAPPEN: no
-oracle binary for an attested dir, no source file under one, no Mull report, no mutant in a
+oracle binary for an attested dir, no source file under one (checked per attested dir, not over
+their union: red-team round 4 showed a whole-scope check passes `l3 link` through whenever `l3/`
+alone has sources), no Mull report, no mutant in a
 non-empty scope, and — added after red-team round 3 on PR #593 — **no mutant executed under an
-attested dir**. That last one needed its own rule: the pre-existing per-changed-dir rule is
+attested dir**, where *executed* is the mutant's status and not its presence in the report: the
+first draft of that rule counted every mutant the report listed, so a dir whose mutants all came
+back `NoCoverage` — Mull's own "no binary reached it", i.e. the unreached-directory blind spot
+itself — still attested green at 100 % (red-team round 4). That last one needed its own rule:
+the pre-existing per-changed-dir rule is
 guarded on `diff_mode and ranges`, which an attestation (trend mode, no ranges) can never
 satisfy, while a dir's `test_<dir>_*` oracle binaries carry the sibling scope dirs' mutants too,
 so a non-zero total over the whole scope said nothing about the dir being attested — and the
