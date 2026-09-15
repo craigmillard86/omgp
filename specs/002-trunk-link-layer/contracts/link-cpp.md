@@ -248,8 +248,8 @@ public:
                                                                // separately and never summed — BY DESIGN, not pending (ruled
                                                                // 2026-09-15, data-model §8, #574): they answer different questions,
                                                                // and nothing in this feature aggregates them.
-    void reset_stats();                                        // matches Master::reset_stats(); accepted by the same ruling, not
-                                                               // yet implemented — a follow-up PR, tests first.
+   void reset_stats();                                        // zeroes this tracker's BusStats only;
+                                                               // leaves node states, bus_fault(), bit_rate(), and any in-flight reference pass unchanged.
 };
 ```
 Rules: SUSPECT after `TRUNK_suspect_after_failures` consecutive failures; OFFLINE after
