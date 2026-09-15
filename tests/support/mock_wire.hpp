@@ -3,11 +3,9 @@
 // contracts/mock-wire.md, contracts/byte-wire-and-clock.md, research.md R-07.
 //
 // Host-only (tests/support/) but allocation-free, per contracts/mock-wire.md, so F4's
-// virtual wire can seed itself from the same code. Kind::Respond, Kind::Silence,
-// Kind::CrcError and Kind::Duplicate are implemented here (the last two per T029's own
-// scope, ahead of the rest of T030); Garbage/Babble/Rate are declared so T011/T028 can
-// reference the enum, with their behaviour landing in T030 (tasks.md) — see the switch
-// in mock_wire.cpp.
+// virtual wire can seed itself from the same code. All seven Kinds are implemented:
+// Respond/Silence from T010, CrcError/Duplicate from T029's own slice, and
+// Garbage/Babble/Rate from T030 (#48) — see the switch in mock_wire.cpp.
 //
 // contracts/mock-wire.md:16 gives Kind::Respond's answer to "the node's RequestHandler"
 // (and the CrcError/Duplicate rows build "the real response" from it): set_handler()
@@ -50,7 +48,7 @@ struct Step {
     // exists to make legal — actually compiles: -Wmissing-field-initializers (part of
     // -Wextra, and this project builds -Werror) flags a trailing designated-init member
     // with no default member initializer even though its zero-initialized value is the
-    // same either way. Only Garbage/Babble/Rate (T030) read count/seed at all.
+    // same either way. Only Garbage/Babble/Rate read count/seed at all.
     // uint32_t, not the uint16_t the artefacts first stated: Kind::Rate reads count as a bit
     // rate (1 000 000 or 115 200), neither of which fits 16 bits. Widened 2026-09-14 by the
     // 2026-09-03 ruling (docs/OPEN-QUESTIONS.md 2026-09-02 "Step::count (uint16_t) cannot
@@ -60,7 +58,7 @@ struct Step {
     uint32_t seed = 0;
 };
 
-// research R-07: all script-driven randomness (Garbage/Babble byte content, T030) goes
+// research R-07: all script-driven randomness (Garbage/Babble byte content) goes
 // through this xorshift32 so a given Step::seed reproduces the same byte stream.
 // `state`'s only fixed point is 0 (every subsequent call would then return 0 forever);
 // xorshift32_next() repairs an all-zero input by substituting 0xFFFFFFFF before
@@ -193,8 +191,14 @@ class MockWire : public omgp::link::ByteWire {
     };
 
     // 4 x kMaxWire (contracts/mock-wire.md "Capacity"): enough for a response, a
-    // duplicate and a babble burst (T030).
+    // duplicate and a babble burst.
     static constexpr size_t kRxCapacity = 4 * omgp::link::kMaxWire;
+    // The longest Garbage/Babble burst a step may ask for. Bounded by the RX queue itself:
+    // bytes past it could not be enqueued anyway (enqueue() would raise the capacity fault
+    // for each), so generating them would be work nobody can receive. A step asking for
+    // more is refused by name rather than truncated — contracts/mock-wire.md "Capacity":
+    // never a silent drop.
+    static constexpr size_t kMaxBurst = kRxCapacity;
     // Generous fixed bound for the transcript, sized well above what any single test's
     // transaction sequence needs (a full 3-attempt retry to every one of the 16 nodes is
     // 48 frames); overflow is a REQUIRE failure, matching the RX queue's no-silent-drop
@@ -228,6 +232,35 @@ class MockWire : public omgp::link::ByteWire {
     // response, then the same bytes again delay_us after that first copy ends.
     void schedule_duplicate(const omgp::link::FrameFields& request, uint64_t tx_end,
                             uint32_t delay_us);
+    // Kind::Garbage and Kind::Babble (contracts/mock-wire.md) and the wrong-rate branch of
+    // Kind::Rate all put the same thing on the wire: `count` seeded-PRNG bytes starting at
+    // `t0`, one byte_time_us() apart, "never containing a valid frame — checked at
+    // generation" (the Garbage row) — checked here with the REAL Deframer, and regenerated
+    // from the advanced PRNG state if a frame does fall out, the way torture.py handles a
+    // CRC-lucky corruption (data-model.md §11). Refuses, by name, a count of 0 (which would
+    // be an invisible Silence) or one above kMaxBurst.
+    void schedule_noise(uint64_t t0, uint32_t count, uint32_t seed);
+    // contracts/mock-wire.md's Babble row: the burst is emitted "regardless of addressee
+    // (also emitted when a different node is polled)". Fires the pending Babble step at the
+    // head of every OTHER node's own script — `addressed`'s is handled by transmit()'s
+    // switch — so a scripted babbler transmits outside any window of its own (the trunk §3
+    // violation the Kind exists to stage). A node that cannot hear the wire's current rate is
+    // skipped and keeps its step, exactly as the addressed node's is kept: see
+    // hears_current_rate() and docs/OPEN-QUESTIONS.md 2026-09-15 "A node deafened by
+    // `Kind::Rate`: does its pending `Kind::Babble` step still fire?".
+    void fire_foreign_babble(uint8_t addressed, uint64_t tx_end);
+    // Whether `node` can hear traffic at the wire's CURRENT bit rate: true for every node until
+    // a Kind::Rate step arms it (the node_rate_ == 0 sentinel below), and thereafter only while
+    // the wire runs at the rate that step named. Pure — deaf_to_current_rate() is the arm that
+    // also puts the wrong-rate branch's noise on the wire. Shared so a node's hearing is decided
+    // in ONE place for both the addressed node and a foreign babbler.
+    // Precondition: node < omgp::link::kAddrCount (both callers check, transmit() by refusing
+    // the request outright).
+    bool hears_current_rate(uint8_t node) const;
+    // Kind::Rate's standing effect on a node that cannot hear the current wire rate: nothing
+    // at all when the arming step's seed was 0, a noise burst otherwise. Returns true when it
+    // handled the request (i.e. the node is deaf), leaving the node's script untouched.
+    bool deaf_to_current_rate(uint8_t node, uint64_t tx_end);
     // `injected`: mark this byte as inject_bytes()'s (see QueuedByte::injected). Defaulted
     // false so the three schedule_*() paths stay untracked without restating it.
     void enqueue(uint8_t byte, uint64_t start_us, bool injected = false);
@@ -277,6 +310,19 @@ class MockWire : public omgp::link::ByteWire {
     // (the contract's preamble) so F4 can seed its virtual wire from it. nullptr — the
     // initial state of every slot — selects the interim echo answer instead.
     omgp::link::RequestHandler* handlers_[omgp::link::kAddrCount] = {};
+
+    // Kind::Rate's standing per-node state (contracts/mock-wire.md: "the node NOW hears only
+    // at `count`" — a property of the node from then on, not of the one request that carried
+    // the step). 0 is the sentinel for "no Rate step seen; this node hears whatever the wire
+    // uses": no valid bit rate is 0 (byte_time_us() asserts on it), so the sentinel cannot
+    // collide with a rate a script could name.
+    uint32_t node_rate_[omgp::link::kAddrCount] = {};
+    // The arming step's seed and delay, kept because a LATER wrong-rate request has no step
+    // of its own to read them from (docs/OPEN-QUESTIONS.md 2026-09-15 "Kind::Rate's
+    // wrong-rate Garbage branch names no burst LENGTH"). seed == 0 selects the Silence
+    // branch, per the Rate row.
+    uint32_t node_rate_seed_[omgp::link::kAddrCount] = {};
+    uint32_t node_rate_delay_[omgp::link::kAddrCount] = {};
 
     // Sorted by start_us (ascending), not a FIFO: byte-wire-and-clock.md requires
     // receive() to release the earliest-start-instant byte first, and interleaved delays
