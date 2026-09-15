@@ -109,8 +109,8 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // What this still cannot tell apart, stated (rule 11): more than one transaction
     // outstanding to the SAME address at once — the newest probe's rate is what the first
     // outcome back is read at. That is obligation 1's territory, ASSUMED, not enforced.
-    // Outside a fault the rate decides one thing: whether a late fault-time answer counts
-    // (other_rate).
+    // Outside a fault the rate decides one thing: whether a fault-time probe's late outcome
+    // counts (late_fault_probe below).
     const bool at_reference = (bus_.probe_fallback & probe_bit(addr)) == 0;
     // The recorded fallback answerer answered at the fallback rate. trunk §2 says every node
     // supports both rates and the active one is selected by strap or configuration; the
@@ -136,23 +136,33 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // The probe this outcome answers is no longer in flight, so its record stops being the
     // one thing a new episode must not overwrite. Unconditional: an outcome for an address
     // with no outstanding probe clears a bit that is already clear.
-    bus_.probe_live = static_cast<uint16_t>(bus_.probe_live & ~probe_bit(addr));
 
-    // Outside a fault, an ok outcome for a probe that went out at a rate OTHER than the rate
-    // now in use is not evidence its node hears the rate in use, and moves no §6 state: it is
-    // the late answer to a fault-time probe (a written-off pass probe at the reference rate
-    // after a fallback clear; an alternation probe at the fallback rate after a reference
-    // clear), and enrolling on it strands the node as ENROLLED on a trunk it cannot hear, or
-    // status-polls it straight back into SUSPECT and a re-declared fault (round-15 red team
-    // on #530). It does not undo the clear: past the window the tracker acted as if the node
-    // were silent, and there is no automatic return (ruling 2026-09-13) — the node stays
-    // SUSPECT, visibly. Demonstrated by the two "... does not enrol its node ..." cases.
-    const bool other_rate =
-        !bus_.fault && ok && at_reference != (bus_.bit_rate == omgp::TRUNK_bit_rate);
-    if (is_answerer || other_rate) {
-        // Recorded already, or answered at the other rate — nothing to record, nothing to
-        // apply; the pass-advance block below still consumes this outcome if it is the
-        // outstanding pass probe's.
+    // Outside a fault, the late outcome of a FAULT-TIME PROBE — one still outstanding inside
+    // its outcome window — that went out at a rate other than the rate now in use is that
+    // probe's, not new evidence about the node: an ok is not proof it hears the rate in use
+    // (enrolling on it stranded the node as ENROLLED on a trunk it cannot hear — round-15 red
+    // team), and a failure is the write-off's "drew nothing" counted a second time (round-16
+    // red team, follow-up 2). It moves no §6 state. Bounded to a live probe inside its window
+    // (round-16 review and red team, [HIGH]): read from the last probe's rate bit alone, the
+    // rule suppressed every later status-poll answer that disagreed with the rate in use —
+    // status polls never write that bit — and a node that answered every poll stayed SUSPECT
+    // until it aged to OFFLINE. An ordinary poll answer has no live probe behind it. Inside
+    // the window a first answer after the clear is ambiguous and is read as the probe's; the
+    // live bit is consumed by it, so the next answer counts. It does not undo the clear: past
+    // the window the tracker acted as if the node were silent, and there is no automatic
+    // return (ruling 2026-09-13). Demonstrated by the "... does not enrol its node ..." pair,
+    // "after a clear, ordinary status-poll answers ..." and "a late failure for a written-off
+    // pass probe ..." in tests/unit/test_link_busfault.cpp.
+    const bool late_fault_probe =
+        !bus_.fault && (bus_.probe_live & probe_bit(addr)) != 0 &&
+        elapsed_us(now_us, records_[addr].probe_issued_us) <= kOutcomeWindowUs &&
+        at_reference != (bus_.bit_rate == omgp::TRUNK_bit_rate);
+    // The outcome consumes the live record — read above first, cleared here (round 16).
+    bus_.probe_live = static_cast<uint16_t>(bus_.probe_live & ~probe_bit(addr));
+    if (is_answerer || late_fault_probe) {
+        // Recorded already, or a fault-time probe's late outcome at the other rate — nothing to
+        // record, nothing to apply; the pass-advance block below still consumes this outcome
+        // if it is the outstanding pass probe's.
     } else if (fallback_answer) {
         // §7: a fallback-rate answer neither clears the fault nor moves that node's state —
         // enrolling it here would have it status-polled at a rate it cannot hear, fail into
