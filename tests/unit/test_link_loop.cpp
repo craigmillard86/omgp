@@ -54,8 +54,10 @@
 //                              mode this table rows on, but is proven the same way immediately
 //                              below: "SC-005 RECOVERED: a Respond step after OFFLINE drives a
 //                              real HealthTracker back to ENROLLED")
-//   BUS_FAULT              -> reserved: T042 (#60) extends this file with the wrong-rate script
-//   wrong-rate probe       -> reserved: T042 (#60), same script as BUS_FAULT above
+//   BUS_FAULT              -> "SC-005 BUS_FAULT / wrong-rate probe: three nodes silently drop
+//                              to the fallback rate ..." (T042/#60, below the SC-005 SUSPECT/
+//                              OFFLINE/RECOVERED block; same script for both rows)
+//   wrong-rate probe       -> ditto
 #include "catch_amalgamated.hpp"
 #include "fake_clock.hpp"
 #include "link/crc16.hpp"
@@ -1130,6 +1132,190 @@ TEST_CASE("SC-005 RECOVERED: a Respond step after OFFLINE drives a real HealthTr
     REQUIRE(one_more_failure.kind == MasterEvent::Failed);
     REQUIRE(tracker.state(kNode) == HealthState::ENROLLED);
     REQUIRE(listener.entries.size() == 4 + kDeclareNotices + kClearNotices);
+}
+
+// --- T042/#60 (US5): BUS_FAULT / wrong-rate probe, driven end to end through a REAL Master
+// and REAL wire traffic -- the SC-005 row above marked "reserved". trunk §7's declare rule,
+// alternating-rate re-probe, reference pass and fallback-rate clear (data-model.md §7, amended
+// 2026-09-13 "F4") are tests/unit/test_link_busfault.cpp's subject (T041/#59, "a pass that
+// draws nothing clears the fault at the fallback rate and enrols the recorded answerer"); this
+// file reproduces the SAME scenario, but every outcome below comes from a transmitted MockWire
+// frame rather than a direct tracker.on_result() call -- SC-005's own wording for this row,
+// "reachable from a script with no test-specific code" (#62 2026-09-15), is what a
+// tracker-only proof does not discharge.
+//
+// Kind::Rate is standing, per-node state (mock_wire.hpp): once a node's script hands it a
+// Kind::Rate step, deaf_to_current_rate() is checked BEFORE next_step() on every later
+// request, so a deaf node's script position never advances again -- an exhausted script then
+// defaults to Kind::Respond, which is exactly what answers the node the moment the wire's rate
+// matches what it hears. kNodeA/B/C therefore need only TWO script entries each: Respond (the
+// initial enrolment, at the reference rate) and Rate{TRUNK_bit_rate_fallback} (arms the
+// standing deafness -- this same request, still at the reference rate, is itself unanswered:
+// mock_wire.cpp's Kind::Rate arm "governs this very request too"). No third entry is needed by
+// construction, not merely by this scenario's cell count.
+//
+// No scheduler exists yet (contracts/link-cpp.md "Health tracker": next_probe()/on_result()
+// wiring is F3's, assumed here as an obligation, not enforced) -- this file is the driver.
+
+// Runs one already-begun transaction to a terminal event, in byte-time steps at `rate` (never
+// assumed to be Answered or Failed): a generous, spec-symbol-derived bound, not an exact one --
+// three full attempts' worth of a maximum-length frame plus its response window, with headroom.
+MasterEvent drive(MockWire& wire, Master& master, uint32_t rate, uint64_t from_us) {
+    const uint64_t step = omgp::link::byte_time_us(rate);
+    const uint64_t deadline = from_us + 3 * (static_cast<uint64_t>(kMaxWire) * step +
+                                             omgp::TRUNK_T_resp_us + omgp::TRUNK_T_gap_us);
+    MasterEvent ev{};
+    for (uint64_t t = from_us + step; t <= deadline && ev.kind == MasterEvent::None; t += step)
+        ev = wire.advance_to(t, master);
+    REQUIRE(ev.kind != MasterEvent::None); // must reach a terminal event within the bound
+    return ev;
+}
+
+// Advances the tracker's fault-time rotation via next_probe() (F3 obligation 2: exactly once
+// per probe ISSUED) until it hands out `addr` at `rate`, touching the real wire for none of the
+// addresses skipped along the way -- the same "search, then act on the one that matters" shape
+// test_link_busfault.cpp's own probe_until() uses (skipped probes are simply abandoned, same as
+// there). Bounded the same way: two full rotations of the 15 backplane addresses covers every
+// (address, rate) pair, 15 being odd making the two cycles co-prime.
+Probe seek_probe(HealthTracker& tracker, uint8_t addr, uint32_t rate) {
+    constexpr int kCycle = 2 * (omgp::ADDR_backplane_max - omgp::ADDR_backplane_min + 1);
+    for (int i = 0; i < kCycle; ++i) {
+        const Probe p = tracker.next_probe(0);
+        if (p.addr == addr && p.bit_rate == rate)
+            return p;
+    }
+    FAIL("no probe for that address at that rate within one full rotation x alternation cycle");
+    return Probe{omgp::ADDR_host, rate};
+}
+
+// Acts on an already-known Probe: matches the real wire's rate to what it names ("Master::
+// set_bit_rate observed on the mock for each rate change", T042), transmits and drives to a
+// terminal event, then feeds the REAL outcome back.
+MasterEvent act_on_probe(MockWire& wire, FakeClock& clock, Master& master, HealthTracker& tracker,
+                         const Probe& p, const uint8_t* payload, size_t len) {
+    master.set_bit_rate(p.bit_rate);
+    REQUIRE(wire.bit_rate() == p.bit_rate);
+    REQUIRE(master.begin(p.addr, payload, len) == Status::Ok);
+    const MasterEvent ev = drive(wire, master, p.bit_rate, clock.now_us());
+    tracker.on_result(p.addr, ev.kind == MasterEvent::Answered, clock.now_us());
+    return ev;
+}
+
+size_t count_notice(const RecordingHealthListener& listener, Notice notice) {
+    size_t n = 0;
+    for (const auto& e : listener.entries)
+        if (e.notice == notice)
+            ++n;
+    return n;
+}
+
+TEST_CASE("SC-005 BUS_FAULT / wrong-rate probe: three nodes silently drop to the fallback "
+          "rate, the alternating probe answers at 115200, the reference pass at 1 Mbit/s "
+          "draws nothing, and recovery pins the fallback rate -- driven end to end through a "
+          "real Master, real wire traffic and a real HealthTracker",
+          "[link]") {
+    FakeClock clock;
+    MockWire wire(clock);
+    Master master(wire, clock, omgp::ADDR_host);
+    RecordingHealthListener listener;
+    HealthTracker tracker(clock, listener);
+
+    constexpr uint8_t kNodeA = omgp::ADDR_backplane_min;
+    constexpr uint8_t kNodeB = omgp::ADDR_backplane_min + 1;
+    constexpr uint8_t kNodeC = omgp::ADDR_backplane_min + 2;
+    const uint8_t nodes[] = {kNodeA, kNodeB, kNodeC};
+
+    const Step script_a[] = {
+        {.node = kNodeA, .kind = Kind::Respond},
+        {.node = kNodeA, .kind = Kind::Rate, .count = omgp::TRUNK_bit_rate_fallback},
+    };
+    const Step script_b[] = {
+        {.node = kNodeB, .kind = Kind::Respond},
+        {.node = kNodeB, .kind = Kind::Rate, .count = omgp::TRUNK_bit_rate_fallback},
+    };
+    const Step script_c[] = {
+        {.node = kNodeC, .kind = Kind::Respond},
+        {.node = kNodeC, .kind = Kind::Rate, .count = omgp::TRUNK_bit_rate_fallback},
+    };
+    wire.set_script(kNodeA, script_a, 2);
+    wire.set_script(kNodeB, script_b, 2);
+    wire.set_script(kNodeC, script_c, 2);
+
+    const uint8_t payload[] = {0x01};
+
+    // --- Enrol A, B, C at the reference rate (each one Respond step) ---
+    for (uint8_t addr : nodes) {
+        REQUIRE(master.begin(addr, payload, sizeof payload) == Status::Ok);
+        const MasterEvent ev = drive(wire, master, omgp::TRUNK_bit_rate, clock.now_us());
+        REQUIRE(ev.kind == MasterEvent::Answered);
+        tracker.on_result(addr, true, clock.now_us());
+        REQUIRE(tracker.state(addr) == HealthState::ENROLLED);
+    }
+
+    // --- "host probes at 1 Mbit/s -> silence -> SUSPECT" (T042): each node's SECOND request
+    // consumes its Rate-arm step and is itself unanswered (armed, then re-checked against the
+    // wire's still-reference rate); every request after that stays deaf too -- node_rate_ is
+    // standing (mock_wire.hpp), so no further script entry is ever needed. Sequential per
+    // node, matching test_link_busfault.cpp's ThreeNodeRig: C is the last to go SUSPECT, so
+    // trunk §7's declare rule (every enrolled node SUSPECT or worse) fires on its transition.
+    for (uint8_t addr : nodes) {
+        for (uint32_t i = 0; i < omgp::TRUNK_suspect_after_failures; ++i) {
+            REQUIRE(master.begin(addr, payload, sizeof payload) == Status::Ok);
+            const MasterEvent ev = drive(wire, master, omgp::TRUNK_bit_rate, clock.now_us());
+            REQUIRE(ev.kind == MasterEvent::Failed);
+            tracker.on_result(addr, false, clock.now_us());
+        }
+        REQUIRE(tracker.state(addr) == HealthState::SUSPECT);
+    }
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(count_notice(listener, Notice::BUS_FAULT) == 1);
+    REQUIRE(count_notice(listener, Notice::ALERT) == 1);
+
+    // --- "the alternating probe at 115 200 gets an answer" ---
+    const Probe fallback_hit = seek_probe(tracker, kNodeC, omgp::TRUNK_bit_rate_fallback);
+    const MasterEvent answered =
+        act_on_probe(wire, clock, master, tracker, fallback_hit, payload, sizeof payload);
+    REQUIRE(answered.kind == MasterEvent::Answered);
+    REQUIRE(wire.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(tracker.bus_fault()); // one fallback answer starts a pass; F4 does not clear yet
+
+    // --- "(amended F4) a reference pass of every enrolled address at 1 Mbit/s draws nothing" ---
+    for (int i = 0; i < 3; ++i) {
+        const Probe p = tracker.next_probe(clock.now_us());
+        REQUIRE(p.bit_rate ==
+                omgp::TRUNK_bit_rate); // the pass runs at the reference rate throughout
+        master.set_bit_rate(p.bit_rate);
+        REQUIRE(wire.bit_rate() == p.bit_rate);
+        REQUIRE(master.begin(p.addr, payload, sizeof payload) == Status::Ok);
+        const MasterEvent ev = drive(wire, master, p.bit_rate, clock.now_us());
+        REQUIRE(ev.kind == MasterEvent::Failed); // deaf: still armed to hear only the fallback rate
+        tracker.on_result(p.addr, false, clock.now_us());
+    }
+
+    // --- "recovery at 115 200 ... no fault re-declared" ---
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(count_notice(listener, Notice::BUS_RECOVERED) == 1);
+    REQUIRE(count_notice(listener, Notice::BUS_FAULT) ==
+            1); // not re-declared on the recovering result
+    // F3 obligation 3 (health.hpp): the wire and the tracker move to the layer-above rate
+    // together. The pass's last probe already left the wire at the reference rate, so this is
+    // the change back.
+    master.set_bit_rate(tracker.bit_rate());
+    REQUIRE(wire.bit_rate() == tracker.bit_rate());
+
+    // Ordinary status polling resumes at the rate now in use and succeeds -- the exhausted
+    // per-node script's default (Kind::Respond) answers once the wire matches what the node
+    // hears, exactly as it did for the recovering probe above.
+    for (uint8_t addr : nodes) {
+        REQUIRE(master.begin(addr, payload, sizeof payload) == Status::Ok);
+        const MasterEvent ev = drive(wire, master, omgp::TRUNK_bit_rate_fallback, clock.now_us());
+        REQUIRE(ev.kind == MasterEvent::Answered);
+        tracker.on_result(addr, true, clock.now_us());
+    }
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(count_notice(listener, Notice::BUS_FAULT) ==
+            1); // still exactly one episode, start to finish
 }
 
 // --- FR-015/FR-016: the replay key's SEQUENCE conjunct, exercised end to end --------------
