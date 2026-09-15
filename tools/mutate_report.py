@@ -31,13 +31,15 @@ Policy (tools/mutate.cfg [policy] — T3 constants, never relaxed to get green):
   * --attest-* given (a test-only PR's attestation; tools/mutate.sh, #146, ruling
     docs/OPEN-QUESTIONS.md 2026-09-14 "Option A — attest, never gate"): trend mode over the
     dirs whose unit tests the diff changed. The three flags are one unit and must be given
-    together — any one of them alone would switch the label rule below off. NO finding of the
-    run gates — not a survivor, not a label, not the kill rate — because the diff changed no
-    source line, so every finding is pre-existing debt and gating on it is the Option B that
-    ruling rejected. What still exits 1 is the run failing to happen: no reports, no mutants
-    in a non-empty scope, or no mutant executed under an attested dir (the per-dir blind spot
-    below, which the diff-mode guard cannot reach here). Those say the attestation is empty,
-    and exit 0 would be a false green.
+    together, each carrying a value — any one of them alone, or a blank one, would switch the
+    label rule below off. NO finding of the run gates — not a survivor, not a label, not the
+    kill rate — because the diff changed no source line, so every finding is pre-existing debt
+    and gating on it is the Option B that ruling rejected. What still exits 1 is the run
+    failing to happen: no reports, no mutants in a non-empty scope, or no mutant EXECUTED
+    under an attested dir — executed meaning a binary ran it (status rank >= EXECUTED), not
+    merely that Mull listed it, since a NoCoverage mutant is the unreached-directory blind
+    spot itself (the per-dir rule below, which the diff-mode guard cannot reach here). Those
+    say the attestation is empty, and exit 0 would be a false green.
   * A label whose line has no surviving mutant it could cover is STALE (the test was
     written or the code moved) — reported as a warning, never counted as a survivor.
   * "No mutants in a non-empty scope" is a tool-failure signal (blind spot: instrumentation
@@ -89,6 +91,13 @@ import sys
 # not-covered if no binary reached it.
 RANK = {"Killed": 3, "Timeout": 3, "RuntimeError": 3, "CompileError": 3, "Survived": 2,
         "NoCoverage": 1, "Ignored": 0, "Pending": 0}
+# The rank at which a mutant was actually RUN by a binary, for the two per-dir blind-spot
+# rules below. Being in the report is not being executed: `NoCoverage` is the table's own
+# "no binary reached it", and `Ignored`/`Pending` (and any status this table does not know,
+# which ranks 0 — a future Mull release fails closed) never ran at all. Counting those let a
+# directory whose mutants all came back unexecuted attest green at 100 %, which is precisely
+# the blind spot the rules exist to name (#593 red-team round 4).
+EXECUTED = 2
 
 LABEL = re.compile(r"//\s*mutant-ok\(\s*([A-Za-z_]+)\s*((?:,\s*[A-Za-z0-9_]+\s*)*)\)\s*:\s*(.*\S)")
 LABEL_ANY = re.compile(r"//\s*mutant-ok\b")
@@ -175,12 +184,20 @@ def main(argv=None) -> int:
     # --attest-dirs on an ordinary whole-tree run switch the malformed-label gate off while
     # recording `origin: changed-tests` with no ref and no tests — a provenance false on its
     # face (#593 red-team round 3). A partial set is a usage error, never a suppressed gate.
-    attest_flags = (args.attest_ref, args.attest_tests, args.attest_dirs)
-    if any(attest_flags) and not all(attest_flags):
+    # Judged on CONTENT, not truthiness: " " is a truthy string that `.split()` turns into [],
+    # so a mis-expanded flag (`--attest-dirs "$DIRS "` with DIRS unset) used to pass `all()`
+    # and produce exactly the empty provenance above, with the per-dir rule below iterating
+    # nothing (#593 red-team round 4). Given at all (`any` over the RAW values) means all
+    # three must carry something.
+    raw_flags = (args.attest_ref, args.attest_tests, args.attest_dirs)
+    attest_flags = tuple(v.strip() for v in raw_flags)
+    if any(raw_flags) and not all(attest_flags):
         ap.error("--attest-ref/--attest-tests/--attest-dirs describe one test-derived "
-                 "attestation and must be given together (a partial set would suppress the "
-                 "malformed-label gate and record a provenance that never happened)")
+                 "attestation and must be given together, each with a value (a partial or "
+                 "blank set would suppress the malformed-label gate and record a provenance "
+                 "that never happened)")
     attest = all(attest_flags)
+    attest_ref, attest_tests, attest_dirs = attest_flags
     if attest and args.ref:
         # An attestation IS the trend mode (it has no changed line to gate on): the two
         # cannot be asked for at once, or the caller would get a gate it did not intend.
@@ -221,7 +238,10 @@ def main(argv=None) -> int:
 
     best: dict[tuple, tuple[int, str]] = {}
     # Mutants the runner EXECUTED per scope dir, on any line: the per-changed-dir blind-spot
-    # rule below reads this, not `best` (which is already line-filtered).
+    # rule below reads this, not `best` (which is already line-filtered). "Executed" is the
+    # mutant's STATUS (>= EXECUTED above), not its presence in the report — a dir all of whose
+    # mutants come back NoCoverage is the "the oracle does not reach this directory" blind spot
+    # itself, not evidence against it.
     executed_by_dir: dict[str, int] = {d: 0 for d in scope_dirs}
     for r in reports:
         try:
@@ -233,13 +253,13 @@ def main(argv=None) -> int:
             rel = _rel(path)
             top = rel.split("/", 1)[0]
             for m in f.get("mutants", []):
-                if top in executed_by_dir:
+                rank = RANK.get(m.get("status"), 0)
+                if top in executed_by_dir and rank >= EXECUTED:
                     executed_by_dir[top] += 1
                 loc = (m.get("location") or {}).get("start") or {}
                 if not _in_scope(rel, loc.get("line")):
                     continue
                 key = (rel, loc.get("line"), loc.get("column"), m.get("mutatorName"))
-                rank = RANK.get(m.get("status"), 0)
                 if rank > best.get(key, (-1, ""))[0]:
                     best[key] = (rank, m.get("status", "?"))
 
@@ -437,10 +457,10 @@ def main(argv=None) -> int:
               "max_unlabelled": args.max_unlabelled, "survivors": survivors, "stale_labels": stale,
               "malformed_labels": malformed}
     if attest:
-        report["attest"] = {"origin": "changed-tests", "diff_ref": args.attest_ref,
-                            "tests": args.attest_tests.split(), "dirs": args.attest_dirs.split()}
-        print(f"mutation: attested from changed tests ({args.attest_tests or '?'}) at "
-              f"{args.attest_ref or '?'}: {mode} mode over {args.attest_dirs or '?'} — no finding of "
+        report["attest"] = {"origin": "changed-tests", "diff_ref": attest_ref,
+                            "tests": attest_tests.split(), "dirs": attest_dirs.split()}
+        print(f"mutation: attested from changed tests ({attest_tests}) at "
+              f"{attest_ref}: {mode} mode over {attest_dirs} — no finding of "
               f"this run gates (survivors, labels and the kill rate are all listed, never exit 1); "
               f"a run that did not happen still does (#146)")
     out = pathlib.Path(args.out)
@@ -515,11 +535,14 @@ def main(argv=None) -> int:
         # scope dirs' mutants too, so one mutant anywhere in scope keeps total > 0 and the
         # global "no mutants" rule stays silent while the attested dir itself ran nothing:
         # report.json would then claim a kill rate for a directory that was never mutated
-        # (#593 red-team round 3). mutate.sh has already failed closed on an attested dir with
-        # no source file at all, so zero here is the run-time path filter or the
-        # instrumentation, not an empty directory. This is a blind spot, not a finding: it
+        # (#593 red-team round 3). On the mutate.sh path an attested dir holding no source
+        # file at all has already failed closed, per dir (demonstrated by
+        # test_mutate_attested_dir_with_no_source_fails_closed and
+        # ..._inside_a_union), so zero here is the run-time path filter or the
+        # instrumentation, not an empty directory; a caller invoking this reporter directly
+        # gets the same exit for either reason. This is a blind spot, not a finding: it
         # says the attestation did not happen, which is what an attestation still gates on.
-        silent = [d for d in args.attest_dirs.split() if not executed_by_dir.get(d, 0)]
+        silent = [d for d in attest_dirs.split() if not executed_by_dir.get(d, 0)]
         if silent:
             print("mutation: the attestation names " + ", ".join(f"{d}/" for d in silent)
                   + " but the runner executed no mutant there — failing (blind spot: the run-time "

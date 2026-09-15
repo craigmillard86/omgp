@@ -202,10 +202,21 @@ ORACLE=$(echo $ORACLE | tr ' ' '\n' | sort -u | tr '\n' ' ')
 echo "mutation: oracle: $ORACLE"
 # Attesting only, and after the oracle rule so that a dir with neither is reported as the
 # blind spot the source path already names: a dir holding no source file can produce no
-# mutant, so there is nothing for its changed tests to attest.
-if [ "$ATTEST" -eq 1 ] && [ -z "$SCOPE" ]; then
-  echo "mutation: no source file under the attested dir(s) '$(oneline "$ATTEST_DIRS")' — failing (blind spot: the changed tests attest nothing there)" >&2
-  exit 1
+# mutant, so there is nothing for its changed tests to attest. Per attested DIR, never over
+# their union: an attestation of `l3 link` where only l3/ holds sources has a non-empty
+# SCOPE, so a whole-scope test would pass it through with link/ in dirs= and its seven
+# binaries in the oracle, attesting nothing (#593 red-team round 4).
+if [ "$ATTEST" -eq 1 ]; then
+  SOURCELESS=""
+  for d in $ATTEST_DIRS; do
+    if [ -z "$(find "$d" -type f \( "${FIND_EXT[@]}" \) 2>/dev/null)" ]; then
+      SOURCELESS="$SOURCELESS $d"
+    fi
+  done
+  if [ -n "$SOURCELESS" ]; then
+    echo "mutation: no source file under the attested dir(s) '${SOURCELESS# }' — failing (blind spot: the changed tests attest nothing there)" >&2
+    exit 1
+  fi
 fi
 [ "$DRY" -eq 1 ] && exit 0
 
