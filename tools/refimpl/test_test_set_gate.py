@@ -1004,8 +1004,15 @@ class TestCtestPath:
         # no scenario failed with either anchor dropped. A line that merely CONTAINS the marker
         # is not the run's own count: a trailing ` (cached)` kills the trailing anchor (the red
         # team's mutant), a leading `note: ` the leading one (`^` dropped AND match -> search;
-        # either alone still anchors at the line start, so it is one mutant). test_a's own
-        # default count carries the floor here — neither of these lines is counted at all.
+        # either alone still anchors at the line start, so it is one mutant).
+        # What clears the floor here is NOT what clears the tool (red team @b05da68 [LOW],
+        # which caught this comment claiming otherwise): stage_unit's ctest-path sum greps
+        # UNANCHORED (pipeline.sh:273, `grep -o 'EXECUTED: [0-9]\+'`), so it credits the
+        # contaminated line as well as test_a's — the floor is cleared twice over, asserted
+        # below as 2 * DEFAULT_EXECUTED so a change to either path shows up here. The SET
+        # gate is the one that refuses it: check_test_set.py's EXECUTED_RE is anchored, does
+        # not credit the line, and names test_b as not run. That anchored/unanchored split is
+        # the subject of this scenario; do not restate the tool's property as the floor's.
         for sub, line in (("tail", f'echo "EXECUTED: {DEFAULT_EXECUTED} (from the previous run, cached)"'),
                           ("head", f'echo "note: EXECUTED: {DEFAULT_EXECUTED}"')):
             (tmp_path / sub).mkdir()
@@ -1014,6 +1021,8 @@ class TestCtestPath:
             assert r.returncode != 0, sub + "\n" + r.stdout + r.stderr
             assert "tests/unit/test_b.cpp" in r.stderr and "did not run" in r.stderr, sub + "\n" + r.stderr
             assert "verified" not in r.stdout, sub
+            # The unanchored floor sum counted the contaminated line too (see above).
+            assert f"unit: executed {2 * DEFAULT_EXECUTED} check(s) (ctest path)" in r.stdout, sub + "\n" + r.stdout
 
     def test_symlinked_source_is_refused(self, tmp_path):
         # The file case of the same rule (supersedes the @2f40596 lead-b statement that a
