@@ -85,8 +85,8 @@ class HealthTracker {
     // Bus-level counters (data-model.md §8): `rate_changes` and `bus_faults` as decided by
     // this tracker. `BusStats::discards` is the Master engine's field and is never written
     // here — the tracker sees no frames. (Accessor added by T043 alongside the bus-fault
-    // logic the counters describe; contracts/link-cpp.md "Health tracker" amended to match,
-    // pending a ruling.)
+    // logic the counters describe; contracts/link-cpp.md "Health tracker" amended to match
+    // the 2026-09-15 ruling that the tracker and Master own disjoint BusStats fields by design.)
     const BusStats& bus_stats() const;
 
   private:
