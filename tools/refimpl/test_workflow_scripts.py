@@ -202,6 +202,30 @@ def test_wip_cap_wiring():
     assert "wip_cap" in gov
 
 
+def test_dispatch_implement_may_run_the_bootstrap_pipeline():
+    """#62 (T044) AC2 needs `command -v cmake` to fail so `pipeline.sh` takes its bootstrap g++
+    branch (`pipeline.sh:181`), but the dispatch allow-list was `Bash(./pipeline.sh*)` only — a
+    `PATH=...`-prefixed invocation does not start with that literal, so GitHub's runner image
+    (cmake on the toolcache path, not /usr/bin or /bin) made AC2 undemonstrable by the dispatch
+    agent at every attempt (comments on #62, 2026-09-15 06:47 and 19:33: same denial both times).
+    The grant is the exact PATH value the agent already tried twice, not a `PATH=*` wildcard —
+    the `gh pr edit*` lesson (review-fix, round 2 on #466) is that a wide trailing wildcard on a
+    grant spans the rest of the command line, so scope stays a literal prefix, matching every
+    other grant's shape (`Bash(./pipeline.sh*)` itself already carries that same accepted
+    trailing-wildcard risk for pipeline.sh's own flags — this doesn't widen that, only what may
+    precede it)."""
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "agent-dispatch.yml").read_text())
+    steps = wf["jobs"]["implement"]["steps"]
+    claude = [s for s in steps if "claude-code-action" in s.get("uses", "")]
+    assert len(claude) == 2, "expected the first attempt and the one retry"
+    for st in claude:
+        granted = set(re.search(r'--allowedTools "([^"]*)"', st["with"]["claude_args"]).group(1).split(","))
+        assert "Bash(PATH=/usr/bin:/bin ./pipeline.sh*)" in granted, (
+            st.get("id"), "the bootstrap-path grant must be present, exact, and unwidened")
+        assert not any(g.startswith("Bash(PATH=") and g != "Bash(PATH=/usr/bin:/bin ./pipeline.sh*)" for g in granted), (
+            st.get("id"), "no broader PATH= grant than the one AC2 evidence needs")
+
+
 # --- model tiers for agent workflows (ruling 2026-08-31) ---------------------------------------
 
 def _claude_steps(workflow):
