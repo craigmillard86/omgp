@@ -202,6 +202,43 @@ def test_wip_cap_wiring():
     assert "wip_cap" in gov
 
 
+def test_dispatch_implement_may_run_the_bootstrap_pipeline():
+    """The dispatch allow-list was `Bash(./pipeline.sh*)` only, and a `PATH=...`-prefixed
+    invocation does not start with that literal — so every `PATH=/usr/bin:/bin ./pipeline.sh`
+    the #62 agent tried was denied outright (comments on #62, 2026-09-15 06:47 and 19:33: the
+    same denial both times). This pins the grant that lifts that denial on BOTH Claude steps,
+    and pins it as the exact literal, not a `PATH=*` wildcard: the `gh pr edit*` lesson
+    (review-fix, round 2 on #466) is that a wide trailing wildcard on a grant spans the rest of
+    the command line, so scope stays a literal prefix, matching every other grant's shape
+    (`Bash(./pipeline.sh*)` itself already carries that same accepted trailing-wildcard risk for
+    pipeline.sh's own flags — this doesn't widen that, only what may precede it).
+
+    WHAT THIS DOES NOT ESTABLISH (rule 11; copilot review on #617, confirmed): lifting the denial
+    does not make #62's AC2 — "the bootstrap g++ fallback path (`cmake` masked from `PATH`)" —
+    reachable in this job. The `Toolchain` step apt-installs cmake, which the Debian/Ubuntu
+    package puts in `/usr/bin`, so `command -v cmake` still succeeds under that PATH and
+    `pipeline.sh:181` takes the CMake branch; the same PATH also hides the pip-installed pinned
+    clang-format that `stage_quality` requires on CI. The last assertion below pins the first
+    half of that — it fails the day the cmake install moves or goes away, which is the day
+    `docs/OPEN-QUESTIONS.md`'s 2026-09-15 AC2 entry (options A/B/C, ruling PENDING) needs
+    revisiting."""
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "agent-dispatch.yml").read_text())
+    steps = wf["jobs"]["implement"]["steps"]
+    claude = [s for s in steps if "claude-code-action" in s.get("uses", "")]
+    assert len(claude) == 2, "expected the first attempt and the one retry"
+    for st in claude:
+        granted = set(re.search(r'--allowedTools "([^"]*)"', st["with"]["claude_args"]).group(1).split(","))
+        assert "Bash(PATH=/usr/bin:/bin ./pipeline.sh*)" in granted, (
+            st.get("id"), "the bootstrap-path grant must be present, exact, and unwidened")
+        assert not any(g.startswith("Bash(PATH=") and g != "Bash(PATH=/usr/bin:/bin ./pipeline.sh*)" for g in granted), (
+            st.get("id"), "no broader PATH= grant than the one AC2 evidence needs")
+    toolchain = "\n".join(s.get("run", "") for s in steps)
+    assert "install -y cmake" in toolchain, (
+        "this job still installs cmake into /usr/bin, so the grant above lifts a denial but does "
+        "NOT force pipeline.sh's bootstrap branch — see docs/OPEN-QUESTIONS.md 2026-09-15 '#62 "
+        "(T044) AC2'. If this assertion fails, that entry is stale and must be re-ruled.")
+
+
 # --- model tiers for agent workflows (ruling 2026-08-31) ---------------------------------------
 
 def _claude_steps(workflow):

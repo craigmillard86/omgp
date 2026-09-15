@@ -4037,6 +4037,119 @@ undischarged evidence item). **Supersedes:** none.
 
 ---
 
+## 2026-09-15 — #62 (T044) AC6: the 2026-09-12 mutation discharge applies; cites PR #530
+
+**Context:** #62 (T044)'s **sixth** acceptance criterion — "a local diff-scoped mutation run
+(`tools/mutate.sh --diff origin/main`) … reports zero unlabelled survivors" — is the same shape
+the 2026-09-12 T040/#58 ruling already decided. #62 has no diff yet (nothing is implemented on
+`task/62`). **Corrected a second time** (review on #617, re-checked and confirmed against the
+tree rather than taken on trust): an earlier draft of this entry scoped the future diff to
+`pipeline.sh` (AC4), the SC-005 mode→script comment table in `tests/unit/test_link_loop.cpp`
+(AC9), and `tasks.md`, and reasoned from that. **#572 (PR #630) has since delivered AC9** —
+`tests/unit/test_link_loop.cpp` now carries the `BUS_FAULT`/`wrong-rate probe`/`BUS_RECOVERED`
+rows, *demonstrated by the absence of any `reserved: T042` line in the file at this head* — so
+that file is no longer part of what #62's own remaining diff touches. #62's own "Out of scope"
+forbids new engine code, so **no source under `tools/mutate.cfg`'s `scope_dirs` (`l3 link
+core`) changes** either way.
+
+What #62's now-narrower diff (`pipeline.sh` + `tasks.md` only) does at the current head of
+`tools/mutate.sh` — *demonstrated by reading the control flow*:
+
+- It **does** take the empty-scope exit (`tools/mutate.sh:150-152`, "nothing in scope"): that
+  branch needs `SCOPE` *and* `TEST_SCOPE` both empty. `pipeline.sh` matches neither `l3`, `link`
+  nor `core` (`tools/mutate.cfg`'s `scope_dirs`), so `SCOPE` would be empty; `tasks.md` matches
+  neither `tests/unit` nor #146's test-derived pattern (`tools/mutate.sh:146-148`,
+  `^tests/unit/test_(l3|link|core)_[^/]*\.(cpp|hpp)$`), so `TEST_SCOPE` would be empty too — and
+  with `tests/unit/test_link_loop.cpp` no longer part of #62's own remaining diff, nothing else
+  could populate either. *Demonstrated by the two file paths against those patterns, not by
+  running the diff — #62 has no diff yet.* The run prints "nothing in scope" and **exits 0**,
+  before the Mull presence check — attestation mode (`:154-163`) is never entered.
+- The clause is therefore **vacuous** in exactly the sense the 2026-09-12 T040/#58 ruling
+  already covers: a green tick attesting nothing about `link/`'s scoped sources, because the
+  diff that would produce it changes none of them.
+
+(The now-superseded middle draft of this entry, written between #572 landing on `main` and this
+correction, argued the opposite — that the diff *did* still touch `test_link_loop.cpp` and so
+entered attestation mode, "redundant" rather than "vacuous". That was correct for the tree as it
+stood when written, and wrong for the tree #62 will actually be released against, once #572 had
+already merged. The two branches are observably different — exit 0 unconditionally vs. fail
+closed without Mull — so this is not a wording fix.)
+
+Where the real evidence for `link/`'s scoped sources lives is unchanged: **PR #530** (issues
+#59+#61), whose CI `deep-verify` mutation run drove commit `c1b7843`'s triage, surviving in-tree
+as `mutant-ok` labels across `link/` — 38 lines, counted here by `grep -rc mutant-ok link/`:
+`health.cpp` 15, `responder.cpp` 10, `master.cpp` 9, `frame.cpp` 3, `responder.hpp` 1. That a
+live Mull run produced them is *assumed* from that commit message, not re-demonstrated here.
+
+**Ruling:** human, 2026-09-15. Applying the 2026-09-12 ruling's own terms ("a human ticks it, or
+rules the clause discharged here"): **AC6 is discharged for #62**, citing PR #530's `deep-verify`
+run and the `mutant-ok` triage above — unaffected by the correction, since the discharge holds
+under either branch above; only the recorded reason for it needed fixing. A `tools/mutate.sh
+--diff origin/main` run on #62's branch is still welcome as disclosure and will, on the current
+tree, simply confirm "nothing in scope". This is the standing 2026-09-12 principle applied to a
+second checkpoint, not a new one; recorded per-issue because `tasks.md` still asks for the
+clause literally.
+
+**Amends:** none — applies the 2026-09-12 T040/#58 ruling's stated principle to #62, corrected
+in place (still unmerged) for #572 landing on `main` mid-entry. **Supersedes:** none.
+
+---
+
+## 2026-09-15 — #62 (T044) AC2: the bootstrap grant lifts the denial but does not mask `cmake`
+
+**Context:** the 2026-09-15 maintainer ruling on #62 records AC2's blocker as a "dispatch
+allow-list gap fixed in #617", granting `Bash(PATH=/usr/bin:/bin ./pipeline.sh*)` on both Claude
+steps of `agent-dispatch.yml`'s `implement` job. Review of #617 (copilot, 2026-09-15) found the
+grant necessary but **not sufficient**, and re-checking that here confirms it. Two facts about
+the job the agent runs in:
+
+1. Its `Toolchain` step runs `sudo apt-get install -y cmake ninja-build`. The Debian/Ubuntu
+   `cmake` package installs `/usr/bin/cmake` — so under `PATH=/usr/bin:/bin`, `command -v cmake`
+   **succeeds**, `pipeline.sh:181` takes the *CMake* branch, and the run is not bootstrap
+   evidence at all. (*Proved by the package's file layout, which is what `apt-get install cmake`
+   guarantees; not measured on a dispatch runner here — the review sandbox cannot stat
+   `/usr/bin`. The falsifier is cheap: a genuine bootstrap run prints "build: cmake not found ->
+   bootstrap g++ build"; its absence is the tell.*)
+2. The same step `pip install -r tools/requirements.txt`, which is where the **pinned
+   `clang-format`** lands (setup-python's toolcache bin dir, not `/usr/bin`). `PATH=/usr/bin:/bin`
+   hides it, and `stage_quality` runs *before* `stage_build` and returns 1 on CI when the pin is
+   missing (`pipeline.sh:149-151`, the hole #135 closed). So a full `PATH=/usr/bin:/bin
+   ./pipeline.sh` in that job reds at `quality`, before reaching any build branch.
+
+No PATH value fixes this: on that image `cmake`, `g++`, `python3`, `git` and `find` all live in
+`/usr/bin`, so any PATH that hides `cmake` hides the toolchain the bootstrap build needs. **AC2's
+literal wording ("`cmake` masked from `PATH`") is unsatisfiable in the `implement` job as
+configured** — *proved by construction from the two facts above, given that job's steps*.
+
+The grant is still correct to keep: it removes a denial that was mechanically blocking the agent
+(#62, 2026-09-15 06:47 and 19:33), and it is the narrowest literal that does so. It just does not,
+on its own, make AC2 demonstrable, and #617's workflow comment and test docstring have been
+corrected not to claim that it does.
+
+**Options for making AC2 reachable** (none taken here — all three touch T2/T3 artefacts):
+
+- **A. A force-bootstrap selector in `pipeline.sh`** (e.g. `OMGP_BUILD=bootstrap` honoured by
+  `stage_build` *and* by `stage_unit`'s ctest predicate at `pipeline.sh:219`, which would
+  otherwise pick up a stale `build/native/CTestTestfile.cmake`), granted as
+  `Bash(OMGP_BUILD=bootstrap ./pipeline.sh*)`. Cheapest, but it proves the bootstrap *branch*
+  rather than the *detection* AC2 words — the objection the 2026-09-15 dispatch agent raised
+  when it declined to add one.
+- **B. A CI job that never installs `cmake`** (a `bootstrap` job in `ci.yml` installing
+  `tools/requirements.txt` but not `cmake`/`ninja`, running the full default stages).
+  *Recommended.* It makes the fallback path a standing gate instead of a one-off agent
+  transcript, which is what CLAUDE.md's "the build stage falls back to a bootstrap g++ build
+  with identical sources" is worth having evidence for, and it needs no change to `pipeline.sh`
+  and no new Bash grant.
+- **C. Amend AC2** to name whichever mechanism is chosen, so the criterion and the evidence
+  agree.
+
+**Ruling:** PENDING — human. A→C above is a GOVERNANCE §3 choice (`ci.yml`/`pipeline.sh`), and
+#62 should not be re-released with AC2 still unsatisfiable by the job that would claim it.
+**Amends:** the 2026-09-15 maintainer ruling on #62 blocker 2 (records that its fix is necessary
+but not sufficient). **Supersedes:** none.
+
+---
+
 ## 2026-09-15 — `Kind::Rate`'s wrong-rate `Garbage` branch names no burst LENGTH
 
 **Context:** T030 (#48), implementing the `Kind::Rate` body in `tests/support/mock_wire.cpp`.
