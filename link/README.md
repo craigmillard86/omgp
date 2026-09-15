@@ -101,8 +101,8 @@ outside those files is required.
 Two places where the contract is ahead of the code, so that a reader coding against it is
 not surprised. `contracts/link-cpp.md`'s SC-010 list says `Master::begin/poll/feed`, but there
 is no public `feed()` — `poll()` and `begin()` drain `ByteWire::receive()` themselves and that
-is the only receive path. And of the seven step kinds above only `Respond`, `Silence`, `CrcError` and `Duplicate` are
-implemented in `tests/support/mock_wire.cpp` today: `Garbage`, `Babble` and `Rate` are declared
+is the only receive path. And of the seven step kinds above only `Respond`, `Silence`,
+`CrcError` and `Duplicate` are implemented in `tests/support/mock_wire.cpp` today: `Garbage`, `Babble` and `Rate` are declared
 so scripts can name them, but the switch raises a "not implemented until T030" test fault
 instead of producing the behaviour (`tests/support/mock_wire.hpp:6-10`,
 `tests/support/mock_wire.cpp` `case Kind::Garbage:`). F4's mapping for garbage, babble and
