@@ -489,6 +489,103 @@ def test_mutate_test_only_scope_without_oracle_fails_closed(tmp_path):
     assert "nothing in scope" not in out, out
 
 
+def test_mutate_test_scope_requires_a_source_extension(tmp_path):
+    """The test scope is `tests/unit/test_<dir>_*.<ext>` for <ext> in source_ext — the one
+    list. Without the extension anchor any `tests/unit/test_link_*` path buys a full link/
+    mutation run: a note, a fixture, a JSON blob. Red-team round 1 on #593 showed the AC's
+    cited evidence (test_source_extensions_have_one_source_of_truth) is as green with the
+    anchor deleted as with it, so this is the case that discriminates — it fails if the
+    `$EXT_RE` anchor is dropped from the test-scope grep (mutate.sh) and passes with it."""
+    for rel in ("tests/unit/test_link_notes.md", "tests/unit/test_link_master.cpp.bak"):
+        sub = tmp_path / rel.rsplit("/", 1)[1]
+        sub.mkdir()
+        clone = shared_clone(sub, rel, "not a source file\n")
+        rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", timeout=90)
+        assert rc == 0, (rel, out)
+        assert "mode=attest" not in out, (rel, out)
+        assert "mutation: nothing in scope (HEAD~1) — no changed sources under: l3 link core" in out, (rel, out)
+
+
+def test_mutate_attested_dir_with_no_source_fails_closed(tmp_path):
+    """The other blind spot on the attest path (mutate.sh, after the oracle rule): the changed
+    tests name a dir that holds no source file, so no mutant can exist there and the tests
+    attest nothing. That must fail closed, not report a green attestation over an empty scope.
+    Unreachable in today's tree — every scope dir that owns a test_<dir>_* binary also owns
+    sources — so the case is built: link/'s sources go in one commit (the directory itself
+    stays, or `find` would fail the script before this rule), the test edit in the next, and
+    the run is scoped to the second commit alone."""
+    clone = shared_clone(tmp_path, "docs/zz_probe.md", "a file outside every scope dir\n")
+    sources = [str(p.relative_to(clone)) for p in (clone / "link").iterdir() if p.is_file()]
+    subprocess.run(["git", "rm", "-q", "--", *sources], cwd=clone, check=True)
+    (clone / "link" / "notes.md").write_text("the dir survives its sources\n")
+    subprocess.run(["git", "add", "link/notes.md"], cwd=clone, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"],
+                   cwd=clone, check=True)
+    _commit(clone, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 1, out
+    assert "no source file under the attested dir(s) 'link'" in out and "blind spot" in out, out
+    assert "nothing in scope" not in out, out
+    # The oracle rule ran first and was satisfied: this is the source blind spot, not that one.
+    assert "no unit-test oracle" not in out, out
+    assert oracle_line(out), out
+
+
+def test_mutate_attestation_gates_on_a_broken_run_never_on_its_findings(tmp_path):
+    """What "never gates" means, rule by rule, against every `return 1` in mutate_report.py
+    that an attestation can reach — the previous case generalised from the unlabelled-survivor
+    rule alone and the PR body's "every gate rule is guarded on diff_mode" was false of the
+    other three (red-team round 1 on #593).
+
+    FINDINGS never gate: an attestation changes no source line, so every survivor and every
+    `mutant-ok` label it can read is pre-existing debt outside its diff. Gating on one is
+    Option B, which docs/OPEN-QUESTIONS.md 2026-09-14 rejected precisely because it fails PRs
+    on debt they did not touch.
+
+    A BROKEN RUN still fails closed: no reports and no mutants say the attestation did not
+    happen, so there is nothing to report and exit 0 would be a false green — the same
+    blind-spot rule the shell already applies for a missing oracle or an empty source scope."""
+    ATTEST = ("--attest-ref", "origin/main", "--attest-tests", "tests/unit/test_link_master.cpp",
+              "--attest-dirs", "link")
+
+    # (a) a malformed label already on main: gates without the attestation, listed with it.
+    for bad, msg in ((" // mutant-ok(whatever): not a category", "unknown label category 'whatever'"),
+                     (" // mutant-ok(equivalent):", "malformed label")):
+        src = list(SRC)
+        src[3] = "    if (a < 0)" + bad
+        root, reports = _setup(tmp_path, src, MUTANTS)
+        rc_gate, out_gate, _ = _report(tmp_path, root, reports)
+        assert rc_gate == 1 and msg in out_gate, out_gate     # discriminating: it DOES gate otherwise
+        rc, out, doc = _report(tmp_path, root, reports, *ATTEST)
+        assert rc == 0, out
+        assert msg in out, out                                # still reported, on stdout …
+        assert any(msg in m for m in doc["malformed_labels"]), doc   # … and in report.json
+        assert doc["attest"]["dirs"] == ["link"], doc
+
+    # (b) a stale label stays a reported warning: suppressing the gate must not suppress the
+    # information the attestation exists to produce.
+    root, reports = _setup(tmp_path, SRC, [_mutant(4, 11, "cxx_lt_to_le", "Killed")])
+    rc, out, doc = _report(tmp_path, root, reports, *ATTEST)
+    assert rc == 0, out
+    assert doc["stale_labels"] and "warning: stale label: l3/x.cpp:4" in out, (doc, out)
+
+    # (c) the run did not happen: both blind spots still fail, and say which.
+    root, reports = _setup(tmp_path, SRC, [])
+    rc, out, _ = _report(tmp_path, root, reports, *ATTEST)
+    assert rc == 1 and "no mutants" in out and "blind spot" in out, out
+    for f in reports.glob("*.json"):
+        f.unlink()
+    rc, out, _ = _report(tmp_path, root, reports, *ATTEST)
+    assert rc == 1 and "no Mull reports" in out and "blind spot" in out, out
+
+    # (d) and the shell's own disclosure says exactly that, not "no gate at all".
+    clone = shared_clone(tmp_path / "shell", "tests/unit/test_link_master.cpp", TEST_EDIT)
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 0, out
+    assert "gate=none" not in attest_line(out), attest_line(out)
+    assert "gate=blind-spot-only" in attest_line(out), attest_line(out)
+
+
 # --- tools/mutate_report.py: the triage gate on synthetic Elements reports --------------------
 
 REPORT = ROOT / "tools" / "mutate_report.py"
