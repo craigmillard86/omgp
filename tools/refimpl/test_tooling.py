@@ -615,6 +615,126 @@ def test_mutate_attestation_gates_on_a_broken_run_never_on_its_findings(tmp_path
     assert "gate=blind-spot-only" in attest_line(out), attest_line(out)
 
 
+# --- tools/mutate.sh -> tools/mutate_report.py: the attestation is HANDED OVER, end to end ------
+# Every other mutate.sh case above stops at --dry-run or at the missing-Mull skip, so the half
+# of the script that hands the attestation to the reporter — ATTEST_ARGS, --ref "$REPORT_REF",
+# the runner loop — was covered by a regex over the script's own source text alone. Red-team
+# round 2 on #593 emptied ATTEST_ARGS and the whole file stayed green: with the --attest-* args
+# gone the reporter sees a plain trend run, where a malformed `mutant-ok` label already on main
+# exits 1 — the Option-B failure (redding a PR for debt it never touched) that
+# docs/OPEN-QUESTIONS.md 2026-09-14 rejected and this path exists to prevent.
+#
+# Mull is absent here and in CI's `native` job, so the runner, cmake and clang++ are shimmed,
+# the way tools/fuzz-smoke.sh's cases shim the five fuzzers (#141 review): what is REAL in this
+# case is tools/mutate.sh, tools/mutate_report.py and everything that passes between them. What
+# it does NOT cover, and what still needs a run with Mull installed: the instrumented build,
+# the phase-2 includePaths filter, and the shape of a real Elements report.
+_MULL_SHIM = r"""#!/usr/bin/env bash
+# Stand-in for mull-runner: writes one canned Elements report for the target binary, says
+# "No mutants found" for the rest of the oracle, and exits non-zero — the real runner does that
+# whenever survivors exist, and mutate.sh must not read it as a failure.
+name=""; dir="reports"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --report-name) name="$2"; shift 2 ;;
+    --report-dir) dir="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+mkdir -p "$dir"
+root=$(cd ../.. && pwd -P)     # the runner's cwd is the build dir (mutate.sh cds there)
+if [ "$name" = "$MULL_SHIM_TARGET" ]; then
+  cat > "$dir/$name.json" <<JSON
+{"files": {"$root/$MULL_SHIM_FILE": {"mutants": [
+  {"id": "cxx_ge_to_gt:$MULL_SHIM_LINE:9", "mutatorName": "cxx_ge_to_gt", "status": "Survived",
+   "location": {"start": {"line": $MULL_SHIM_LINE, "column": 9},
+                "end": {"line": $MULL_SHIM_LINE, "column": 10}}}]}}}
+JSON
+  echo "Surviving mutants: 1"
+else
+  echo "No mutants found"
+fi
+exit 1
+"""
+
+_CMAKE_SHIM = r"""#!/usr/bin/env bash
+# Stand-in for cmake: configuring is a no-op, and `--build <dir> ... --target a b c` drops an
+# executable stub for every named target — all the runner loop needs to get past its
+# "oracle binary was not built" blind-spot rule.
+if [ "$1" = "--build" ]; then
+  dir=$2; shift 2
+  in_targets=0
+  for a in "$@"; do
+    [ "$a" = "--target" ] && { in_targets=1; continue; }
+    case "$a" in --*) continue ;; esac
+    [ "$in_targets" = 1 ] && { printf '#!/bin/sh\nexit 0\n' > "$dir/$a"; chmod +x "$dir/$a"; }
+  done
+fi
+exit 0
+"""
+
+# An UNTRACKED source under the attested dir: `git diff` never lists untracked files, so the
+# diff stays test-only (asserted below) while `find link -type f` — the attestation's scope —
+# picks it up. Its label is malformed on purpose: that is the rule which gates in trend mode
+# and must not gate on an attestation.
+PROBE_REL = "link/zz_attest_probe.cpp"
+PROBE_SRC = ("// an untracked probe source: in the attested dir, not in the diff\n"
+             "int zz_attest_probe(int a) {\n"
+             "    if (a >= 4) // mutant-ok(whatever): not a category — malformed, and already on main\n"
+             "        return 1;\n"
+             "    return 0;\n"
+             "}\n")
+PROBE_MUTANT_LINE = 3
+
+
+def test_mutate_attestation_is_handed_to_the_reporter_end_to_end(tmp_path):
+    """mutate.sh run to completion on a test-only diff, with the runner shimmed: the reporter
+    must receive the attestation (`--attest-ref/--attest-tests/--attest-dirs`) and the empty ref,
+    so a malformed label already in the attested dir is REPORTED and the run exits 0. Drop the
+    ATTEST_ARGS block from mutate.sh and this case fails on both halves — exit 1 and no
+    `attest` key in report.json — which is what no other case in this file does."""
+    clone = shared_clone(tmp_path, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    (clone / PROBE_REL).write_text(PROBE_SRC)
+    changed = subprocess.run(["git", "diff", "--name-only", "HEAD~1"], cwd=clone,
+                             capture_output=True, text=True, check=True).stdout.split()
+    # The diff is test-only: the probe is untracked, and nothing under a scope dir is in it.
+    # (tools/mutate.sh itself can be: shared_clone copies the working-tree script in.)
+    assert "tests/unit/test_link_master.cpp" in changed, changed
+    assert not [f for f in changed if f.split("/")[0] in ("l3", "link", "core")], changed
+
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "cmake").write_text(_CMAKE_SHIM)
+    (shim / "clang++").write_text('#!/usr/bin/env bash\necho "clang version 18.1.8"\nexit 0\n')
+    (shim / "mull-runner").write_text(_MULL_SHIM)
+    for tool in ("cmake", "clang++", "mull-runner"):
+        (shim / tool).chmod(0o755)
+    (shim / "mull-ir-frontend").write_text("not a real plugin; mutate.sh only tests -f\n")
+
+    env = {"PATH": f"{shim}:{os.environ['PATH']}", "OMGP_CLANG_MAJOR": "18",
+           "MULL_RUNNER": str(shim / "mull-runner"), "MULL_PLUGIN": str(shim / "mull-ir-frontend"),
+           "MULL_SHIM_TARGET": "test_link_master", "MULL_SHIM_FILE": PROBE_REL,
+           "MULL_SHIM_LINE": str(PROBE_MUTANT_LINE)}
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--require",
+                     env_overrides=env, timeout=300)
+    assert rc == 0, out
+    assert "mutation: PASS" in out, out
+    assert "gate=blind-spot-only" in attest_line(out), out
+    # The mull-present line: this run really did get past the tool check into the runner loop.
+    assert "test-only attestation of link — trend only; no finding gates" in out, out
+    assert "mutation: test_link_master: Surviving mutants: 1" in out, out
+    doc = json.loads((clone / "build" / "mutate" / "report.json").read_text())
+    # The provenance the shell derived, as the reporter recorded it — the whole point of the
+    # call site this case exists to cover.
+    assert doc["attest"] == {"origin": "changed-tests", "diff_ref": "HEAD~1",
+                             "tests": ["tests/unit/test_link_master.cpp"], "dirs": ["link"]}, doc
+    assert doc["mode"] == "trend", doc
+    # … and the finding that would have gated a trend run is reported, not gated.
+    assert any("unknown label category 'whatever'" in m for m in doc["malformed_labels"]), doc
+    assert f"ERROR: {PROBE_REL}:{PROBE_MUTANT_LINE}: unknown label category 'whatever'" in out, out
+    assert "malformed mutant-ok label(s) in the attested dir(s) — reported, NOT gated" in out, out
+
+
 # --- tools/mutate_report.py: the triage gate on synthetic Elements reports --------------------
 
 REPORT = ROOT / "tools" / "mutate_report.py"
