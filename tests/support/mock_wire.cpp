@@ -486,7 +486,10 @@ void MockWire::fire_foreign_babble(uint8_t addressed, uint64_t tx_end) {
         // Per-node scripts only, NOT the 0xFF wildcard fallback: each node draws the wildcard
         // at its own cursor (next_step()), so a wildcard Babble step scanned here would fire
         // kAddrCount-1 bursts for a single request — a rig-wide storm nobody authored. A
-        // wildcard Babble still reaches the ADDRESSED node through next_step() as usual.
+        // wildcard Babble is therefore not scriptable at all: transmit()'s Kind::Babble arm
+        // refuses it by name rather than let it reach the ADDRESSED node alone (which would be
+        // Kind::Garbage under another name). docs/OPEN-QUESTIONS.md 2026-09-15 "A `Kind::Babble`
+        // step in the 0xFF wildcard script" holds the question.
         if (scripts_[n] == nullptr || script_pos_[n] >= script_len_[n])
             continue;
         const Step& s = scripts_[n][script_pos_[n]];
@@ -634,7 +637,27 @@ uint64_t MockWire::transmit(const uint8_t* bytes, size_t n, uint64_t now_us) {
             schedule_noise(frame_tx_end + delay_us, count, seed);
             break;
         case Kind::Babble:
-            // The same burst Garbage emits — what makes a step Babble is that
+            // A wildcard step (set_script() requires Step::node == 0xFF for every step in the
+            // 0xFF script, so this is exactly "drawn from the wildcard") is refused by name
+            // rather than honoured as the narrower thing the mock could carry out.
+            // contracts/mock-wire.md:25 makes a wildcard step "apply to every node" and :21
+            // makes Babble fire "regardless of addressee"; together they would put one burst
+            // on the wire per node per request — kAddrCount-1 bursts nobody authored, past the
+            // RX queue's capacity — and neither artefact names a count. Honouring it only here
+            // would instead make the step reach the ADDRESSED node alone, i.e. Kind::Garbage
+            // wearing another Kind's name: the one property the Babble row states, silently
+            // absent. Neither reading is written down, so per CLAUDE.md the ambiguity is
+            // recorded, not resolved here — docs/OPEN-QUESTIONS.md 2026-09-15 "A `Kind::Babble`
+            // step in the 0xFF wildcard script" — and the step is refused on the same
+            // deferred-fault path as schedule_noise()'s two refusals (PR #610 review round 2,
+            // finding 1). Per-node Babble scripts are unaffected.
+            if (step != nullptr && step->node == 0xFF) {
+                if (fault_ == nullptr)
+                    fault_ = "MockWire: Kind::Babble in the 0xFF wildcard script (script it per "
+                             "node; see docs/OPEN-QUESTIONS.md 2026-09-15)";
+                break;
+            }
+            // Otherwise the same burst Garbage emits — what makes a step Babble is that
             // fire_foreign_babble() above also fires it from a node that was NOT addressed.
             // Reaching it here means the babbler happens to be this request's addressee too.
             schedule_noise(frame_tx_end + delay_us, count, seed);

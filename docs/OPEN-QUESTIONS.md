@@ -4158,3 +4158,53 @@ else in the repo depends on it.
 `contracts/mock-wire.md`: what the mock does with two transmitters at one instant).
 
 **Amends:** none. **Supersedes:** none.
+
+---
+
+## 2026-09-15 — A `Kind::Babble` step in the 0xFF wildcard script
+
+**Context:** T030 (#48), PR #610 review round 2 finding 1. Two clauses of
+`contracts/mock-wire.md` meet with no stated result. The `Babble` row (`:21`) emits "`count`
+PRNG bytes at `request_end + delay_us` **regardless of addressee** (also emitted when a
+different node is polled, i.e. outside any window)"; the scripts paragraph (`:25`) says "Steps
+with `node == 0xFF` apply to every node". A `Babble` step in the wildcard script is therefore
+*every* node's pending babble at once, and no artefact says how many bursts one request then
+puts on the wire, nor whose cursor advances. The 2026-09-01 entry above (item (2), ruled by a
+human 2026-09-03) settled the wildcard's ORDERING — own script, then wildcard, then the default
+`Respond` — for Kinds scoped to "the next request addressed to `node`". `Babble` is the one Kind
+that escapes that scoping, so the ruling does not reach it.
+
+**Options:** (a) refuse a wildcard `Babble` by name — a script bug, on the same deferred-fault
+path as the mock's other refusals; (b) fire it for every non-addressed node, i.e.
+`kAddrCount − 1` bursts per request; (c) fire it for the addressed node only, which is what
+drawing it through `next_step()` and doing nothing else amounts to; (d) fire it once from some
+designated node, which would have to be invented.
+
+**Recommended:** (a). (b) is the literal reading of the two clauses together and is unusable:
+16 nodes × a burst apiece cannot fit the RX queue's `4 × kMaxWire`, so a script that looked
+ordinary would raise the capacity fault every time, and the `Babble` row names no per-node count
+to shrink one. (c) is worse than unusable — it is *silently* narrower: the step would reach only
+the addressed node, which is exactly `Kind::Garbage`, with the one property the `Babble` row
+states (addressee-independence) absent and nothing saying so. (d) invents a rule no artefact
+hints at. (a) costs nothing expressive — a babbler is scripted per node today
+(`set_script(0x03, {{0x03, Kind::Babble, …}}, 1)`), which is how every `Babble` case in the repo
+is written and how `fire_foreign_babble()` finds one — and it keeps the "never a silent drop"
+doctrine whole.
+
+**Implemented as (a) in PR #610** (`transmit()`'s `Kind::Babble` arm in
+`tests/support/mock_wire.cpp`: `step->node == 0xFF` → a named fault, no burst; `set_script()`
+already `REQUIRE`s every step's `node` to equal the script's registered node, so that test is
+exactly "drawn from the wildcard"). Pinned by `tests/unit/test_mock_wire.cpp`'s "A Garbage,
+Babble or Rate step the mock cannot honour is refused by name…" case, section "Kind::Babble in
+the 0xFF wildcard script", which asserts the fault fires, that nothing reaches the wire, and that
+the step is consumed rather than re-raised on the next poll. No repo script uses a wildcard
+`Babble`, so nothing else changes behaviour. A ruling for (b) or (c) replaces that section and
+the arm's `if`; under (b) `fire_foreign_babble()`'s per-node scan would also grow a wildcard
+pass. `contracts/mock-wire.md` is a human-ruling artefact and is **not** edited here.
+
+**Ruling:** PENDING — human (contract text; `specs/002-trunk-link-layer/contracts/mock-wire.md`,
+the `Babble` row against the "Steps with `node == 0xFF` apply to every node" sentence).
+
+**Amends:** none. **Supersedes:** none. **Related:** the 2026-09-01 "MockWire (T010) design
+choices…" entry, item (2) (wildcard-script ordering, ruled 2026-09-03), and the 2026-09-15 "A
+node deafened by `Kind::Rate`…" entry (the other axis the `Babble` row leaves open).
