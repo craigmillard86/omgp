@@ -22,7 +22,7 @@ is the problem the single-source rule for `protocol/omgp-protocol.yaml` exists t
 | Fixed-capacity buffers sized from the generated limits | by construction in `link_types.hpp`: `kMaxUnstuffed`/`kMaxWire` derive from `LIMIT_max_l3_payload`, `kAddrCount` sizes the per-address sequence and statistics tables and the health table. No function here takes ownership of memory — callers pass buffers in, `Status` comes back |
 | No OS, no wall clock | `check_embedded.py` forbids `<chrono>`, `<thread>`, `sleep` and `system_clock`; time enters only through `Clock` (FR-027, CLAUDE.md rule 3) |
 | No restated protocol or timing literals | `check_embedded.py` flags any integer literal ≥ 0x10 that the protocol YAML also defines; the values come from `build/gen/omgp_protocol.h` (FR-028, CLAUDE.md rule 4) |
-| Spec traceability | `check_embedded.py` requires a `trunk §…` citation in every file in this directory |
+| Spec traceability | `check_embedded.py` requires a spec citation — `trunk §…`, `trunk-link-layer §…`, `protocol-l3 §…` or `Spec §…`, any one of them satisfies the guard — in every file under the `--cite-dirs` basenames (default `l3 link`). Citing `trunk §` specifically is this directory's convention, not something the tool checks |
 | Compiles for the target | `./pipeline.sh esp32` builds `esp32-host/components/omgp_link` with the pinned ESP-IDF image (Xtensa LX7); `./pipeline.sh` builds and tests natively with ASan/UBSan. Both are gates, not advisories |
 
 ## Timing model
@@ -36,12 +36,16 @@ stop — evaluated at whichever of the trunk's two rates the wire is running, `T
 its probes while a bus fault is declared; `ByteWire::transmit()` returns the instant of the
 frame's final stop bit and received bytes carry their start-bit instant, which is what the
 four timing symbols are measured against — the `Responder` answers inside
-`[request_end + TRUNK_T_turn_min_us, request_end + TRUNK_T_turn_max_us]`, the `Master` fails
-an attempt whose response has not opened before `tx_end + TRUNK_T_resp_us` (exclusive) and
-retries up to `TRUNK_retries` times, neither transmits within `TRUNK_T_gap_us` of the last
+`[request_end + TRUNK_T_turn_min_us, request_end + TRUNK_T_turn_max_us]`; the `Master` fails
+an attempt whose response has not opened before `tx_end + TRUNK_T_resp_us` (exclusive),
+retries up to `TRUNK_retries` times, and never transmits within `TRUNK_T_gap_us` of the last
 byte heard (a courtesy bounded by one worst-case frame, so a station that will not stop
-talking cannot stall the host indefinitely — see the contract's "That push-out is bounded"),
-and `TRUNK_T_poll_us` is the superframe cadence at which the layer above calls in; nothing in
+talking cannot stall the host indefinitely — see the contract's "That push-out is bounded");
+that gap rule is the `Master`'s, and the `Responder` takes it on only when it answers late —
+inside the turnaround window trunk §3 reserves the bus for it, so it keys down at its
+turnaround with no gap check at all, and only past `T_turn_max`, where that reservation is
+gone, does it defer on the same bounded rule; and `TRUNK_T_poll_us` is the superframe cadence
+at which the layer above calls in; nothing in
 this directory ever waits, sleeps or spins on the clock — it is handed `now` (`poll(now_us)`)
 and compares it against a deadline.
 
@@ -65,13 +69,21 @@ node side of a virtual backplane; and `MockWire`'s step kinds (`Respond`, `Silen
 mapping target for scenario YAML fault steps, so trunk §7's failure modes stay configuration
 instead of special-cased code paths.
 
-Everything either needs is in those two contract files; nothing else is required.
+Everything either needs is specified in `contracts/link-cpp.md` and
+`byte-wire-and-clock.md`, with `contracts/mock-wire.md` for the step table; no interface
+outside those files is required.
 
-Two places where the contract is ahead of the headers, so that a reader coding against it is
-not surprised: its SC-010 list says `Master::begin/poll/feed`, but there is no public `feed()`
-— `poll()` and `begin()` drain `ByteWire::receive()` themselves and that is the only receive
-path; and `HealthTracker::set_bit_rate` is specified but not yet declared in `health.hpp`
-(tasks.md T041/T043 carry it as a red-first slice, as the header comment records).
+Three places where the contract is ahead of the code, so that a reader coding against it is
+not surprised. `contracts/link-cpp.md`'s SC-010 list says `Master::begin/poll/feed`, but there
+is no public `feed()` — `poll()` and `begin()` drain `ByteWire::receive()` themselves and that
+is the only receive path. `HealthTracker::set_bit_rate` is specified but not yet declared in
+`health.hpp` (tasks.md T041/T043 carry it as a red-first slice, as the header comment records).
+And of the seven step kinds above only `Respond`, `Silence`, `CrcError` and `Duplicate` are
+implemented in `tests/support/mock_wire.cpp` today: `Garbage`, `Babble` and `Rate` are declared
+so scripts can name them, but the switch raises a "not implemented until T030" test fault
+instead of producing the behaviour (`tests/support/mock_wire.hpp:6-10`,
+`tests/support/mock_wire.cpp` `case Kind::Garbage:`). F4's mapping for garbage, babble and
+rate-change waits on T030, or on F4 implementing them in its own `ByteWire`.
 
 ## Files
 
