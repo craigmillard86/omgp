@@ -35,16 +35,24 @@ stop — evaluated at whichever of the trunk's two rates the wire is running, `T
 (the reference rate) or `TRUNK_bit_rate_fallback`, between which the health tracker alternates
 its probes while a bus fault is declared; `ByteWire::transmit()` returns the instant of the
 frame's final stop bit and received bytes carry their start-bit instant, which is what the
-four timing symbols are measured against — the `Responder` answers inside
-`[request_end + TRUNK_T_turn_min_us, request_end + TRUNK_T_turn_max_us]`; the `Master` fails
-an attempt whose response has not opened before `tx_end + TRUNK_T_resp_us` (exclusive),
-retries up to `TRUNK_retries` times, and never transmits within `TRUNK_T_gap_us` of the last
-byte heard (a courtesy bounded by one worst-case frame, so a station that will not stop
-talking cannot stall the host indefinitely — see the contract's "That push-out is bounded");
-that gap rule is the `Master`'s, and the `Responder` takes it on only when it answers late —
-inside the turnaround window trunk §3 reserves the bus for it, so it keys down at its
-turnaround with no gap check at all, and only past `T_turn_max`, where that reservation is
-gone, does it defer on the same bounded rule; and `TRUNK_T_poll_us` is the superframe cadence
+four timing symbols are measured against — a `Responder` whose `poll()` reaches the response
+inside the turnaround window answers inside
+`[request_end + TRUNK_T_turn_min_us, request_end + TRUNK_T_turn_max_us]`, while one still due
+on the first `poll()` past `TRUNK_T_turn_max_us` is transmitted then, outside that bracket and
+counted in `stats().late_responses`, rather than dropped or backdated (FR-014); the `Master`
+fails an attempt whose response has not opened before `tx_end + TRUNK_T_resp_us` (exclusive),
+retries up to `TRUNK_retries` times, and defers a transmission to `TRUNK_T_gap_us` after the
+last byte it heard — a courtesy to other stations rather than a guarantee to them, because it
+is bounded: past one worst-case frame plus `TRUNK_T_gap_us` from the instant the transmission
+was first deferred to, the engine transmits on schedule whatever is on the wire, so a station
+that will not stop talking cannot stall the host indefinitely (that bound buys exactly this,
+and no more: a frame already on the wire at the deferred instant finishes and gets its full
+gap, whereas a station still transmitting when the cap expires is transmitted over — see the
+contract's "That push-out is bounded"); the gap rule is the `Master`'s, and the `Responder`
+takes it on, cap and all, only when it answers late — inside the turnaround window trunk §3
+reserves the bus for it, so it keys down at its turnaround with no gap check at all, and only
+past `T_turn_max`, where that reservation is gone, does it defer on the same bounded rule;
+and `TRUNK_T_poll_us` is the superframe cadence
 at which the layer above calls in; nothing in
 this directory ever waits, sleeps or spins on the clock — it is handed `now` (`poll(now_us)`)
 and compares it against a deadline.
