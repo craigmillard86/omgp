@@ -54,8 +54,19 @@
 //                              mode this table rows on, but is proven the same way immediately
 //                              below: "SC-005 RECOVERED: a Respond step after OFFLINE drives a
 //                              real HealthTracker back to ENROLLED")
-//   BUS_FAULT              -> reserved: T042 (#60) extends this file with the wrong-rate script
-//   wrong-rate probe       -> reserved: T042 (#60), same script as BUS_FAULT above
+//   BUS_FAULT              -> "SC-005 BUS_FAULT: a node that hears only the fallback rate ..."
+//                             (T042, landed via #572 rather than #60 — the wrong-rate script at
+//                             the end of this file: a real Master + real HealthTracker over a
+//                             node deafened by a Kind::Rate step)
+//   wrong-rate probe       -> same script as BUS_FAULT above: the alternating probe at
+//                             omgp::TRUNK_bit_rate_fallback is the one request the deafened
+//                             node hears, and Master::set_bit_rate carries each rate onto the
+//                             mock (FR-025)
+//   BUS_RECOVERED          -> same script again: the reference pass that follows that answer
+//                             draws nothing, so the fault clears at the fallback rate with the
+//                             answering node ENROLLED (FR-026). Not a trunk §7 MODE (nor is
+//                             RECOVERED above), rowed here because this table is US5's map
+//                             from §7's vocabulary to the script that produces it
 #include "catch_amalgamated.hpp"
 #include "fake_clock.hpp"
 #include "link/crc16.hpp"
@@ -133,14 +144,31 @@ struct CountingHandler : RequestHandler {
 // Sized deliberately, and asserted against in bridge_latest_request(): when a wildcard script
 // runs out, MockWire falls back to answering for itself -- so exhausting this one would make
 // the host_wire fabricate responses with no Responder involved, and every cell past that point
-// would pass without testing anything (red team @e4fffd9). The busiest cell today is SC-005
-// RECOVERED: 1 enrolling clean transaction (1 transmission) + 3 failed transactions x 3
+// would pass without testing anything (red team @e4fffd9). The busiest BRIDGED cell today is
+// SC-005 RECOVERED: 1 enrolling clean transaction (1 transmission) + 3 failed transactions x 3
 // attempts (9) + 1 recovering clean transaction (1) + 1 further failed transaction proving
 // consecutive_failures reset (3, review @3b1a80e) = 14; the array below holds 16, two
 // transmissions of headroom. That is this file's current contents, not a guarantee: the next
-// cell added (T042/#60 among them), or one more retry position, would cross silently and must
-// have this count re-derived, not assumed still generous. The assertion turns an actual
-// overrun into "harness budget exceeded" instead of a fabricated pass.
+// bridged cell added, or one more retry position, would cross silently and must have this
+// count re-derived, not assumed still generous. The assertion turns an actual overrun into
+// "harness budget exceeded" instead of a fabricated pass.
+//
+// Re-derived for T042/#572 (the wrong-rate case at the end of this file), which is the first
+// cell here that is NOT bridged: it transmits 56 frames on host_wire, far past the 16 above,
+// and the count still holds because the two budgets are different things.
+//   - The assertion is bridge_latest_request()'s, and that cell never calls it: it drives the
+//     real Master against host_wire's own scripted node instead (see that section's header).
+//     So the 14 above is still the largest value `transcript_size()` ever takes at that
+//     REQUIRE, and the bridged cells are the only ones it governs.
+//   - What the wildcard must still cover there is per NODE, because each node draws the
+//     wildcard at its own cursor (mock_wire.hpp, wildcard_pos_): 0x02..0x0F are each probed
+//     once, 3 transmissions apiece, so 3 of the 16 entries; kNode draws its OWN script for
+//     every request it hears and the wildcard not at all. `transcript_size()` is the bridged
+//     cells' conservative proxy for that per-node figure (they address one node), not a
+//     second rule this file obeys everywhere.
+//   - MockWire's transcript itself holds kTranscriptCapacity == 128 (mock_wire.hpp), so those
+//     56 frames fit with room to spare, and an overrun there is a recorded fault rather than a
+//     silent drop.
 constexpr Step kAlwaysSilence[] = {
     {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence},
     {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence}, {0xFF, Kind::Silence},
@@ -909,10 +937,12 @@ TEST_CASE("SC-004 duplicate after give-up: a late duplicate of the final, withhe
 
 // --- SC-005 "babble": extraneous bus noise between transactions ---------------------------
 // trunk §7 "babble" (contracts/mock-wire.md Kind::Babble: bytes regardless of addressee).
-// Kind::Babble itself is not yet implemented in MockWire (tasks.md T030, gated behind #48's
-// needs-human ruling on widening Step::count — not this issue's to resolve or depend on); a
-// fixed, hand-picked byte sequence that is not a valid frame for any node stands in for it,
-// injected onto host_wire outside any open transaction's window.
+// This case uses a fixed, hand-picked byte sequence that is not a valid frame for any node,
+// injected onto host_wire outside any open transaction's window, rather than a Kind::Babble
+// step: it was written while that Kind was still unimplemented (T030/#48, since landed), and
+// hand-picked bytes keep the case's own wire content exactly stated. Kind::Babble is now
+// available if a later case wants a scripted babbler instead — see tests/unit/test_mock_wire.cpp
+// for what it emits.
 
 TEST_CASE("SC-005 babble: extraneous bus noise between transactions is silently discarded, "
           "not attributed to the next transaction",
@@ -1280,4 +1310,352 @@ TEST_CASE("SC-004 a maximum-length payload survives the replay buffer byte-for-b
     REQUIRE(loop.responder.stats().replays_served == 1);
     REQUIRE(loop.master.stats(kNode).crc_failures == 1);
     REQUIRE(loop.master.attempts() == 2);
+}
+
+// --- SC-005 BUS_FAULT / wrong-rate probe / BUS_RECOVERED: the wrong-rate script (T042) ------
+// trunk §7 "Bus health" (amended 2026-09-13, F4): declare once, re-probe alternating from the
+// fallback rate, a reference pass after a fallback answer, clear at the rate that worked, no
+// automatic return. spec.md FR-024 (declared once; ruling Q2 — one enrolled node counts as
+// all), FR-025 (re-probe starts at the fallback rate and alternates; the transport MUST expose
+// the rate change), FR-026 (a reference answer clears at once; a fallback answer only after a
+// reference pass draws nothing), FR-030/FR-033 (§7 modes from script data, no test-specific
+// paths), SC-005, SC-007. data-model.md §6 (while `fault`: poll_due() false everywhere,
+// next_probe() includes SUSPECT, the pass yields each enrolled address once at the reference
+// rate), §7, §8, §10 (Kind::Rate reads `count` as a bit rate).
+//
+// The loop-level companion to tests/unit/test_link_busfault.cpp, which pins these rules against
+// a HealthTracker alone with no wire at all. What this file adds, and the only reason it exists
+// (tasks.md T042): the silence is a real node's, the rate change is observed ON THE WIRE, and
+// both go through the real Master.
+//
+// -- Why this section does not use the bridge above (the mechanism #572 leaves to the
+// implementer; recorded here per CLAUDE.md rule 11, with what each choice would have cost) --
+// The bridge copies every request onto node_wire and injects the real Responder's answer back
+// onto host_wire whatever rate host_wire is running at, so a node deafened by a Kind::Rate step
+// would still answer: the deafness would have to come from the DRIVER — a `Fault::Drop` in the
+// plan, or a rate test in bridge_latest_request() — which is exactly the test-specific path
+// FR-030/FR-033 rule out. And byte_us() is pinned at omgp::TRUNK_bit_rate (it has no reason not
+// to be: every bridged cell runs at that one rate), so the bridge would mistime every instant
+// of a fallback-rate transaction unless it were made rate-aware too.
+// So this section drives the real Master against host_wire's OWN scripted node: Kind::Rate
+// deafens it, Kind::Respond answers the one probe it can still hear, and every instant comes
+// from byte_time_us(host_wire.bit_rate()) — the rate in force, read from the mock. node_wire,
+// the Responder and the CountingHandler are simply unused here (this cell proves nothing about
+// the replay buffer, which is SC-004's subject above). Nothing in tests/support/ or link/ is
+// touched, byte_us() and bridge_latest_request() are unchanged, and no cell above is affected.
+
+namespace {
+
+// data-model.md §9: a bus-level notice (BUS_FAULT, ALERT, BUS_RECOVERED) carries addr 0.
+constexpr uint8_t kBusAddr = 0;
+
+// kNode's own script. Drawn before the 0xFF wildcard, and ONLY by requests the node can hear:
+// mock_wire.cpp checks Kind::Rate's standing effect before next_step(), so a deafened node's
+// script does not advance. Three steps, one per heard request in the whole case:
+//   [0] Respond — the enrolment-rotation probe at omgp::TRUNK_bit_rate: answered, so the node
+//                 enrols (UNENROLLED -> ENROLLED). Nothing enrolled means no fault can ever be
+//                 declared (FR-023/FR-024), so this step is load-bearing, not scene-setting.
+//   [1] Rate    — count == omgp::TRUNK_bit_rate_fallback: from here the node hears only the
+//                 fallback rate. It governs the very request that carried it (mock_wire.cpp:
+//                 "...and it governs this very request too"), so that status poll is already
+//                 unanswered — real silence from a deafened node, not a driver-applied fault.
+//                 seed == 0 selects the Rate row's Silence branch: a deaf node that is quiet,
+//                 not one that babbles (contracts/mock-wire.md, Rate row).
+//   [2] Respond — the alternating probe at the fallback rate: the one request the deafened node
+//                 hears again, and the answer FR-026 must NOT let clear the fault.
+// Every other request kNode is sent in this case is at the reference rate and unheard, so it
+// draws no step at all; the wildcard's Silence steps are never reached on this node's cursor
+// (see kAlwaysSilence's budget note above). The 0xFF wildcard is what answers for 0x02..0x0F.
+constexpr Step kDeafAtReferenceRate[] = {
+    {kNode, Kind::Respond, omgp::TRUNK_T_turn_min_us, 0, 0},
+    {kNode, Kind::Rate, omgp::TRUNK_T_turn_min_us, omgp::TRUNK_bit_rate_fallback, 0},
+    {kNode, Kind::Respond, omgp::TRUNK_T_turn_min_us, 0, 0},
+};
+constexpr size_t kDeafAtReferenceRateLen =
+    sizeof(kDeafAtReferenceRate) / sizeof(kDeafAtReferenceRate[0]);
+
+// A bound on one whole transaction at `rate`, in that rate's own byte times — never byte_us(),
+// which is the reference rate's (data-model.md §4; link/master.hpp for the courtesy cap):
+// TRUNK_retries + 1 attempts, each at most a worst-case request frame, one more worst-case
+// frame plus T_gap of deferral courtesy, and its T_resp window. Only the poll loop's stopping
+// condition: a transaction that concludes returns long before this, and one that never
+// concludes fails by name instead of spinning.
+uint64_t transaction_bound_us(uint32_t rate) {
+    const uint64_t attempt = 2 * static_cast<uint64_t>(kMaxWire) * byte_time_us(rate) +
+                             omgp::TRUNK_T_resp_us + 2 * omgp::TRUNK_T_gap_us;
+    return (static_cast<uint64_t>(omgp::TRUNK_retries) + 1) * attempt;
+}
+
+// One whole transaction driven against host_wire's scripted node, at whatever rate the wire is
+// running: begun on the real Master, then polled at the byte cadence OF THAT RATE until the
+// engine produces its own terminal event. Time moves only through the shared FakeClock (via
+// MockWire::advance_to), and no instant here is a literal or a reference-rate constant.
+MasterEvent run_scripted_transaction(Loop& loop, uint8_t dst, uint8_t payload_byte) {
+    const uint8_t payload[] = {payload_byte};
+    REQUIRE(loop.master.begin(dst, payload, sizeof payload) == Status::Ok);
+    const uint64_t step_us = byte_time_us(loop.host_wire.bit_rate());
+    const uint64_t give_up_at =
+        loop.clock.now_us() + transaction_bound_us(loop.host_wire.bit_rate());
+    while (loop.clock.now_us() < give_up_at) {
+        const MasterEvent ev =
+            loop.host_wire.advance_to(loop.clock.now_us() + step_us, loop.master);
+        if (ev.kind != MasterEvent::None)
+            return ev;
+    }
+    FAIL("no terminal MasterEvent within one transaction's worst-case span at this rate");
+    return MasterEvent{};
+}
+
+// One status poll of a node the tracker says is owed one, driven the way F3 must: poll_due()
+// first (never a poll the health rules did not ask for), mark_polled(), the real transaction,
+// then exactly one on_result for its outcome at the instant it concluded.
+MasterEvent run_status_poll(Loop& loop, HealthTracker& tracker, uint8_t dst, uint8_t payload_byte) {
+    REQUIRE(tracker.poll_due(dst, loop.clock.now_us()));
+    tracker.mark_polled(dst, loop.clock.now_us());
+    const MasterEvent ev = run_scripted_transaction(loop, dst, payload_byte);
+    tracker.on_result(dst, ev.kind == MasterEvent::Answered, loop.clock.now_us());
+    return ev;
+}
+
+struct ProbeRun {
+    Probe probe;
+    MasterEvent ev;
+};
+
+// One probe, issued the way contracts/link-cpp.md "What F3/F4 need" requires of F3: ONE
+// next_probe() call per probe actually put on the wire (obligation 2), that probe the only
+// traffic while a fault stands (obligation 1 — every transaction in the faulted half of this
+// case comes from here), the wire moved to the probe's own rate through the real Master before
+// it goes out, and exactly one on_result for its outcome.
+// `apply_rate` is false only for the pre-fault enrolment probe: the wire is already at the rate
+// next_probe() hands out there, and calling Master::set_bit_rate anyway would count a change on
+// Master's own BusStats that nothing decided (link/master.cpp counts applied calls, the tracker
+// counts decided changes — data-model.md §8).
+ProbeRun run_probe(Loop& loop, HealthTracker& tracker, uint8_t payload_byte, bool apply_rate) {
+    const Probe p = tracker.next_probe(loop.clock.now_us());
+    // link/health.hpp: ADDR_host is the "nothing to probe" sentinel and must never reach the
+    // wire. Unreachable while faulted (every backplane address is a candidate then), checked
+    // because this helper issues whatever it is handed.
+    REQUIRE(p.addr != omgp::ADDR_host);
+    if (apply_rate)
+        loop.master.set_bit_rate(p.bit_rate);
+    // FR-025: "the transport MUST expose the rate change" — read back FROM THE MOCK, not
+    // inferred from the tracker's own bit_rate() or from the Probe we just asked for.
+    REQUIRE(loop.host_wire.bit_rate() == p.bit_rate);
+    const MasterEvent ev = run_scripted_transaction(loop, p.addr, payload_byte);
+    tracker.on_result(p.addr, ev.kind == MasterEvent::Answered, loop.clock.now_us());
+    return ProbeRun{p, ev};
+}
+
+// Count equality over the WHOLE stream is what FR-024 ("declared once per episode") and SC-006
+// ("exactly one notification per transition") need; "at least one" would pass for a tracker
+// that re-declared on every probe.
+size_t count_notices(const RecordingHealthListener& listener, Notice notice) {
+    size_t n = 0;
+    for (const RecordingHealthListener::Entry& e : listener.entries)
+        if (e.notice == notice)
+            ++n;
+    return n;
+}
+
+// data-model.md §6, amended 2026-09-13: while a fault is declared there are no status polls
+// anywhere — only next_probe() drives the wire, so a node that hears only the fallback rate is
+// never polled at the reference rate it cannot hear. Every address, not just kNode.
+void require_no_polls_due(const HealthTracker& tracker, uint64_t now_us) {
+    for (uint8_t a = 0; a < static_cast<uint8_t>(kAddrCount); ++a) {
+        INFO("addr " << static_cast<unsigned>(a));
+        REQUIRE_FALSE(tracker.poll_due(a, now_us));
+    }
+}
+
+} // namespace
+
+TEST_CASE("SC-005 BUS_FAULT: a node that hears only the fallback rate falls silent at the "
+          "reference rate and declares the bus faulty once; the alternating fallback probe is "
+          "answered without clearing it, and the reference pass that then draws nothing "
+          "recovers the bus at the fallback rate",
+          "[link][timing:bit_rate_fallback]") {
+    Loop loop;
+    loop.host_wire.set_script(kNode, kDeafAtReferenceRate, kDeafAtReferenceRateLen);
+    RecordingHealthListener listener;
+    HealthTracker tracker(loop.clock, listener);
+
+    REQUIRE(loop.host_wire.bit_rate() == omgp::TRUNK_bit_rate);
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+
+    // --- the node enrols at the reference rate ------------------------------------------
+    // Issued as the enrolment-rotation probe it is (data-model.md §6): outside a fault
+    // next_probe() hands out the rate in use and walks the rotation cursor, which also fixes
+    // where the fault-time rotation below starts from.
+    const ProbeRun enrolling = run_probe(loop, tracker, 0x81, /*apply_rate=*/false);
+    REQUIRE(enrolling.probe.addr == kNode);
+    REQUIRE(enrolling.probe.bit_rate == omgp::TRUNK_bit_rate);
+    REQUIRE(enrolling.ev.kind == MasterEvent::Answered);
+    REQUIRE(tracker.state(kNode) == HealthState::ENROLLED);
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bus_stats().rate_changes == 0); // nothing has moved the wire yet
+
+    // --- then it stops hearing the trunk, and exactly TRUNK_suspect_after_failures
+    // --- consecutive status polls fail ---------------------------------------------------
+    // Poll 0 draws the Kind::Rate step, which governs that very request: the node is deaf from
+    // it on, so the poll goes unanswered. Polls 1 and 2 draw no step at all — mock_wire.cpp
+    // checks the standing effect before next_step(), so a deafened node's script stands still.
+    // Each is a real L2 retry exhaustion against a silent node, never a Fault::Drop applied by
+    // this driver (FR-030/FR-033: the deafness is script data).
+    for (uint32_t i = 0; i < omgp::TRUNK_suspect_after_failures; ++i) {
+        INFO("failed poll " << i);
+        const MasterEvent ev =
+            run_status_poll(loop, tracker, kNode, static_cast<uint8_t>(0x82 + i));
+        REQUIRE(ev.kind == MasterEvent::Failed);
+        // Silence, not a corrupted or mis-sequenced answer: the node heard nothing to answer.
+        REQUIRE(ev.reason == MasterEvent::Timeout);
+        REQUIRE(loop.master.attempts() == static_cast<uint8_t>(omgp::TRUNK_retries) + 1);
+        if (i + 1 < omgp::TRUNK_suspect_after_failures) {
+            REQUIRE(tracker.state(kNode) == HealthState::ENROLLED);
+            REQUIRE_FALSE(tracker.bus_fault()); // not before the LAST failure
+        }
+    }
+    REQUIRE(tracker.state(kNode) == HealthState::SUSPECT);
+    REQUIRE(loop.master.stats(kNode).timeouts ==
+            omgp::TRUNK_suspect_after_failures * (static_cast<uint32_t>(omgp::TRUNK_retries) + 1));
+
+    // --- declared once, at bus level ------------------------------------------------------
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(count_notices(listener, Notice::BUS_FAULT) == 1); // FR-024: once per episode
+    REQUIRE(count_notices(listener, Notice::ALERT) == 1);     // FR-024: one system alert
+    REQUIRE(count_notices(listener, Notice::BUS_RECOVERED) == 0);
+    REQUIRE(tracker.bus_stats().bus_faults == 1);
+    for (const RecordingHealthListener::Entry& e : listener.entries)
+        if (e.notice == Notice::BUS_FAULT || e.notice == Notice::ALERT)
+            REQUIRE(e.addr == kBusAddr); // data-model.md §9: bus-level notices carry addr 0
+    require_no_polls_due(tracker, loop.clock.now_us());
+
+    // --- the re-probe: fallback first, then alternating, each rate applied to the WIRE -----
+    // FR-025. The rotation covers all 15 backplane addresses while faulted (nothing is ENROLLED
+    // then, and SUSPECT joins the candidate set) and the alternation has period 2, so kNode
+    // recurs at the fallback rate within 2 x 15 probes — 15 being odd is what makes the two
+    // cycles co-prime, the same bound probe_until() carries in test_link_busfault.cpp.
+    constexpr int kProbeCycle = 2 * (omgp::ADDR_backplane_max - omgp::ADDR_backplane_min + 1);
+    uint32_t probes_issued = 0;
+    ProbeRun answered{};
+    bool answered_yet = false;
+    for (int i = 0; i < kProbeCycle; ++i) {
+        INFO("probe " << i);
+        // FR-025: the first probe after the declare is at the FALLBACK rate, and successive
+        // probes alternate fallback -> reference -> fallback while no pass is running. Checked
+        // per probe rather than for the first three alone, so a tracker that alternated for a
+        // while and then stopped would fail here too.
+        const uint32_t expected_rate =
+            (i % 2 == 0) ? omgp::TRUNK_bit_rate_fallback : omgp::TRUNK_bit_rate;
+        const ProbeRun r = run_probe(loop, tracker, static_cast<uint8_t>(0x90 + i), true);
+        ++probes_issued;
+        REQUIRE(r.probe.bit_rate == expected_rate);
+        // data-model.md §8: one increment per change, at the point it is decided. Every probe
+        // here changes the rate (it alternates), so the count tracks the probes issued.
+        REQUIRE(tracker.bus_stats().rate_changes == probes_issued);
+        if (r.probe.addr == kNode && r.probe.bit_rate == omgp::TRUNK_bit_rate_fallback) {
+            answered = r;
+            answered_yet = true;
+            break;
+        }
+        // Every other probe is to an address no node answers for: the wildcard script is
+        // Silence, so the transaction times out and the fault stands.
+        REQUIRE(r.ev.kind == MasterEvent::Failed);
+        REQUIRE(tracker.bus_fault());
+    }
+    REQUIRE(answered_yet);
+    // ...and it took a WHOLE rotation to come round, so the fallback -> reference -> fallback
+    // run the alternation criterion asks for really happened before the answer (a case that
+    // was handed kNode back on the first probe would satisfy everything above vacuously).
+    // 15 probes, one per backplane address: the enrolment probe above left the cursor on kNode,
+    // so kNode comes round again after one full rotation — and kBackplaneCount is odd, which
+    // is what puts that probe on the fallback rate rather than the reference one.
+    constexpr uint32_t kBackplaneCount =
+        static_cast<uint32_t>(omgp::ADDR_backplane_max) - omgp::ADDR_backplane_min + 1;
+    REQUIRE(probes_issued == kBackplaneCount);
+
+    // --- the wrong-rate probe is answered, and that does NOT clear the fault (FR-026) ------
+    REQUIRE(answered.probe.addr == kNode);
+    REQUIRE(answered.probe.bit_rate == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(answered.ev.kind == MasterEvent::Answered);
+    REQUIRE(loop.master.attempts() == 1); // heard the first time it was asked at that rate
+    REQUIRE(tracker.bus_fault());         // still faulted: a fallback answer is not a recovery
+    REQUIRE(count_notices(listener, Notice::BUS_RECOVERED) == 0);
+    REQUIRE(tracker.state(kNode) == HealthState::SUSPECT); // its §6 transition is DEFERRED
+    // data-model.md §7: the rate in use is assigned only by a clear, so a probe's own rate
+    // never moves it — the wire is at the fallback rate, the tracker's rate in use is not.
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+    REQUIRE(loop.host_wire.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    require_no_polls_due(tracker, loop.clock.now_us());
+
+    // --- the reference pass draws nothing, and the fault clears at the fallback rate -------
+    // FR-026: every enrolled address once at omgp::TRUNK_bit_rate, without alternating. Ruling
+    // Q2 makes kNode the whole enrolled set, so the pass is one probe.
+    // Labelled per rule 11: the pass probe's RATE alone does not distinguish a pass from the
+    // alternation here — after a fallback probe the alternation's next rate is the reference
+    // rate too, and with one enrolled address there is no second pass probe to show the
+    // absence of alternation. What this cell pins is the pass's OUTCOME, which the alternation
+    // has none of: a failing pass probe clears the fault at the fallback rate, where a failed
+    // alternating probe clears nothing. Distinguishing the two by rate needs a pass longer than
+    // one probe, which is test_link_busfault.cpp's multi-node subject (and #572 rules a second
+    // node here out of scope).
+    const ProbeRun pass = run_probe(loop, tracker, 0xA0, /*apply_rate=*/true);
+    ++probes_issued;
+    REQUIRE(pass.probe.addr == kNode);
+    REQUIRE(pass.probe.bit_rate == omgp::TRUNK_bit_rate);
+    REQUIRE(loop.host_wire.bit_rate() == omgp::TRUNK_bit_rate);
+    REQUIRE(pass.ev.kind == MasterEvent::Failed); // the deafened node cannot hear this one
+
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(count_notices(listener, Notice::BUS_RECOVERED) == 1);
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback); // the rate that works, pinned
+    REQUIRE(tracker.state(kNode) == HealthState::ENROLLED);       // the deferred §6 transition
+    // No second episode on the way out (FR-024, and data-model.md §7's "no immediate
+    // re-declare": the answerer is ENROLLED by the clear, so the declare rule is not satisfied
+    // when it is next evaluated).
+    REQUIRE(count_notices(listener, Notice::BUS_FAULT) == 1);
+    REQUIRE(count_notices(listener, Notice::ALERT) == 1);
+    REQUIRE(tracker.bus_stats().bus_faults == 1);
+
+    // The whole notice stream, in order (SC-006: exactly one notification per transition) —
+    // which is also what says no BUS_FAULT or ALERT follows the recovery.
+    // Three node-level transitions (enrol, suspect, recover) plus this episode's declare and
+    // clear notices, counted through the same constants the SC-005 cases above use.
+    REQUIRE(listener.entries.size() == 3 + kDeclareNotices + kClearNotices);
+    REQUIRE(listener.entries[0].notice == Notice::ENROLLED);
+    REQUIRE(listener.entries[0].addr == kNode);
+    REQUIRE(listener.entries[1].notice == Notice::SUSPECT);
+    REQUIRE(listener.entries[1].addr == kNode);
+    REQUIRE(listener.entries[2].notice == Notice::BUS_FAULT);
+    REQUIRE(listener.entries[2].addr == kBusAddr);
+    REQUIRE(listener.entries[3].notice == Notice::ALERT);
+    REQUIRE(listener.entries[3].addr == kBusAddr);
+    // The deferred §6 transition the clear applies, and then the clear itself — in that order,
+    // and last, so nothing re-declared behind them.
+    REQUIRE(listener.entries[4].notice == Notice::RECOVERED);
+    REQUIRE(listener.entries[4].addr == kNode);
+    REQUIRE(listener.entries[5].notice == Notice::BUS_RECOVERED);
+    REQUIRE(listener.entries[5].addr == kBusAddr);
+
+    // data-model.md §7: the clear PINS that rate and there is no automatic return (ruling
+    // 2026-09-13), so the layer above moves the wire to what the tracker now reports — the one
+    // rate change in this episode that no probe decided.
+    loop.master.set_bit_rate(tracker.bit_rate());
+    REQUIRE(loop.host_wire.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    // data-model.md §8: one per change decided — each fault-time probe moved the wire (they
+    // alternate), and the clear pinned it once more.
+    REQUIRE(tracker.bus_stats().rate_changes == probes_issued + 1);
+    // Master counts the calls it APPLIED (link/master.cpp), which is the same number here only
+    // because every rate this case applied was a change: each probe's, plus the pin above.
+    REQUIRE(loop.master.bus_stats().rate_changes == probes_issued + 1);
+
+    // What this case actually put on host_wire, derived rather than counted by hand — the
+    // figure kAlwaysSilence's budget note at the top of this file quotes, and the assertion
+    // that every transaction here but the two answered ones spent its whole retry budget.
+    constexpr size_t kAttempts = static_cast<size_t>(omgp::TRUNK_retries) + 1;
+    // One answered enrolment probe; the failed status polls; the fault-time probes nobody
+    // answers; the answered fallback probe; the reference pass probe.
+    const size_t expected_frames = 1 + omgp::TRUNK_suspect_after_failures * kAttempts +
+                                   (kBackplaneCount - 1) * kAttempts + 1 + kAttempts;
+    REQUIRE(loop.host_wire.transcript_size() == expected_frames);
 }

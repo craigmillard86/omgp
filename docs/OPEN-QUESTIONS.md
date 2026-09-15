@@ -4140,3 +4140,188 @@ corrected not to claim that it does.
 #62 should not be re-released with AC2 still unsatisfiable by the job that would claim it.
 **Amends:** the 2026-09-15 maintainer ruling on #62 blocker 2 (records that its fix is necessary
 but not sufficient). **Supersedes:** none.
+
+---
+
+## 2026-09-15 — `Kind::Rate`'s wrong-rate `Garbage` branch names no burst LENGTH
+
+**Context:** T030 (#48), implementing the `Kind::Rate` body in `tests/support/mock_wire.cpp`.
+`contracts/mock-wire.md`'s Rate row reads: "the node now 'hears' only at `count` interpreted as
+bit rate (1 000 000 or 115 200); requests at another rate behave as `Silence` (or `Garbage` if
+`seed != 0`)". `research.md` R-07 says the same. The `Garbage` row those five words defer to is
+parameterised by `count` PRNG bytes — but on a `Rate` step `count` is spent on the bit rate and
+`seed` is spent on selecting the branch, so **no field is left to carry the burst length**, and
+neither document states one. `delay_us` is the only remaining field, and it already means "when
+this step's output starts" for every other row. The same gap covers the *delay* of a burst
+produced by a LATER request: the `Rate` step that armed the deafness has been consumed by then,
+so its `delay_us` has to be remembered or re-invented.
+
+**Options:** (a) fix a length in the mock and say so — one full frame's worth of line noise
+(`omgp::link::kMaxWire`), which is what a receiver mis-sampling a foreign-rate transmission sees
+over one frame time; (b) model it physically — the node answers at its own rate and the host,
+sampling at another, sees roughly `wire_len × byte_time(node_rate) / byte_time(host_rate)` bytes
+of noise — faithful, but it invents a rate-conversion model no document asks for and makes the
+burst length a function of an answer the node never produced; (c) widen `Step` again with a
+length field — a fourth artefact-wide struct change for one row, which is exactly the cost the
+2026-09-03/2026-09-14 `Step::count` widening was weighed against; (d) make the wrong-rate branch
+always `Silence` and drop the `seed != 0` clause — deletes contract text.
+
+**Recommended:** (a), as a contract clarification, with the mock remembering the arming step's
+`delay_us` and `seed` per node so a later wrong-rate request starts its burst at
+`request_end + delay_us` of the step that armed it. It is the smallest choice that leaves every
+stated part of the row true, needs no new field, and keeps a burst inside the RX queue's
+`4 × kMaxWire`. **Implemented that way in T030/#48** (`kWrongRateNoiseBytes` in
+`tests/support/mock_wire.cpp`, one named constant citing this entry).
+`tests/unit/test_mock_wire.cpp`'s `Kind::Rate` case deliberately asserts the burst's START
+instant, cadence, determinism and "no valid frame" but **not** its length, so a ruling for (b)
+or (c) changes the constant and no test. `contracts/mock-wire.md` is a human-ruling artefact and
+is **not** edited here.
+
+**Ruling:** PENDING — human (contract text; `specs/002-trunk-link-layer/contracts/mock-wire.md`
+Rate row).
+
+**Amends:** none. **Supersedes:** none.
+
+---
+
+## 2026-09-15 — A node deafened by `Kind::Rate`: does its pending `Kind::Babble` step still fire?
+
+**Context:** T030 (#48), PR #610 red-team round 1 finding 1. `contracts/mock-wire.md`'s `Babble`
+row emits "`count` PRNG bytes at `request_end + delay_us` **regardless of addressee** (also
+emitted when a different node is polled, i.e. outside any window)"; its `Rate` row makes a node
+"hear" only at one bit rate, with "requests at another rate behav[ing] as `Silence` (or `Garbage`
+if `seed != 0`)". Both rows sit under a table header scoping every Kind to "the next request
+addressed to `node`" — which the `Babble` row overrides along the ADDRESSEE axis and which
+neither row addresses along the HEARING axis. So when one node's script carries a `Rate` step and
+then a `Babble` step, and a request then arrives at a rate that node cannot hear, no artefact
+says whether the burst fires, or whether the step is consumed.
+
+**Options:** (a) deafness gates babbling — an unheard request does not reach the node's script at
+all, so the `Babble` step neither fires nor advances, and fires on the first request the node
+does hear; (b) deafness does not gate babbling — a babbler transmits unprompted, so the burst
+fires whether or not the node heard the request that triggered it; (c) refuse the combination by
+name, treating a script that pairs the two Kinds on one node as a script bug.
+
+**Recommended:** (a). It is the reading `transmit()` already applies to the ADDRESSED node ("a
+node that cannot hear the wire's current rate never received this request at all, so its script
+must not advance"), and the mock anchors every burst at `request_end + delay_us` — an instant a
+node that cannot demodulate the wire cannot locate. (b) is defensible in isolation (a real
+babbler is a node that has lost sync and squawks unprompted), but it would advance the script of
+a node the same code path says heard nothing, and it needs its own answer for what an unheard
+burst is anchored to. (c) costs expressiveness for no stated benefit: under (a) the combination
+stays scriptable — arm the deafness, move the wire to the node's rate, and the burst fires.
+
+The code as first written was neither: `fire_foreign_babble()` consulted no node's hearing, so a
+deaf node babbled (and advanced its script) for ANOTHER node's poll while staying silent for its
+own — addressee-DEPENDENT for exactly the nodes carrying both Kinds, which is the one property
+the `Babble` row states. **Implemented as (a) in PR #610** (`hears_current_rate()` in
+`tests/support/mock_wire.cpp`, consulted by both `fire_foreign_babble()` and
+`deaf_to_current_rate()`), with `tests/unit/test_mock_wire.cpp`'s "Kind::Rate's deafness gates
+Kind::Babble the SAME way whoever is addressed…" case asserting both halves of the symmetry and
+the step's survival. A ruling for (b) changes that case and one `continue`; for (c), those plus a
+named refusal. `contracts/mock-wire.md` is a human-ruling artefact and is **not** edited here.
+
+**Ruling:** PENDING — human (contract text; `specs/002-trunk-link-layer/contracts/mock-wire.md`,
+the `Babble` and `Rate` rows).
+
+**Amends:** none. **Supersedes:** none.
+
+---
+
+## 2026-09-15 — Two `Kind::Babble` bursts scheduled at one instant are interleaved, not collided
+
+**Context:** T030 (#48), PR #610 red-team round 1 finding 3. Two nodes scripted with `Babble`
+steps of equal `delay_us` put their bursts on `MockWire`'s RX queue at identical start instants.
+`contracts/byte-wire-and-clock.md` fixes the release ORDER ("earliest start instant first") but
+says nothing about two bytes sharing one instant, and `contracts/mock-wire.md` "Capacity" only
+forbids a silent drop. The mock therefore delivers BOTH bursts, whole and byte-perfect,
+alternating one byte per transmitter per instant — whereas `docs/trunk-link-layer.md` §3 makes
+two nodes transmitting at once on the half-duplex pair a collision, from which neither
+transmission would survive intact.
+
+**Options:** (a) keep the interleave and state it — the mock models the SCHEDULING of a §3
+violation, not its electrical outcome; (b) model the collision — damage or drop bytes that share
+an instant, which invents a line model no artefact asks for and changes what every
+multi-transmitter script puts on the wire; (c) refuse equal instants by name, making a colliding
+script a test-authoring error.
+
+**Recommended:** (a) for now. The engine under test sees noise either way (a burst is frame-free
+by construction, checked at generation), no case in the repo draws a conclusion about collision
+damage, and (b) is a modelling decision whose consequences land at engine level — it belongs with
+T042's §7 bus-fault work, where a collision first has an observable meaning. (c) would forbid
+exactly the script the `Babble` row's addressee-independence makes natural to write.
+
+**Implemented as (a) in PR #610:** no code change. `tests/unit/test_mock_wire.cpp`'s "two nodes
+babbling at once both reach the wire, interleaved rather than collided" section now asserts the
+instants (each carried twice, in ascending pairs), that de-interleaving recovers exactly what
+each babbler puts on the wire alone, and that the stream replays byte-for-byte — where it
+previously asserted only a byte count and left the model unstated. WHICH transmitter takes the
+first slot at a shared instant is the RX queue's insertion order, which no artefact states, and
+is deliberately NOT pinned. A ruling for (b) or (c) changes that section and `enqueue()`; nothing
+else in the repo depends on it.
+
+**Ruling:** PENDING — human (`specs/002-trunk-link-layer/contracts/byte-wire-and-clock.md` /
+`contracts/mock-wire.md`: what the mock does with two transmitters at one instant).
+
+**Amends:** none. **Supersedes:** none.
+
+---
+
+## 2026-09-15 — A `Kind::Babble` step in the 0xFF wildcard script
+
+**Context:** T030 (#48), PR #610 review round 2 finding 1. Two clauses of
+`contracts/mock-wire.md` meet with no stated result. The `Babble` row (`:21`) emits "`count`
+PRNG bytes at `request_end + delay_us` **regardless of addressee** (also emitted when a
+different node is polled, i.e. outside any window)"; the scripts paragraph (`:25`) says "Steps
+with `node == 0xFF` apply to every node". A `Babble` step in the wildcard script is therefore
+*every* node's pending babble at once, and no artefact says how many bursts one request then
+puts on the wire, nor whose cursor advances. The 2026-09-01 entry above (item (2), ruled by a
+human 2026-09-03) settled the wildcard's ORDERING — own script, then wildcard, then the default
+`Respond` — for Kinds scoped to "the next request addressed to `node`". `Babble` is the one Kind
+that escapes that scoping, so the ruling does not reach it.
+
+**Options:** (a) refuse a wildcard `Babble` by name — a script bug, on the same deferred-fault
+path as the mock's other refusals; (b) fire it for every non-addressed node, i.e.
+`kAddrCount − 1` bursts per request; (c) fire it for the addressed node only, which is what
+drawing it through `next_step()` and doing nothing else amounts to; (d) fire it once from some
+designated node, which would have to be invented.
+
+**Recommended:** (a). (b) is the literal reading of the two clauses together and is unusable —
+though not for the reason first given here (corrected after PR #610 red-team round 3, finding 1;
+an earlier revision of this paragraph said 16 bursts "cannot fit the RX queue's `4 × kMaxWire`",
+so that an ordinary script "would raise the capacity fault every time", which is false for short
+bursts and overstates the case). What is true: one request becomes `kAddrCount − 1` = 15 bursts
+nobody authored per node, and the `Babble` row names no count to size them by, so whether the
+rig-wide storm fits is `count`-dependent rather than a property of `kAddrCount` — the RX queue
+holds `4 × kMaxWire` = 568 bytes, so 15 bursts fit whenever `count ≤ 37` (the red team's case C1:
+15 × 8 bytes, no fault) and overrun above it (its case A4: 15 × `kMaxWire` = 2130 bytes, named
+capacity fault). *Demonstrated by those two red-team cases, which are scratch TUs in that
+round-3 comment and not in the repo; the arithmetic itself is proved by construction from
+`kRxCapacity` and `kAddrCount`.* The objection to (b) therefore stands on the unstated count and
+the unauthored multiplication — a step that looks like one burst is fifteen, with the capacity
+fault reachable from a script that reads as ordinary — not on arithmetic impossibility.
+(c) is worse than unusable — it is *silently* narrower: the step would reach only
+the addressed node, which is exactly `Kind::Garbage`, with the one property the `Babble` row
+states (addressee-independence) absent and nothing saying so. (d) invents a rule no artefact
+hints at. (a) costs nothing expressive — a babbler is scripted per node today
+(`set_script(0x03, {{0x03, Kind::Babble, …}}, 1)`), which is how every `Babble` case in the repo
+is written and how `fire_foreign_babble()` finds one — and it keeps the "never a silent drop"
+doctrine whole.
+
+**Implemented as (a) in PR #610** (`transmit()`'s `Kind::Babble` arm in
+`tests/support/mock_wire.cpp`: `step->node == 0xFF` → a named fault, no burst; `set_script()`
+already `REQUIRE`s every step's `node` to equal the script's registered node, so that test is
+exactly "drawn from the wildcard"). Pinned by `tests/unit/test_mock_wire.cpp`'s "A Garbage,
+Babble or Rate step the mock cannot honour is refused by name…" case, section "Kind::Babble in
+the 0xFF wildcard script", which asserts the fault fires, that nothing reaches the wire, and that
+the step is consumed rather than re-raised on the next poll. No repo script uses a wildcard
+`Babble`, so nothing else changes behaviour. A ruling for (b) or (c) replaces that section and
+the arm's `if`; under (b) `fire_foreign_babble()`'s per-node scan would also grow a wildcard
+pass. `contracts/mock-wire.md` is a human-ruling artefact and is **not** edited here.
+
+**Ruling:** PENDING — human (contract text; `specs/002-trunk-link-layer/contracts/mock-wire.md`,
+the `Babble` row against the "Steps with `node == 0xFF` apply to every node" sentence).
+
+**Amends:** none. **Supersedes:** none. **Related:** the 2026-09-01 "MockWire (T010) design
+choices…" entry, item (2) (wildcard-script ordering, ruled 2026-09-03), and the 2026-09-15 "A
+node deafened by `Kind::Rate`…" entry (the other axis the `Babble` row leaves open).
