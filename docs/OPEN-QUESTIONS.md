@@ -4037,25 +4037,106 @@ undischarged evidence item). **Supersedes:** none.
 
 ---
 
-## 2026-09-15 — #62 (T044) AC6: the 2026-09-12 empty-scope discharge applies; cites PR #530
+## 2026-09-15 — #62 (T044) AC6: the 2026-09-12 mutation discharge applies; cites PR #530
 
-**Context:** #62 (T044)'s fourth acceptance criterion, a "local mutation run", is the same shape
-the 2026-09-12 T040/#58 ruling already decided: #62's own diff (`pipeline.sh`, a comment table,
-`tasks.md`) touches nothing under `tools/mutate.cfg`'s `scope_dirs` (`l3 link core`), so any run
-it could produce would be vacuous — `tools/mutate.sh:105-108` exits "nothing in scope" before the
-Mull presence check even runs. claude[bot]'s three dispatch attempts on #62 (2026-09-15 06:47,
-06:52, 19:33) found this independently each time and cited where the real evidence for `link/`'s
-scoped sources actually lives: **PR #530** (issues #59+#61), whose CI `deep-verify` mutation run
-drove the triage that now lives in-tree as `mutant-ok` labels across `link/` — 38 total, verified
-here by `grep -rc mutant-ok link/`: `health.cpp` 15, `responder.cpp` 10, `master.cpp` 9,
-`frame.cpp` 3, `responder.hpp` 1.
+**Context:** #62 (T044)'s **sixth** acceptance criterion — "a local diff-scoped mutation run
+(`tools/mutate.sh --diff origin/main`) … reports zero unlabelled survivors" — is the same shape
+the 2026-09-12 T040/#58 ruling already decided. #62 has no diff yet (nothing is implemented on
+`task/62`), so what follows is about the diff its own criteria scope it to: `pipeline.sh`
+(AC4's `UNIT_TEST_FLOOR` raise), the SC-005 mode→script comment table in
+`tests/unit/test_link_loop.cpp` (AC9), and `tasks.md`. Its "Out of scope" forbids new engine
+code, so **no source under `tools/mutate.cfg`'s `scope_dirs` (`l3 link core`) changes**.
+
+What such a diff does at the current head of `tools/mutate.sh` — *demonstrated by reading the
+control flow*, and corrected here from an earlier draft of this entry that cited the wrong path:
+
+- It does **not** take the empty-scope exit (`tools/mutate.sh:150-152`, "nothing in scope"). That
+  branch needs `SCOPE` *and* `TEST_SCOPE` empty, and #146's test-derived scope
+  (`tools/mutate.sh:146-148`) matches `^tests/unit/test_(l3|link|core)_[^/]*\.(cpp|hpp)$` —
+  which `tests/unit/test_link_loop.cpp` matches. The run therefore enters **attestation mode**
+  (`tools/mutate.sh:154-163`): `ATTEST=1`, `REPORT_REF=""`, scope widened to all of `link/`.
+- Attestation mode is **non-gating by construction** (`mode=attest … report=trend
+  gate=blind-spot-only`): per #146's 2026-09-14 ruling, "no finding of this run gates". So even
+  when it executes, it cannot produce the "zero unlabelled survivors on the changed lines"
+  verdict AC6 asks for — there are no changed lines under `scope_dirs` for it to gate on.
+- What it *would* do is re-mutate `link/` whole, the same whole-dir work PR #530's CI
+  `deep-verify` already did. And it **fails closed** when Mull is absent (#146: "a run that
+  cannot happen at all still fails closed"), which is the state of every dispatch host observed
+  so far (`/usr/lib/mull*` and `/usr/bin/mull*` absent, 2026-09-15 19:33 — *assumed* to hold on
+  the next runner, not proved for it).
+
+So the clause is not vacuous in the "exits before Mull is needed" sense an earlier draft claimed;
+it is **redundant** — it re-runs `link/` whole with no gate attached, and fails closed on a host
+without Mull. Where the real evidence for `link/`'s scoped sources lives is unchanged:
+**PR #530** (issues #59+#61), whose CI `deep-verify` mutation run drove commit `c1b7843`'s triage,
+surviving in-tree as `mutant-ok` labels across `link/` — 38 lines, counted here by
+`grep -rc mutant-ok link/`: `health.cpp` 15, `responder.cpp` 10, `master.cpp` 9, `frame.cpp` 3,
+`responder.hpp` 1. That a live Mull run produced them is *assumed* from that commit message, not
+re-demonstrated here.
 
 **Ruling:** human, 2026-09-15. Applying the 2026-09-12 ruling's own terms ("a human ticks it, or
 rules the clause discharged here"): **AC6 is discharged for #62**, citing PR #530's `deep-verify`
-run and the `mutant-ok` triage above. This is the standing 2026-09-12 principle applied to a
-second checkpoint, not a new one — recorded per-issue because `tasks.md` still asks for the
-clause literally, and #146's attestation mechanism (delivered 2026-09-15, previous entry) is what
-will eventually make this mechanical instead of a fresh ruling per checkpoint.
+run and the `mutant-ok` triage above. A `tools/mutate.sh --diff origin/main` run on #62's branch
+is still welcome as disclosure, and if it runs it must be reported as what it is — a non-gating
+`link/` attestation — never as AC6's changed-line verdict. This is the standing 2026-09-12
+principle applied to a second checkpoint, not a new one; recorded per-issue because `tasks.md`
+still asks for the clause literally.
 
-**Amends:** none — applies the 2026-09-12 T040/#58 ruling's stated principle to #62.
+**Amends:** none — applies the 2026-09-12 T040/#58 ruling's stated principle to #62, and reads
+it against #146's attestation mechanism (2026-09-14 ruling, delivered 2026-09-15).
 **Supersedes:** none.
+
+---
+
+## 2026-09-15 — #62 (T044) AC2: the bootstrap grant lifts the denial but does not mask `cmake`
+
+**Context:** the 2026-09-15 maintainer ruling on #62 records AC2's blocker as a "dispatch
+allow-list gap fixed in #617", granting `Bash(PATH=/usr/bin:/bin ./pipeline.sh*)` on both Claude
+steps of `agent-dispatch.yml`'s `implement` job. Review of #617 (copilot, 2026-09-15) found the
+grant necessary but **not sufficient**, and re-checking that here confirms it. Two facts about
+the job the agent runs in:
+
+1. Its `Toolchain` step runs `sudo apt-get install -y cmake ninja-build`. The Debian/Ubuntu
+   `cmake` package installs `/usr/bin/cmake` — so under `PATH=/usr/bin:/bin`, `command -v cmake`
+   **succeeds**, `pipeline.sh:181` takes the *CMake* branch, and the run is not bootstrap
+   evidence at all. (*Proved by the package's file layout, which is what `apt-get install cmake`
+   guarantees; not measured on a dispatch runner here — the review sandbox cannot stat
+   `/usr/bin`. The falsifier is cheap: a genuine bootstrap run prints "build: cmake not found ->
+   bootstrap g++ build"; its absence is the tell.*)
+2. The same step `pip install -r tools/requirements.txt`, which is where the **pinned
+   `clang-format`** lands (setup-python's toolcache bin dir, not `/usr/bin`). `PATH=/usr/bin:/bin`
+   hides it, and `stage_quality` runs *before* `stage_build` and returns 1 on CI when the pin is
+   missing (`pipeline.sh:149-151`, the hole #135 closed). So a full `PATH=/usr/bin:/bin
+   ./pipeline.sh` in that job reds at `quality`, before reaching any build branch.
+
+No PATH value fixes this: on that image `cmake`, `g++`, `python3`, `git` and `find` all live in
+`/usr/bin`, so any PATH that hides `cmake` hides the toolchain the bootstrap build needs. **AC2's
+literal wording ("`cmake` masked from `PATH`") is unsatisfiable in the `implement` job as
+configured** — *proved by construction from the two facts above, given that job's steps*.
+
+The grant is still correct to keep: it removes a denial that was mechanically blocking the agent
+(#62, 2026-09-15 06:47 and 19:33), and it is the narrowest literal that does so. It just does not,
+on its own, make AC2 demonstrable, and #617's workflow comment and test docstring have been
+corrected not to claim that it does.
+
+**Options for making AC2 reachable** (none taken here — all three touch T2/T3 artefacts):
+
+- **A. A force-bootstrap selector in `pipeline.sh`** (e.g. `OMGP_BUILD=bootstrap` honoured by
+  `stage_build` *and* by `stage_unit`'s ctest predicate at `pipeline.sh:219`, which would
+  otherwise pick up a stale `build/native/CTestTestfile.cmake`), granted as
+  `Bash(OMGP_BUILD=bootstrap ./pipeline.sh*)`. Cheapest, but it proves the bootstrap *branch*
+  rather than the *detection* AC2 words — the objection the 2026-09-15 dispatch agent raised
+  when it declined to add one.
+- **B. A CI job that never installs `cmake`** (a `bootstrap` job in `ci.yml` installing
+  `tools/requirements.txt` but not `cmake`/`ninja`, running the full default stages).
+  *Recommended.* It makes the fallback path a standing gate instead of a one-off agent
+  transcript, which is what CLAUDE.md's "the build stage falls back to a bootstrap g++ build
+  with identical sources" is worth having evidence for, and it needs no change to `pipeline.sh`
+  and no new Bash grant.
+- **C. Amend AC2** to name whichever mechanism is chosen, so the criterion and the evidence
+  agree.
+
+**Ruling:** PENDING — human. A→C above is a GOVERNANCE §3 choice (`ci.yml`/`pipeline.sh`), and
+#62 should not be re-released with AC2 still unsatisfiable by the job that would claim it.
+**Amends:** the 2026-09-15 maintainer ruling on #62 blocker 2 (records that its fix is necessary
+but not sufficient). **Supersedes:** none.
