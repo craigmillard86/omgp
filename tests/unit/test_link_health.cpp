@@ -33,12 +33,16 @@ struct RecordingListener : HealthListener {
     bool overrun_noted = false;
 
     // Reserves up front so growth during a HEAP_FREE_SCOPE measures HealthTracker's own
-    // allocations, not this recording harness's vector doubling. 64 covers the largest
-    // scripted sequence in this file (the whole-table tick case emits 45 notices; reviews
-    // on #124: the old 16, then 32, were silently exceeded, which a future
-    // HEAP_FREE_SCOPE user would have measured as a tracker allocation).
+    // allocations, not this recording harness's vector doubling. 128 covers the largest
+    // scripted sequence in this file: the whole-table tick case emitted 45 notices before
+    // T043 added the bus-level BUS_FAULT/ALERT/BUS_RECOVERED notices to the one-node and
+    // 15-node cases, which pushed it past the old 64 and made the overrun note below fire on
+    // every green run (round-7 red team on #530, finding 2). Reviews on #124: 16, then 32,
+    // were silently exceeded, which a future HEAP_FREE_SCOPE user would have measured as a
+    // tracker allocation — so the reserve is raised WITH the count that justifies it, not as
+    // the automatic answer the note warns against.
     RecordingListener() {
-        entries.reserve(64);
+        entries.reserve(128);
     }
 
     void on_notice(Notice notice, uint8_t addr) override {
@@ -66,6 +70,28 @@ constexpr uint8_t kAddr = omgp::ADDR_backplane_min; // 0x01: a representative pe
 // TRUNK_* symbols generate as uint32_t; multiply once, in 64 bits, and use file-wide so
 // no case silently reintroduces a bare 32-bit `* 1000`.
 constexpr uint64_t kThresholdUs = uint64_t{omgp::TRUNK_offline_after_suspect_ms} * 1000;
+
+// US5 (trunk §7, implemented by T043) declares BUS_FAULT the moment EVERY enrolled node is
+// SUSPECT or worse — which a one-node rig reaches as soon as kAddr does (ruling Q2, human
+// 2026-08-29: "a single enrolled node counts as all"). The single-address scripts below
+// therefore also emit the bus-level notices of data-model.md §9: two on a declare
+// (BUS_FAULT, ALERT) and one on a clear (BUS_RECOVERED), each carrying addr 0. They are
+// counted here; the rules that produce them are tests/unit/test_link_busfault.cpp's subject.
+constexpr size_t kDeclareNotices = 2;
+constexpr size_t kClearNotices = 1;
+
+// A second enrolled address that keeps answering, so the bus-fault rule is NOT satisfied
+// while kAddr fails alone — how a case that is purely about ONE node's §6 lifecycle is
+// scripted now that US5 exists. ADDR_backplane_max is used so it never collides with the
+// low addresses the rotation cases drive, nor with the 0x11 alias of kAddr.
+constexpr uint8_t kPeer = omgp::ADDR_backplane_max;
+
+// data-model.md §9: a bus-level notice carries addr 0, never a node address.
+constexpr uint8_t kBusAddr = 0;
+
+void enrol_peer(HealthTracker& tracker, uint64_t at_us = 0) {
+    tracker.on_result(kPeer, true, at_us);
+}
 
 // Enrols `addr` at `base` then drives exactly TRUNK_suspect_after_failures consecutive
 // failures, landing on SUSPECT with suspect_since == the returned time (data-model.md §6
@@ -137,7 +163,10 @@ TEST_CASE("ENROLLED tolerates two consecutive failures and resets the count on s
     }
     tracker.on_result(kAddr, false, 3 + omgp::TRUNK_suspect_after_failures);
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
-    REQUIRE(listener.entries.size() == 2);
+    // ENROLLED and SUSPECT, plus the bus notices kAddr's SUSPECT transition declares in a
+    // one-node rig (see kDeclareNotices).
+    REQUIRE(listener.entries.size() == 2 + kDeclareNotices);
+    REQUIRE(listener.entries[1].notice == Notice::SUSPECT);
 }
 
 TEST_CASE("ENROLLED to SUSPECT on the Nth consecutive failure", "[link]") {
@@ -148,10 +177,14 @@ TEST_CASE("ENROLLED to SUSPECT on the Nth consecutive failure", "[link]") {
     drive_to_suspect(tracker, kAddr);
 
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
-    REQUIRE(listener.entries.size() == 2);
+    REQUIRE(listener.entries.size() == 2 + kDeclareNotices);
     REQUIRE(listener.entries[0].notice == Notice::ENROLLED);
     REQUIRE(listener.entries[1].notice == Notice::SUSPECT);
     REQUIRE(listener.entries[1].addr == kAddr);
+    // The declare follows the node's own transition, in that order (trunk §7 evaluates the
+    // bus rule after the result has been applied).
+    REQUIRE(listener.entries[2].notice == Notice::BUS_FAULT);
+    REQUIRE(listener.entries[3].notice == Notice::ALERT);
 }
 
 TEST_CASE("SUSPECT to ENROLLED (RECOVERED) on a valid result", "[link]") {
@@ -163,9 +196,14 @@ TEST_CASE("SUSPECT to ENROLLED (RECOVERED) on a valid result", "[link]") {
     tracker.on_result(kAddr, true, suspect_since + 1);
 
     REQUIRE(tracker.state(kAddr) == HealthState::ENROLLED);
-    REQUIRE(listener.entries.size() == 3);
-    REQUIRE(listener.entries[2].notice == Notice::RECOVERED);
-    REQUIRE(listener.entries[2].addr == kAddr);
+    // ENROLLED, SUSPECT, RECOVERED — plus the declare kAddr's SUSPECT transition fired in
+    // this one-node rig and the clear its valid answer (at the rate in use, the reference
+    // rate) then produced.
+    REQUIRE(listener.entries.size() == 3 + kDeclareNotices + kClearNotices);
+    const size_t n = listener.entries.size();
+    REQUIRE(listener.entries[n - 2].notice == Notice::RECOVERED);
+    REQUIRE(listener.entries[n - 2].addr == kAddr);
+    REQUIRE(listener.entries[n - 1].notice == Notice::BUS_RECOVERED);
 }
 
 TEST_CASE("SUSPECT stays SUSPECT via tick just short of the OFFLINE boundary", "[link]") {
@@ -235,9 +273,13 @@ TEST_CASE("OFFLINE to ENROLLED (RECOVERED) on a valid result", "[link]") {
     tracker.on_result(kAddr, true, suspect_since + kThresholdUs + 1);
 
     REQUIRE(tracker.state(kAddr) == HealthState::ENROLLED);
-    REQUIRE(listener.entries.size() == before + 1);
-    REQUIRE(listener.entries.back().notice == Notice::RECOVERED);
-    REQUIRE(listener.entries.back().addr == kAddr);
+    // RECOVERED, and the clear of the fault this one-node rig has been in since its SUSPECT
+    // transition (the answer arrives at the reference rate, the rate in use).
+    REQUIRE(listener.entries.size() == before + 1 + kClearNotices);
+    const size_t n = listener.entries.size();
+    REQUIRE(listener.entries[n - 2].notice == Notice::RECOVERED);
+    REQUIRE(listener.entries[n - 2].addr == kAddr);
+    REQUIRE(listener.entries[n - 1].notice == Notice::BUS_RECOVERED);
 }
 
 TEST_CASE("OFFLINE stays OFFLINE on further failures", "[link]") {
@@ -274,13 +316,31 @@ TEST_CASE("notice count equals transition count across a full scripted lifecycle
     tracker.on_result(kAddr, true, ++t);  // OFFLINE -> ENROLLED             : RECOVERED
 
     REQUIRE(tracker.state(kAddr) == HealthState::ENROLLED);
-    REQUIRE(listener.entries.size() == 6);
-    Notice expected[6] = {Notice::ENROLLED, Notice::SUSPECT, Notice::RECOVERED,
-                          Notice::SUSPECT,  Notice::OFFLINE, Notice::RECOVERED};
-    for (size_t i = 0; i < 6; ++i) {
-        REQUIRE(listener.entries[i].notice == expected[i]);
-        REQUIRE(listener.entries[i].addr == kAddr);
-    }
+    // kAddr is the rig's only enrolled node, so each of its SUSPECT transitions is also a
+    // bus-fault declare and each valid answer (at the reference rate, the rate in use) is
+    // the clear — the count is still "one notice per transition", over both levels. The
+    // second SUSPECT transition declares afresh: BUS_FAULT is per episode, not a latch.
+    constexpr size_t kExpected = 6 + 2 * kDeclareNotices + 2 * kClearNotices;
+    REQUIRE(listener.entries.size() == kExpected);
+    size_t i = 0;
+    auto expect = [&](Notice notice, uint8_t addr) {
+        REQUIRE(listener.entries[i].notice == notice);
+        REQUIRE(listener.entries[i].addr == addr);
+        ++i;
+    };
+    expect(Notice::ENROLLED, kAddr);
+    expect(Notice::SUSPECT, kAddr);
+    expect(Notice::BUS_FAULT, kBusAddr);
+    expect(Notice::ALERT, kBusAddr);
+    expect(Notice::RECOVERED, kAddr);
+    expect(Notice::BUS_RECOVERED, kBusAddr);
+    expect(Notice::SUSPECT, kAddr);
+    expect(Notice::BUS_FAULT, kBusAddr);
+    expect(Notice::ALERT, kBusAddr);
+    expect(Notice::OFFLINE, kAddr);
+    expect(Notice::RECOVERED, kAddr);
+    expect(Notice::BUS_RECOVERED, kBusAddr);
+    REQUIRE(i == kExpected); // every notice above was consumed, none left over
 }
 
 TEST_CASE("poll_due for a SUSPECT node follows the 10x T_poll reduced-rate rule",
@@ -289,7 +349,12 @@ TEST_CASE("poll_due for a SUSPECT node follows the 10x T_poll reduced-rate rule"
     RecordingListener listener;
     HealthTracker tracker(clock, listener);
 
+    // The peer keeps answering, so kAddr fails as a strict subset and no bus fault is
+    // declared: while one IS declared, trunk §7 sends no status polls at all (poll_due is
+    // false for every address), which would mask the §6 rule this case is about.
+    enrol_peer(tracker);
     drive_to_suspect(tracker, kAddr);
+    REQUIRE_FALSE(tracker.bus_fault());
     uint64_t last_poll = 1'000'000;
     tracker.mark_polled(kAddr, last_poll);
 
@@ -322,8 +387,19 @@ TEST_CASE("poll_due is false for OFFLINE and UNENROLLED", "[link]") {
 
     REQUIRE_FALSE(tracker.poll_due(kAddr, 0)); // UNENROLLED: never touched
 
+    // As in the SUSPECT case above: without a peer that keeps answering, offline_addr is the
+    // rig's only enrolled node, its SUSPECT transition declares BUS_FAULT (ruling Q2) and
+    // nothing clears it — so the OFFLINE assertion below would return at poll_due's
+    // "no status polls while faulted" guard and never reach the §6 arm this case is named
+    // for. Demonstrated, not argued: with the peer removed, reversing the OFFLINE row of
+    // data-model.md §6 to `return true` leaves the whole 20-binary suite green (review
+    // round 3 on #530, finding 1).
+    enrol_peer(tracker);
+    REQUIRE_FALSE(tracker.bus_fault());
+
     uint8_t offline_addr = omgp::ADDR_backplane_min + 1;
     uint64_t suspect_since = drive_to_offline(tracker, offline_addr);
+    REQUIRE_FALSE(tracker.bus_fault());
     uint64_t offline_at = suspect_since + kThresholdUs;
     tracker.mark_polled(offline_addr, offline_at);
 
@@ -371,9 +447,9 @@ TEST_CASE("next_probe rotates round-robin over UNENROLLED/OFFLINE addresses only
     std::sort(sorted_eligible.begin(), sorted_eligible.end());
     REQUIRE(sorted_seen == sorted_eligible);
 
-    // bus_fault()/bit_rate() are unconditional T038 stubs (bus_fault() always returns
-    // false, bit_rate() always TRUNK_bit_rate) — this pins the stub, not a property of
-    // `enrolled_addr` staying ENROLLED, which the stub never reads.
+    // No fault here, and now (T043) for a reason: `enrolled_addr` is ENROLLED throughout, so
+    // trunk §7's "every enrolled node SUSPECT or worse" is not satisfied — which is what
+    // keeps this rotation the plain §6 one, at the rate in use.
     REQUIRE_FALSE(tracker.bus_fault());
     REQUIRE(tracker.next_probe(0).bit_rate == omgp::TRUNK_bit_rate);
 }
@@ -392,10 +468,10 @@ TEST_CASE("next_probe returns ADDR_host when no UNENROLLED/OFFLINE address exist
 
     Probe probe = tracker.next_probe(0);
     REQUIRE(probe.addr == omgp::ADDR_host);
-    // Pins the T038 STUB on the sentinel return path (bit_rate() is unconditionally
-    // TRUNK_bit_rate until T043 alternates it under bus fault) — asserted here because
-    // deep-verify on #118 found this call site covered by no assertion, not because the
-    // sentinel guarantees the reference rate as a lasting property.
+    // The sentinel carries the rate in use — here the reference rate, because every node is
+    // ENROLLED, so no fault has ever been declared and nothing has pinned another rate
+    // (data-model.md §7: `bit_rate` is assigned only by a clear). Asserted because
+    // deep-verify on #118 found this call site covered by no assertion.
     REQUIRE(probe.bit_rate == omgp::TRUNK_bit_rate);
 
     // Still no candidate on a second call: the "no eligible address" signal is stable,
@@ -598,7 +674,14 @@ TEST_CASE("an earlier now_us than a stored stamp reads as zero elapsed, never a 
     RecordingListener listener;
     HealthTracker tracker(clock, listener);
 
+    // The peer keeps answering so kAddr fails as a strict subset and no bus fault is
+    // declared: while one IS declared poll_due is false for every address, which would mask
+    // the clamp the last assertion of this case pins. Demonstrated, not argued: with the peer
+    // removed, replacing poll_due's elapsed_us() with the raw subtraction leaves the whole
+    // 20-binary suite green (review round 3 on #530, finding 2).
+    enrol_peer(tracker);
     const uint64_t suspect_since = drive_to_suspect(tracker, kAddr, 1000);
+    REQUIRE_FALSE(tracker.bus_fault());
     const auto notices_after_suspect = listener.entries.size();
 
     tracker.tick(suspect_since - 1);
@@ -720,7 +803,7 @@ TEST_CASE("failures seen before enrolment do not shorten the first SUSPECT windo
     }
     tracker.on_result(kAddr, false, 200);
     REQUIRE(tracker.state(kAddr) == HealthState::SUSPECT);
-    REQUIRE(listener.entries.size() == 2);
+    REQUIRE(listener.entries.size() == 2 + kDeclareNotices); // + the one-node rig's declare
 }
 
 // Red-team round 11 on #124 (both cases adopted verbatim): the is_node_addr guard on
@@ -735,11 +818,14 @@ TEST_CASE("an aliasing non-node address never reads or writes a live record", "[
     constexpr uint8_t kAlias = static_cast<uint8_t>(kAddr + kAddrCount); // 0x11 % 16 == kAddr
 
     tracker.on_result(kAddr, true, 0); // kAddr ENROLLED: state ENROLLED, always poll-due
+    enrol_peer(tracker);               // and a peer that keeps answering: no bus fault, so
+                                       // poll_due stays the §6 rule this case reads (trunk §7)
     REQUIRE(tracker.state(kAlias) == HealthState::UNENROLLED);
     REQUIRE_FALSE(tracker.poll_due(kAlias, 0));
 
     // mark_polled must not push a live node's reduced-rate poll stamp forward.
     drive_to_suspect(tracker, kAddr, 1'000'000);
+    REQUIRE_FALSE(tracker.bus_fault());
     const uint64_t polled_at = 2'000'000;
     tracker.mark_polled(kAddr, polled_at);
     const uint64_t due_at = polled_at + kSuspectPollPeriod_us;

@@ -1,5 +1,6 @@
 // OMGP trunk L2 — node health tracker implementation: trunk §6, §7; transition table
-// data-model.md §6. Makes tests/unit/test_link_health.cpp (T037) pass.
+// data-model.md §6, bus state data-model.md §7. Makes tests/unit/test_link_health.cpp (T037)
+// and tests/unit/test_link_busfault.cpp (T041) pass.
 #include "link/health.hpp"
 
 #include "omgp_protocol.h"
@@ -34,10 +35,46 @@ constexpr uint64_t kOfflineThresholdUs =
 constexpr bool is_node_addr(uint8_t addr) {
     return addr != omgp::ADDR_host && addr < kAddrCount;
 }
+// data-model.md §9: a bus-level notice (BUS_FAULT, ALERT, BUS_RECOVERED) carries addr 0.
+// 0x00 is the host's own address (trunk §5) and is never a node, so it names no record.
+constexpr uint8_t kBusAddr = 0; // literal-ok: the data model's bus-level sentinel, not a
+                                // protocol value
+// Number of backplane addresses in the enrolment rotation (trunk §5: 0x01..0x0F).
+constexpr size_t kBackplaneCount =
+    static_cast<size_t>(omgp::ADDR_backplane_max) - omgp::ADDR_backplane_min + 1;
+// BusState::probe_fallback (health.hpp) is one bit per address: bit N is address N. Every
+// caller passes an address that has already passed is_node_addr or that came from the
+// rotation cursor, so the shift is in range BY CONSTRUCTION — and the assert below is what
+// keeps "in range" true if the address space ever grows past the width of that field.
+static_assert(kAddrCount <= 16, // literal-ok: the bit width of that uint16_t field
+              "BusState::probe_fallback holds one bit per address");
+constexpr uint16_t probe_bit(uint8_t addr) {
+    return static_cast<uint16_t>(1u << addr);
+}
+// How long a probe can be outstanding, measured from its issue (next_probe's now_us): the
+// request's own transmission, the in-flight hold of one worst-case frame, and the response
+// window, all at the slowest rate (contracts/link-cpp.md "Behaviour": the window is
+// [tx_end, tx_end + T_resp) and the hold extends it by max_frame; trunk §3/§9). Spec symbols
+// only (CLAUDE.md rule 4): 2 x kMaxWire x byte_time_us(TRUNK_bit_rate_fallback) + TRUNK_T_resp_us
+// ≈ 24.6 ms. One bound for both rates — a reference-rate probe is written off later than it
+// need be, never earlier; the harm the bound exists for (an abandoned record frozen for ever)
+// is on the long side. The epoch is the issue instant, so a probe ISSUED but never transmitted
+// is covered too (round-9 red team on #530, finding 1).
+constexpr uint64_t kOutcomeWindowUs =
+    2ull * kMaxWire * byte_time_us(omgp::TRUNK_bit_rate_fallback) + omgp::TRUNK_T_resp_us;
+
+// Every address's bit at once, for evaluate_declare()'s per-episode reset. Derived from
+// kAddrCount rather than written as a mask, so it stays the whole field if the address space
+// grows — up to the width the static_assert above holds it to.
+constexpr uint16_t kAllProbeBits = static_cast<uint16_t>((1u << kAddrCount) - 1u);
 } // namespace
 
 HealthTracker::HealthTracker(Clock& clock, HealthListener& listener)
-    : clock_(clock), listener_(listener), records_{}, next_probe_addr_(omgp::ADDR_backplane_max) {
+    : clock_(clock), listener_(listener), records_{}, next_probe_addr_(omgp::ADDR_backplane_max),
+      // Each BusState field's start-of-life value is declared beside the field in health.hpp,
+      // so this is aggregate initialisation from those and not a positional list to keep in
+      // step with the struct.
+      bus_{}, stats_{} {
     (void)clock_; // discarded read: see the clock_ declaration comment in health.hpp
 }
 
@@ -50,6 +87,186 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // build, rule 10) and not modulo (which would alias 0x11 onto backplane 0x01's record).
     if (!is_node_addr(addr))
         return;
+
+    // trunk §7 / data-model.md §7. The rate this outcome arrived at is the rate the last probe
+    // TO THIS ADDRESS went out at (bus_.probe_fallback, written by note_probe below) —
+    // knowable only because probes are the only traffic while a fault is declared (F3
+    // obligation 1, contracts/link-cpp.md "What F3/F4 need", ASSUMED here, not enforced).
+    // Per address, not the rate last put on the wire: one next_probe() call with this outcome
+    // still outstanding (obligation 2 violated by a single superframe) moves the wire to
+    // another address's probe, and reading this answer at that rate inverts §7's two clear
+    // rules — upward it enrols a node at a rate it cannot hear and oscillates declare/clear,
+    // downward it pins the trunk at the fallback rate with no automatic return (red team round
+    // 2 on #530, finding 1; the two "an extra next_probe() call ..." cases in
+    // tests/unit/test_link_busfault.cpp). And per episode, EXCEPT where a probe is still
+    // outstanding: evaluate_declare() resets the bit of every address that owes this layer no
+    // outcome to the rate in use — such an outcome answers something issued before the declare,
+    // at that rate, and must not be read at a bit some earlier episode left behind (red team
+    // round 5 on #530, finding 1) — while an address with a probe in flight keeps its bit,
+    // because for it that bit is the only record of a rate already on the wire and the new
+    // episode's rate in use says nothing about it (red team round 6 on #530, finding 1).
+    // `bus_.probe_live` is what tells the two apart, and this is where a record is consumed.
+    // What this still cannot tell apart, stated (rule 11): more than one transaction
+    // outstanding to the SAME address at once — the newest probe's rate is what the first
+    // outcome back is read at. That is obligation 1's territory, ASSUMED, not enforced.
+    // Outside a fault the rate decides one thing: whether a fault-time probe's late outcome
+    // counts (late_fault_probe below).
+    const bool at_reference = (bus_.probe_fallback & probe_bit(addr)) == 0;
+    // The recorded fallback answerer answered at the fallback rate. trunk §2 says every node
+    // supports both rates and the active one is selected by strap or configuration; the
+    // inference this branch rests on — a node configured at the fallback rate does not answer
+    // a reference-rate probe — follows from that selection, and is labelled as inference, not
+    // quoted (round-10 review, finding 4). So an ok outcome for it while the fault stands is
+    // its fallback answer delivered again (golden rule 2: an L2 retry, a legitimate input),
+    // never a reference-rate answer. Read at its overwritten bit (the pass probe's) it cleared
+    // the fault at 1 Mbit and bypassed the pass (round-8 red team, finding 1). Demonstrated by
+    // "a duplicate fallback answer after the pass has probed the answerer ..." and "a fallback
+    // answerer that keeps answering cannot stop the pass from ending".
+    // No `bus_.fault` conjunct: fallback_seen is emptied by every clear, so it is non-zero only
+    // while a fault stands — a conjunct here could never be false (round-12 red team, 1(b)).
+    const bool is_answerer = ok && (bus_.fallback_seen & probe_bit(addr)) != 0;
+    // An ok from an address that already answered at the fallback rate this episode is that
+    // answer again: it neither clears at the reference rate nor takes a §6 transition nor
+    // restarts the pass — but if that address's pass probe is outstanding it IS that probe's
+    // outcome and advances the pass below, else a babbling or retrying answerer stalled the
+    // pass for ever (round-11 red team on #530, finding 1: round 10's early return sat before
+    // the pass-advance block). Every such address is remembered, not only the latest
+    // (finding 2: a demoted answerer's duplicate cleared at 1 Mbit).
+    const bool fallback_answer = bus_.fault && ok && !at_reference && !is_answerer;
+    // The probe this outcome answers is no longer in flight, so its record stops being the
+    // one thing a new episode must not overwrite. Unconditional: an outcome for an address
+    // with no outstanding probe clears a bit that is already clear.
+
+    // Outside a fault, the late outcome of a FAULT-TIME PROBE — one still outstanding inside
+    // its outcome window — that went out at a rate other than the rate now in use is that
+    // probe's, not new evidence about the node: an ok is not proof it hears the rate in use
+    // (enrolling on it stranded the node as ENROLLED on a trunk it cannot hear — round-15 red
+    // team), and a failure is the write-off's "drew nothing" counted a second time (round-16
+    // red team, follow-up 2). It moves no §6 state. Bounded to a live probe inside its window
+    // (round-16 review and red team, [HIGH]): read from the last probe's rate bit alone, the
+    // rule suppressed every later status-poll answer that disagreed with the rate in use —
+    // status polls never write that bit — and a node that answered every poll stayed SUSPECT
+    // until it aged to OFFLINE. An ordinary poll answer has no live probe behind it. Inside
+    // the window a first answer after the clear is ambiguous and is read as the probe's; the
+    // live bit is consumed by it, so the next answer counts. It does not undo the clear: past
+    // the window the tracker acted as if the node were silent, and there is no automatic
+    // return (ruling 2026-09-13). Demonstrated by the "... does not enrol its node ..." pair,
+    // "after a clear, ordinary status-poll answers ..." and "a late failure for a written-off
+    // pass probe ..." in tests/unit/test_link_busfault.cpp.
+    const bool late_fault_probe =
+        !bus_.fault && (bus_.probe_live & probe_bit(addr)) != 0 &&
+        elapsed_us(now_us, records_[addr].probe_issued_us) <= kOutcomeWindowUs &&
+        at_reference != (bus_.bit_rate == omgp::TRUNK_bit_rate);
+    // The outcome consumes the live record — read above first, cleared here (round 16).
+    bus_.probe_live = static_cast<uint16_t>(bus_.probe_live & ~probe_bit(addr));
+    if (is_answerer || late_fault_probe) {
+        // Recorded already, or a fault-time probe's late outcome at the other rate — nothing to
+        // record, nothing to apply; the pass-advance block below still consumes this outcome
+        // if it is the outstanding pass probe's.
+    } else if (fallback_answer) {
+        // §7: a fallback-rate answer neither clears the fault nor moves that node's state —
+        // enrolling it here would have it status-polled at a rate it cannot hear, fail into
+        // SUSPECT and re-declare the fault it just recovered (round-4 red team on #472). It
+        // is recorded, and a reference pass over every enrolled address starts.
+        // What IS true by construction: no outcome for an address whose PASS probe is
+        // outstanding reaches here — every pass probe goes out at the reference rate
+        // (pass_probe below), and the one address whose outcome could still read as a
+        // fallback one, the recorded answerer, returned early above (round-10 red team,
+        // finding 3: round 8's `|| is_answerer` disjunct had falsified this sentence and the
+        // benign-restart argument below it). The wider claim this comment once made — that no pass
+        // can already be running — is false, and labelled so per rule 11 (red team round 2 on #530,
+        // finding 2): a pass is running from the moment ref_pass_left is set below, and until its
+        // first probe goes out the answerer's remembered rate is still the fallback one, so a
+        // duplicate or late outcome for it re-enters this branch and recomputes the pass. Benign,
+        // and demonstrated so rather than asserted: |enrolled| cannot change in that window and the
+        // cursor is already at ADDR_backplane_min, so the recomputation reproduces the state it
+        // overwrites — "a duplicate fallback answer before the first pass probe restarts an
+        // identical pass" in tests/unit/test_link_busfault.cpp.
+        // The data model's named answerer, written here and read by nothing at this head (the
+        // rules read fallback_seen below), so any constant is behaviourally identical:
+        // mutant-ok(equivalent, cxx_assign_const): written, never read at this head.
+        bus_.fallback_answerer = addr;
+        bus_.fallback_seen = static_cast<uint16_t>(bus_.fallback_seen | probe_bit(addr));
+        // The FIRST fallback answer of the episode starts the pass; a later answerer joins the
+        // record above and leaves the running pass alone — recomputing it rewound its cursor
+        // (round-10 red team on #530, finding 1). ref_pass_left > 0 exactly while a pass runs.
+        if (bus_.ref_pass_left == 0) {
+            uint8_t enrolled = 0;
+            for (const HealthRecord& r : records_)
+                if (r.state != HealthState::UNENROLLED)
+                    ++enrolled;
+            bus_.ref_pass_left = enrolled; // exactly |enrolled| probes (FR-026)
+            bus_.pass_addr = 0;
+            // The cursor starts AT ADDR_backplane_min, and nowhere else. cxx_assign_const rewrites
+            // this RHS to a constant that is NOT the type's zero value — demonstrated on #530: the
+            // zero rewrite is killed by "a pass whose only enrolled address is the last one in the
+            // rotation" (a scan from below the rotation spends one of pass_probe()'s
+            // kBackplaneCount iterations on records_[ADDR_host] and stops one address short of
+            // ADDR_backplane_max), yet the mutant survived that test. Mull documents 42 as the
+            // constant, and a rewrite to 42 reproduces the survivor exactly — the whole unit suite
+            // passes with it — so the two cases in tests/unit/test_link_busfault.cpp pin the start
+            // from both sides: that one fails for a cursor starting BELOW ADDR_backplane_min, and
+            // "a pass over the first and last addresses of the rotation probes them in that order"
+            // fails for one starting ABOVE it (a scan from higher up meets ADDR_backplane_max
+            // before it wraps round to ADDR_backplane_min). Both demonstrated by those named tests;
+            // that 42 is the constant Mull emits is ASSUMED, and nothing here depends on its value.
+            bus_.pass_next_addr = omgp::ADDR_backplane_min;
+        }
+    } else {
+        apply_result(addr, ok, now_us);
+    }
+
+    // §7: the pass is advanced by the FIRST outcome for the address whose pass probe is in
+    // flight, and by nothing else — not by a probe being issued (a tick between the last
+    // probe and its result must not fire the clear, round-8 red team) and not by a later
+    // outcome for the same address. `pass_addr` is non-zero only while a pass probe is
+    // outstanding, and `addr` is a node address here, so this one comparison carries the
+    // whole condition: no redundant "a pass is running" conjunct to get out of step with it.
+    // A bool initialised `false`. cxx_init_const rewrites the RHS to a constant that is not
+    // the type's zero value (see the pass start above), but a bool is read back as `value & 1`
+    // — so the mutant either reads `false`, coinciding with the original, or reads `true` and
+    // fires the pass-end clear on the FIRST outcome after any fallback answer, which the
+    // multi-probe pass cases in tests/unit/test_link_busfault.cpp assert does not happen. It
+    // survived them, so it reads `false`. (The same rewrite is recorded on
+    // `bool belief_stale = false` in link/responder.cpp poll().)
+    // mutant-ok(equivalent, cxx_init_const): the mutation and the original coincide.
+    bool pass_ended = false;
+    if (bus_.pass_addr == addr) {
+        bus_.pass_addr = 0;
+        // Cannot wrap: pass_probe() sets pass_addr only while ref_pass_left > 0, and this is
+        // the only place ref_pass_left is decremented.
+        pass_ended = --bus_.ref_pass_left == 0;
+    }
+
+    if (bus_.fault && ok && at_reference && !is_answerer) {
+        // §7: the host prefers the reference rate — a valid answer there clears at once,
+        // mid-pass or not. `addr` has already taken its own §6 transition above. Never an
+        // address that answered at the fallback rate this episode (is_answerer above).
+        clear_fault(omgp::TRUNK_bit_rate, now_us);
+    } else if (pass_ended) {
+        // §7: the pass drew nothing, so the fallback rate is the rate that works. `pass_ended`
+        // is the whole condition, not `ref_pass_left == 0` (which also means "no pass"): it is
+        // set only by the decrement above, i.e. by the outcome of a pass probe. The
+        // "&& bus_.fallback_answerer != 0" conjunct this line used to carry was removed as a
+        // condition no test could falsify (review round 3 on #530, finding 3(a)): a pass runs
+        // only while ref_pass_left > 0, which is set only in the fallback branch above, which
+        // records a non-zero answerer in the same block, and clear_fault/evaluate_declare zero
+        // the pair together — so the conjunct was true whenever `pass_ended` was. VERIFIED BY
+        // CONSTRUCTION over this file, which is a control on the current code, not a language
+        // guarantee. clear_fault still guards its own deferred apply_result on the answerer.
+        // data-model §7 writes the rule as "fallback_answerer ≠ 0 and the pass outcome that
+        // takes ref_pass_left to 0 is itself a failure": `pass_ended` says a pass probe's own
+        // outcome ended a running pass, and only a pass started by a recorded answerer can run,
+        // so the first conjunct is implied. ONE divergence from §7, stated (round-12 review):
+        // the clear enrols every address in fallback_seen, not only "the recorded answerer" —
+        // recorded in docs/OPEN-QUESTIONS.md 2026-09-14 (T043 entry), ruling pending.
+        clear_fault(omgp::TRUNK_bit_rate_fallback, now_us);
+    }
+
+    evaluate_declare(now_us);
+}
+
+void HealthTracker::apply_result(uint8_t addr, bool ok, uint64_t now_us) {
     HealthRecord& r = records_[addr];
     switch (r.state) {
     case HealthState::UNENROLLED:
@@ -103,6 +320,15 @@ void HealthTracker::tick(uint64_t now_us) {
             notify(Notice::OFFLINE, static_cast<uint8_t>(&r - records_));
         }
     }
+    // data-model.md §7: the declare rule is evaluated after every on_result AND every tick.
+    // Labelled per rule 11: no tick can newly SATISFY it — the predicate reads "every
+    // enrolled node is SUSPECT or OFFLINE", and the only transition above is SUSPECT ->
+    // OFFLINE, which moves a node between two members of that set. This call is the data
+    // model's evaluation point, not a reachable declaration path, so a mutant deleting it
+    // survives by construction rather than for want of a test. (`statement_deletion` named a
+    // mutator Mull has no such name for, so the label covered nothing and the survivor came
+    // back unlabelled; `cxx_remove_void_call` is Mull's own name for this mutation.)
+    evaluate_declare(now_us); // mutant-ok(equivalent, cxx_remove_void_call): see above
 }
 
 HealthState HealthTracker::state(uint8_t addr) const {
@@ -116,6 +342,11 @@ HealthState HealthTracker::state(uint8_t addr) const {
 
 bool HealthTracker::poll_due(uint8_t addr, uint64_t now_us) const {
     if (!is_node_addr(addr))
+        return false;
+    // trunk §7 / data-model.md §6 (amended 2026-09-13, F4): no status polls while a fault is
+    // declared — only next_probe() drives the wire, so a node that answered at the fallback
+    // rate is never polled at the reference rate it cannot hear.
+    if (bus_.fault)
         return false;
     const HealthRecord& r = records_[addr];
     switch (r.state) {
@@ -145,32 +376,302 @@ uint8_t HealthTracker::next_backplane_addr(uint8_t addr) const {
                                 omgp::ADDR_backplane_min);
 }
 
-Probe HealthTracker::next_probe(uint64_t /*now_us*/) {
+Probe HealthTracker::pass_probe(uint64_t now_us) {
+    // trunk §7 reference pass: every enrolled address once, in address order, at the
+    // reference rate, without alternating (data-model.md §6/§7, amended 2026-09-13).
+    if (bus_.pass_addr != 0) {
+        // The pass probe's outcome is still outstanding: hand back the SAME probe and
+        // advance nothing. A scheduler that calls this at a superframe boundary with the
+        // probe in flight (F3 obligation 2 violated) then still completes the pass; walking
+        // the cursor past the probe on the wire would leave a pass that can never end
+        // (round-13 red team on #472). Fail-safe under a violated assumption.
+        //
+        // The call below cannot change anything on this path, BY CONSTRUCTION: `pass_addr`
+        // is non-zero only between the loop below issuing a pass probe at TRUNK_bit_rate and
+        // that probe's outcome, and nothing can move the wire rate in between — next_probe()
+        // routes here whenever fault && ref_pass_left > 0, and the two places that end a pass
+        // (on_result's decrement, clear_fault) both zero `pass_addr` first. So wire_rate is
+        // already TRUNK_bit_rate and note_wire_rate returns without touching rate_changes.
+        // By the same construction `pass_addr`'s remembered probe rate is already the
+        // reference rate — the loop below cleared its bit when it issued this very probe, and
+        // only a probe going out moves a bit — so there is no note_probe() call here, and
+        // DELIBERATELY: note_probe() also stamps `probe_issued_us`, the epoch the write-off in
+        // next_probe() reads, and the epoch is the FIRST issue. A re-yield is the same probe,
+        // not a re-issue: F3 obligation 2 is one call per probe issued, and a scheduler that
+        // calls again with the probe in flight is handed the same address so that it does not
+        // walk the cursor past the frame on the wire (round-13 red team on #472). If it
+        // re-transmits on that re-yield, the second frame's own window is not this layer's to
+        // track (round-15 review): restamping here would reopen round 7's unbounded hold.
+        // mutant-ok(equivalent, cxx_remove_void_call): a no-op call on this path.
+        note_wire_rate(omgp::TRUNK_bit_rate);
+        return Probe{bus_.pass_addr, omgp::TRUNK_bit_rate};
+    }
+    // The <= mutant of this bound adds one iteration, which changes nothing until all
+    // kBackplaneCount addresses have come back UNENROLLED — the sentinel path below, which a
+    // running pass cannot reach. Every reachable call returns from inside the loop, at the
+    // same iteration either way. `++i` is a different matter: its -- mutant underflows
+    // `i` to SIZE_MAX and ends the scan after ONE address, and is killed by "a pass whose
+    // only enrolled address is the last one in the rotation" in test_link_busfault.cpp.
+    // mutant-ok(accepted, cxx_lt_to_le): differs only on the unreachable exhaustion path.
+    for (size_t i = 0; i < kBackplaneCount; ++i) {
+        const uint8_t addr = bus_.pass_next_addr;
+        bus_.pass_next_addr = next_backplane_addr(addr);
+        if (records_[addr].state != HealthState::UNENROLLED) { // enrolled: ever answered
+            bus_.pass_addr = addr;
+            note_wire_rate(omgp::TRUNK_bit_rate);
+            note_probe(addr, omgp::TRUNK_bit_rate, now_us);
+            return Probe{addr, omgp::TRUNK_bit_rate};
+        }
+    }
+    // Unreachable while a pass is running: a pass starts only during a fault, a fault is
+    // declared only with at least one enrolled node, and no transition during a pass
+    // un-enrols one. Returning the sentinel rather than spinning keeps the "nothing to
+    // probe" contract if that ever changes (rule 11: a guard, not a property).
+    // mutant-ok(accepted, cxx_remove_void_call): on the unreachable path described above.
+    note_wire_rate(omgp::TRUNK_bit_rate);
+    return Probe{omgp::ADDR_host, omgp::TRUNK_bit_rate};
+}
+
+Probe HealthTracker::next_probe(uint64_t now_us) {
+    // A pass probe whose outcome never arrives is written off after the outcome window — the
+    // bound probe_live already lives under (kOutcomeWindowUs) — as "drew nothing": the pass
+    // advances, and if it was the last pass probe the fault clears at the fallback rate here.
+    // Unbounded, the re-yield below held one dead address for ever: bus_fault() stuck true,
+    // poll_due() false everywhere, one dropped frame a dead rig (round-14 red team on #530).
+    // Demonstrated by "an abandoned pass probe is written off after the outcome window ..." in
+    // tests/unit/test_link_busfault.cpp (still owed at exactly one window; written off after).
+    if (bus_.fault && bus_.pass_addr != 0 &&
+        elapsed_us(now_us, records_[bus_.pass_addr].probe_issued_us) > kOutcomeWindowUs) {
+        bus_.pass_addr = 0;
+        if (--bus_.ref_pass_left == 0)
+            clear_fault(omgp::TRUNK_bit_rate_fallback, now_us);
+    }
+    if (bus_.fault && bus_.ref_pass_left > 0)
+        return pass_probe(now_us);
+
+    // trunk §7 / FR-025: while faulted the probes alternate, STARTING at the fallback rate;
+    // data-model.md §7 keeps `bus_.bit_rate` untouched until a clear, so a fault-time probe's
+    // rate is the probe's own (round-9 red team on #472).
+    uint32_t rate = bus_.bit_rate;
+    if (bus_.fault) {
+        rate = bus_.next_probe_fallback ? omgp::TRUNK_bit_rate_fallback : omgp::TRUNK_bit_rate;
+        bus_.next_probe_fallback = !bus_.next_probe_fallback;
+    }
+    note_wire_rate(rate);
+
     // data-model.md §6: round-robin over UNENROLLED/OFFLINE addresses in
-    // [ADDR_backplane_min, ADDR_backplane_max] (0x00 is the host and is never a candidate).
-    // Bounded by the full backplane range so an all-ENROLLED/SUSPECT table can never spin.
-    constexpr size_t kBackplaneCount =
-        static_cast<size_t>(omgp::ADDR_backplane_max) - omgp::ADDR_backplane_min + 1;
+    // [ADDR_backplane_min, ADDR_backplane_max] (0x00 is the host and is never a candidate) —
+    // plus, while faulted, every SUSPECT address, so the probes reach the nodes whose silence
+    // declared the fault at once instead of only after they age to OFFLINE (amended
+    // 2026-09-13, F4). Bounded by the full backplane range so the scan can never spin.
     for (size_t i = 0; i < kBackplaneCount; ++i) {
         next_probe_addr_ = next_backplane_addr(next_probe_addr_);
         const HealthState s = records_[next_probe_addr_].state;
-        if (s == HealthState::UNENROLLED || s == HealthState::OFFLINE)
-            return Probe{next_probe_addr_, bit_rate()};
+        if (s == HealthState::UNENROLLED || s == HealthState::OFFLINE ||
+            (bus_.fault && s == HealthState::SUSPECT)) {
+            note_probe(next_probe_addr_, rate, now_us);
+            return Probe{next_probe_addr_, rate};
+        }
     }
     // No eligible address (e.g. every backplane node is ENROLLED/SUSPECT — the steady
     // state of a healthy rig): ADDR_host (0x00) is outside the rotation range and is
     // asserted by tests/unit/test_link_health.cpp to never be a real probe target, so it
     // signals "nothing to probe" without adding a field the contract doesn't declare.
-    // T043 revisits this under bus fault.
-    return Probe{omgp::ADDR_host, bit_rate()};
+    // Unreachable while faulted: no address is ENROLLED then and every other state is a
+    // candidate, so the at-least-one enrolled node the declare rule requires is always one.
+    return Probe{omgp::ADDR_host, rate};
+}
+
+void HealthTracker::note_wire_rate(uint32_t bit_rate) {
+    // data-model.md §8: rate_changes is incremented at the point the change is decided —
+    // when a probe goes out at a rate other than the last one used, or when a clear pins a
+    // new rate. Counting calls instead would count phantom changes.
+    if (bit_rate == bus_.wire_rate)
+        return;
+    bus_.wire_rate = bit_rate;
+    ++stats_.rate_changes;
+}
+
+void HealthTracker::note_probe(uint8_t addr, uint32_t bit_rate, uint64_t now_us) {
+    // data-model.md §7 needs "a valid answer at the reference rate" told from one at the
+    // fallback rate, and on_result carries no rate — so each probe leaves the rate it went out
+    // at on its own address (health.hpp, BusState::probe_fallback). Per address, because the
+    // wire moves on: while a probe to this address is outstanding, another next_probe() call
+    // (F3 obligation 2 violated) puts a different address's probe on the wire at the other
+    // rate, and the classification must not follow it (red team round 2 on #530, finding 1).
+    // Every caller is a probe about to be issued for a rotation address, in range by the
+    // static_assert above; ADDR_host, which is the "nothing to probe" sentinel and never goes
+    // on the wire, is not one of them.
+    if (bit_rate == omgp::TRUNK_bit_rate_fallback)
+        bus_.probe_fallback = static_cast<uint16_t>(bus_.probe_fallback | probe_bit(addr));
+    else
+        bus_.probe_fallback = static_cast<uint16_t>(bus_.probe_fallback & ~probe_bit(addr));
+    // …and the record is owed an outcome from here until on_result reads it — or until the
+    // outcome window closes. That is what exempts this address from evaluate_declare()'s
+    // per-episode reset (health.hpp, BusState::probe_live; red team round 6 on #530, finding
+    // 1), for kOutcomeWindowUs from now (round 7, finding 1: unbounded, an abandoned probe
+    // froze the record for ever; round 9: per address, and the whole transaction's window,
+    // not T_resp from issue). The stamp is this address's own: a single stamp for the set was
+    // re-armed by every later probe to any other address.
+    // Every outstanding probe keeps its record until its outcome arrives or its window
+    // closes: two outstanding probes violate neither F3 obligation (obligation 2 is one call per
+    // probe issued, not one outcome before the next call — the "an extra next_probe() call"
+    // cases), so a later handout must not drop an earlier live bit. Round 9 tried "only the
+    // newest handout is live" and reinstated round 6's oscillation for every other outstanding
+    // probe (round-10 review, finding 1); withdrawn.
+    bus_.probe_live = static_cast<uint16_t>(bus_.probe_live | probe_bit(addr));
+    records_[addr].probe_issued_us = now_us;
+}
+
+void HealthTracker::evaluate_declare(uint64_t now_us) {
+    // trunk §7 / data-model.md §7: declare when at least one node is enrolled (has ever
+    // answered — FR-023) and every enrolled node is SUSPECT or OFFLINE. A single enrolled
+    // node counts as all (ruling Q2, human 2026-08-29).
+    if (bus_.fault)
+        return;
+    uint8_t enrolled = 0;
+    uint8_t failing = 0;
+    for (const HealthRecord& r : records_) { // records_[ADDR_host] is never written (§5)
+        if (r.state == HealthState::UNENROLLED)
+            continue;
+        ++enrolled;
+        if (r.state != HealthState::ENROLLED)
+            ++failing;
+    }
+    if (enrolled == 0 || failing != enrolled)
+        return;
+
+    bus_.fault = true;
+    bus_.next_probe_fallback = true; // FR-025: re-probing starts at the fallback rate
+    // The four pass fields are reset per episode. cxx_assign_const does NOT write the type's
+    // zero value (demonstrated at on_result's pass start above), so each label below argues
+    // from the write being DEAD — true whatever constant is substituted — never from the
+    // mutant being byte-identical. (`ref_pass_left` carries no label: Mull emitted no mutant
+    // at that statement in this function — see the #530 deep-verify report — and an unused
+    // label is reported as stale.)
+    //
+    // Dead: fallback_answerer is the data model's named answerer, written by on_result's pass
+    // start for §7/§8 observability and read by nothing at this head — the rules read
+    // fallback_seen (round-12 review). fallback_seen itself is NOT reset here: every episode
+    // ends with a clear, which empties it (clear_fault), and a tracker starts empty; a second
+    // reset would be unfalsifiable (round-12 red team, finding 4).
+    // mutant-ok(equivalent, cxx_assign_const): overwritten before any reachable read.
+    bus_.fallback_answerer = 0;
+    bus_.ref_pass_left = 0;
+    // Dead the same way: pass_probe() reads pass_addr only while ref_pass_left > 0, which the
+    // line above makes false until on_result's pass start, and that zeroes pass_addr itself.
+    // The one read this does not cover is on_result's `pass_addr == addr`, which a constant
+    // INSIDE [ADDR_backplane_min, ADDR_backplane_max] would make fire without a pass and
+    // underflow ref_pass_left — demonstrated not to be this constant for the addresses the
+    // cases in tests/unit/test_link_busfault.cpp drive outcomes for during a declared fault
+    // (kNodeA..kNodeC and ADDR_backplane_max); for the rest of the rotation, ASSUMED.
+    // mutant-ok(equivalent, cxx_assign_const): overwritten before any reachable read.
+    bus_.pass_addr = 0;
+    // Dead in every reachable execution: pass_next_addr is read only by pass_probe(), reached
+    // only while ref_pass_left > 0, and the sole place that makes ref_pass_left non-zero
+    // (on_result's pass start) re-writes pass_next_addr in the same block. `ref_pass_left = 0`
+    // above is what makes that hold on entry to the episode.
+    // mutant-ok(equivalent, cxx_assign_const): a dead write; no reachable read sees it.
+    bus_.pass_next_addr = omgp::ADDR_backplane_min;
+    // The remembered probe rates are per EPISODE as well as per address, and unlike the four
+    // resets above this one is LIVE: on_result classifies every fault-time outcome by the bit
+    // for its address, and an outcome can arrive for an address this episode has not probed.
+    // F3 obligation 1 does not exclude that — it is an obligation to ISSUE ("while bus_fault()
+    // is true, issue only the probe next_probe() returns"), and the fault is declared BY an
+    // outcome, on the line below, so a status poll already on the wire in the superframe that
+    // declares it necessarily lands afterwards and cannot be un-issued. It went out at the rate
+    // in use, which is what those addresses' bits are set to here; a bit a PREVIOUS episode left
+    // behind is some other episode's rate, and reading an answer at it inverts both of §7's
+    // clear rules (red team round 5 on #530, finding 1). To the rate in use and not simply
+    // cleared: after a fallback-rate clear that rate IS the rate in use (no automatic return,
+    // ruling 2026-09-13), so a cleared bit would be just as wrong in the other direction.
+    //
+    // `probe_live` is the exception, and it is not a refinement but the other half of the rule
+    // (red team round 6 on #530, finding 1): for an address whose probe is still in flight the
+    // remembered bit is the rate of a frame ALREADY on the wire, which no later declare can
+    // change, so overwriting it inverts exactly the same two clear rules the reset exists to
+    // protect — a fallback-rate probe answered after the boundary would clear the new episode
+    // at the reference rate and enrol a node at a rate it has just failed to hear. The rate in
+    // use is the right answer only where this layer is owed nothing.
+    // All four combinations are DEMONSTRATED, one case each, by the two "a new episode ..." and
+    // two "... outstanding across an episode boundary" / "... answered in the next episode"
+    // cases in tests/unit/test_link_busfault.cpp.
+    // …and only while that probe can still be answered (HealthRecord::probe_issued_us): past
+    // kOutcomeWindowUs the outcome is not coming, the record is owed nothing, and honouring it
+    // would freeze a dead frame's rate into this and every later episode (round 7, finding 1;
+    // round 9: judged per address against the slowest transaction's whole window, because a
+    // bound of T_resp from issue wrote off every fallback-rate probe older than 200 us — its
+    // request alone takes longer — and one stamp for the set was re-armed by any later probe).
+    // Demonstrated by the abandoned-probe, sweep and discovery-probe cases in
+    // tests/unit/test_link_busfault.cpp; the in-window half by the two boundary cases.
+    for (uint8_t a = omgp::ADDR_backplane_min; a <= omgp::ADDR_backplane_max; ++a)
+        // With `|` the first operand is always true and the drop below runs for every stale
+        // address; clearing a bit that is already clear is a no-op, so the outcome coincides:
+        // mutant-ok(equivalent, cxx_and_to_or): the drop on an already-clear bit is a no-op.
+        if ((bus_.probe_live & probe_bit(a)) != 0 &&
+            elapsed_us(now_us, records_[a].probe_issued_us) > kOutcomeWindowUs)
+            bus_.probe_live = static_cast<uint16_t>(bus_.probe_live & ~probe_bit(a));
+    const uint16_t in_use = bus_.bit_rate == omgp::TRUNK_bit_rate_fallback ? kAllProbeBits : 0;
+    bus_.probe_fallback = static_cast<uint16_t>((bus_.probe_fallback & bus_.probe_live) |
+                                                (in_use & ~bus_.probe_live));
+    ++stats_.bus_faults;
+    notify(Notice::BUS_FAULT, kBusAddr);
+    notify(Notice::ALERT, kBusAddr); // FR-024: one system alert per episode
+}
+
+void HealthTracker::clear_fault(uint32_t bit_rate, uint64_t now_us) {
+    // trunk §7: the fault clears exactly once per episode, at the rate that worked, and the
+    // rate in use then stands until the layer above or a human changes it — there is NO
+    // automatic return from the fallback rate (ruling 2026-09-13).
+    //
+    // cxx_assign_const does not substitute the type's zero value (demonstrated at on_result's
+    // pass start), so this bool and the three uint8_t resets at the end of this function are
+    // argued one by one, not as a block. This one is a bool, read back as `value & 1`: the
+    // mutant either reads `false`, coinciding with the original, or leaves the fault standing
+    // through every clear — which every REQUIRE_FALSE(bus_fault()) in
+    // tests/unit/test_link_busfault.cpp would catch. It survived them, so it reads `false`.
+    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
+    bus_.fault = false;
+    bus_.bit_rate = bit_rate;
+    note_wire_rate(bit_rate);
+    // The deferred §6 transition of a fallback-rate answerer is applied BEFORE the pass state
+    // is reset and before the declare rule is next evaluated — resetting first would lose the
+    // answerer the clear still needs, and the rig would be re-declared faulty at once
+    // (round-8 red team on #472). On a clear at the reference rate the recorded answerer is
+    // dropped un-applied: it keeps the state it had, since it cannot hear the reference rate
+    // and §6 will find it in its own time (data-model.md §7).
+    if (bit_rate == omgp::TRUNK_bit_rate_fallback)
+        for (uint8_t a = omgp::ADDR_backplane_min; a <= omgp::ADDR_backplane_max; ++a)
+            if ((bus_.fallback_seen & probe_bit(a)) != 0) // every answerer of the episode, not
+                apply_result(a, true, now_us);            // only the latest (health.hpp)
+    bus_.fallback_seen = 0;
+    // The three resets are dead writes whatever constant replaces them: the fault is clear
+    // from here, so next_probe()'s pass branch and on_result()'s fallback branch are both shut
+    // until the next declare, and evaluate_declare() rewrites fallback_answerer and
+    // ref_pass_left before a pass can start — which then rewrites pass_addr itself.
+    // mutant-ok(equivalent, cxx_assign_const): overwritten before any reachable read.
+    bus_.fallback_answerer = 0;
+    // mutant-ok(equivalent, cxx_assign_const): overwritten before any reachable read.
+    bus_.ref_pass_left = 0;
+    // Same caveat as the pass_addr reset in evaluate_declare(): on_result's
+    // `pass_addr == addr` is the one read no rewrite is shut out of, and the node addresses
+    // the cases in tests/unit/test_link_busfault.cpp drive outcomes for are demonstrated not
+    // to be this constant. For the rest of the rotation, ASSUMED.
+    // mutant-ok(equivalent, cxx_assign_const): overwritten before any reachable read.
+    bus_.pass_addr = 0;
+    notify(Notice::BUS_RECOVERED, kBusAddr);
 }
 
 bool HealthTracker::bus_fault() const {
-    return false; // T043 (US5) implements declare/clear; stubbed per tasks.md T038.
+    return bus_.fault;
 }
 
 uint32_t HealthTracker::bit_rate() const {
-    return omgp::TRUNK_bit_rate; // T043 (US5) pins the recovered rate; stubbed per T038.
+    return bus_.bit_rate;
+}
+
+const BusStats& HealthTracker::bus_stats() const {
+    return stats_;
 }
 
 } // namespace link
