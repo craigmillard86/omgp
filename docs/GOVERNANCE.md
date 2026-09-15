@@ -132,23 +132,23 @@ the enforcement.
     in the PR body. Every other real finding is routed to `## FOLLOW-UPS`
     and filed as a `task` issue by `review-followups.yml` — scheduled, not
     dropped — and the comment must say the budget applied and which
-    findings it moved. (Amended 2026-09-15, red team on PR #614 — OPEN, not
-    yet fixed: "scheduled, not dropped" depends on the filer actually SEEING
-    the verdict comment, and `review-followups.yml` triggers on `created`
-    only while reading no comment but the trigger's own. A `## FOLLOW-UPS`
-    section that claude-code-action edits into its placeholder is therefore
-    never filed at all, silently, with no rescan able to recover it. Of the
-    four `issue_comment` decision gates — `agent-approve`, `agent-merge`,
-    `review-fix`, `review-followups` (`claude-mention` is a fifth
-    `issue_comment` workflow, but decides nothing) — it is the only one
-    calling no `listComments`, so it is the only one whose miss is
-    unrecoverable rather than merely late. `review-fix` is `created`-only
-    too and its rescan does NOT rescue it either — a rescan only ever runs
-    inside a run that was triggered — but its miss fails in the safe
-    DIRECTION: a stalled PR a human can see, not a dropped record. Until
-    `types: [created, edited]` lands on the filer, this promise holds only
-    for verdicts whose FOLLOW-UPS section was present when the comment was
-    created.)
+    findings it moved. (Amended 2026-09-15, red team on PR #614, fixed the
+    same day: "scheduled, not dropped" depends on the filer actually SEEING
+    the verdict comment, and `review-followups.yml` triggered on `created`
+    only while reading no comment but the trigger's own — so a `## FOLLOW-UPS`
+    section claude-code-action edited into its placeholder after the
+    triggering event would have been never filed at all, silently, with no
+    rescan able to recover it. Of the four `issue_comment` decision gates —
+    `agent-approve`, `agent-merge`, `review-fix`, `review-followups`
+    (`claude-mention` is a fifth `issue_comment` workflow, but decides
+    nothing) — it was the only one calling no `listComments`, so it was the
+    only one whose miss would have been unrecoverable rather than merely
+    late. `review-fix` was `created`-only too; its rescan would not have
+    rescued it either — a rescan only ever runs inside a run that was
+    triggered — but its miss would have failed in the safe DIRECTION: a
+    stalled PR a human can see, not a dropped record. Both now carry
+    `types: [created, edited]`, `review-followups` because the gap was live,
+    `review-fix` for parity.)
   - **What this deliberately gives up.** A clean verdict past the budget
     can now co-exist with known, filed, non-HIGH weaknesses, and
     `agent-approve`/`agent-merge` act on that verdict. That is the trade:

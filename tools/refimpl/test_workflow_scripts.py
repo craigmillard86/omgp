@@ -412,16 +412,17 @@ def test_review_fix_wiring():
     on = wf[True] if True in wf else wf["on"]
     # Default-branch definition runs (same rationale as agent-approve): a PR cannot rewrite
     # this loop's own bounds in its own diff.
-    # KNOWN GAP (#614 red team, 2026-09-15): `edited` is missing here for the #610 reason — a
-    # `findings` verdict that claude-code-action edits into its placeholder never starts this
-    # loop, and the gate's `listComments` rescan cannot recover it, because a rescan only ever
-    # happens inside a run that was triggered. What makes this one less urgent than
-    # review-followups is the failure DIRECTION, not the rescan: a missed verdict stalls the PR
-    # (visible, human-resolvable) instead of dropping a record silently.
+    # FIXED (#614 red team, 2026-09-15): `edited` was missing here for the #610 reason — a
+    # `findings` verdict that claude-code-action edits into its placeholder would never have
+    # started this loop, and the gate's `listComments` rescan could not have recovered it,
+    # because a rescan only ever happens inside a run that was triggered. This one was less
+    # urgent than review-followups for the failure DIRECTION, not the rescan: a missed verdict
+    # stalled the PR (visible, human-resolvable) instead of dropping a record silently — landed
+    # anyway, for parity.
     # The bound below is deliberate (round-2 review + red team F2, #614): `created` must stay,
-    # `edited` may be added without touching this line — but nothing else may. `deleted` is the
-    # type that must never appear: that webhook carries the PRE-delete body, so a retracted
-    # verdict would still start the fix loop.
+    # `edited` may be present — but nothing else may. `deleted` is the type that must never
+    # appear: that webhook carries the PRE-delete body, so a retracted verdict would still start
+    # the fix loop.
     types = set(on["issue_comment"]["types"])
     assert "created" in types and types <= {"created", "edited"}
     gate, fix = wf["jobs"]["gate"], wf["jobs"]["fix"]
@@ -549,17 +550,18 @@ def test_review_followups_wiring():
     # issues out of the body of a comment that no longer exists (round-2 red team F2, #614).
     types = set(on["issue_comment"]["types"])
     assert "created" in types and types <= {"created", "edited"}
-    # KNOWN GAP (#614 red team, 2026-09-15, BLOCKING there): `edited` is load-bearing HERE in a
-    # way it is not for the other three `issue_comment` decision gates (agent-approve,
-    # agent-merge, review-fix all rescan), and it is still missing. This filer reads only
-    # `context.payload.comment` and never calls `listComments` — pinned below — so a
-    # `## FOLLOW-UPS` section that claude-code-action edits into its placeholder has NO later
-    # event able to recover it: those proposals are not filed late, they are never filed, which
-    # is exactly what GOVERNANCE.md's "scheduled, not dropped" promises cannot happen. The fix is
-    # `types: [created, edited]`; it needs a push with the `workflows` permission.
+    # FIXED (#614 red team, 2026-09-15, BLOCKING there): `edited` was load-bearing HERE in a way
+    # it is not for the other three `issue_comment` decision gates (agent-approve, agent-merge,
+    # review-fix all rescan). This filer reads only `context.payload.comment` and never calls
+    # `listComments` — pinned below — so a `## FOLLOW-UPS` section that claude-code-action edits
+    # into its placeholder had NO later event able to recover it: those proposals would not have
+    # been filed late, they would never have been filed, which is exactly what GOVERNANCE.md's
+    # "scheduled, not dropped" promises cannot happen. `types: [created, edited]` is the fix;
+    # the assertion below stays as the invariant it always was — this filer relies on the
+    # triggering comment's own (now possibly edited) body being enough, never on a rescan.
     assert "listComments" not in _script("review-followups.yml", "file"), (
-        "this filer has gained a rescan — re-read the KNOWN GAP above, since the `edited` "
-        "trigger is only load-bearing while no rescan exists")
+        "this filer has gained a rescan, which changes why `edited` alone is sufficient here — "
+        "re-read the comment above and update it")
     perms = wf["permissions"]
     assert perms["issues"] == "write" and perms.get("contents", "read") == "read" and "id-token" not in perms
     job = wf["jobs"]["file"]
