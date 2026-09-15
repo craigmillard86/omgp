@@ -154,6 +154,14 @@ jobs:
             echo "PROMPT_EOF_${GITHUB_RUN_ID}"
           } >> "$GITHUB_OUTPUT"
 
+      # `Bash(PATH=/usr/bin:/bin ./pipeline.sh*)` (added 2026-09-15, #62): a checkpoint's AC2
+      # needs `command -v cmake` to fail so pipeline.sh takes its bootstrap g++ branch
+      # (pipeline.sh:181), and on this runner image cmake sits outside /usr/bin and /bin. A
+      # bare `Bash(./pipeline.sh*)` refuses any PATH=-prefixed invocation, so AC2 was
+      # undemonstrable by this agent (denied identically on #62, 2026-09-15 06:47 and 19:33).
+      # The grant is that one literal PATH value, not `PATH=*` — a wide trailing wildcard
+      # spans the rest of the command line (the `gh pr edit*` lesson, review-fix round 2 on
+      # #466), so scope stays exact rather than widening what may precede pipeline.sh.
       - name: Claude Code — implement task
         id: agent                       # the execution file (turns, denials, is_error) is a step output; an id-less step has none
         uses: anthropics/claude-code-action@v1
@@ -163,7 +171,7 @@ jobs:
           prompt: ${{ steps.prompt.outputs.text }}
           claude_args: |
             --model claude-opus-5
-            --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr create*),Bash(gh issue*),Edit,Read,Write,Grep,Glob"
+            --allowedTools "Bash(./pipeline.sh*),Bash(PATH=/usr/bin:/bin ./pipeline.sh*),Bash(git*),Bash(gh pr create*),Bash(gh issue*),Edit,Read,Write,Grep,Glob"
 
       # #361. This step used to be `if: failure()`, which is why it never once fired: the five
       # observed no-ops (#54 twice, #342's fix twice, #58 after 156 turns / 26 denials / $9.07)
@@ -218,7 +226,7 @@ jobs:
           prompt: ${{ steps.prompt.outputs.text }}
           claude_args: |
             --model claude-opus-5
-            --allowedTools "Bash(./pipeline.sh*),Bash(git*),Bash(gh pr create*),Bash(gh issue*),Edit,Read,Write,Grep,Glob"
+            --allowedTools "Bash(./pipeline.sh*),Bash(PATH=/usr/bin:/bin ./pipeline.sh*),Bash(git*),Bash(gh pr create*),Bash(gh issue*),Edit,Read,Write,Grep,Glob"
 
       - name: Did the retry produce anything?
         id: detect_retry
