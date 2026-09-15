@@ -1351,6 +1351,41 @@ TEST_CASE("the late-probe rule's window is inclusive: at exactly one window the 
     }
 }
 
+TEST_CASE(
+    "the late-probe rule reads the live bit of the answering address, not of some other address",
+    "[timing:bit_rate_fallback][timing:T_resp]") {
+    // deep-verify on #530 (round 18): `probe_bit(addr)` in the rule's live-bit test survived
+    // replacement by a constant, because every case put the node under test at an address
+    // that constant happens to cover (0x01, 0x03) or left such an address live. Here the only
+    // outstanding fault-time probe is B's (0x02): its late fallback-rate answer after a
+    // reference-rate clear must move nothing — read from any other address's bit, B would
+    // be enrolled on a trunk it cannot hear.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    ThreeNodeRig::build(tracker);
+    // The alternation hands out fallback-rate probes on odd calls and B sits at the second
+    // slot of the 15-address rotation, so B @ fallback is call 17; every earlier handout gets
+    // its (failed) outcome at once, so nothing but B is outstanding at the end.
+    uint64_t t = 4'000;
+    Probe p{};
+    for (int i = 1; i <= 16; ++i) {
+        p = tracker.next_probe(t);
+        tracker.on_result(p.addr, false, t + 1);
+        t += 10;
+    }
+    p = tracker.next_probe(t); // call 17: B @ fallback — left outstanding
+    REQUIRE(p.addr == kNodeB);
+    REQUIRE(p.bit_rate == omgp::TRUNK_bit_rate_fallback);
+    // A was probed at the reference rate on call 16 and answered false; its record still says
+    // reference, so A's answer now clears the fault there (A's probe is no longer live).
+    tracker.on_result(kNodeA, true, t + 20); // A answers at the reference rate: cleared
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+    tracker.on_result(kNodeB, true, t + 30); // B's late fallback answer, inside its window
+    REQUIRE(tracker.state(kNodeB) == HealthState::SUSPECT); // the old probe's: moves nothing
+}
+
 TEST_CASE("a second outstanding probe does not cancel the first's episode-boundary exemption",
           "[timing:bit_rate_fallback][timing:T_resp]") {
     // Round-10 review on #530, finding 1 [HIGH]: round 9's "newest handout supersedes" rule
