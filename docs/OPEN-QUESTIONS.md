@@ -4034,3 +4034,44 @@ ship a timeout. No timeout, cap or budget constant is introduced here: `tools/mu
 **Ruling:** PENDING — human (the measurement above; the A/B question is already ruled).
 **Amends:** the 2026-09-14 "#146 … Option A" entry (records its implementation and the one
 undischarged evidence item). **Supersedes:** none.
+
+---
+
+## 2026-09-15 — `Kind::Rate`'s wrong-rate `Garbage` branch names no burst LENGTH
+
+**Context:** T030 (#48), implementing the `Kind::Rate` body in `tests/support/mock_wire.cpp`.
+`contracts/mock-wire.md`'s Rate row reads: "the node now 'hears' only at `count` interpreted as
+bit rate (1 000 000 or 115 200); requests at another rate behave as `Silence` (or `Garbage` if
+`seed != 0`)". `research.md` R-07 says the same. The `Garbage` row those five words defer to is
+parameterised by `count` PRNG bytes — but on a `Rate` step `count` is spent on the bit rate and
+`seed` is spent on selecting the branch, so **no field is left to carry the burst length**, and
+neither document states one. `delay_us` is the only remaining field, and it already means "when
+this step's output starts" for every other row. The same gap covers the *delay* of a burst
+produced by a LATER request: the `Rate` step that armed the deafness has been consumed by then,
+so its `delay_us` has to be remembered or re-invented.
+
+**Options:** (a) fix a length in the mock and say so — one full frame's worth of line noise
+(`omgp::link::kMaxWire`), which is what a receiver mis-sampling a foreign-rate transmission sees
+over one frame time; (b) model it physically — the node answers at its own rate and the host,
+sampling at another, sees roughly `wire_len × byte_time(node_rate) / byte_time(host_rate)` bytes
+of noise — faithful, but it invents a rate-conversion model no document asks for and makes the
+burst length a function of an answer the node never produced; (c) widen `Step` again with a
+length field — a fourth artefact-wide struct change for one row, which is exactly the cost the
+2026-09-03/2026-09-14 `Step::count` widening was weighed against; (d) make the wrong-rate branch
+always `Silence` and drop the `seed != 0` clause — deletes contract text.
+
+**Recommended:** (a), as a contract clarification, with the mock remembering the arming step's
+`delay_us` and `seed` per node so a later wrong-rate request starts its burst at
+`request_end + delay_us` of the step that armed it. It is the smallest choice that leaves every
+stated part of the row true, needs no new field, and keeps a burst inside the RX queue's
+`4 × kMaxWire`. **Implemented that way in T030/#48** (`kWrongRateNoiseBytes` in
+`tests/support/mock_wire.cpp`, one named constant citing this entry).
+`tests/unit/test_mock_wire.cpp`'s `Kind::Rate` case deliberately asserts the burst's START
+instant, cadence, determinism and "no valid frame" but **not** its length, so a ruling for (b)
+or (c) changes the constant and no test. `contracts/mock-wire.md` is a human-ruling artefact and
+is **not** edited here.
+
+**Ruling:** PENDING — human (contract text; `specs/002-trunk-link-layer/contracts/mock-wire.md`
+Rate row).
+
+**Amends:** none. **Supersedes:** none.

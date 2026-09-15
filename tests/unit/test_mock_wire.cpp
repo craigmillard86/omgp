@@ -1445,6 +1445,63 @@ TEST_CASE("Kind::Rate makes the node deaf to every other bit rate: silence when 
     }
 }
 
+TEST_CASE("A Garbage, Babble or Rate step the mock cannot honour is refused by name, never "
+          "quietly turned into silence",
+          "[link][mock_wire]") {
+    // contracts/mock-wire.md "Capacity" forbids a silent drop; the same reasoning covers a step
+    // the mock cannot carry out at all. Each of these would otherwise put nothing on the wire —
+    // indistinguishable from Kind::Silence — and every case scripted on it would pass while
+    // asserting nothing about the kind it named. take_fault()'s documented use: assert WHICH
+    // fault fired, with an ordinary REQUIRE.
+    const uint64_t bt = byte_time_us(omgp::TRUNK_bit_rate);
+
+    SECTION("Kind::Garbage with count == 0") {
+        FakeClock clock;
+        static const Step steps[] = {{0x01, Kind::Garbage, 30, 0, 0x1234u}};
+        MockWire wire(clock);
+        wire.set_script(0x01, steps, 1);
+        const std::vector<uint8_t> req = encode_request(0x01, 0);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        const char* fault = wire.take_fault();
+        REQUIRE(fault != nullptr);
+        REQUIRE(std::string(fault).find("count == 0") != std::string::npos);
+        wire.advance_to(tx_end + 10000 * bt);
+        REQUIRE(drain_all(wire).empty());
+    }
+
+    SECTION("Kind::Babble longer than the RX queue can hold") {
+        FakeClock clock;
+        // One byte past 4 * kMaxWire, the queue's fixed capacity (mock_wire.hpp): every byte
+        // beyond it would be dropped, so the burst is refused whole instead.
+        static const Step steps[] = {{0x03, Kind::Babble, 30, 4 * kMaxWire + 1, 0x1234u}};
+        MockWire wire(clock);
+        wire.set_script(0x03, steps, 1);
+        const std::vector<uint8_t> req = encode_request(0x03, 0);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        const char* fault = wire.take_fault();
+        REQUIRE(fault != nullptr);
+        REQUIRE(std::string(fault).find("RX queue capacity") != std::string::npos);
+        wire.advance_to(tx_end + 10000 * bt);
+        REQUIRE(drain_all(wire).empty());
+    }
+
+    SECTION("Kind::Rate with count == 0") {
+        FakeClock clock;
+        // 0 is the mock's "no Rate step seen" sentinel and is no bit rate a node could hear
+        // at, so honouring it would silently DISARM the node rather than deafen it.
+        static const Step steps[] = {{0x01, Kind::Rate, 30, 0, 0}};
+        MockWire wire(clock);
+        wire.set_script(0x01, steps, 1);
+        const std::vector<uint8_t> req = encode_request(0x01, 0);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+        const char* fault = wire.take_fault();
+        REQUIRE(fault != nullptr);
+        REQUIRE(std::string(fault).find("count is a bit rate") != std::string::npos);
+        wire.advance_to(tx_end + 10000 * bt);
+        REQUIRE(drain_all(wire).empty());
+    }
+}
+
 // --- MockWire::inject_bytes(), directly (tasks.md T028: "plus a direct test of
 // `MockWire::inject_bytes()`", PR #137 red-team @050f397, NOT EXAMINED) ----------------------
 // The helper is exercised heavily through test_link_master.cpp and test_link_loop.cpp, but its
