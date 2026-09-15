@@ -1301,25 +1301,90 @@ TEST_CASE("Kind::Babble fires for the addressed node too, and its burst coexists
             REQUIRE(starts[i] > starts[i - 1]); // strictly ascending across BOTH sources
     }
 
-    SECTION("two nodes babbling at once both reach the wire") {
+    SECTION("two nodes babbling at once both reach the wire, interleaved rather than collided") {
         // Pins that the addressee-independent sweep covers every scripted node, not just the
         // first one it finds: with only one burst emitted the size below reads 20, not 40.
+        //
+        // Both bursts are scheduled at the SAME instants, one byte from each per instant. This
+        // mock therefore models two simultaneous transmitters as a deterministic INTERLEAVE of
+        // two INTACT bursts — NOT as the electrical collision docs/trunk-link-layer.md §3 makes
+        // two nodes transmitting at once on a half-duplex pair, from which neither transmission
+        // would survive. That model is asserted here rather than left implicit behind a byte
+        // count (PR #610 red-team round 1, finding 3), so no later case can read a collision
+        // into it; it is recorded as an open modelling question in docs/OPEN-QUESTIONS.md
+        // 2026-09-15 "Two `Kind::Babble` bursts scheduled at one instant are interleaved, not
+        // collided" (ruling PENDING).
         constexpr uint32_t kCount = 20;
-        FakeClock clock;
-        static const Step babbler_a[] = {{0x03, Kind::Babble, 60, kCount, 0x5EED03u}};
-        static const Step babbler_b[] = {{0x05, Kind::Babble, 60, kCount, 0x5EED04u}};
-        static const Step polled[] = {{0x01, Kind::Silence, 0}};
-        MockWire wire(clock);
-        wire.set_script(0x03, babbler_a, 1);
-        wire.set_script(0x05, babbler_b, 1);
-        wire.set_script(0x01, polled, 1);
+        constexpr uint32_t kDelay = 60;
 
-        const std::vector<uint8_t> req = encode_request(0x01, 6);
-        const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
-        wire.advance_to(tx_end + 60 + static_cast<uint64_t>(kCount) * bt);
-        const std::vector<uint8_t> drained = drain_all(wire);
-        REQUIRE(drained.size() == 2 * kCount);
-        REQUIRE(frames_in(drained) == 0);
+        // The bytes one babbler puts on the wire with nothing sharing its instants — the
+        // comparison that makes "intact" mean something.
+        auto burst_alone = [&](uint8_t node, uint32_t seed) {
+            FakeClock clock;
+            const Step babbler[] = {{node, Kind::Babble, kDelay, kCount, seed}};
+            const Step silent[] = {{0x01, Kind::Silence, 0}};
+            // Declared after the scripts so ~MockWire() runs while they are still alive.
+            MockWire wire(clock);
+            wire.set_script(node, babbler, 1);
+            wire.set_script(0x01, silent, 1);
+            const std::vector<uint8_t> req = encode_request(0x01, 6);
+            const uint64_t tx_end = wire.transmit(req.data(), req.size(), 0);
+            wire.advance_to(tx_end + kDelay + static_cast<uint64_t>(kCount) * bt);
+            return drain_all(wire);
+        };
+        const std::vector<uint8_t> alone_a = burst_alone(0x03, 0x5EED03u);
+        const std::vector<uint8_t> alone_b = burst_alone(0x05, 0x5EED04u);
+        REQUIRE(alone_a.size() == kCount);
+        REQUIRE(alone_b.size() == kCount);
+        REQUIRE(alone_a != alone_b); // distinct seeds: the two halves below are distinguishable
+
+        struct Run {
+            std::vector<uint8_t> bytes;
+            std::vector<uint64_t> starts;
+            uint64_t tx_end;
+        };
+        auto both_at_once = [&] {
+            FakeClock clock;
+            const Step babbler_a[] = {{0x03, Kind::Babble, kDelay, kCount, 0x5EED03u}};
+            const Step babbler_b[] = {{0x05, Kind::Babble, kDelay, kCount, 0x5EED04u}};
+            const Step polled[] = {{0x01, Kind::Silence, 0}};
+            MockWire wire(clock);
+            wire.set_script(0x03, babbler_a, 1);
+            wire.set_script(0x05, babbler_b, 1);
+            wire.set_script(0x01, polled, 1);
+
+            const std::vector<uint8_t> req = encode_request(0x01, 6);
+            Run run{};
+            run.tx_end = wire.transmit(req.data(), req.size(), 0);
+            wire.advance_to(run.tx_end + kDelay + static_cast<uint64_t>(kCount) * bt);
+            run.bytes = drain_with_starts(wire, run.starts);
+            return run;
+        };
+
+        const Run run = both_at_once();
+        REQUIRE(run.bytes.size() == 2 * kCount);
+        REQUIRE(frames_in(run.bytes) == 0);
+        // Each instant of the burst carries exactly two bytes, in ascending pairs.
+        for (size_t i = 0; i < run.starts.size(); ++i) {
+            CAPTURE(i);
+            REQUIRE(run.starts[i] == run.tx_end + kDelay + static_cast<uint64_t>(i / 2) * bt);
+        }
+        // Intact: de-interleaving the two slots at each instant recovers exactly what each
+        // babbler puts on the wire alone. WHICH of the two takes the first slot is the RX
+        // queue's insertion order for equal instants, which contracts/byte-wire-and-clock.md
+        // does not state ("earliest start instant first" is silent on ties) — so it is not
+        // pinned here, only that both bursts are wholly present.
+        std::vector<uint8_t> first_slots, second_slots;
+        for (size_t i = 0; i < run.bytes.size(); ++i)
+            (i % 2 == 0 ? first_slots : second_slots).push_back(run.bytes[i]);
+        REQUIRE(((first_slots == alone_a && second_slots == alone_b) ||
+                 (first_slots == alone_b && second_slots == alone_a)));
+        // ...and the tie order is deterministic, not whatever the queue happens to do: the same
+        // script replays the same bytes at the same instants (the "Scheduling" section's rule,
+        // which equal instants must not quietly escape).
+        const Run again = both_at_once();
+        REQUIRE(again.bytes == run.bytes);
+        REQUIRE(again.starts == run.starts);
     }
 }
 
@@ -1443,6 +1508,132 @@ TEST_CASE("Kind::Rate makes the node deaf to every other bit rate: silence when 
                         static_cast<uint64_t>(answer.size()) * ref_bt);
         REQUIRE(drain_all(wire) == answer);
     }
+}
+
+TEST_CASE("Kind::Rate's deafness gates Kind::Babble the SAME way whoever is addressed: a deaf "
+          "node babbles for no request, and its Babble step survives unconsumed",
+          "[link][mock_wire][timing:bit_rate][timing:bit_rate_fallback]") {
+    // PR #610 red-team round 1, finding 1: fire_foreign_babble() consulted no node's hearing, so
+    // a node deafened by a Kind::Rate step DID babble (and DID advance its script) on a request
+    // it provably could not hear, while staying silent when that same unheard request was
+    // addressed to itself — making Kind::Babble addressee-DEPENDENT for exactly the nodes
+    // carrying both Kinds, which is the one property contracts/mock-wire.md's Babble row states.
+    // Either answer is defensible; one of each is not. The two readings and the reason for this
+    // one are in docs/OPEN-QUESTIONS.md 2026-09-15 "A node deafened by `Kind::Rate`: does its
+    // pending `Kind::Babble` step still fire?" (ruling PENDING).
+    constexpr uint32_t kCount = 24;
+    constexpr uint32_t kDelay = 50;
+    const uint64_t ref_bt = byte_time_us(omgp::TRUNK_bit_rate);
+    const uint64_t slow_bt = byte_time_us(omgp::TRUNK_bit_rate_fallback);
+
+    FakeClock clock;
+    // seed == 0 on the Rate step, so its own wrong-rate branch is Silence: every byte drained
+    // below is the Babble burst or nothing at all.
+    static const Step deaf_babbler[] = {
+        {0x03, Kind::Rate, 30, omgp::TRUNK_bit_rate_fallback, 0},
+        {0x03, Kind::Babble, kDelay, kCount, 0x0B0BB1Eu},
+    };
+    // One Silence step per poll of node 0x01 below, so none of them falls through to the
+    // exhausted-script default Respond and contributes bytes of its own.
+    static const Step polled[] = {
+        {0x01, Kind::Silence, 0}, {0x01, Kind::Silence, 0}, {0x01, Kind::Silence, 0}};
+    MockWire wire(clock);
+    wire.set_script(0x03, deaf_babbler, 2);
+    wire.set_script(0x01, polled, 3);
+    REQUIRE(wire.bit_rate() == omgp::TRUNK_bit_rate);
+
+    // Arm the deafness: node 0x03 now hears only the fallback rate, the wire runs at the
+    // reference rate, and node 0x03's Babble step is next at the head of its script.
+    const std::vector<uint8_t> arm = encode_request(0x03, 0);
+    uint64_t now = wire.transmit(arm.data(), arm.size(), 0);
+    wire.advance_to(now + 10000 * ref_bt);
+    REQUIRE(drain_all(wire).empty());
+
+    // (a) an unheard request addressed to a DIFFERENT node: no burst.
+    const std::vector<uint8_t> foreign = encode_request(0x01, 1);
+    now = wire.transmit(foreign.data(), foreign.size(), clock.now_us());
+    wire.advance_to(now + kDelay + 10000 * ref_bt);
+    REQUIRE(drain_all(wire).empty());
+
+    // (b) the same unheard request addressed to the babbler ITSELF: no burst either. (a) and
+    // (b) together are the symmetry the Babble row requires.
+    const std::vector<uint8_t> own = encode_request(0x03, 2);
+    now = wire.transmit(own.data(), own.size(), clock.now_us());
+    wire.advance_to(now + kDelay + 10000 * ref_bt);
+    REQUIRE(drain_all(wire).empty());
+
+    // Unheard, not consumed: move the wire to the rate node 0x03 hears and the Babble step is
+    // still there — and still addressee-independent, firing on a poll of node 0x01.
+    wire.set_bit_rate(omgp::TRUNK_bit_rate_fallback);
+    const std::vector<uint8_t> foreign2 = encode_request(0x01, 3);
+    const uint64_t tx_end = wire.transmit(foreign2.data(), foreign2.size(), clock.now_us());
+    wire.advance_to(tx_end + kDelay + static_cast<uint64_t>(kCount - 1) * slow_bt);
+
+    std::vector<uint64_t> starts;
+    const std::vector<uint8_t> drained = drain_with_starts(wire, starts);
+    REQUIRE(drained.size() == kCount);
+    require_byte_cadence(starts, tx_end + kDelay, slow_bt);
+    REQUIRE(frames_in(drained) == 0);
+    require_not_constant(drained);
+
+    // ...and consumed exactly once when it does fire, like any other Babble step.
+    const std::vector<uint8_t> foreign3 = encode_request(0x01, 4);
+    now = wire.transmit(foreign3.data(), foreign3.size(), clock.now_us());
+    wire.advance_to(now + kDelay + 10000 * slow_bt);
+    REQUIRE(drain_all(wire).empty());
+}
+
+TEST_CASE("Kind::Rate remembers the ARMING step's seed and delay per node, not in one shared slot",
+          "[link][mock_wire][timing:bit_rate][timing:bit_rate_fallback]") {
+    // PR #610 red-team round 1, finding 2: node_rate_seed_/node_rate_delay_ (mock_wire.hpp) are
+    // per-node arrays, but no case read either for more than one node, so an implementation
+    // keeping both in ONE shared slot passed the whole suite. They are read only when a LATER
+    // wrong-rate request arrives — the arming step is long consumed by then (docs/
+    // OPEN-QUESTIONS.md 2026-09-15 "`Kind::Rate`'s wrong-rate `Garbage` branch names no burst
+    // LENGTH") — so arming two nodes with DIFFERENT seeds and delays and then RE-polling the
+    // first is what discriminates: with a shared slot the third burst below takes node 0x02's
+    // delay (a cadence failure) and node 0x02's seed (a byte failure).
+    constexpr uint32_t kDelayA = 40;
+    constexpr uint32_t kDelayB = 90;
+    static_assert(kDelayA != kDelayB, "the two delays must be distinguishable");
+    const uint64_t ref_bt = byte_time_us(omgp::TRUNK_bit_rate);
+
+    FakeClock clock;
+    static const Step arm_a[] = {
+        {0x01, Kind::Rate, kDelayA, omgp::TRUNK_bit_rate_fallback, 0xAAAAAAAAu}};
+    static const Step arm_b[] = {
+        {0x02, Kind::Rate, kDelayB, omgp::TRUNK_bit_rate_fallback, 0xBBBBBBBBu}};
+    MockWire wire(clock);
+    wire.set_script(0x01, arm_a, 1);
+    wire.set_script(0x02, arm_b, 1);
+
+    // Polls `dst` at the wire's (unchanged, reference) rate, which neither node hears, and
+    // returns the wrong-rate burst — having required it to start at `delay` past the request,
+    // at the wire's byte cadence. The LENGTH is deliberately not asserted here either, for the
+    // reason the Kind::Rate case above gives.
+    auto wrong_rate_poll = [&](uint8_t dst, uint8_t seq, uint32_t delay) {
+        const std::vector<uint8_t> req = encode_request(dst, seq);
+        const uint64_t tx_end = wire.transmit(req.data(), req.size(), clock.now_us());
+        wire.advance_to(tx_end + delay + 10000 * ref_bt);
+        std::vector<uint64_t> starts;
+        std::vector<uint8_t> burst = drain_with_starts(wire, starts);
+        REQUIRE_FALSE(starts.empty());
+        require_byte_cadence(starts, tx_end + delay, ref_bt);
+        return burst;
+    };
+
+    const std::vector<uint8_t> burst_a = wrong_rate_poll(0x01, 0, kDelayA);
+    const std::vector<uint8_t> burst_b = wrong_rate_poll(0x02, 1, kDelayB);
+    require_not_constant(burst_a);
+    REQUIRE(frames_in(burst_a) == 0);
+    REQUIRE(frames_in(burst_b) == 0);
+    REQUIRE(burst_a != burst_b); // different arming seeds, different bytes
+
+    // Node 0x01 again, its arming step long consumed and node 0x02 armed since: its OWN delay
+    // (the cadence check inside the lambda) and its OWN seed, not the most recently armed
+    // node's.
+    const std::vector<uint8_t> burst_a_again = wrong_rate_poll(0x01, 2, kDelayA);
+    REQUIRE(burst_a_again == burst_a);
 }
 
 TEST_CASE("A Garbage, Babble or Rate step the mock cannot honour is refused by name, never "
