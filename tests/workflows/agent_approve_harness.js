@@ -33,7 +33,7 @@ function world({labels = ['agent-authored'], comments = [], reviews = [], files 
   return {github, core, log};
 }
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-async function approve(w, {tier = 'risk:t1', max = '2', isPr = true, commenter = 'claude[bot]', commentBody = 'VERDICT(review): whatever', workspace = null} = {}) {
+async function approve(w, {tier = 'risk:t1', max = '2', isPr = true, commenter = 'claude[bot]', commentBody = 'VERDICT(review): whatever', workspace = null, action = 'created'} = {}) {
   process.env.TIER_LABEL = tier;
   process.env.MAX_TIER = max;
   process.env.GITHUB_WORKSPACE = workspace || process.argv[3] || process.cwd();
@@ -41,7 +41,9 @@ async function approve(w, {tier = 'risk:t1', max = '2', isPr = true, commenter =
   if (isPr) issue.pull_request = {url: 'x'};
   const context = {
     repo: {owner: 'o', repo: 'r'}, eventName: 'issue_comment',
-    payload: {issue, comment: {user: {login: commenter}, body: commentBody}},
+    // `action` is part of the real webhook payload and was absent here until #614, which is why
+    // nothing in the suite had ever run this script on an `edited` payload at all.
+    payload: {action, issue, comment: {user: {login: commenter}, body: commentBody}},
   };
   await new AsyncFunction('github', 'context', 'core', 'require', S.approve)(w.github, context, w.core, require);
 }
@@ -192,6 +194,32 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
   w = world({comments: [clean('review')], files: ['tools/x.py']});
   await approve(w, {tier: 'risk:t0', workspace: '/nonexistent-workspace'});
   check('CODEOWNERS unreadable -> not approved (fail closed)', !approved(w) && w.log.some(l => /notice.*CODEOWNERS/.test(l)));
+
+  // --- action parity: `edited` must decide EXACTLY as `created` does (#614, live gap on #610) ---
+  // The one-line trigger widening rests entirely on "the script is action-agnostic". That claim
+  // was pinned only by a substring scan for `payload.action`, which a `const {action} =
+  // context.payload` destructure walks past (round-2 red team F1 demonstrated a mutant that
+  // returns early on `edited` and kept all 77 python tests green). These cases pin the PROPERTY:
+  // the same world, run on both payload shapes, must produce an identical decision log. A script
+  // that branches on the action — however it spells the read — makes the two logs differ.
+  // `expected` is carried per case so the comparison can never pass vacuously on two empty logs.
+  const stale = {id: 58, user: {login: 'github-actions[bot]'}, state: 'APPROVED', commit_id: OLD};
+  const PARITY = [
+    ['clean review verdict at head -> approves', {comments: [clean('review')]}, {tier: 'risk:t1'}, true],
+    ['findings verdict -> refuses', {comments: [findings('review')]}, {tier: 'risk:t1'}, false],
+    ['T2 without a red-team verdict -> refuses', {comments: [clean('review')]}, {tier: 'risk:t2'}, false],
+    ['T2 with both verdicts clean -> approves', {comments: [clean('review'), clean('red-team')]}, {tier: 'risk:t2'}, true],
+    ['stale bot approval -> dismisses and re-approves', {comments: [clean('review')], reviews: [stale]}, {tier: 'risk:t1'}, true],
+    ['CODEOWNERS-owned path -> refuses', {comments: [clean('review')], files: ['docs/GOVERNANCE.md']}, {tier: 'risk:t0'}, false],
+  ];
+  for (const [name, worldOpts, approveOpts, expected] of PARITY) {
+    const a = world(worldOpts);
+    await approve(a, Object.assign({}, approveOpts, {action: 'created'}));
+    const b = world(worldOpts);
+    await approve(b, Object.assign({}, approveOpts, {action: 'edited'}));
+    check(`action parity: ${name}`,
+      approved(a) === expected && a.log.length > 0 && JSON.stringify(a.log) === JSON.stringify(b.log));
+  }
 
   for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
   console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);

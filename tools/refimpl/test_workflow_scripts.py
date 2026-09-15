@@ -294,6 +294,32 @@ def test_agent_approval_wiring():
     assert "auto_approve_max_tier: 2" in cfg
 
 
+# Reads of the webhook action, in the spellings a gate could plausibly use. The plain
+# `payload.action` substring is not enough on its own: `const {action} = context.payload`
+# walks straight past it (red team round 2 on #614, F1, demonstrated with a mutant that kept
+# the whole suite green). This regex closes the spellings we know of — it is still a SPELLING
+# check, so it is the cheap early warning, not the guarantee. The property itself ("the script
+# decides identically on created and on edited") is pinned behaviourally by the action-parity
+# cases in tests/workflows/agent_approve_harness.js, which no rewording evades.
+_ACTION_READ = re.compile(
+    r"payload\s*\.\s*action\b"                       # context.payload.action
+    r"|payload\s*\[\s*['\"]action['\"]\s*\]"         # context.payload['action']
+    r"|github\.event\.action\b"                      # ${{ github.event.action }} in an if:
+    r"|\{[^{}]*\baction\b[^{}]*\}\s*=\s*[\w.]*payload"   # const {action} = context.payload
+)
+
+
+def _issue_comment_workflows() -> dict:
+    """Every workflow in .github/workflows triggered by `issue_comment`, parsed."""
+    found = {}
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        wf = yaml.safe_load(path.read_text())
+        on = wf.get(True, wf.get("on"))
+        if isinstance(on, dict) and "issue_comment" in on:
+            found[path.name] = wf
+    return found
+
+
 def test_issue_comment_gates_are_action_agnostic():
     """Every `issue_comment` gate must decide the same way on `created` and on `edited`.
 
@@ -301,20 +327,30 @@ def test_issue_comment_gates_are_action_agnostic():
     live gap on #610) needs no script change — and before this test it was asserted only in
     prose, in a workflow comment and a test comment (red team on #614, F3). CLAUDE.md rule 11:
     a claim that holds only by the current contents of a file is a control, not a guarantee,
-    unless something executable pins it. This is that pin.
+    unless something executable pins it.
 
-    Established BY THIS TEST over the checked-in scripts (not by construction): none of these
-    gates branches on the webhook action, so an edit of a verdict comment is judged on the body
-    it now has, exactly as a fresh comment would be. A future script that does branch on it
-    must say so here and argue the `edited` path explicitly.
+    What THIS test establishes, and what it does not (round 2 on #614, F1): it is a spelling
+    scan over every job `if:`, step `if:` and github-script body of every issue_comment-triggered
+    workflow — not just the first script of one job, which is all `_script()` returns and is why
+    a read inserted into review-fix's `fix` job used to pass. A scan cannot establish a semantic
+    property; `agent_approve_harness.js` runs the approve script on both payload shapes and
+    demands an identical decision, and that is where the property is actually pinned.
     """
-    for workflow, job in (("agent-approve.yml", "approve"),
-                          ("review-followups.yml", "file"),
-                          ("review-fix.yml", "gate")):
-        wf = yaml.safe_load((ROOT / ".github" / "workflows" / workflow).read_text())
-        for src in (wf["jobs"][job]["if"], _script(workflow, job)):
-            assert "payload.action" not in src and "github.event.action" not in src, (
-                f"{workflow}: the gate branches on the webhook action, so `edited` is no longer "
+    gates = _issue_comment_workflows()
+    # Non-vacuity: the four decision gates must be among what was discovered, so a rename or a
+    # parse change cannot quietly reduce this test to iterating over nothing.
+    assert {"agent-approve.yml", "agent-merge.yml", "review-fix.yml", "review-followups.yml"} <= set(gates)
+    for name, wf in gates.items():
+        sources = []
+        for job in wf["jobs"].values():
+            sources.append(str(job.get("if", "")))
+            for step in job.get("steps", []):
+                sources.append(str(step.get("if", "")))
+                if "actions/github-script" in step.get("uses", ""):
+                    sources.append(step["with"]["script"])
+        for src in sources:
+            assert not _ACTION_READ.search(src), (
+                f"{name}: the gate branches on the webhook action, so `edited` is no longer "
                 "a no-op for it — re-argue the edited path before landing this")
 
 
@@ -378,11 +414,16 @@ def test_review_fix_wiring():
     # this loop's own bounds in its own diff.
     # KNOWN GAP (#614 red team, 2026-09-15): `edited` is missing here for the #610 reason — a
     # `findings` verdict that claude-code-action edits into its placeholder never starts this
-    # loop. Unlike review-followups this one fails SAFE (the gate rescans comments, so a missed
-    # verdict stalls the PR rather than merging it), which is why the membership is not pinned:
-    # the assertion below stays green both before and after the one-line trigger widening, so it
-    # neither hides the gap nor trips the fix.
-    assert "created" in set(on["issue_comment"]["types"])
+    # loop, and the gate's `listComments` rescan cannot recover it, because a rescan only ever
+    # happens inside a run that was triggered. What makes this one less urgent than
+    # review-followups is the failure DIRECTION, not the rescan: a missed verdict stalls the PR
+    # (visible, human-resolvable) instead of dropping a record silently.
+    # The bound below is deliberate (round-2 review + red team F2, #614): `created` must stay,
+    # `edited` may be added without touching this line — but nothing else may. `deleted` is the
+    # type that must never appear: that webhook carries the PRE-delete body, so a retracted
+    # verdict would still start the fix loop.
+    types = set(on["issue_comment"]["types"])
+    assert "created" in types and types <= {"created", "edited"}
     gate, fix = wf["jobs"]["gate"], wf["jobs"]["fix"]
     assert "claude[bot]" in gate["if"] and "VERDICT(" in gate["if"]
     checkout = next(s for s in gate["steps"] if "actions/checkout" in s.get("uses", ""))
@@ -503,9 +544,14 @@ def test_review_followups_wiring():
     privilege, and it files `task` only — never a label that releases work to the dispatcher."""
     wf = yaml.safe_load(REVIEW_FOLLOWUPS.read_text())
     on = wf[True] if True in wf else wf["on"]
-    assert "created" in set(on["issue_comment"]["types"])
+    # Same bound as review-fix, same reason: `edited` may be added, `deleted` may not — this
+    # filer decides entirely from the webhook payload, so under `deleted` it would file `task`
+    # issues out of the body of a comment that no longer exists (round-2 red team F2, #614).
+    types = set(on["issue_comment"]["types"])
+    assert "created" in types and types <= {"created", "edited"}
     # KNOWN GAP (#614 red team, 2026-09-15, BLOCKING there): `edited` is load-bearing HERE in a
-    # way it is not for the other two gates, and it is still missing. This filer reads only
+    # way it is not for the other three `issue_comment` decision gates (agent-approve,
+    # agent-merge, review-fix all rescan), and it is still missing. This filer reads only
     # `context.payload.comment` and never calls `listComments` — pinned below — so a
     # `## FOLLOW-UPS` section that claude-code-action edits into its placeholder has NO later
     # event able to recover it: those proposals are not filed late, they are never filed, which
