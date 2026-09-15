@@ -154,6 +154,36 @@ boundary tests for `T_resp`, `T_gap` and `retries`.
   - Landed on PR #137 (out of that PR's own originally-stated scope — see the T029 note above)
 - [ ] T032 [US2] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; `mutate.sh --diff origin/main` locally (extracted Mull) — zero unlabelled survivors or labels justified in the PR body
   - Partly discharged by issue #139 for `link/master.cpp` ONLY: the nine survivors on that file in the maintainer's whole-tree run (main @`eef9def`, pasted on #139 as the authority the issue asks for) were each re-argued over the whole input domain, and the two whose justification was false or unsupported — both `open_ = false` `cxx_assign_const` labels, which asserted the mutator substitutes the type's zero value — were rewritten to an argument that does not depend on the constant. The diff for `link/master.cpp` is comments only. What is NOT discharged and keeps this task open: the same triage for the other files in scope (`l3/`, `link/{frame,health,responder}.cpp` — 29 of the run's 38 survivors), `UNIT_TEST_FLOOR` (untouched: `main` already exceeds it by ~22k checks, so #139's own added case does not move the gate), and the local `mutate.sh` run at any later head — Mull is outside the agent dispatch envelope, so #139's before/after evidence is the maintainer's run plus CI `deep-verify`, not an agent-run report.
+  - Three of the four clauses are discharged on the T032/#50 checkpoint PR: `./pipeline.sh` is
+    green at that head (20 binaries, 606570 executed checks, ctest path), `./pipeline.sh esp32`
+    is green (the ESP-IDF `omgp_link` component compiles `link/master.cpp` and links
+    `libomgp_link.a`), and `UNIT_TEST_FLOOR` is raised 582360 → 606565 (total − 5,
+    contracts/tooling.md "pipeline.sh"). The **local mutation run** is not, for the same reason
+    it was not on T040/#401 and one more: the branch changes no source under `mutate.cfg`'s
+    `scope_dirs` (`l3 link core`), so `tools/mutate.sh --diff origin/main` short-circuits on an
+    empty scope and a pass there would attest nothing — the 2026-09-12 ruling ("an empty diff
+    scope discharges it, and the criterion is the defect") is the governing precedent, and its
+    remedy is to cite the gate where the scoped source changed: PR #137's `deep-verify` for
+    `link/master.{hpp,cpp}`, triaged to zero unlabelled survivors by #139 (closed), nine labels
+    readable in-tree at `link/master.cpp:129,171,276,320,353,400,463,524,540`. Separately, and
+    by construction from `mutate.cfg`/`mutate.sh`: `tests/support/mock_wire.{hpp,cpp}` — which
+    AC4 also names — is under no `scope_dir` and matches no `^tests/unit/test_(l3|link|core)_`
+    attestation path, so the T028/T030 work has never been inside the mutation gate at all.
+    `tools/mutate.sh` is in any case outside this dispatch's command allow-list (attempted,
+    refused, not routed around).
+  - The raise found one real coupling, fixed in the same PR: `tools/refimpl/test_test_set_gate.py`
+    builds fake trees that copy the REAL `pipeline.sh`, and its fake binaries printed a
+    hard-coded `EXECUTED: 600000`. Crossing 600000 made the two single-binary scenarios fail on
+    the COUNT gate instead of exercising the SET gate they exist to test. Those two now size
+    their count from `UNIT_TEST_FLOOR` (read, not restated), and a new
+    `test_fixture_counts_still_clear_the_floor` names that file the day the two-binary default
+    stops clearing the floor as well. No assertion was weakened or removed.
+  - What the first bullet's "other files in scope" clause demands is a **whole-tree** triage,
+    and `tools/mutate.cfg` says whole-tree runs "report the kill rate as a trend only — never a
+    gate". Whether that clause is an acceptance criterion at all is recorded as a pending human
+    question in `docs/OPEN-QUESTIONS.md` (2026-09-15, "T032's mutation clause: the T040 ruling
+    applied…"); the box therefore stays unticked, as T040's did, and the recommendation there is
+    that it is a nightly trend rather than a checkpoint criterion.
 
 **Checkpoint**: US2 independent test passes; every retry/discard rule of FR-007..FR-012 has a named test.
 
