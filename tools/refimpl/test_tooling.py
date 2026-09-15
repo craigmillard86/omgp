@@ -539,6 +539,27 @@ def test_mutate_attested_dir_with_no_source_fails_closed(tmp_path):
     assert oracle_line(out), out
 
 
+def test_mutate_attestation_scope_is_the_union_of_the_changed_tests_dirs(tmp_path):
+    """Nothing bounds an attestation to one directory: a diff touching both dirs' unit tests
+    attests both. This is the reachable MAXIMUM, and the number `deep-verify`'s 45-minute
+    budget has to hold — the #146 estimate reasoned about link/ alone (7 of 17 binaries),
+    which red-team round 1 on #593 showed is not the worst case. The wall clock itself stays
+    unmeasured here (Mull is absent; see docs/OPEN-QUESTIONS.md 2026-09-15): what this case
+    pins is the SIZE the measurement has to be taken at, not the time."""
+    clone = shared_clone(tmp_path, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    _commit(clone, "tests/unit/test_l3_payload.cpp", TEST_EDIT)
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~2", "--dry-run")
+    assert rc == 0, out
+    assert "dirs=l3 link" in attest_line(out), attest_line(out)
+    scope = scope_line(out)
+    assert {f.split("/")[0] for f in scope} == {"l3", "link"}, scope
+    oracle = oracle_line(out)
+    assert set(oracle) <= unit_binaries(), oracle
+    assert {b.split("_")[1] for b in oracle} == {"l3", "link"}, oracle
+    # Against the whole tree it contrasts itself with: the majority of the binaries, not 7/17.
+    assert len(oracle) > len(unit_binaries()) / 2, (len(oracle), len(unit_binaries()))
+
+
 def test_mutate_attestation_gates_on_a_broken_run_never_on_its_findings(tmp_path):
     """What "never gates" means, rule by rule, against every `return 1` in mutate_report.py
     that an attestation can reach — the previous case generalised from the unlabelled-survivor

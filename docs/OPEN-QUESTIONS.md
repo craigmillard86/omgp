@@ -3930,7 +3930,17 @@ since `contracts/link-cpp.md` and `data-model.md` are human-ruling artefacts
 is implemented on `task/146`: `tools/mutate.sh` derives a TEST scope (changed
 `tests/unit/test_<dir>_*.<ext>`, `<dir>` from `scope_dirs`, `<ext>` from `source_ext` — the one
 list) when the source scope is empty, mutates those dirs whole and calls `tools/mutate_report.py`
-with an empty `--ref`, i.e. trend mode, which cannot gate. FR-027 is **not** superseded: its
+with an empty `--ref`, i.e. trend mode. **What "never gates" means, exactly** (the first draft of
+this entry said "trend mode, which cannot gate", and red-team round 1 on PR #593 falsified it —
+three of `mutate_report.py`'s `return 1` paths run before the `diff_mode` guard): no FINDING of
+an attest run gates — not a survivor, not a malformed `mutant-ok` label, not the kill rate —
+because the diff changed no source line, so every finding is pre-existing debt, and gating on one
+is the Option B this ruling rejected. The label rule, which did gate at PR #593's first head, is
+now reported-not-gated on that path alone. What still exits 1 is the run failing to HAPPEN: no
+oracle binary for an attested dir, no source file under one, no Mull report, no mutant in a
+non-empty scope. Those are the harness's blind-spot rules, not a gate on the PR's content — a
+green empty attestation would be a false green — and the mode line says so:
+`gate=blind-spot-only`. FR-027 is **not** superseded: its
 gate ("survivors on a changed line", exit 1 on an unlabelled one) is reached on exactly the diffs
 it was reached on before, which `test_mutate_source_change_scoping_is_unchanged` pins by
 comparing a source-only diff against the same diff plus a test change. The new path is the
@@ -3954,15 +3964,31 @@ binaries' filtered runs at the same order as that 43 s suggests single-digit min
 on top of a build in the 5-10 min range — **assumed**, on a 12-core machine, where GitHub's
 runner has 4.
 
-**Why that matters before merge, not after:** `.github/workflows/ci.yml:170-172` already calls
-`--diff origin/main --require`, so this mode needs no wiring — the next test-only PR takes it in
-CI. If the estimate is wrong the failure mode is a `deep-verify` timeout, i.e. a red gate on a
-PR that changed only tests.
+**`link/` alone is NOT the worst case**, and the measurement should not be taken as if it were
+(red-team round 1 on PR #593, `--dry-run`-confirmed): nothing bounds an attestation to one
+directory. A diff touching `tests/unit/test_link_*.cpp` *and* `tests/unit/test_l3_*.cpp` — an
+ordinary "kill the surviving mutants in l3 and link" PR, the exact shape #146 exists to serve —
+attests both dirs: **12 of the 17 binaries and 22 sources**, close to the whole-tree run the
+estimate contrasts itself against. The trigger surface is wider than "a PR that kills mutants",
+too: **deleting** a unit test, **adding** one never registered in `CMakeLists.txt`, and a
+`tests/unit/test_link_*.hpp` helper (`hpp` is in `source_ext`) each start a full attest run,
+`--dry-run`-confirmed. None is wrong — the dirs' mutants are still what the changed tests are the
+oracle for — but each is `deep-verify` minutes on a PR that cannot have changed a mutant's
+outcome, and the budget question should be asked about the 12-binary case, not the 7-binary one.
+
+**Why that matters before merge, not after:** `.github/workflows/ci.yml:220` (the
+`Diff-scoped mutation` step of `deep-verify`; the `:170-172` cited in the first draft of this
+entry is the `actions/checkout` step, and went stale when the `budgets` job landed in #153)
+already calls `--diff origin/main --require`, so this mode needs no wiring — the next test-only
+PR takes it in CI. If the estimate is wrong the failure mode is a `deep-verify` timeout, i.e. a
+red gate on a PR that changed only tests.
 
 **Recommendation (agent):** before merging #146, the maintainer takes one local measured run
 (the same setup as the 2026-09-14 whole-tree run at `eef9def`) of `./tools/mutate.sh --diff
 <ref>` on a branch whose only change is a `tests/unit/test_link_*.cpp` edit, and records the
-wall clock here. If it does not fit the budget, the bound is the enrichment's split item 3 — its
+wall clock here — and, given the paragraph above, a second on a branch that also edits
+`tests/unit/test_l3_*.cpp`, which is the reachable maximum and the one the 45-minute budget has
+to hold. If it does not fit the budget, the bound is the enrichment's split item 3 — its
 own story, with the bound chosen from that number — and this PR should wait for it rather than
 ship a timeout. No timeout, cap or budget constant is introduced here: `tools/mutate.cfg` and
 `.github/**` are T3 and this PR changes neither (`git diff --exit-code` on both is empty).
