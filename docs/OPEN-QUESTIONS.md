@@ -4180,10 +4180,21 @@ path as the mock's other refusals; (b) fire it for every non-addressed node, i.e
 drawing it through `next_step()` and doing nothing else amounts to; (d) fire it once from some
 designated node, which would have to be invented.
 
-**Recommended:** (a). (b) is the literal reading of the two clauses together and is unusable:
-16 nodes × a burst apiece cannot fit the RX queue's `4 × kMaxWire`, so a script that looked
-ordinary would raise the capacity fault every time, and the `Babble` row names no per-node count
-to shrink one. (c) is worse than unusable — it is *silently* narrower: the step would reach only
+**Recommended:** (a). (b) is the literal reading of the two clauses together and is unusable —
+though not for the reason first given here (corrected after PR #610 red-team round 3, finding 1;
+an earlier revision of this paragraph said 16 bursts "cannot fit the RX queue's `4 × kMaxWire`",
+so that an ordinary script "would raise the capacity fault every time", which is false for short
+bursts and overstates the case). What is true: one request becomes `kAddrCount − 1` = 15 bursts
+nobody authored per node, and the `Babble` row names no count to size them by, so whether the
+rig-wide storm fits is `count`-dependent rather than a property of `kAddrCount` — the RX queue
+holds `4 × kMaxWire` = 568 bytes, so 15 bursts fit whenever `count ≤ 37` (the red team's case C1:
+15 × 8 bytes, no fault) and overrun above it (its case A4: 15 × `kMaxWire` = 2130 bytes, named
+capacity fault). *Demonstrated by those two red-team cases, which are scratch TUs in that
+round-3 comment and not in the repo; the arithmetic itself is proved by construction from
+`kRxCapacity` and `kAddrCount`.* The objection to (b) therefore stands on the unstated count and
+the unauthored multiplication — a step that looks like one burst is fifteen, with the capacity
+fault reachable from a script that reads as ordinary — not on arithmetic impossibility.
+(c) is worse than unusable — it is *silently* narrower: the step would reach only
 the addressed node, which is exactly `Kind::Garbage`, with the one property the `Babble` row
 states (addressee-independence) absent and nothing saying so. (d) invents a rule no artefact
 hints at. (a) costs nothing expressive — a babbler is scripted per node today

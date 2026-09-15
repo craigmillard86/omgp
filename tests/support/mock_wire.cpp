@@ -642,8 +642,11 @@ uint64_t MockWire::transmit(const uint8_t* bytes, size_t n, uint64_t now_us) {
             // rather than honoured as the narrower thing the mock could carry out.
             // contracts/mock-wire.md:25 makes a wildcard step "apply to every node" and :21
             // makes Babble fire "regardless of addressee"; together they would put one burst
-            // on the wire per node per request — kAddrCount-1 bursts nobody authored, past the
-            // RX queue's capacity — and neither artefact names a count. Honouring it only here
+            // on the wire per node per request — kAddrCount-1 bursts nobody authored, whose
+            // total overruns the RX queue once count exceeds kRxCapacity / (kAddrCount - 1),
+            // i.e. 37 bytes (below that they fit, so the overrun is a property of the count the
+            // script picked, not of kAddrCount) — and neither artefact names a count, so the
+            // author cannot see which of the two they are writing. Honouring it only here
             // would instead make the step reach the ADDRESSED node alone, i.e. Kind::Garbage
             // wearing another Kind's name: the one property the Babble row states, silently
             // absent. Neither reading is written down, so per CLAUDE.md the ambiguity is
