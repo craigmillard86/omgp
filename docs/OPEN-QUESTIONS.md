@@ -4042,49 +4042,56 @@ undischarged evidence item). **Supersedes:** none.
 **Context:** #62 (T044)'s **sixth** acceptance criterion — "a local diff-scoped mutation run
 (`tools/mutate.sh --diff origin/main`) … reports zero unlabelled survivors" — is the same shape
 the 2026-09-12 T040/#58 ruling already decided. #62 has no diff yet (nothing is implemented on
-`task/62`), so what follows is about the diff its own criteria scope it to: `pipeline.sh`
-(AC4's `UNIT_TEST_FLOOR` raise), the SC-005 mode→script comment table in
-`tests/unit/test_link_loop.cpp` (AC9), and `tasks.md`. Its "Out of scope" forbids new engine
-code, so **no source under `tools/mutate.cfg`'s `scope_dirs` (`l3 link core`) changes**.
+`task/62`). **Corrected a second time** (review on #617, re-checked and confirmed against the
+tree rather than taken on trust): an earlier draft of this entry scoped the future diff to
+`pipeline.sh` (AC4), the SC-005 mode→script comment table in `tests/unit/test_link_loop.cpp`
+(AC9), and `tasks.md`, and reasoned from that. **#572 (PR #630) has since delivered AC9** —
+`tests/unit/test_link_loop.cpp` now carries the `BUS_FAULT`/`wrong-rate probe`/`BUS_RECOVERED`
+rows, *demonstrated by the absence of any `reserved: T042` line in the file at this head* — so
+that file is no longer part of what #62's own remaining diff touches. #62's own "Out of scope"
+forbids new engine code, so **no source under `tools/mutate.cfg`'s `scope_dirs` (`l3 link
+core`) changes** either way.
 
-What such a diff does at the current head of `tools/mutate.sh` — *demonstrated by reading the
-control flow*, and corrected here from an earlier draft of this entry that cited the wrong path:
+What #62's now-narrower diff (`pipeline.sh` + `tasks.md` only) does at the current head of
+`tools/mutate.sh` — *demonstrated by reading the control flow*:
 
-- It does **not** take the empty-scope exit (`tools/mutate.sh:150-152`, "nothing in scope"). That
-  branch needs `SCOPE` *and* `TEST_SCOPE` empty, and #146's test-derived scope
-  (`tools/mutate.sh:146-148`) matches `^tests/unit/test_(l3|link|core)_[^/]*\.(cpp|hpp)$` —
-  which `tests/unit/test_link_loop.cpp` matches. The run therefore enters **attestation mode**
-  (`tools/mutate.sh:154-163`): `ATTEST=1`, `REPORT_REF=""`, scope widened to all of `link/`.
-- Attestation mode is **non-gating by construction** (`mode=attest … report=trend
-  gate=blind-spot-only`): per #146's 2026-09-14 ruling, "no finding of this run gates". So even
-  when it executes, it cannot produce the "zero unlabelled survivors on the changed lines"
-  verdict AC6 asks for — there are no changed lines under `scope_dirs` for it to gate on.
-- What it *would* do is re-mutate `link/` whole, the same whole-dir work PR #530's CI
-  `deep-verify` already did. And it **fails closed** when Mull is absent (#146: "a run that
-  cannot happen at all still fails closed"), which is the state of every dispatch host observed
-  so far (`/usr/lib/mull*` and `/usr/bin/mull*` absent, 2026-09-15 19:33 — *assumed* to hold on
-  the next runner, not proved for it).
+- It **does** take the empty-scope exit (`tools/mutate.sh:150-152`, "nothing in scope"): that
+  branch needs `SCOPE` *and* `TEST_SCOPE` both empty. `pipeline.sh` matches neither `l3`, `link`
+  nor `core` (`tools/mutate.cfg`'s `scope_dirs`), so `SCOPE` would be empty; `tasks.md` matches
+  neither `tests/unit` nor #146's test-derived pattern (`tools/mutate.sh:146-148`,
+  `^tests/unit/test_(l3|link|core)_[^/]*\.(cpp|hpp)$`), so `TEST_SCOPE` would be empty too — and
+  with `tests/unit/test_link_loop.cpp` no longer part of #62's own remaining diff, nothing else
+  could populate either. *Demonstrated by the two file paths against those patterns, not by
+  running the diff — #62 has no diff yet.* The run prints "nothing in scope" and **exits 0**,
+  before the Mull presence check — attestation mode (`:154-163`) is never entered.
+- The clause is therefore **vacuous** in exactly the sense the 2026-09-12 T040/#58 ruling
+  already covers: a green tick attesting nothing about `link/`'s scoped sources, because the
+  diff that would produce it changes none of them.
 
-So the clause is not vacuous in the "exits before Mull is needed" sense an earlier draft claimed;
-it is **redundant** — it re-runs `link/` whole with no gate attached, and fails closed on a host
-without Mull. Where the real evidence for `link/`'s scoped sources lives is unchanged:
-**PR #530** (issues #59+#61), whose CI `deep-verify` mutation run drove commit `c1b7843`'s triage,
-surviving in-tree as `mutant-ok` labels across `link/` — 38 lines, counted here by
-`grep -rc mutant-ok link/`: `health.cpp` 15, `responder.cpp` 10, `master.cpp` 9, `frame.cpp` 3,
-`responder.hpp` 1. That a live Mull run produced them is *assumed* from that commit message, not
-re-demonstrated here.
+(The now-superseded middle draft of this entry, written between #572 landing on `main` and this
+correction, argued the opposite — that the diff *did* still touch `test_link_loop.cpp` and so
+entered attestation mode, "redundant" rather than "vacuous". That was correct for the tree as it
+stood when written, and wrong for the tree #62 will actually be released against, once #572 had
+already merged. The two branches are observably different — exit 0 unconditionally vs. fail
+closed without Mull — so this is not a wording fix.)
+
+Where the real evidence for `link/`'s scoped sources lives is unchanged: **PR #530** (issues
+#59+#61), whose CI `deep-verify` mutation run drove commit `c1b7843`'s triage, surviving in-tree
+as `mutant-ok` labels across `link/` — 38 lines, counted here by `grep -rc mutant-ok link/`:
+`health.cpp` 15, `responder.cpp` 10, `master.cpp` 9, `frame.cpp` 3, `responder.hpp` 1. That a
+live Mull run produced them is *assumed* from that commit message, not re-demonstrated here.
 
 **Ruling:** human, 2026-09-15. Applying the 2026-09-12 ruling's own terms ("a human ticks it, or
 rules the clause discharged here"): **AC6 is discharged for #62**, citing PR #530's `deep-verify`
-run and the `mutant-ok` triage above. A `tools/mutate.sh --diff origin/main` run on #62's branch
-is still welcome as disclosure, and if it runs it must be reported as what it is — a non-gating
-`link/` attestation — never as AC6's changed-line verdict. This is the standing 2026-09-12
-principle applied to a second checkpoint, not a new one; recorded per-issue because `tasks.md`
-still asks for the clause literally.
+run and the `mutant-ok` triage above — unaffected by the correction, since the discharge holds
+under either branch above; only the recorded reason for it needed fixing. A `tools/mutate.sh
+--diff origin/main` run on #62's branch is still welcome as disclosure and will, on the current
+tree, simply confirm "nothing in scope". This is the standing 2026-09-12 principle applied to a
+second checkpoint, not a new one; recorded per-issue because `tasks.md` still asks for the
+clause literally.
 
-**Amends:** none — applies the 2026-09-12 T040/#58 ruling's stated principle to #62, and reads
-it against #146's attestation mechanism (2026-09-14 ruling, delivered 2026-09-15).
-**Supersedes:** none.
+**Amends:** none — applies the 2026-09-12 T040/#58 ruling's stated principle to #62, corrected
+in place (still unmerged) for #572 landing on `main` mid-entry. **Supersedes:** none.
 
 ---
 
