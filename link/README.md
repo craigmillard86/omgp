@@ -33,8 +33,12 @@ generated symbol out of `build/gen/omgp_protocol.h` rather than a number written
 `byte_time_us(bps) = 10 000 000 / bps` — 8N1 is ten bit times, start plus eight data plus
 stop — evaluated at whichever of the trunk's two rates the wire is running, `TRUNK_bit_rate`
 (the reference rate) or `TRUNK_bit_rate_fallback`, between which the health tracker alternates
-its probes while a bus fault is declared; `ByteWire::transmit()` returns the instant of the
-frame's final stop bit and received bytes carry their start-bit instant, which is what the
+its probes while a bus fault is declared — except during a reference pass, where every probe
+goes out at `TRUNK_bit_rate` and there is no alternation at all (`health.hpp`'s `next_probe`
+carries the rule; the exception is what `test_link_busfault` "a fallback answerer that keeps
+answering cannot stop the pass from ending" asserts); `ByteWire::transmit()` returns the
+instant of the frame's final stop bit and received bytes carry their start-bit instant,
+which is what the
 four timing symbols are measured against — a `Responder` whose `poll()` reaches the response
 inside the turnaround window answers inside
 `[request_end + TRUNK_T_turn_min_us, request_end + TRUNK_T_turn_max_us]`, while one still due
@@ -46,10 +50,17 @@ last byte it heard — a courtesy to other stations rather than a guarantee to t
 is bounded: past one worst-case frame plus `TRUNK_T_gap_us` from the instant the transmission
 was first deferred to, the engine transmits on schedule whatever is on the wire, so a station
 that will not stop talking cannot stall the host indefinitely (that bound buys exactly this,
-and no more: a frame already on the wire at the deferred instant finishes and gets its full
-gap, whereas a station still transmitting when the cap expires is transmitted over — see the
-contract's "That push-out is bounded"); the gap rule is the `Master`'s, and the `Responder`
-takes it on, cap and all, only when it answers late — inside the turnaround window trunk §3
+and no more, and only at a constant bit rate: a frame already on the wire at the deferred
+instant finishes and gets its full gap, whereas a station still transmitting when the cap
+expires is transmitted over — see the contract's "That push-out is bounded". The constancy is
+load-bearing, not a footnote: deferral and cap are both byte times at the rate the host's own
+wire is set to, and `ByteWire` reports a received byte's start instant but not its duration, so
+a frame put on the wire at the trunk's *other* rate is perceived as short bytes with holes
+wider than `TRUNK_T_gap_us` between them and gets no protection from this courtesy at all — the
+engine keys down inside it. That is recorded, not resolved: `docs/OPEN-QUESTIONS.md` 2026-09-06,
+"a bit-rate change while another station's frame is still arriving", with `master.cpp`'s claims
+narrowed to a constant rate until it is ruled); the gap rule is the `Master`'s, and the
+`Responder` takes it on, cap and all, only when it answers late — inside the turnaround window trunk §3
 reserves the bus for it, so it keys down at its turnaround with no gap check at all, and only
 past `T_turn_max`, where that reservation is gone, does it defer on the same bounded rule;
 and `TRUNK_T_poll_us` is the superframe cadence
