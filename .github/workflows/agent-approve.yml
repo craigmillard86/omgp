@@ -9,10 +9,21 @@ name: agent-approve
 # authoring claude[bot]); T3 is never approved; CODEOWNERS paths still need the owner;
 # the merge click remains human (GOVERNANCE.md §1). Kill switch: auto_approve_max_tier
 # to -1, or disable this workflow.
+# `edited` (added 2026-09-15, live gap on PR #610): claude-code-action posts its verdict
+# comment as a placeholder and edits the final body in, so the `created` event alone can
+# fire on a pre-verdict body and never get another chance — agent-merge's sweep then finds
+# clean verdicts (it reads comments fresh) and tries to merge a head that was never actually
+# approved, and GitHub's branch protection correctly 405s it. The job script is action-agnostic
+# (never reads context.payload.action) so `edited` needs no script change, only this trigger.
+# Trust note (assumed, not proved by this gate): an edited body is attributed to the comment's
+# ORIGINAL author, so this still trusts `comment.user.login == 'claude[bot]'` even when someone
+# else edited the text in — the same trust boundary `listComments` below already carries, since
+# any later run rescans every comment's live body regardless of who can edit it. That boundary is
+# repo permissions (who can edit another user's comment), not this workflow.
 # The script is executed verbatim by tests/workflows/agent_approve_harness.js.
 on:
   issue_comment:
-    types: [created]
+    types: [created, edited]
 
 concurrency:
   group: agent-approve-${{ github.event.issue.number }}
