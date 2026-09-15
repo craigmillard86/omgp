@@ -32,6 +32,14 @@
 # list until PR #94 (2026-08-30), the first link/ source, produced zero executed mutants and
 # tripped the blind-spot rule. A changed dir with no unit binary fails before any build.
 #
+# Attestation (#146, ruling docs/OPEN-QUESTIONS.md 2026-09-14 "Option A — attest, never
+# gate"): a diff that changes tests/unit/test_<dir>_* and NO source under <dir> has no changed
+# line to gate, so it used to end at "nothing in scope" — a PR whose whole purpose is killing
+# mutants was attested by nothing (observed on #142). That diff now mutates the changed tests'
+# directories whole, in TREND mode: survivors are reported, and because trend mode never
+# gates, a test-only PR can still not fail on survivors sitting on lines it did not change
+# (Option B, rejected). A diff that does change a source in scope is untouched by this.
+#
 #   ./tools/mutate.sh --diff origin/main --require     # CI: fail if Mull is missing
 #   ./tools/mutate.sh --diff HEAD~1                    # local: disclosed skip if Mull is missing
 #   ./tools/mutate.sh --diff <ref> --dry-run           # print the scope and stop
@@ -115,18 +123,62 @@ else
   # shellcheck disable=SC2086
   SCOPE=$(find $SCOPE_DIRS -type f \( "${FIND_EXT[@]}" \) 2>/dev/null | sort)
 fi
-if [ -z "$SCOPE" ]; then
+
+# --- test-derived scope: a diff that changes a dir's unit tests and no source ------------------
+# #146 (ruling docs/OPEN-QUESTIONS.md 2026-09-14): the changed TESTS name the dirs to attest.
+# The dir list is scope_dirs and the extensions are source_ext — the one list, as above; no
+# second one is introduced here. Only tests/unit counts: the unit binaries are the only
+# mutation oracle this harness has (see the oracle section below).
+oneline() { echo "$1" | tr '\n' ' ' | sed 's/ *$//'; }
+ATTEST=0
+REPORT_REF="$REF"            # what mutate_report.py is given: empty = trend mode = no gate
+TEST_SCOPE=""
+ATTEST_DIRS=""
+DIRS_RE=$(echo "$SCOPE_DIRS" | tr ' ' '|')
+if [ -z "$SCOPE" ] && [ -n "$REF" ]; then
+  TEST_SCOPE=$(git diff --name-only "$REF" -- tests/unit |
+    grep -E "^tests/unit/test_($DIRS_RE)_[^/]*$EXT_RE" || true)
+fi
+if [ -z "$SCOPE" ] && [ -z "$TEST_SCOPE" ]; then
   echo "mutation: nothing in scope (${REF:-full tree}) — no changed sources under: $SCOPE_DIRS"
   exit 0
 fi
-echo "mutation: scope: $(echo "$SCOPE" | tr '\n' ' ')"
+if [ -n "$TEST_SCOPE" ]; then
+  ATTEST=1; REPORT_REF=""
+  # `#` as the sed delimiter: DIRS_RE is an alternation, so `|` would end the expression.
+  ATTEST_DIRS=$(echo "$TEST_SCOPE" | sed -E "s#^tests/unit/test_($DIRS_RE)_.*#\1#" | sort -u)
+  echo "mutation: mode=attest ref=$REF dirs=$(oneline "$ATTEST_DIRS") report=trend gate=none tests=$(oneline "$TEST_SCOPE")"
+  echo "mutation: that diff changes no source under $SCOPE_DIRS, only unit tests of the dir(s) above — mutating them whole and reporting; a survivor on a line this diff did not change is listed, never gated (#146, docs/OPEN-QUESTIONS.md 2026-09-14)"
+  # Trend mode has no changed-line ranges to narrow to, so the dirs' own sources are the scope.
+  # shellcheck disable=SC2086
+  SCOPE=$(find $ATTEST_DIRS -type f \( "${FIND_EXT[@]}" \) 2>/dev/null | sort)
+fi
+if [ -n "$SCOPE" ]; then echo "mutation: scope: $(echo "$SCOPE" | tr '\n' ' ')"; fi
+
+# The whole-tree trend log records whole-tree scores; an attestation mutates one or two dirs,
+# so its numbers are not comparable with the log's and are never appended to it. Decided here,
+# before the tool check, so --dry-run discloses it.
+TREND=()
+if [ -n "$TREND_LOG" ]; then
+  if [ "$ATTEST" -eq 1 ]; then
+    echo "mutation: --trend-log not appended for a test-only attestation: this run mutates only $(oneline "$ATTEST_DIRS"), and that log's lines are whole-tree scores"
+  else
+    TREND=(--trend-log "$TREND_LOG")
+  fi
+fi
 
 # --- oracle: the unit binaries of every changed scope dir --------------------------------------
 # Unit tests are the oracle: the seeded property tests (tests/property) are too slow per
 # mutant at -O0 and assert invariants, not specific values. Names come from CMakeLists.txt so
 # a new test_<dir>_* binary joins the oracle without touching this script; a changed dir with
 # no unit binary can never kill a mutant, so that is a blind spot and fails here, unbuilt.
-CHANGED_DIRS=$(echo "$SCOPE" | cut -d/ -f1 | sort -u)
+# Attesting: the dirs come from the changed tests, not from the (whole-dir) source scope, so
+# that a dir whose tests changed is oracle-checked even if it holds no source file at all.
+if [ "$ATTEST" -eq 1 ]; then
+  CHANGED_DIRS="$ATTEST_DIRS"
+else
+  CHANGED_DIRS=$(echo "$SCOPE" | cut -d/ -f1 | sort -u)
+fi
 # Comment lines are dropped first: a commented-out registration is not a binary.
 UNIT_BINS=$(grep -vE '^[[:space:]]*#' CMakeLists.txt | grep -oE 'omgp_add_catch_test\(test_[A-Za-z0-9_]+ +tests/unit/' | sed -E 's/omgp_add_catch_test\(//; s/ .*//')
 ORACLE=""
@@ -140,6 +192,13 @@ for d in $CHANGED_DIRS; do
 done
 ORACLE=$(echo $ORACLE | tr ' ' '\n' | sort -u | tr '\n' ' ')
 echo "mutation: oracle: $ORACLE"
+# Attesting only, and after the oracle rule so that a dir with neither is reported as the
+# blind spot the source path already names: a dir holding no source file can produce no
+# mutant, so there is nothing for its changed tests to attest.
+if [ "$ATTEST" -eq 1 ] && [ -z "$SCOPE" ]; then
+  echo "mutation: no source file under the attested dir(s) '$(oneline "$ATTEST_DIRS")' — failing (blind spot: the changed tests attest nothing there)" >&2
+  exit 1
+fi
 [ "$DRY" -eq 1 ] && exit 0
 
 # --- tool presence -------------------------------------------------------------------------------
@@ -155,7 +214,9 @@ if ! command -v "$RUNNER" >/dev/null 2>&1 || [ ! -f "$PLUGIN" ] || ! command -v 
   echo "mutation: mull not present — skipped (blind spot: no mutation coverage in this environment; CI deep-verify runs it with --require)"
   exit 0
 fi
-if [ -n "$REF" ]; then
+if [ "$ATTEST" -eq 1 ]; then
+  echo "mutation: mull $VERSION via $RUNNER (clang $CLANG_MAJOR); test-only attestation of $(oneline "$ATTEST_DIRS") — trend only, no gate"
+elif [ -n "$REF" ]; then
   echo "mutation: mull $VERSION via $RUNNER (clang $CLANG_MAJOR); gate: max ${MAX_UNLABELLED} unlabelled survivor(s) on changed lines"
 else
   echo "mutation: mull $VERSION via $RUNNER (clang $CLANG_MAJOR); whole tree — trend only, no gate"
@@ -225,9 +286,9 @@ phase2_config > "$BUILD/mull.yml"
 # post-image line of its surviving predecessor — which the comment-only blind-spot exemption
 # below reads so that a hunk deleting a guard in favour of a comment is not certified on its
 # added half alone, and so that a comment deleted from after a `\`-ended line is caught too.
-if [ -n "$REF" ]; then
+if [ -n "$REPORT_REF" ]; then
   # shellcheck disable=SC2086
-  git diff -U0 "$REF" -- $SCOPE_DIRS |
+  git diff -U0 "$REPORT_REF" -- $SCOPE_DIRS |
     python3 tools/mutate_ranges.py --ranges-out "$BUILD/scope_ranges.json" \
       --removed-out "$BUILD/scope_removed.json"
 else
@@ -266,11 +327,18 @@ for name in $ORACLE; do
 done
 
 # --- merge the Elements reports and apply the triage gate (tools/mutate_report.py) ---------------
-TREND=()
-[ -n "$TREND_LOG" ] && TREND=(--trend-log "$TREND_LOG")
+# TREND was decided with the scope (above). The attestation's provenance — the ref it was
+# derived from and the changed tests that named the dirs — goes into report.json too, so the
+# artefact says where it came from without anyone having to keep the stdout (#146).
+ATTEST_ARGS=()
+if [ "$ATTEST" -eq 1 ]; then
+  ATTEST_ARGS=(--attest-ref "$REF" --attest-tests "$(oneline "$TEST_SCOPE")" \
+               --attest-dirs "$(oneline "$ATTEST_DIRS")")
+fi
 python3 tools/mutate_report.py --reports "$REPORTS" --root "$ROOT" --scope-dirs "$SCOPE_DIRS" \
   --ranges "$BUILD/scope_ranges.json" --removed "$BUILD/scope_removed.json" \
-  --source-ext "$SOURCE_EXT" --ref "$REF" --out "$BUILD/report.json" \
-  --max-unlabelled "$MAX_UNLABELLED" --categories "$CATEGORIES" "${TREND[@]}" || rc=1
+  --source-ext "$SOURCE_EXT" --ref "$REPORT_REF" --out "$BUILD/report.json" \
+  --max-unlabelled "$MAX_UNLABELLED" --categories "$CATEGORIES" \
+  "${ATTEST_ARGS[@]}" "${TREND[@]}" || rc=1
 [ "$rc" -eq 0 ] && echo "mutation: PASS" || echo "mutation: FAIL" >&2
 exit $rc

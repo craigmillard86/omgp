@@ -145,12 +145,25 @@ def main(argv=None) -> int:
     ap.add_argument("--source-ext", required=True,
                     help="space-separated source extensions (tools/mutate.cfg source_ext, passed by mutate.sh)")
     ap.add_argument("--ref", default="", help="diff ref; empty = whole-tree trend mode")
+    # Provenance of a test-derived attestation (#146, ruling docs/OPEN-QUESTIONS.md
+    # 2026-09-14): mutate.sh passes these when the diff changed a dir's unit tests and no
+    # source, so report.json records where the run came from instead of looking like an
+    # ordinary whole-tree trend run. They never change what is counted or what gates.
+    ap.add_argument("--attest-ref", default="", help="the diff ref the attestation was derived from")
+    ap.add_argument("--attest-tests", default="", help="space-separated changed test files that named the dirs")
+    ap.add_argument("--attest-dirs", default="", help="space-separated dirs attested")
     ap.add_argument("--out", required=True, help="report.json path")
     ap.add_argument("--max-unlabelled", type=int, default=0)
     ap.add_argument("--categories", default="equivalent accepted")
     ap.add_argument("--trend-log", default="", help="JSONL file to append the trend line to (trend mode)")
     ap.add_argument("--list-limit", type=int, default=200)
     args = ap.parse_args(argv)
+    attest = bool(args.attest_ref or args.attest_tests or args.attest_dirs)
+    if attest and args.ref:
+        # An attestation IS the trend mode (it has no changed line to gate on): the two
+        # cannot be asked for at once, or the caller would get a gate it did not intend.
+        ap.error("--attest-ref/--attest-tests/--attest-dirs describe a test-derived attestation, "
+                 "which runs in trend mode — they cannot be combined with --ref")
 
     root = str(pathlib.Path(args.root).resolve())
     scope_dirs = args.scope_dirs.split()
@@ -401,6 +414,12 @@ def main(argv=None) -> int:
               "labelled": labelled_counts, "unlabelled": len(unlabelled),
               "max_unlabelled": args.max_unlabelled, "survivors": survivors, "stale_labels": stale,
               "malformed_labels": malformed}
+    if attest:
+        report["attest"] = {"origin": "changed-tests", "diff_ref": args.attest_ref,
+                            "tests": args.attest_tests.split(), "dirs": args.attest_dirs.split()}
+        print(f"mutation: attested from changed tests ({args.attest_tests or '?'}) at "
+              f"{args.attest_ref or '?'}: {mode} mode over {args.attest_dirs or '?'} — survivors are "
+              f"listed above and never gate (#146)")
     out = pathlib.Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2) + "\n")
