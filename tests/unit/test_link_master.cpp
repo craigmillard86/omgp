@@ -4,10 +4,10 @@
 // contract and spec.md User Story 2 (Acceptance Scenarios 1-7 and the Edge Cases naming
 // T_resp/seq-wrap/"simulated time that does not advance") ahead of link/master.{hpp,cpp}
 // (T031); link/master.{hpp,cpp} and MockWire's Kind::CrcError/Kind::Duplicate (T029's own
-// slice of T030 — Garbage/Babble/Rate remain T030) now implement it, and this suite is
-// green. Every assertion is driven through the scripted MockWire + FakeClock harness with
-// simulated time advanced explicitly (CLAUDE.md rule 3): nothing here sleeps or reads a
-// wall clock.
+// slice of T030 — Garbage/Babble/Rate landed with the rest of T030, #48) now implement it,
+// and this suite is green. Every assertion is driven through the scripted MockWire +
+// FakeClock harness with simulated time advanced explicitly (CLAUDE.md rule 3): nothing
+// here sleeps or reads a wall clock.
 //
 // Scope note (AC6, "wrong src/wrong dst/response-bit-clear" frames): MockWire's own
 // Respond/CrcError/Duplicate scheduling (tests/support/mock_wire.cpp, schedule_respond())

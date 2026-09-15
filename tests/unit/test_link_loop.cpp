@@ -909,10 +909,12 @@ TEST_CASE("SC-004 duplicate after give-up: a late duplicate of the final, withhe
 
 // --- SC-005 "babble": extraneous bus noise between transactions ---------------------------
 // trunk §7 "babble" (contracts/mock-wire.md Kind::Babble: bytes regardless of addressee).
-// Kind::Babble itself is not yet implemented in MockWire (tasks.md T030, gated behind #48's
-// needs-human ruling on widening Step::count — not this issue's to resolve or depend on); a
-// fixed, hand-picked byte sequence that is not a valid frame for any node stands in for it,
-// injected onto host_wire outside any open transaction's window.
+// This case uses a fixed, hand-picked byte sequence that is not a valid frame for any node,
+// injected onto host_wire outside any open transaction's window, rather than a Kind::Babble
+// step: it was written while that Kind was still unimplemented (T030/#48, since landed), and
+// hand-picked bytes keep the case's own wire content exactly stated. Kind::Babble is now
+// available if a later case wants a scripted babbler instead — see tests/unit/test_mock_wire.cpp
+// for what it emits.
 
 TEST_CASE("SC-005 babble: extraneous bus noise between transactions is silently discarded, "
           "not attributed to the next transaction",
