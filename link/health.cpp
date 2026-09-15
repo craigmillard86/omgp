@@ -670,6 +670,47 @@ uint32_t HealthTracker::bit_rate() const {
     return bus_.bit_rate;
 }
 
+void HealthTracker::set_bit_rate(uint32_t bps) {
+    // trunk §7 (closing clauses, ruling 2026-09-14): the layer above selects the fallback rate
+    // through Master::set_bit_rate and, in the same step, this — so a rig can be brought up AT
+    // the fallback rate and the reference rate restored after a fallback-rate clear, which §7
+    // leaves in place for ever (no automatic return, FR-025/FR-026). Moving the wire alone left
+    // this tracker 8.7x wrong about the rate its probes go out at (round-1 red team on #523).
+    //
+    // Refused on exactly Master::set_bit_rate's predicate (link/master.cpp), not a re-derived
+    // bound: byte_time_us() has a nonzero precondition, and above 10 Mb/s its integer byte time
+    // truncates to 0 us, which would hand every timing computation downstream a zero byte time.
+    // A refusal assigns nothing and counts nothing — it is not a change (docs/OPEN-QUESTIONS.md
+    // 2026-09-06 as amended; round-2 red team on #523). The bps == 0 arm must stay FIRST: it is
+    // what keeps byte_time_us's own assert out of reach.
+    if (bps == 0 || byte_time_us(bps) == 0)
+        return;
+    // data-model.md §7 "Rate and the schedule": `bit_rate` is the rate in use, and every reader
+    // of it is shut while a fault stands — next_probe() overwrites it with the probe's own rate,
+    // evaluate_declare() returns early, and on_result()'s late-fault-probe rule requires
+    // !bus_.fault. So this call ends no episode, moves no §6 state and disturbs no reference
+    // pass BY CONSTRUCTION (those three readers are the whole of it, `bus_.bit_rate` in this
+    // file); demonstrated by "set_bit_rate is never a clear ..." in
+    // tests/unit/test_link_busfault.cpp. Outside a fault it does move the late-fault-probe
+    // rule's reference point, which is the rule as written: that outcome is read against the
+    // rate now IN USE, whoever last set it.
+    //
+    // §8 counts a change of the rate in use (data-model.md:267), which is why note_wire_rate()
+    // cannot stand in for the count: a fault-time alternation leaves `wire_rate` at the fallback
+    // rate while `bit_rate` is still the reference, so note_wire_rate() would see nothing to
+    // count and the change would be lost. Counted here, where it is decided (§8) — demonstrated
+    // by "an accepted rate counts one change even when the wire is already at it".
+    const bool changed = bps != bus_.bit_rate;
+    bus_.bit_rate = bps;
+    // F3 obligation 3 (contracts/link-cpp.md "What F3/F4 need"): the caller puts this rate on
+    // the wire in the same step, so the wire is at `bps` from here — recorded, not counted
+    // again, or the one physical change would count twice (once here, once at the next probe
+    // that goes out at it).
+    bus_.wire_rate = bps;
+    if (changed)
+        ++stats_.rate_changes;
+}
+
 const BusStats& HealthTracker::bus_stats() const {
     return stats_;
 }

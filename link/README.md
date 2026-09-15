@@ -98,12 +98,10 @@ Everything either needs is specified in `contracts/link-cpp.md` and
 `byte-wire-and-clock.md`, with `contracts/mock-wire.md` for the step table; no interface
 outside those files is required.
 
-Three places where the contract is ahead of the code, so that a reader coding against it is
+Two places where the contract is ahead of the code, so that a reader coding against it is
 not surprised. `contracts/link-cpp.md`'s SC-010 list says `Master::begin/poll/feed`, but there
 is no public `feed()` — `poll()` and `begin()` drain `ByteWire::receive()` themselves and that
-is the only receive path. `HealthTracker::set_bit_rate` is specified but not yet declared in
-`health.hpp` (tasks.md T041/T043 carry it as a red-first slice, as the header comment records).
-And of the seven step kinds above only `Respond`, `Silence`, `CrcError` and `Duplicate` are
+is the only receive path. And of the seven step kinds above only `Respond`, `Silence`, `CrcError` and `Duplicate` are
 implemented in `tests/support/mock_wire.cpp` today: `Garbage`, `Babble` and `Rate` are declared
 so scripts can name them, but the switch raises a "not implemented until T030" test fault
 instead of producing the behaviour (`tests/support/mock_wire.hpp:6-10`,

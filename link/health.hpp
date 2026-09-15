@@ -9,8 +9,7 @@
 // (F3) that this layer assumes and cannot enforce are recorded in contracts/link-cpp.md
 // "What F3/F4 need"; `on_result` and `next_probe` below say where the first two are relied
 // on. The third (the wire and this tracker set to the layer above's rate in the same step,
-// ruling 2026-09-14) belongs with `HealthTracker::set_bit_rate`, which is NOT implemented
-// here — tasks.md T041/T043 carry it as a red-first follow-up slice.
+// ruling 2026-09-14) is assumed by `HealthTracker::set_bit_rate`.
 #pragma once
 
 #include "link/clock.hpp"
@@ -81,7 +80,18 @@ class HealthTracker {
     Probe next_probe(uint64_t now_us);
 
     bool bus_fault() const;
-    uint32_t bit_rate() const; // the rate in use; assigned only by a clear (data-model.md §7)
+    // The rate in use; assigned by a clear (data-model.md §7) or by set_bit_rate below.
+    uint32_t bit_rate() const;
+    // trunk §7: the layer above's rate selection — bringing a rig up AT the fallback rate, or
+    // restoring the reference rate after a fallback-rate clear, which §7 leaves in place for
+    // ever (ruling 2026-09-14). Assigns what bit_rate() reports and, while !bus_fault(), the
+    // rate enrolment probes go out at; during a fault the probe's rate is the probe's own
+    // (the alternation, the reference pass). NEVER a clear: it moves no node state, notifies
+    // nothing and ends no episode. Refused — assigning nothing and counting nothing — on
+    // exactly Master::set_bit_rate's predicate (link/master.cpp: bps == 0 or a byte time that
+    // truncates to 0 us). The caller moves the wire in the same step: F3 obligation 3 in
+    // contracts/link-cpp.md "What F3/F4 need", ASSUMED here, not enforceable at this layer.
+    void set_bit_rate(uint32_t bps);
     // Bus-level counters (data-model.md §8): `rate_changes` and `bus_faults` as decided by
     // this tracker. `BusStats::discards` is the Master engine's field and is never written
     // here — the tracker sees no frames. (Accessor added by T043 alongside the bus-fault
@@ -112,8 +122,9 @@ class HealthTracker {
     // integers, a positional list is one transposition away from compiling with two values
     // swapped. Still an aggregate (C++17) and still no dynamic allocation.
     struct BusState {
-        uint32_t bit_rate = omgp::TRUNK_bit_rate; // the rate in use; assigned only by a clear
-        bool fault = false;                       // BUS_FAULT declared
+        // The rate in use; assigned by a clear or by the layer above's set_bit_rate.
+        uint32_t bit_rate = omgp::TRUNK_bit_rate;
+        bool fault = false; // BUS_FAULT declared
         // The alternation's next rate; true (fallback) on declare.
         bool next_probe_fallback = false;
         // Address to enrol on a clear at the fallback rate; 0 = none recorded.
@@ -134,10 +145,13 @@ class HealthTracker {
         uint8_t pass_addr = 0; // the pass probe in flight; 0 = none outstanding
         // The pass's own cursor, in address order.
         uint8_t pass_next_addr = omgp::ADDR_backplane_min;
-        // The rate the host last put on the wire — a probe's rate, or a rate pinned by a
-        // clear. Not a data-model.md §7 field: it is how this implementation counts
+        // The rate the host last put on the wire — a probe's rate, a rate pinned by a clear,
+        // or one the layer above selected (which moves the wire in the same step, F3
+        // obligation 3). Not a data-model.md §7 field: it is how this implementation counts
         // `rate_changes` (§8: at the point the change is decided). Before any probe has been
-        // issued it is the rate in use.
+        // issued it is the rate in use. It is NOT the whole of the counting rule: §8 counts a
+        // change of the RATE IN USE too (data-model.md:267), and during a fault the two come
+        // apart — see set_bit_rate in health.cpp.
         uint32_t wire_rate = omgp::TRUNK_bit_rate;
         // One bit per address (bit N = address N): set when the last probe to that address
         // went out at TRUNK_bit_rate_fallback, clear when it went out at the reference rate.
