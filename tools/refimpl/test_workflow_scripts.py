@@ -264,7 +264,13 @@ def test_agent_approval_wiring():
     assert "approve" not in review["jobs"]                       # never in the PR-controlled workflow
     approve_wf = yaml.safe_load((ROOT / ".github" / "workflows" / "agent-approve.yml").read_text())
     aon = approve_wf[True] if True in approve_wf else approve_wf["on"]
-    assert aon["issue_comment"]["types"] == ["created"]          # default-branch definition runs
+    # `created` alone missed the deciding verdict on PR #610 (2026-09-15): claude-code-action
+    # posts its verdict comment as a placeholder, then EDITS it in — the `created` webhook fires
+    # on the pre-verdict body, and no later event ever re-checked the finalised one. agent-merge's
+    # sweep then tried to merge on a verdict that was never actually approved and hit GitHub's
+    # branch-protection 405. `edited` must be a member too; script logic is action-agnostic
+    # (doesn't read context.payload.action) so no script change is required, only the trigger.
+    assert set(aon["issue_comment"]["types"]) == {"created", "edited"}
     approve = approve_wf["jobs"]["approve"]
     assert "issue.pull_request" in approve["if"] and "VERDICT(" in approve["if"]
     assert approve["permissions"] == {"contents": "read", "pull-requests": "write"}
