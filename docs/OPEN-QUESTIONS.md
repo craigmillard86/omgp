@@ -3921,3 +3921,52 @@ since `contracts/link-cpp.md` and `data-model.md` are human-ruling artefacts
 (`docs/OPERATING-POLICY.md` §2).
 
 **Ruling:** PENDING — human. **Amends:** none. **Supersedes:** none.
+
+---
+
+## 2026-09-15 — #146 delivered (Option A), and the attest run's wall clock is still UNMEASURED
+
+**Context:** the 2026-09-14 ruling "#146: mutation attestation for test-only PRs — Option A"
+is implemented on `task/146`: `tools/mutate.sh` derives a TEST scope (changed
+`tests/unit/test_<dir>_*.<ext>`, `<dir>` from `scope_dirs`, `<ext>` from `source_ext` — the one
+list) when the source scope is empty, mutates those dirs whole and calls `tools/mutate_report.py`
+with an empty `--ref`, i.e. trend mode, which cannot gate. FR-027 is **not** superseded: its
+gate ("survivors on a changed line", exit 1 on an unlabelled one) is reached on exactly the diffs
+it was reached on before, which `test_mutate_source_change_scoping_is_unchanged` pins by
+comparing a source-only diff against the same diff plus a test change. The new path is the
+attestation FR-027's fast path left missing, not a second gate.
+
+**The gap this entry exists to record.** The issue's evidence list asks for the MEASURED
+wall-clock of one test-only attest run scoped to `link/`, to say whether it fits `deep-verify`'s
+45-minute budget (which already spends ~10 min in `fuzz-smoke.sh 600`). **It was not measured
+and is not measurable in the dispatch environment:** Mull is absent and `tools/mutate.sh` is
+outside the dispatch allow-list, the same wall recorded on 2026-09-12 (T040) and 2026-09-14
+(#139). Everything else in the acceptance list is demonstrated by named tests in
+`tools/refimpl/test_tooling.py`; this one is not, and no run in this PR stands in for it.
+
+What is known, and it is an **estimate, not a measurement**: the attest run for `link/` builds 7
+instrumented binaries (`test_link_frame|health|interfaces|loop|master|responder|types`) rather
+than the 17 of a whole-tree run, and executes only `link/` mutants under the phase-2
+`includePaths` filter. The recorded points are PR #137 round 19 (12 cores): whole-tree
+instrumented build of 17 binaries ~15 min of a 17-min run; `test_link_master` 4050 mutants /
+14m30s unfiltered → 260 / 43 s filtered. Scaling the build by binary count and taking the 7
+binaries' filtered runs at the same order as that 43 s suggests single-digit minutes of run time
+on top of a build in the 5-10 min range — **assumed**, on a 12-core machine, where GitHub's
+runner has 4.
+
+**Why that matters before merge, not after:** `.github/workflows/ci.yml:170-172` already calls
+`--diff origin/main --require`, so this mode needs no wiring — the next test-only PR takes it in
+CI. If the estimate is wrong the failure mode is a `deep-verify` timeout, i.e. a red gate on a
+PR that changed only tests.
+
+**Recommendation (agent):** before merging #146, the maintainer takes one local measured run
+(the same setup as the 2026-09-14 whole-tree run at `eef9def`) of `./tools/mutate.sh --diff
+<ref>` on a branch whose only change is a `tests/unit/test_link_*.cpp` edit, and records the
+wall clock here. If it does not fit the budget, the bound is the enrichment's split item 3 — its
+own story, with the bound chosen from that number — and this PR should wait for it rather than
+ship a timeout. No timeout, cap or budget constant is introduced here: `tools/mutate.cfg` and
+`.github/**` are T3 and this PR changes neither (`git diff --exit-code` on both is empty).
+
+**Ruling:** PENDING — human (the measurement above; the A/B question is already ruled).
+**Amends:** the 2026-09-14 "#146 … Option A" entry (records its implementation and the one
+undischarged evidence item). **Supersedes:** none.
