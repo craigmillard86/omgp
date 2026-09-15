@@ -154,14 +154,18 @@ jobs:
             echo "PROMPT_EOF_${GITHUB_RUN_ID}"
           } >> "$GITHUB_OUTPUT"
 
-      # `Bash(PATH=/usr/bin:/bin ./pipeline.sh*)` (added 2026-09-15, #62): a checkpoint's AC2
-      # needs `command -v cmake` to fail so pipeline.sh takes its bootstrap g++ branch
-      # (pipeline.sh:181), and on this runner image cmake sits outside /usr/bin and /bin. A
-      # bare `Bash(./pipeline.sh*)` refuses any PATH=-prefixed invocation, so AC2 was
-      # undemonstrable by this agent (denied identically on #62, 2026-09-15 06:47 and 19:33).
-      # The grant is that one literal PATH value, not `PATH=*` — a wide trailing wildcard
-      # spans the rest of the command line (the `gh pr edit*` lesson, review-fix round 2 on
-      # #466), so scope stays exact rather than widening what may precede pipeline.sh.
+      # `Bash(PATH=/usr/bin:/bin ./pipeline.sh*)` (added 2026-09-15, #62): a bare
+      # `Bash(./pipeline.sh*)` refuses any PATH=-prefixed invocation, so this exact command was
+      # denied outright, twice (#62, 2026-09-15 06:47 and 19:33). The grant lifts that denial —
+      # it does NOT, on its own, make AC2's bootstrap g++ path demonstrable in THIS job: the
+      # Toolchain step above apt-installs cmake, which the Debian/Ubuntu package puts in
+      # /usr/bin, so `command -v cmake` still succeeds under this PATH and pipeline.sh:181 takes
+      # the CMake branch; the same PATH also hides the pip-installed pinned clang-format
+      # stage_quality needs on CI. See docs/OPEN-QUESTIONS.md 2026-09-15 "#62 (T044) AC2" —
+      # options A/B/C recorded there, ruling PENDING — human. The grant is that one literal PATH
+      # value, not `PATH=*` — a wide trailing wildcard spans the rest of the command line (the
+      # `gh pr edit*` lesson, review-fix round 2 on #466), so scope stays exact rather than
+      # widening what may precede pipeline.sh.
       - name: Claude Code — implement task
         id: agent                       # the execution file (turns, denials, is_error) is a step output; an id-less step has none
         uses: anthropics/claude-code-action@v1
