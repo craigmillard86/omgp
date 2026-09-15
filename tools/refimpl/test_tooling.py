@@ -338,6 +338,157 @@ def test_mutate_diff_with_no_unit_oracle_fails_closed(tmp_path):
     assert "blind spot" in out and "core" in out and "no unit-test oracle" in out, out
 
 
+# --- tools/mutate.sh: a test-only change is ATTESTED, never gated (#146) ------------------------
+# Until now `--diff <ref>` scoped by changed SOURCES alone, so a PR whose whole purpose is
+# killing surviving mutants took the `nothing in scope` fast path and got no machine
+# attestation at all (observed on #142, where four kills rested only on the author's local
+# runs). Ruling docs/OPEN-QUESTIONS.md 2026-09-14, Option A: a diff that changes
+# tests/unit/test_<dir>_* and no source under <dir> derives a TEST scope, runs that dir's
+# mutants in TREND mode and reports. Trend mode never gates, so the attestation cannot fail a
+# PR on survivors sitting on lines it did not change (Option B, rejected). What stays exactly
+# as it was: a diff that does change a source in scope.
+
+def attest_line(out):
+    lines = [l for l in out.splitlines() if l.startswith("mutation: mode=attest")]
+    assert len(lines) == 1, out
+    return lines[0]
+
+
+def scope_line(out):
+    lines = [l for l in out.splitlines() if l.startswith("mutation: scope:")]
+    assert len(lines) == 1, out
+    return lines[0].split(":", 2)[2].split()
+
+
+def _commit(clone, rel, content):
+    p = clone / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content)
+    subprocess.run(["git", "add", rel], cwd=clone, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"],
+                   cwd=clone, check=True)
+
+
+TEST_EDIT = "// rewritten by test_tooling.py: a test-only change under tests/unit\n"
+
+
+def test_mutate_test_only_change_is_attested_not_skipped(tmp_path):
+    """A diff that touches only tests/unit/test_link_*.cpp must NOT take the fast path: it
+    names one greppable attest line (mode, ref, dirs, the changed test files) and derives the
+    same oracle the source path would. The source scope it derives is the whole attested
+    directory — trend mode has no changed-line ranges to narrow it to."""
+    clone = shared_clone(tmp_path, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    rc, out, dt = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 0, out
+    assert "nothing in scope" not in out, out
+    line = attest_line(out)
+    assert "ref=HEAD~1" in line and "dirs=link" in line, line
+    assert "tests=tests/unit/test_link_master.cpp" in line, line
+    scope = scope_line(out)
+    assert scope and all(f.startswith("link/") for f in scope), scope
+    assert "link/master.cpp" in scope, scope
+    oracle = oracle_line(out)
+    assert oracle and all(b.startswith("test_link_") for b in oracle), oracle
+    assert set(oracle) <= unit_binaries(), oracle
+    assert dt < 60, dt
+
+
+def test_mutate_unrelated_test_change_is_still_nothing_in_scope(tmp_path):
+    """The test scope is `tests/unit/test_<dir>_*` for <dir> in scope_dirs, nothing wider:
+    tests/unit/test_mock_wire.cpp names no scope dir, so the diff is still empty and the fast
+    path (and its exact message) is unchanged."""
+    clone = shared_clone(tmp_path, "tests/unit/test_mock_wire.cpp", TEST_EDIT)
+    rc, out, dt = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", timeout=90)
+    assert rc == 0, out
+    assert "mutation: nothing in scope (HEAD~1) — no changed sources under: l3 link core" in out, out
+    assert "mode=attest" not in out, out
+    assert dt < 60, dt
+
+
+def test_mutate_test_only_attestation_never_gates(tmp_path):
+    """Two halves, labelled. (a) The shell states the mode it will run the reporter in, and
+    passes it the empty ref that selects trend mode — proved for the printed claim by this
+    run, and for the reporter call by reading the single call site (mutate.sh is not run to
+    completion here: that needs Mull). (b) The reporter in that mode does not gate: the very
+    input that exits 1 with --ref exits 0 without it, while still LISTING the unlabelled
+    survivor and recording where the attestation came from."""
+    clone = shared_clone(tmp_path, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 0, out
+    line = attest_line(out)
+    assert "report=trend" in line and "gate=none" in line, line
+    sh = MUTATE.read_text()
+    assert len(re.findall(r"^python3 tools/mutate_report\.py", sh, re.M)) == 1, "more than one reporter call site"
+    assert '--ref "$REPORT_REF"' in sh, "the reporter must be called with the mode-selecting ref variable"
+    assert re.search(r'^\s*ATTEST=1; REPORT_REF=""', sh, re.M), "attest mode must clear the reporter's ref"
+
+    root, reports = _setup(tmp_path, SRC, MUTANTS, {"l3/x.cpp": [[1, 8]]})
+    rc_gate, out_gate, _ = _report(tmp_path, root, reports, "--ref", "origin/main")
+    assert rc_gate == 1, out_gate            # the discriminating half: this input DOES gate in diff mode
+    attest = ("--attest-ref", "origin/main", "--attest-tests", "tests/unit/test_link_master.cpp",
+              "--attest-dirs", "link")
+    rc, out, doc = _report(tmp_path, root, reports, *attest)
+    assert rc == 0, out
+    assert doc["mode"] == "trend", doc["mode"]
+    assert doc["unlabelled"] == 1 and any(s["label"] is None for s in doc["survivors"]), doc
+    assert "UNLABELLED survivor: l3/x.cpp:2:11 cxx_ge_to_gt" in out, out
+    # Provenance lives in the file, not only in stdout (data-model §7 keys are all still there).
+    assert doc["attest"] == {"origin": "changed-tests", "diff_ref": "origin/main",
+                             "tests": ["tests/unit/test_link_master.cpp"], "dirs": ["link"]}, doc
+    assert {"mode", "diff_ref", "mutants_total", "killed", "survived", "not_covered", "kill_rate",
+            "labelled", "unlabelled", "max_unlabelled", "survivors", "stale_labels",
+            "malformed_labels"} <= set(doc), sorted(doc)
+    # And the two are mutually exclusive by construction: an attestation is never a diff-mode run.
+    rc, out, _ = _report(tmp_path, root, reports, "--ref", "origin/main", *attest)
+    assert rc == 2 and "--attest-" in out, out
+
+
+def test_mutate_attestation_is_never_appended_to_the_whole_tree_trend_log(tmp_path):
+    """An attestation mutates one or two dirs; metrics/mutation-trend.jsonl records whole-tree
+    scores. Appending one to the other would silently put a partial score in the series, so
+    --trend-log is disclosed and dropped on that path — and the decision is taken early enough
+    that --dry-run shows it (this run needs no Mull)."""
+    clone = shared_clone(tmp_path, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    log = tmp_path / "trend.jsonl"
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--trend-log", str(log), "--dry-run")
+    assert rc == 0, out
+    assert "--trend-log not appended for a test-only attestation" in out, out
+    assert not log.exists(), log
+    # The whole-tree run it belongs to still takes it.
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--trend-log", str(log), "--dry-run")
+    assert rc == 0 and "not appended" not in out, out
+
+
+def test_mutate_source_change_scoping_is_unchanged(tmp_path):
+    """Changing a test must never widen what can fail a PR: with a source in scope the run is
+    byte-identical whether or not the same diff also touches tests/unit."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    src_only = shared_clone(tmp_path / "a", "link/zz_probe.cpp", "int zz_probe() { return 1; }\n")
+    rc_a, out_a, _ = run(src_only / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    both = shared_clone(tmp_path / "b", "link/zz_probe.cpp", "int zz_probe() { return 1; }\n")
+    _commit(both, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    rc_b, out_b, _ = run(both / "tools" / "mutate.sh", "--diff", "HEAD~2", "--dry-run")
+    assert rc_a == 0 and rc_b == 0, out_a + out_b
+    assert "mode=attest" not in out_b and "mode=attest" not in out_a, out_b
+    assert scope_line(out_a) == scope_line(out_b) == ["link/zz_probe.cpp"], (out_a, out_b)
+    assert oracle_line(out_a) == oracle_line(out_b), (out_a, out_b)
+    assert out_a.replace("HEAD~1", "<ref>") == out_b.replace("HEAD~2", "<ref>"), (out_a, out_b)
+
+
+def test_mutate_test_only_scope_without_oracle_fails_closed(tmp_path):
+    """The attested dir's oracle is the same test_<dir>_* set the source path computes, and
+    fails closed the same way: a test file naming a dir with no registered unit binary can
+    never kill a mutant, so the run fails before any build, with the blind spot named — it
+    does not fall back to the fast path and call that an attestation."""
+    clone = shared_clone(tmp_path, "tests/unit/test_core_health.cpp",
+                         "// a unit test for a dir with no registered unit binary\n")
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 1, out
+    assert "no unit-test oracle for changed dir 'core/'" in out and "blind spot" in out, out
+    assert "nothing in scope" not in out, out
+
+
 # --- tools/mutate_report.py: the triage gate on synthetic Elements reports --------------------
 
 REPORT = ROOT / "tools" / "mutate_report.py"
