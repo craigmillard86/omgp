@@ -27,9 +27,16 @@ name: review-fix
 # resets the labels but a human. Exhaustion escalates `needs-human` exactly as the CI router
 # does. Kill switch: `review_fix_max_attempts: 0`, or disable this workflow.
 # The `gate` script is executed verbatim by tests/workflows/review_fix_harness.js.
+#
+# `edited` (added 2026-09-15, #614 red team): same reasoning as agent-approve/review-followups
+# — claude-code-action posts a placeholder then edits the final verdict in. Parity, not a fix
+# for a live gap here: this gate's `listComments` rescan means a `findings` verdict missed on
+# `created` still gets read whenever any LATER claude[bot] comment triggers a fresh run (no
+# periodic sweep exists here, unlike agent-merge), so the failure direction was already a
+# stalled, human-visible PR waiting on the next round, never a silently dropped record.
 on:
   issue_comment:
-    types: [created]
+    types: [created, edited]
   workflow_dispatch:
     inputs:
       pr:

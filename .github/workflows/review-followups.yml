@@ -9,9 +9,16 @@ name: review-followups
 # Dedup by open-`task` title so re-review on each push does not re-file. Files `task` ONLY —
 # never `ready`/`queued`: release and enrichment stay a human/auto-release decision (GOVERNANCE
 # §1). A hard cap bounds a runaway comment.
+#
+# `edited` (added 2026-09-15, #614 red team, BLOCKING there): claude-code-action posts its
+# verdict comment as a placeholder and edits the final body in (the same shape that left
+# agent-approve missing a verdict on PR #610). This filer reads only the triggering comment's
+# own body and never rescans via listComments, so a `## FOLLOW-UPS` section that only exists
+# after the edit was, until this line, never filed at all — not late, never. Unlike
+# agent-approve/review-fix (both rescan), `edited` here is load-bearing, not parity.
 on:
   issue_comment:
-    types: [created]
+    types: [created, edited]
 
 permissions:
   contents: read

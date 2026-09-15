@@ -39,7 +39,7 @@ issues, comments) — never as direct changes to main.
 | Deep-verify: focused fuzz + diff-scoped mutation | pre-merge deep testing on T2/T3; fails on any fuzz finding or on any surviving mutant on a changed line that is neither killed by a test nor labelled `// mutant-ok(equivalent\|accepted): <why>` on its source line (triage gate, ruled 2026-08-29; the whole-tree kill rate is a nightly trend, never a gate). `tools/mutate.cfg [policy]` constants are T3 — never relaxed to get green | conditional CI job in ci-gate |
 | Claude review on every agent PR | spec-conformance + security review pass, per pushed head | claude-review workflow (advisory findings; machine-readable verdict) |
 | Autonomous merge ≤ T2 | merge only when the tier, the verdicts, every check and the changed paths all clear at ONE head; T3 and human-owned paths never | agent-merge workflow — the merge API call is pinned to that head's sha, so a push landing mid-run makes GitHub refuse (409) rather than merge an unreviewed head; `auto_merge_max_tier: -1` returns the click to a human |
-| Verdict-gated auto-approval ≤ T2 | approval only on a clean review (and, at T2, red-team) verdict for the exact head; stale bot approvals self-dismissed; fail-closed on any unresolved input | agent-approve workflow — `issue_comment` trigger, so the DEFAULT-BRANCH definition and inputs run and a PR cannot rewrite the gate in its own diff (ruling 2026-08-31; hardened per Copilot review on #103) |
+| Verdict-gated auto-approval ≤ T2 | approval only on a clean review (and, at T2, red-team) verdict for the exact head; stale bot approvals self-dismissed; fail-closed on any unresolved input | agent-approve workflow — `issue_comment` trigger, so the DEFAULT-BRANCH definition and inputs run and a PR cannot rewrite the gate in its own diff (ruling 2026-08-31; hardened per Copilot review on #103; live gap found 2026-09-15 on PR #610 — claude-code-action edits its verdict comment's body in after posting a placeholder, so a `created`-only trigger could catch the placeholder and never see the finalised verdict; the merge attempt that followed correctly 405'd rather than merging an unreviewed head, but for the wrong reason — no approval had ever been possible, not merely late; trigger now also fires on `edited`) |
 | Red team: PR attack on T2/T3 + monthly hostile-module protocol attack | falsification with runnable reproducers | red-team workflow (advisory; findings need evidence) |
 | WIP cap (`wip_cap` in .github/agent-config.yml, currently 2; stories in flight = open agent PRs ∪ claimed tasks, deduped per story; ruling 2026-09-03) | review capacity governs autonomy; `wip_cap: 1` restores single-slot | dispatch workflow |
 | `ready`-only pull | humans release all autonomous work | dispatch workflow |
@@ -132,7 +132,23 @@ the enforcement.
     in the PR body. Every other real finding is routed to `## FOLLOW-UPS`
     and filed as a `task` issue by `review-followups.yml` — scheduled, not
     dropped — and the comment must say the budget applied and which
-    findings it moved.
+    findings it moved. (Amended 2026-09-15, red team on PR #614, fixed the
+    same day: "scheduled, not dropped" depends on the filer actually SEEING
+    the verdict comment, and `review-followups.yml` triggered on `created`
+    only while reading no comment but the trigger's own — so a `## FOLLOW-UPS`
+    section claude-code-action edited into its placeholder after the
+    triggering event would have been never filed at all, silently, with no
+    rescan able to recover it. Of the four `issue_comment` decision gates —
+    `agent-approve`, `agent-merge`, `review-fix`, `review-followups`
+    (`claude-mention` is a fifth `issue_comment` workflow, but decides
+    nothing) — it was the only one calling no `listComments`, so it was the
+    only one whose miss would have been unrecoverable rather than merely
+    late. `review-fix` was `created`-only too; its rescan would not have
+    rescued it either — a rescan only ever runs inside a run that was
+    triggered — but its miss would have failed in the safe DIRECTION: a
+    stalled PR a human can see, not a dropped record. Both now carry
+    `types: [created, edited]`, `review-followups` because the gap was live,
+    `review-fix` for parity.)
   - **What this deliberately gives up.** A clean verdict past the budget
     can now co-exist with known, filed, non-HIGH weaknesses, and
     `agent-approve`/`agent-merge` act on that verdict. That is the trade:
