@@ -1291,6 +1291,66 @@ TEST_CASE(
     REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED);
 }
 
+TEST_CASE("a late FAILURE for a fault-time probe still inside its window, at the other rate, moves "
+          "no state either",
+          "[timing:bit_rate_fallback][timing:T_resp]") {
+    // Round-17 red team on #530, finding 1: the failure half of the late-probe rule was
+    // pinned by nothing — reinstating `ok &&` left the suite green. A's fallback-rate probe is
+    // outstanding, B clears the fault at the reference rate, and A's late FAILURE for that
+    // probe arrives inside the window with A already past its offline threshold: counted, it
+    // would send A OFFLINE on a probe at a rate the trunk is no longer using; it is the old
+    // probe's outcome and moves nothing.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    ThreeNodeRig::build(tracker);                     // A SUSPECT since ~1'000 us
+    const uint64_t t0 = 1'000 + kThresholdUs + 1'000; // A past its offline threshold
+    const Probe pa = tracker.next_probe(t0);          // A @ fallback — outstanding
+    const Probe pb = tracker.next_probe(t0);          // B @ reference
+    REQUIRE(pa.addr == kNodeA);
+    REQUIRE(pa.bit_rate == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(pb.addr == kNodeB);
+    tracker.on_result(kNodeB, true, t0 + 100); // clears at the reference rate
+    REQUIRE_FALSE(tracker.bus_fault());
+    const size_t offline_before = listener.count(Notice::OFFLINE);
+    tracker.on_result(kNodeA, false, t0 + 200); // A's late failure for the fallback probe
+    REQUIRE(tracker.state(kNodeA) == HealthState::SUSPECT); // not OFFLINE on the old probe
+    REQUIRE(listener.count(Notice::OFFLINE) == offline_before);
+    // …and past the window an ordinary failure at the rate in use counts, as ever.
+    tracker.on_result(kNodeA, false, t0 + 10'000'000);
+    REQUIRE(tracker.state(kNodeA) == HealthState::OFFLINE);
+}
+
+TEST_CASE("the late-probe rule's window is inclusive: at exactly one window the outcome is the "
+          "probe's, one microsecond later it is fresh",
+          "[timing:bit_rate_fallback][timing:T_resp]") {
+    // Round-17 red team on #530, finding 2: `<=` for `<` at the window boundary survived. Same
+    // shape as the pass write-off's boundary case, on this rule: A's fallback probe at t0, B
+    // clears at the reference rate, A's ok arrives at t0 + window (still the probe's: SUSPECT)
+    // or t0 + window + 1 (fresh: ENROLLED).
+    constexpr uint64_t kWindow =
+        2ull * kMaxWire * byte_time_us(omgp::TRUNK_bit_rate_fallback) + omgp::TRUNK_T_resp_us;
+    for (const uint64_t late : {uint64_t{0}, uint64_t{1}}) {
+        CAPTURE(late);
+        FakeClock clock;
+        RecordingListener listener;
+        HealthTracker tracker(clock, listener);
+        ThreeNodeRig::build(tracker);
+        const uint64_t t0 = 4'000;
+        const Probe pa = tracker.next_probe(t0); // A @ fallback — outstanding
+        const Probe pb = tracker.next_probe(t0); // B @ reference
+        REQUIRE(pa.bit_rate == omgp::TRUNK_bit_rate_fallback);
+        REQUIRE(pb.addr == kNodeB);
+        tracker.on_result(kNodeB, true, t0 + 100); // clears at the reference rate
+        REQUIRE_FALSE(tracker.bus_fault());
+        tracker.on_result(kNodeA, true, t0 + kWindow + late);
+        if (late == 0)
+            REQUIRE(tracker.state(kNodeA) == HealthState::SUSPECT); // the probe's: moves nothing
+        else
+            REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED); // fresh: an ordinary answer
+    }
+}
+
 TEST_CASE("a second outstanding probe does not cancel the first's episode-boundary exemption",
           "[timing:bit_rate_fallback][timing:T_resp]") {
     // Round-10 review on #530, finding 1 [HIGH]: round 9's "newest handout supersedes" rule
