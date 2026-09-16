@@ -4496,3 +4496,52 @@ wording is unsatisfiable in the `implement` job as configured" — is likewise n
 *under the current allow-list grant*, not unsatisfiable *in that environment*. **Supersedes:** none.
 **Related:** T049 (`tasks.md`), which carries the same bootstrap-path clause, and the 2026-09-12
 T040/#58 ruling (the amend-the-criterion precedent, option C).
+
+---
+
+## 2026-09-16 — the rate in use is a ONE-BIT quantity in `HealthTracker`, so `set_bit_rate` cannot mirror `Master`'s refusal rule
+
+**Context:** red team round 2 on PR #651 (#578), finding 1 [MEDIUM].
+`contracts/link-cpp.md` "Health tracker" specifies `HealthTracker::set_bit_rate` as
+"Refused (not assigned) on **exactly** `Master::set_bit_rate`'s rule — `bps == 0` or
+`bps > 10 Mb/s`". That rule is a *byte-timing* precondition, and it admits every rate from
+1 bit/s to 10 Mb/s. `HealthTracker` cannot hold such a rate. Every trunk §7 rule in
+`link/health.cpp` stores a probe's rate as ONE BIT (`BusState::probe_fallback`,
+"fallback : reference"), and `evaluate_declare()` reduces the rate in use to that same bit
+(`bus_.bit_rate == TRUNK_bit_rate_fallback ? kAllProbeBits : 0`). With a third rate
+accepted, every address owing the layer no outcome was recorded as "polled at the REFERENCE
+rate": an answer to a poll that went out at 500 kb/s took §7's first clear rule, cleared the
+fault at 1 Mb/s, moved the rate in use to 1 Mb/s and enrolled its node there — the same
+inversion the "a new episode at the fallback rate reads a pre-declare poll's answer as a
+fallback one" case exists to prevent, one rate to the side of the two
+`docs/trunk-link-layer.md` §9 names. Reachable only through `set_bit_rate`: before it,
+`bus_.bit_rate` was written only by the private `clear_fault`, which is called with §9's two
+constants and nothing else (a control on the file's contents, not a language guarantee).
+
+**Options:** (a) **refuse, at this layer, every rate §9 does not name** — the rate model
+gains no third value and the §7 rules keep the domain they are written for; stricter than
+`Master`'s rule and subsuming it (both §9 rates have a nonzero byte time), so the property
+that rule exists for still holds. (b) Give the rate model a real rate rather than a bit
+(per-address stored rates, §7's clear rules rewritten in terms of "the rate this probe went
+out at" vs "the rate in use") — a large change, and it needs §7 semantics for a rate §9 does
+not define. (c) Leave `set_bit_rate` permissive and have F3 promise never to select a third
+rate — an unenforceable obligation guarding a silent, rig-level misbehaviour.
+
+**Recommended:** (a), implemented on `task/578`: `bps != TRUNK_bit_rate && bps !=
+TRUNK_bit_rate_fallback` returns, assigning nothing and counting nothing. This is a **stated
+divergence** from the contract sentence quoted above, not a silent one; the contract file is
+unchanged here (a human-ruling artefact). Two consequences a ruling should address: the
+contract's "exactly `Master::set_bit_rate`'s rule" needs amending to "§9's two rates" for
+this method, and F3 obligation 3 ("the wire and this tracker set to the layer above's rate
+in the same step") becomes unsatisfiable for a rate outside §9 — a caller that selects one
+puts the two out of step, which is that obligation's violation and not a state this layer
+can represent. `Master::set_bit_rate` itself is untouched: it times bytes, it does not
+classify rates, so the 2026-09-06 amendment's recommendation (a) still stands there and its
+option (d) — restricting `Master` contractually to §9's two rates — is still unruled and
+still not taken.
+
+**Ruling:** pending — human (contract text; `contracts/link-cpp.md` "Health tracker").
+**Related:** the 2026-09-06 "Master::set_bit_rate refuses any rate whose byte time truncates
+to 0 µs" entry, whose option (d) this is the `HealthTracker`-side analogue of; that entry is
+neither amended nor superseded — its subject is `Master`.
+**Supersedes:** none.

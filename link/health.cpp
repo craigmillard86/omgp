@@ -704,13 +704,29 @@ void HealthTracker::set_bit_rate(uint32_t bps) {
     // leaves in place for ever (no automatic return, FR-025/FR-026). Moving the wire alone left
     // this tracker 8.7x wrong about the rate its probes go out at (round-1 red team on #523).
     //
-    // Refused on exactly Master::set_bit_rate's predicate (link/master.cpp), not a re-derived
-    // bound: byte_time_us() has a nonzero precondition, and above 10 Mb/s its integer byte time
-    // truncates to 0 us, which would hand every timing computation downstream a zero byte time.
-    // A refusal assigns nothing and counts nothing — it is not a change (docs/OPEN-QUESTIONS.md
-    // 2026-09-06 as amended; round-2 red team on #523). The bps == 0 arm must stay FIRST: it is
-    // what keeps byte_time_us's own assert out of reach.
-    if (bps == 0 || byte_time_us(bps) == 0)
+    // Refused on every rate trunk §9 does not name. This layer cannot HOLD a third rate: it
+    // stores each probe's rate as ONE BIT (BusState::probe_fallback, "fallback : reference")
+    // and evaluate_declare() reduces the rate in use to that same bit, so a rate that is
+    // neither was recorded for every address owing this layer no outcome as "polled at the
+    // REFERENCE rate" — and §7's first clear rule then fired on that, clearing the fault at
+    // 1 Mb/s, moving the rate in use there and enrolling a node at a rate it had never
+    // answered (red team round 2 on #578, finding 1). Refusing is the safe default of the two
+    // remedies: the other — giving the rate model a third value — needs §7 rules for a rate
+    // §9 does not define, which is a human ruling, not an implementation choice.
+    //
+    // STRICTER than Master::set_bit_rate's predicate (link/master.cpp: bps == 0, or a byte
+    // time that truncates to 0 us above 10 Mb/s), and it SUBSUMES it: both §9 rates have a
+    // nonzero byte time, so no caller downstream of bit_rate() can be handed a zero byte time
+    // — the property that predicate exists for. Demonstrated by "set_bit_rate is refused on
+    // every rate trunk §9 does not name ..." in tests/unit/test_link_busfault.cpp, which
+    // asserts both §9 rates past byte_time_us and every refusal at and around Master's bound.
+    // A DIVERGENCE from contracts/link-cpp.md "Health tracker", which says "refused on exactly
+    // Master::set_bit_rate's rule" — stated, not silently taken, and recorded in
+    // docs/OPEN-QUESTIONS.md 2026-09-16 ("the rate in use is a one-bit quantity"), ruling
+    // pending. Master's own domain is unchanged by this: it times bytes, it does not classify
+    // rates. A refusal assigns nothing and counts nothing — it is not a change
+    // (docs/OPEN-QUESTIONS.md 2026-09-06 as amended; round-2 red team on #523).
+    if (bps != omgp::TRUNK_bit_rate && bps != omgp::TRUNK_bit_rate_fallback)
         return;
     // data-model.md §7 "Rate and the schedule": `bit_rate` is the rate in use, and every reader
     // of it is shut while a fault stands — next_probe() overwrites it with the probe's own rate,
@@ -718,11 +734,19 @@ void HealthTracker::set_bit_rate(uint32_t bps) {
     // !bus_.fault. So this call ends no episode, moves no §6 state and disturbs no reference
     // pass BY CONSTRUCTION (those three readers are the whole of it, `bus_.bit_rate` in this
     // file); demonstrated by "set_bit_rate is never a clear ..." in
-    // tests/unit/test_link_busfault.cpp. Outside a fault it moves no §6 state either, and that
-    // is NOT by construction but by note_probe()'s record: the late-outcome exception is read
-    // against whether the outstanding probe was a fault-time one, so a selection cannot pull an
-    // ordinary probe's answer into it (red team round 1 on #578, finding 1) — demonstrated by
-    // "a selection under an outstanding probe does not suppress that probe's outcome ...".
+    // tests/unit/test_link_busfault.cpp. Outside a fault the call moves no §6 state either.
+    // What it can change is how a LATER outcome reads, and exactly one kind of it: an ORDINARY
+    // probe outstanding when this is called is untouched — NOT by construction but by
+    // note_probe()'s record, which is what the late-outcome exception reads, so a selection
+    // cannot pull an ordinary probe's answer into it (red team round 1 on #578, finding 1;
+    // demonstrated by "a selection under an outstanding probe does not suppress that probe's
+    // outcome ..."). A FAULT-TIME probe still outstanding after its episode cleared IS caught
+    // by that exception when this call moves the rate in use away from the probe's rate: its
+    // §6 transition does not happen. That is the contract's rule ("issued at a rate other than
+    // the rate now in use"), not a defect of this method — but it IS a limit on what this
+    // method may claim, and health.hpp says so rather than claiming invariance (red team
+    // round 2 on #578, finding 2; demonstrated by "a selection after a clear voids the outcome
+    // of a FAULT-TIME probe still outstanding ...").
     //
     // §8 counts a change of the rate in use (data-model.md:267), which is why note_wire_rate()
     // alone cannot stand in for the count: a fault-time alternation leaves `wire_rate` at the
