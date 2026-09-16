@@ -2075,32 +2075,97 @@ TEST_CASE("set_bit_rate(0) is refused: neither the rate in use nor rate_changes 
     REQUIRE(byte_time_us(tracker.bit_rate()) != 0);
 }
 
-TEST_CASE("set_bit_rate is refused on exactly Master's byte-time rule, at its boundary", "[link]") {
-    // Not a re-derived bound: `bps == 0 || byte_time_us(bps) == 0` (link/master.cpp:41), so
-    // 10 Mb/s — where 10 bits take exactly 1 us — is accepted and the first rate above it is
-    // refused. trunk §9's two rates both satisfy it; restricting the selection to those two is
-    // a separate, unruled question (docs/OPEN-QUESTIONS.md 2026-09-06, option (d)) and is NOT
-    // asserted here.
+TEST_CASE("set_bit_rate is refused on every rate trunk §9 does not name, including ones Master's "
+          "byte-time rule accepts",
+          "[timing:bit_rate_fallback]") {
+    // Red team round 2 on #578, finding 1 [MEDIUM]. The refusal was `bps == 0 ||
+    // byte_time_us(bps) == 0` — exactly Master::set_bit_rate's predicate (link/master.cpp:41),
+    // which accepts everything from 1 bit/s to 10 Mb/s. This layer cannot HOLD such a rate:
+    // every §7 rule reads a probe's rate as one bit (BusState::probe_fallback, "fallback :
+    // reference") and evaluate_declare() reduces the rate in use to that same bit, so a third
+    // rate is recorded for every quiet address as "its poll went out at the REFERENCE rate".
+    // The episode that follows from that is the case below. Refusing here is STRICTER than
+    // Master's rule and subsumes it — §9's two rates both have a nonzero byte time — so the
+    // property the byte-time guard existed for still holds: the rate in use is always one a
+    // byte can be timed at.
     FakeClock clock;
     RecordingListener listener;
     HealthTracker tracker(clock, listener);
 
-    const uint32_t too_fast = 10000000u + 1u; // the first rate at which 10 bits take < 1 us
-    REQUIRE(byte_time_us(10000000u) == 1);
-    REQUIRE(byte_time_us(too_fast) == 0);
+    REQUIRE(byte_time_us(omgp::TRUNK_bit_rate) != 0);
+    REQUIRE(byte_time_us(omgp::TRUNK_bit_rate_fallback) != 0);
+    REQUIRE(byte_time_us(10000000u) == 1);      // Master accepts this one (its boundary)…
+    REQUIRE(byte_time_us(10000000u + 1u) == 0); // …and refuses the first rate above it
 
-    tracker.set_bit_rate(too_fast);
-    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
-    REQUIRE(tracker.bus_stats().rate_changes == 0);
-    tracker.set_bit_rate(20000000u);
-    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
-    REQUIRE(tracker.bus_stats().rate_changes == 0);
+    // Rates Master would accept (1 bit/s … 10 Mb/s) and rates it would refuse, together: this
+    // layer's answer to all of them is the same, because none of them is a rate §9 names.
+    const uint32_t refused[] = {
+        0u, 1u, 9600u, 500000u, 2000000u, 10000000u, 10000000u + 1u, 20000000u, 0xFFFFFFFFu,
+    };
+    for (uint32_t bps : refused) {
+        tracker.set_bit_rate(bps);
+        REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+        REQUIRE(tracker.bus_stats().rate_changes == 0);
+        REQUIRE(tracker.next_probe(0).bit_rate == omgp::TRUNK_bit_rate);
+        REQUIRE(byte_time_us(tracker.bit_rate()) != 0);
+    }
 
-    // The boundary itself is accepted, and is then the rate in use and the probes' rate.
-    tracker.set_bit_rate(10000000u);
-    REQUIRE(tracker.bit_rate() == 10000000u);
+    // …and refused the same way over a rate the layer above did select, which stands.
+    tracker.set_bit_rate(omgp::TRUNK_bit_rate_fallback);
     REQUIRE(tracker.bus_stats().rate_changes == 1);
-    REQUIRE(tracker.next_probe(0).bit_rate == 10000000u);
+    for (uint32_t bps : refused) {
+        tracker.set_bit_rate(bps);
+        REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+        REQUIRE(tracker.bus_stats().rate_changes == 1);
+        REQUIRE(byte_time_us(tracker.bit_rate()) != 0);
+    }
+    // Both rates §9 DOES name are accepted, in either direction — the refusal above narrows
+    // the domain, it does not close it.
+    tracker.set_bit_rate(omgp::TRUNK_bit_rate);
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+    REQUIRE(tracker.bus_stats().rate_changes == 2);
+}
+
+TEST_CASE("a rate trunk §9 does not name never becomes the rate a fault is cleared at",
+          "[timing:bit_rate_fallback]") {
+    // Red team round 2 on #578, finding 1 [MEDIUM] — the episode the refusal above prevents.
+    // With 500 kb/s accepted as the rate in use, evaluate_declare()'s
+    // `bit_rate == TRUNK_bit_rate_fallback ? kAllProbeBits : 0` recorded every address owing
+    // this layer no outcome as "probed at the reference rate", so A's answer to its 500 kb/s
+    // poll took §7's reference-rate clear rule: the fault cleared at 1 Mb/s, the rate in use
+    // JUMPED from 500 kb/s to 1 Mb/s, and A was ENROLLED at a rate it has never answered. That
+    // is the inversion "a new episode at the fallback rate reads a pre-declare poll's answer as
+    // a fallback one" exists to prevent, one rate to the side of the two §9 names — A would be
+    // polled at a rate it cannot hear, fail back into SUSPECT and re-declare the fault it just
+    // cleared. What this case pins after the refusal: the rate in use is a §9 rate throughout,
+    // so the clear is at a rate A really was polled at.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    constexpr uint32_t kThirdRate = 500000u; // byte_time_us == 20 us: Master's rule accepts it
+    REQUIRE(byte_time_us(kThirdRate) != 0);
+
+    enrol(tracker, kNodeA, 0);
+    enrol(tracker, kNodeB, 0);
+    enrol(tracker, kNodeC, 0);
+    tracker.set_bit_rate(kThirdRate);
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate); // refused; the rig runs at §9's rate
+    REQUIRE(tracker.bus_stats().rate_changes == 0);
+
+    fail_to_suspect(tracker, kNodeA, ThreeNodeRig::kSuspectA);
+    fail_to_suspect(tracker, kNodeB, ThreeNodeRig::kSuspectB);
+    fail_to_suspect(tracker, kNodeC, ThreeNodeRig::kSuspectC);
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+
+    // A's pre-declare poll, answered after the declare: read at the rate in use, which is the
+    // rate A was actually polled at, so §7's reference-rate clear rule is telling the truth.
+    tracker.on_result(kNodeA, true, ThreeNodeRig::kSuspectC + 1);
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+    REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED);
+    REQUIRE(listener.count(Notice::BUS_RECOVERED) == 1);
 }
 
 TEST_CASE("an accepted rate counts one change even when the wire is already at it",
@@ -2290,6 +2355,64 @@ TEST_CASE("a probe issued after the clear is not read as the fault-time probe th
     tracker.set_bit_rate(omgp::TRUNK_bit_rate_fallback);                        // rate moves…
     tracker.on_result(kNodeD, true, 3'000);                                     // …and D answers
     REQUIRE(tracker.state(kNodeD) == HealthState::ENROLLED);
+}
+
+TEST_CASE("a selection after a clear voids the outcome of a FAULT-TIME probe still outstanding, "
+          "and that is the contract's exception, not an invariance set_bit_rate can claim",
+          "[timing:bit_rate_fallback]") {
+    // Red team round 2 on #578, finding 2 [MEDIUM]. contracts/link-cpp.md "Health tracker":
+    // outside a fault, the late outcome of a fault-time probe still outstanding inside its
+    // outcome window and issued AT A RATE OTHER THAN THE RATE NOW IN USE moves no state. The
+    // rate now in use has two writers, and set_bit_rate is the second — so a selection taken
+    // after the episode cleared can put an outstanding FAULT-TIME probe inside that exception
+    // and void the §6 transition its answer would otherwise have taken. That is the rule
+    // working as the contract writes it (an ok at the reference rate is not proof the node
+    // hears the fallback rate the layer above has just selected — round-15 red team), and it
+    // is why set_bit_rate's doc-block may NOT say an outstanding probe's outcome is read
+    // "exactly as it would have been without the call": true of an ORDINARY probe (the two
+    // cases above), false here. Pinned so the narrowed sentence is demonstrated rather than
+    // asserted; this case is green before and after that correction — the fix for this finding
+    // is the sentence, not the behaviour (CLAUDE.md rule 11).
+    auto drive = [](HealthTracker& t, bool select) {
+        ThreeNodeRig::build(t);
+        REQUIRE(t.bus_fault());
+        probe_until(t, kNodeD, omgp::TRUNK_bit_rate); // D's fault-time probe, left outstanding
+        // The next reference-rate probe to any OTHER address clears the episode. The first
+        // such probe, deliberately: the rotation reaches D again after a full turn, and a
+        // second probe to D would overwrite the very record this case is about.
+        Probe clearer = t.next_probe(0);
+        while (clearer.addr == kNodeD || clearer.bit_rate != omgp::TRUNK_bit_rate)
+            clearer = t.next_probe(0);
+        t.on_result(clearer.addr, true, 5'000); // …a reference-rate answer clears the fault
+        REQUIRE_FALSE(t.bus_fault());
+        REQUIRE(t.bit_rate() == omgp::TRUNK_bit_rate);
+        if (select)
+            t.set_bit_rate(omgp::TRUNK_bit_rate_fallback);
+        t.on_result(kNodeD, true, 6'000); // inside D's outcome window either way
+    };
+
+    FakeClock control_clock;
+    FakeClock selected_clock;
+    RecordingListener control_listener;
+    RecordingListener selected_listener;
+    HealthTracker control(control_clock, control_listener);
+    HealthTracker selected(selected_clock, selected_listener);
+    drive(control, false);
+    drive(selected, true);
+
+    // Without the selection D's probe rate IS the rate in use, the exception does not apply,
+    // and §6's "any valid response -> ENROLLED" runs.
+    REQUIRE(control.state(kNodeD) == HealthState::ENROLLED);
+    // With it, the two are apart and D's late outcome moves nothing — including the notice:
+    // the two rigs differ by exactly D's ENROLLED and nothing else.
+    REQUIRE(selected.state(kNodeD) == HealthState::UNENROLLED);
+    REQUIRE(control_listener.count(Notice::ENROLLED) ==
+            selected_listener.count(Notice::ENROLLED) + 1);
+    // The selection itself still did what it says: the rate in use moved, nothing else.
+    REQUIRE(selected.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE_FALSE(selected.bus_fault());
+    REQUIRE(selected_listener.count(Notice::BUS_RECOVERED) ==
+            control_listener.count(Notice::BUS_RECOVERED));
 }
 
 TEST_CASE("a selection of the rate already in use still counts the wire move it makes",
