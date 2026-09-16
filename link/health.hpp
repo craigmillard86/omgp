@@ -87,7 +87,11 @@ class HealthTracker {
     // ever (ruling 2026-09-14). Assigns what bit_rate() reports and, while !bus_fault(), the
     // rate enrolment probes go out at; during a fault the probe's rate is the probe's own
     // (the alternation, the reference pass). NEVER a clear: it moves no node state, notifies
-    // nothing and ends no episode. Refused — assigning nothing and counting nothing — on
+    // nothing and ends no episode — including a node whose probe is outstanding when it is
+    // called, whose outcome is read exactly as it would have been without the call
+    // (BusState::probe_fault_time; red team round 1 on #578). Counts one rate change when it
+    // moves the rate in use or the wire (the two come apart during a fault) and none when it
+    // moves neither. Refused — assigning nothing and counting nothing — on
     // exactly Master::set_bit_rate's predicate (link/master.cpp: bps == 0 or a byte time that
     // truncates to 0 us). The caller moves the wire in the same step: F3 obligation 3 in
     // contracts/link-cpp.md "What F3/F4 need", ASSUMED here, not enforceable at this layer.
@@ -200,6 +204,19 @@ class HealthTracker {
         // never drops an earlier live bit — the window is the only bound (round 9's "newest
         // handout supersedes" rule reinstated round 6's oscillation; withdrawn at round 10).
         uint16_t probe_live = 0;
+        // One bit per address: the probe `probe_live` above is waiting on went out while a
+        // fault stood — the alternation's or the reference pass's. Written by note_probe()
+        // with every handout and read only alongside that address's live bit, so a stale bit
+        // is unreadable. Not a data-model.md §7 field: it is what bounds on_result's
+        // late-outcome exception to "a FAULT-TIME probe" (contracts/link-cpp.md "Health
+        // tracker"). That bound used to be inferred — a probe whose rate differs from the rate
+        // in use — which held only while a clear was the one writer of `bit_rate`;
+        // set_bit_rate is a second one, and with it the inference put an ordinary enrolment
+        // probe's answer, on a rig that had never faulted, in the exception's scope and left
+        // the node UNENROLLED (red team round 1 on #578, finding 1). Demonstrated by "a
+        // selection under an outstanding probe does not suppress that probe's outcome ..." and
+        // "every node that answers a probe enrols ..." in tests/unit/test_link_busfault.cpp.
+        uint16_t probe_fault_time = 0;
     };
 
     void notify(Notice notice, uint8_t addr);

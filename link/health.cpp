@@ -153,8 +153,19 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // return (ruling 2026-09-13). Demonstrated by the "... does not enrol its node ..." pair,
     // "after a clear, ordinary status-poll answers ..." and "a late failure for a written-off
     // pass probe ..." in tests/unit/test_link_busfault.cpp.
+    // "Fault-time" is READ, from the bit note_probe() wrote for this very probe, not inferred
+    // from its rate differing from the rate in use: that inference held only while a clear was
+    // the one writer of `bus_.bit_rate` (a control on the file's contents, never a language
+    // guarantee), and set_bit_rate is a second writer. Without this conjunct a selection made
+    // while an ORDINARY enrolment probe was outstanding put that probe's answer in the
+    // exception's scope on a rig with no fault in its history, and §6's "any valid response ->
+    // ENROLLED" was discarded — for failures too, so the table went blind in both directions
+    // (red team round 1 on #578, finding 1). Demonstrated by "a selection under an outstanding
+    // probe does not suppress that probe's outcome ..." and "every node that answers a probe
+    // enrols ..." in tests/unit/test_link_busfault.cpp.
     const bool late_fault_probe =
         !bus_.fault && (bus_.probe_live & probe_bit(addr)) != 0 &&
+        (bus_.probe_fault_time & probe_bit(addr)) != 0 &&
         elapsed_us(now_us, records_[addr].probe_issued_us) <= kOutcomeWindowUs &&
         at_reference != (bus_.bit_rate == omgp::TRUNK_bit_rate);
     // The outcome consumes the live record — read above first, cleared here (round 16).
@@ -386,13 +397,20 @@ Probe HealthTracker::pass_probe(uint64_t now_us) {
         // the cursor past the probe on the wire would leave a pass that can never end
         // (round-13 red team on #472). Fail-safe under a violated assumption.
         //
-        // The call below cannot change anything on this path, BY CONSTRUCTION: `pass_addr`
-        // is non-zero only between the loop below issuing a pass probe at TRUNK_bit_rate and
-        // that probe's outcome, and nothing can move the wire rate in between — next_probe()
-        // routes here whenever fault && ref_pass_left > 0, and the two places that end a pass
-        // (on_result's decrement, clear_fault) both zero `pass_addr` first. So wire_rate is
-        // already TRUNK_bit_rate and note_wire_rate returns without touching rate_changes.
-        // By the same construction `pass_addr`'s remembered probe rate is already the
+        // The call below is LIVE, and was mislabelled until #578: it used to argue that
+        // `pass_addr` is non-zero only between the loop below issuing a pass probe at
+        // TRUNK_bit_rate and that probe's outcome, and that nothing could move the wire rate in
+        // between — next_probe() routes here whenever fault && ref_pass_left > 0, and the two
+        // places that end a pass (on_result's decrement, clear_fault) both zero `pass_addr`
+        // first. HealthTracker::set_bit_rate is that something: the layer above's selection
+        // moves the wire in the same step (F3 obligation 3) and can land with the pass probe
+        // still outstanding, so this re-yield puts the reference rate back on the wire and the
+        // count is real. Demonstrated by "a selection under an outstanding pass probe is
+        // counted, and so is the re-yield that puts the reference rate back on the wire" in
+        // tests/unit/test_link_busfault.cpp, which is also what kills the deleted-call mutant
+        // the mutant-ok(equivalent) label here used to excuse (red team round 1 on #578,
+        // finding 3). Where no selection intervenes the call still changes nothing.
+        // `pass_addr`'s remembered probe rate, unlike the wire rate, is still the
         // reference rate — the loop below cleared its bit when it issued this very probe, and
         // only a probe going out moves a bit — so there is no note_probe() call here, and
         // DELIBERATELY: note_probe() also stamps `probe_issued_us`, the epoch the write-off in
@@ -402,7 +420,6 @@ Probe HealthTracker::pass_probe(uint64_t now_us) {
         // walk the cursor past the frame on the wire (round-13 red team on #472). If it
         // re-transmits on that re-yield, the second frame's own window is not this layer's to
         // track (round-15 review): restamping here would reopen round 7's unbounded hold.
-        // mutant-ok(equivalent, cxx_remove_void_call): a no-op call on this path.
         note_wire_rate(omgp::TRUNK_bit_rate);
         return Probe{bus_.pass_addr, omgp::TRUNK_bit_rate};
     }
@@ -520,6 +537,16 @@ void HealthTracker::note_probe(uint8_t addr, uint32_t bit_rate, uint64_t now_us)
     // newest handout is live" and reinstated round 6's oscillation for every other outstanding
     // probe (round-10 review, finding 1); withdrawn.
     bus_.probe_live = static_cast<uint16_t>(bus_.probe_live | probe_bit(addr));
+    // …and whether it is a FAULT-TIME probe, which is what bounds on_result's late-outcome
+    // exception (health.hpp, BusState::probe_fault_time). Recorded here rather than inferred
+    // there from "its rate is not the rate in use": that inference held only while a clear was
+    // the one writer of `bus_.bit_rate`, and HealthTracker::set_bit_rate is a second one (red
+    // team round 1 on #578, finding 1). Assigned on every handout, not only when the fault
+    // stands, so the bit describes THIS probe and no earlier one.
+    if (bus_.fault)
+        bus_.probe_fault_time = static_cast<uint16_t>(bus_.probe_fault_time | probe_bit(addr));
+    else
+        bus_.probe_fault_time = static_cast<uint16_t>(bus_.probe_fault_time & ~probe_bit(addr));
     records_[addr].probe_issued_us = now_us;
 }
 
@@ -691,21 +718,33 @@ void HealthTracker::set_bit_rate(uint32_t bps) {
     // !bus_.fault. So this call ends no episode, moves no §6 state and disturbs no reference
     // pass BY CONSTRUCTION (those three readers are the whole of it, `bus_.bit_rate` in this
     // file); demonstrated by "set_bit_rate is never a clear ..." in
-    // tests/unit/test_link_busfault.cpp. Outside a fault it does move the late-fault-probe
-    // rule's reference point, which is the rule as written: that outcome is read against the
-    // rate now IN USE, whoever last set it.
+    // tests/unit/test_link_busfault.cpp. Outside a fault it moves no §6 state either, and that
+    // is NOT by construction but by note_probe()'s record: the late-outcome exception is read
+    // against whether the outstanding probe was a fault-time one, so a selection cannot pull an
+    // ordinary probe's answer into it (red team round 1 on #578, finding 1) — demonstrated by
+    // "a selection under an outstanding probe does not suppress that probe's outcome ...".
     //
     // §8 counts a change of the rate in use (data-model.md:267), which is why note_wire_rate()
-    // cannot stand in for the count: a fault-time alternation leaves `wire_rate` at the fallback
-    // rate while `bit_rate` is still the reference, so note_wire_rate() would see nothing to
-    // count and the change would be lost. Counted here, where it is decided (§8) — demonstrated
-    // by "an accepted rate counts one change even when the wire is already at it".
-    const bool changed = bps != bus_.bit_rate;
+    // alone cannot stand in for the count: a fault-time alternation leaves `wire_rate` at the
+    // fallback rate while `bit_rate` is still the reference, so note_wire_rate() would see
+    // nothing to count and the change of the rate in use would be lost. Counted here, where it
+    // is decided (§8) — demonstrated by "an accepted rate counts one change even when the wire
+    // is already at it".
+    //
+    // EITHER move counts, and one call counts at most once. F3 obligation 3
+    // (contracts/link-cpp.md "What F3/F4 need") puts this rate on the wire in the same step, so
+    // a selection of the rate already IN USE is still a wire move whenever the alternation left
+    // the other rate there — stamped without being counted, that physical change was lost
+    // entirely: the next probe at that rate found `wire_rate` already there and counted nothing
+    // either, so the total tracked how often the layer above re-asserted its selection rather
+    // than what the rate did (red team round 1 on #578, finding 2). Demonstrated by "a
+    // selection of the rate already in use still counts the wire move it makes". Not two
+    // counts when both move: one action, one count — "set_bit_rate moves the rate in use
+    // and, with no fault, the enrolment probes with it" pins the total at 1.
+    const bool changed = bps != bus_.bit_rate || bps != bus_.wire_rate;
     bus_.bit_rate = bps;
-    // F3 obligation 3 (contracts/link-cpp.md "What F3/F4 need"): the caller puts this rate on
-    // the wire in the same step, so the wire is at `bps` from here — recorded, not counted
-    // again, or the one physical change would count twice (once here, once at the next probe
-    // that goes out at it).
+    // Recorded, not counted again below by the next probe that goes out at it: from here the
+    // wire is at `bps` (obligation 3), so one physical change cannot count twice.
     bus_.wire_rate = bps;
     if (changed)
         ++stats_.rate_changes;
