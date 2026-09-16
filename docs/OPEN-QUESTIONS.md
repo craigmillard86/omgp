@@ -4591,3 +4591,62 @@ divergence is named in `link/health.{hpp,cpp}`, `link/README.md` and here.
 same contract section, independent question); the 2026-09-13 "no automatic return" ruling,
 which is what leaves the fallback rate in use after the clear and so makes this reachable.
 **Supersedes:** none.
+
+---
+
+## 2026-09-16 — a rate move by `set_bit_rate` does not strand an outstanding probe; the same move by a clear does. Which of the two is right is a contract question
+
+**Context:** red team round 4 on PR #651 (#578), finding 1 [HIGH]; the review at the same
+head (`c6a8d08`) reached the same asymmetry and classified it a follow-up needing a ruling.
+`contracts/link-cpp.md` "Health tracker" scopes the late-outcome exception to **a fault-time
+probe**. An ORDINARY enrolment probe on a rig with no fault in its history is therefore
+outside it, and §6's "any valid response → ENROLLED" applies — which is what the code does.
+The trajectory that follows: `next_probe()` hands out a probe at 1 Mb/s; the layer above
+selects the fallback rate while it is on the wire (trunk §7's own use case, F3 obligation 3);
+the node's 1 Mb/s answer arrives inside `kOutcomeWindowUs` and enrols it; it is `poll_due()`
+at once at 115.2 kb/s, a rate it has answered nothing at; being strapped to 1 Mb/s (trunk §2)
+it answers no poll, reaches SUSPECT after `TRUNK_suspect_after_failures`, and — as the one
+enrolled address — FR-023 declares `BUS_FAULT` on a trunk that never had one. Demonstrated by
+"the node enrolled by the two cases above is then polled at the rate the selection moved to,
+and can walk to SUSPECT and declare a fault there" in `tests/unit/test_link_busfault.cpp`, a
+characterization case: green before and after the run that added it, with a control tracker
+whose only difference is that the selection precedes the handout.
+
+The asymmetry: a **clear** that makes the identical move (1 Mb/s probe outstanding, rate in
+use moved to 115.2 kb/s) strands that probe and voids its outcome — the entry above, and "a
+probe issued BEFORE an episode does not enrol its node at the rate the clear moved the trunk
+to". `set_bit_rate` does not. The physics are the same on both sides; only the mover differs.
+
+**Options:** (a) **Leave it** — the contract's "fault-time probe" is read as written and the
+enrolment is correct; the trajectory above is F3's to avoid under obligations 2 and 3 (one
+`next_probe()` per probe issued, and the wire and tracker moved in the same step), since the
+scheduler is what owns probe/outcome ordering and is the only thing that can know a probe is
+in flight when it selects. (b) **Widen the exception a second time**, to "every probe
+outstanding when the rate in use moved, by a clear or by a selection" — `set_bit_rate` would
+`|= probe_live` into `BusState::probe_across_clear` exactly as `clear_fault()` does, the
+field renamed to say "the rate in use moved under this probe". The node then stays
+UNENROLLED, which self-heals: UNENROLLED addresses are what the enrolment rotation probes,
+at the rate now in use, within one rotation. (c) Make the exception asymmetric in the outcome
+— suppress an `ok` (no enrolment at a rate the node has not answered) but apply a failure.
+Rejected as a recommendation: it re-opens round 1's finding from the other side (a voided
+failure and an applied failure blind the table in opposite directions) and no contract
+sentence distinguishes the two.
+
+**Recommended:** (b), and **not implemented on `task/578`**. Two reasons, both bounds rather
+than judgements about which behaviour is better. It would be a **second** widening of a
+contract sentence whose first widening (the entry above) is itself awaiting a ruling, and the
+contract is a human-ruling artefact (OPERATING-POLICY §2) — CLAUDE.md's working agreement is
+to record a spec ambiguity and implement nothing speculative. And it would require inverting
+the assertions of "a selection under an outstanding probe does not suppress that probe's
+outcome ..." and "every node that answers a probe enrols ...", two cases added red-first in
+this same PR to fix red team round 1's finding 1, which was itself BLOCKING: reversing one
+blocking finding's fix to satisfy another is a ruling, not a review fix. A ruling that takes
+(b) should say so on both entries at once, since (b) subsumes the bit the entry above
+introduces.
+
+**Ruling:** pending — human (contract text; `contracts/link-cpp.md` "Health tracker", the
+"Rules:" paragraph and F3 obligations 2/3 under "What F3/F4 need").
+**Related:** the 2026-09-16 "the late-outcome exception is bounded by the CLEAR" entry
+immediately above — same sentence, same PR; a ruling for (b) here settles that one too. The
+2026-09-13 "no automatic return" ruling, which is why the selected rate stays in use.
+**Supersedes:** none.

@@ -92,8 +92,18 @@ class HealthTracker {
     // when it is called depends on which probe that is, and the difference is stated rather
     // than claimed away (CLAUDE.md rule 11; red team rounds 1 and 2 on #578): an ORDINARY
     // enrolment probe's outcome — one issued since the last clear — is read exactly as it
-    // would have been without the call (BusState::probe_across_clear is what makes that true),
-    // while a probe outstanding across a clear is caught by the late-outcome exception the
+    // would have been without the call (BusState::probe_across_clear is what makes that true).
+    // That is a statement about the READING, and the state it produces is the other half of
+    // it: an ok enrols, so the node is poll_due() at the rate just selected on the strength of
+    // an answer at the rate before it, and if it cannot hear the new one it walks to SUSPECT
+    // and — as the only enrolled address — declares a BUS_FAULT on a healthy trunk. A CLEAR
+    // that makes the identical move strands that probe instead; the two rate-movers differ,
+    // the contract's sentence covers only the clear's side ("a FAULT-TIME probe"), and which
+    // of the two is right is a contract question recorded in docs/OPEN-QUESTIONS.md 2026-09-16
+    // (third entry), ruling pending — not resolved here (red team round 4 on #578, finding 1).
+    // Demonstrated by "the node enrolled by the two cases above is then polled at the rate the
+    // selection moved to ...". Meanwhile a probe outstanding across a clear IS caught by the
+    // late-outcome exception the
     // contract writes as "issued at a rate other than the rate now in use"
     // (contracts/link-cpp.md "Health tracker") — so a selection that moves the rate in use
     // away from that probe's rate voids its §6 transition. Both demonstrated by

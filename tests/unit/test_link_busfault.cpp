@@ -2329,6 +2329,68 @@ TEST_CASE("every node that answers a probe enrols, whatever the layer above does
     REQUIRE_FALSE(tracker.bus_fault());
 }
 
+TEST_CASE("the node enrolled by the two cases above is then polled at the rate the selection "
+          "moved to, and can walk to SUSPECT and declare a fault there",
+          "[timing:bit_rate_fallback]") {
+    // Red team round 4 on #578, finding 1 [HIGH] — RECORDED here, not resolved. This is a
+    // characterization case: it is green before and after the run that added it and pins no
+    // fix. What it pins is the CONSEQUENCE of the two cases above, which the doc-blocks
+    // described only as far as the reading ("read exactly as it would have been without the
+    // call") and stopped short of the state that reading produces.
+    //
+    // contracts/link-cpp.md "Health tracker" scopes the late-outcome exception to "a FAULT-TIME
+    // probe still outstanding inside its outcome window and issued at a rate other than the
+    // rate now in use". The probe below is an ORDINARY enrolment probe on a rig with no fault
+    // in its history, so the contract's own "any valid response -> ENROLLED" is what applies
+    // and what the code does — and the node is then poll_due() at a rate it has answered
+    // nothing at. That is the same physical situation the round-3 case
+    // ("a probe issued BEFORE an episode does not enrol its node ...") suppresses when a CLEAR
+    // made the identical move, so the two rate-movers treat it differently. Whether the
+    // exception should be widened a second time to cover a selection is a contract question,
+    // not an implementation choice: docs/OPEN-QUESTIONS.md 2026-09-16 (third entry), ruling
+    // pending. If that ruling widens it, THIS case and the two above are what a ruling-driven
+    // change must rewrite — which is why the trajectory is written down rather than left to be
+    // rediscovered.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    const Probe p = tracker.next_probe(0);
+    REQUIRE_FALSE(tracker.bus_fault()); // no fault has ever been declared here
+    REQUIRE(p.bit_rate == omgp::TRUNK_bit_rate);
+
+    tracker.set_bit_rate(omgp::TRUNK_bit_rate_fallback); // the layer above, mid-transaction
+    tracker.on_result(p.addr, true, 1'000);              // …and the 1 Mb/s probe was answered
+
+    // §6 as the contract writes it: the answer enrols, and an ENROLLED node is poll_due at
+    // once — at 115.2 kb/s, which is not the rate that answer came back at.
+    REQUIRE(tracker.state(p.addr) == HealthState::ENROLLED);
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(tracker.poll_due(p.addr, 1'100));
+
+    // A node strapped to 1 Mb/s (trunk §2) answers none of those polls. It is the only
+    // enrolled address, so FR-023 declares on the strength of a rate move, not of a fault.
+    fail_to_suspect(tracker, p.addr, 5'000);
+    REQUIRE(tracker.state(p.addr) == HealthState::SUSPECT);
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(listener.count(Notice::BUS_FAULT) == 1);
+
+    // CONTROL — the same rig and the same node, with the selection made one call EARLIER, so
+    // that no probe is in flight across it: the probe goes out at the selected rate, draws
+    // nothing, the node stays UNENROLLED and nothing is declared. The whole difference is the
+    // outcome window a probe was in flight for.
+    RecordingListener control_listener;
+    HealthTracker control(clock, control_listener);
+    control.set_bit_rate(omgp::TRUNK_bit_rate_fallback);
+    const Probe q = control.next_probe(0);
+    REQUIRE(q.addr == p.addr);
+    REQUIRE(q.bit_rate == omgp::TRUNK_bit_rate_fallback);
+    control.on_result(q.addr, false, 1'000);
+    REQUIRE(control.state(q.addr) == HealthState::UNENROLLED);
+    REQUIRE_FALSE(control.bus_fault());
+    REQUIRE(control_listener.count(Notice::BUS_FAULT) == 0);
+}
+
 TEST_CASE("a probe issued after the clear is not read as the fault-time probe that address had "
           "during the episode",
           "[timing:bit_rate_fallback]") {

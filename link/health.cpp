@@ -765,7 +765,17 @@ void HealthTracker::set_bit_rate(uint32_t bps) {
     // note_probe()'s record, which is what the late-outcome exception reads, so a selection
     // cannot pull an ordinary probe's answer into it (red team round 1 on #578, finding 1;
     // demonstrated by "a selection under an outstanding probe does not suppress that probe's
-    // outcome ..."). A FAULT-TIME probe still outstanding after its episode cleared IS caught
+    // outcome ..."). Untouched READING, and the state it leaves is stated too rather than left
+    // to be inferred: that ok enrols, so the node is poll_due() at the rate this call selected
+    // on the strength of an answer at the rate before it — and if it cannot hear the new one
+    // it walks to SUSPECT and declares a BUS_FAULT on a healthy trunk (red team round 4 on
+    // #578, finding 1; demonstrated by "the node enrolled by the two cases above is then
+    // polled at the rate the selection moved to ..."). clear_fault() making the IDENTICAL move
+    // strands that probe instead. The asymmetry is real and is a contract question, not an
+    // implementation choice — contracts/link-cpp.md scopes the exception to a FAULT-TIME probe
+    // — so it is recorded in docs/OPEN-QUESTIONS.md 2026-09-16 (third entry, with the widening
+    // a ruling would take), ruling pending, and not resolved in this comment.
+    // A FAULT-TIME probe still outstanding after its episode cleared IS caught
     // by that exception when this call moves the rate in use away from the probe's rate: its
     // §6 transition does not happen. That is the contract's rule ("issued at a rate other than
     // the rate now in use"), not a defect of this method — but it IS a limit on what this
