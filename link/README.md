@@ -108,6 +108,14 @@ instead of producing the behaviour (`tests/support/mock_wire.hpp:6-10`,
 `tests/support/mock_wire.cpp` `case Kind::Garbage:`). F4's mapping for garbage, babble and
 rate-change waits on T030, or on F4 implementing them in its own `ByteWire`.
 
+One place where the code is stricter than the contract, for the same reason.
+`contracts/link-cpp.md` says `HealthTracker::set_bit_rate` is "refused on exactly
+`Master::set_bit_rate`'s rule" (`bps == 0`, or a byte time that truncates to 0 µs); the
+tracker refuses every rate other than trunk §9's two. It stores each probe's rate as one bit
+and reduces the rate in use to the same bit, so a third rate was classified as the reference
+rate and cleared faults there. `Master`'s own domain is unchanged — it times bytes, it does
+not classify rates. Recorded in `docs/OPEN-QUESTIONS.md` 2026-09-16, ruling pending.
+
 ## Files
 
 - `link_types.hpp` — `Status`, `FrameFields`/`FrameView`, `Discard`/`DeframerStats`, the
