@@ -4545,3 +4545,49 @@ still not taken.
 to 0 µs" entry, whose option (d) this is the `HealthTracker`-side analogue of; that entry is
 neither amended nor superseded — its subject is `Master`.
 **Supersedes:** none.
+
+---
+
+## 2026-09-16 — the late-outcome exception is bounded by the CLEAR, not by the fault at the handout: a stated WIDENING of "a fault-time probe"
+
+**Context:** red team round 3 on PR #651 (#578), finding 1 [HIGH].
+`contracts/link-cpp.md` "Health tracker" writes the exception as: outside a fault, the late
+outcome — ok or failure — of **a fault-time probe** still outstanding inside its outcome
+window and issued at a rate other than the rate now in use moves no state. Bounding it by
+"went out while `bus_fault()` was true", recorded at the handout, leaves a hole the rule's
+own rationale (round 15 on #530 — never enrol a node on a trunk it has not answered) does
+not: `kOutcomeWindowUs` is ~24.6 ms and a whole episode — declare, one alternation probe, a
+one-address reference pass, clear — fits inside it. An **ordinary** enrolment probe issued
+before the declare therefore survives the episode, and when that episode clears at the
+FALLBACK rate (§7's second clear rule, which FR-025/FR-026 leave in place for ever), its
+reference-rate answer was applied: §6's `UNENROLLED | ok -> ENROLLED` fired and the node was
+`poll_due()` at once, at 115.2 kb/s, on the strength of an answer at 1 Mb/s. It would then
+fail back into SUSPECT and re-declare the fault that had just cleared. Demonstrated by "a
+probe issued BEFORE an episode does not enrol its node at the rate the clear moved the trunk
+to" in `tests/unit/test_link_busfault.cpp`, red before the change.
+
+**Options:** (a) **bound the exception by the clear** — one bit per address
+(`BusState::probe_across_clear`), set by `clear_fault()` for every address still owing this
+layer an outcome and cleared by `note_probe()` on the next handout to that address.
+(b) Leave the bound at the handout and have `set_bit_rate` clear `probe_live` for the probes
+its selection strands — same effect for round 1's case, but it also releases a FAULT-TIME
+probe the contract's sentence keeps, so it narrows the contract instead of widening it.
+(c) Read the contract's "fault-time probe" literally and accept the enrolment above as
+correct — rejected: it is the harm the exception exists for, one input to the side.
+
+**Recommended:** (a), implemented on `task/578`. It is a **widening**: the set is "every
+probe outstanding when a §7 clear decided the rate in use", a strict superset of the
+contract's "fault-time probe", because `!bus_fault()` after an episode is reached only
+through `clear_fault` and every fault-time probe still live there takes the bit. So no
+outcome the contract's own wording preserves is suppressed; what is added is the ordinary
+pre-declare probe. A ruling should either amend the contract sentence to "a probe still
+outstanding when a clear decided the rate in use" or say why the pre-declare probe's answer
+should be applied at a rate it was not issued at. Not resolved in a code comment: the
+divergence is named in `link/health.{hpp,cpp}`, `link/README.md` and here.
+
+**Ruling:** pending — human (contract text; `contracts/link-cpp.md` "Health tracker", the
+"Rules:" paragraph).
+**Related:** the 2026-09-16 "the rate in use is a ONE-BIT quantity" entry above (same PR,
+same contract section, independent question); the 2026-09-13 "no automatic return" ruling,
+which is what leaves the fallback rate in use after the clear and so makes this reachable.
+**Supersedes:** none.

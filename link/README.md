@@ -108,13 +108,24 @@ instead of producing the behaviour (`tests/support/mock_wire.hpp:6-10`,
 `tests/support/mock_wire.cpp` `case Kind::Garbage:`). F4's mapping for garbage, babble and
 rate-change waits on T030, or on F4 implementing them in its own `ByteWire`.
 
-One place where the code is stricter than the contract, for the same reason.
-`contracts/link-cpp.md` says `HealthTracker::set_bit_rate` is "refused on exactly
+Two places where the code does not sit exactly on the contract, for the same reason — both
+in `HealthTracker`, both recorded in `docs/OPEN-QUESTIONS.md` 2026-09-16, rulings pending.
+
+*Stricter.* `contracts/link-cpp.md` says `HealthTracker::set_bit_rate` is "refused on exactly
 `Master::set_bit_rate`'s rule" (`bps == 0`, or a byte time that truncates to 0 µs); the
 tracker refuses every rate other than trunk §9's two. It stores each probe's rate as one bit
 and reduces the rate in use to the same bit, so a third rate was classified as the reference
 rate and cleared faults there. `Master`'s own domain is unchanged — it times bytes, it does
-not classify rates. Recorded in `docs/OPEN-QUESTIONS.md` 2026-09-16, ruling pending.
+not classify rates.
+
+*Wider.* The contract's late-outcome exception covers "a **fault-time** probe still
+outstanding inside its outcome window and issued at a rate other than the rate now in use";
+`on_result` applies it to every probe still outstanding when a §7 **clear** decided the rate
+in use (`BusState::probe_across_clear`). That is a superset — no episode ends without a
+clear, so every fault-time probe the contract names is in it — and the addition is an
+*ordinary* enrolment probe issued before the declare and still outstanding at the clear: a
+whole episode fits inside one outcome window, and reading such a probe's reference-rate
+answer after a fallback-rate clear enrolled the node on a trunk it has never answered.
 
 ## Files
 

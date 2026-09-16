@@ -110,7 +110,7 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // outstanding to the SAME address at once — the newest probe's rate is what the first
     // outcome back is read at. That is obligation 1's territory, ASSUMED, not enforced.
     // Outside a fault the rate decides one thing: whether a fault-time probe's late outcome
-    // counts (late_fault_probe below).
+    // counts (late_stranded_probe below).
     const bool at_reference = (bus_.probe_fallback & probe_bit(addr)) == 0;
     // The recorded fallback answerer answered at the fallback rate. trunk §2 says every node
     // supports both rates and the active one is selected by strap or configuration; the
@@ -137,9 +137,10 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // one thing a new episode must not overwrite. Unconditional: an outcome for an address
     // with no outstanding probe clears a bit that is already clear.
 
-    // Outside a fault, the late outcome of a FAULT-TIME PROBE — one still outstanding inside
-    // its outcome window — that went out at a rate other than the rate now in use is that
-    // probe's, not new evidence about the node: an ok is not proof it hears the rate in use
+    // Outside a fault, the late outcome of a probe A CLEAR STRANDED — one still outstanding
+    // inside its outcome window when the clear decided the rate in use — that went out at a rate
+    // other than that one is that probe's, not new evidence about the node: an ok is not proof
+    // it hears the rate in use
     // (enrolling on it stranded the node as ENROLLED on a trunk it cannot hear — round-15 red
     // team), and a failure is the write-off's "drew nothing" counted a second time (round-16
     // red team, follow-up 2). It moves no §6 state. Bounded to a live probe inside its window
@@ -153,27 +154,36 @@ void HealthTracker::on_result(uint8_t addr, bool ok, uint64_t now_us) {
     // return (ruling 2026-09-13). Demonstrated by the "... does not enrol its node ..." pair,
     // "after a clear, ordinary status-poll answers ..." and "a late failure for a written-off
     // pass probe ..." in tests/unit/test_link_busfault.cpp.
-    // "Fault-time" is READ, from the bit note_probe() wrote for this very probe, not inferred
-    // from its rate differing from the rate in use: that inference held only while a clear was
-    // the one writer of `bus_.bit_rate` (a control on the file's contents, never a language
-    // guarantee), and set_bit_rate is a second writer. Without this conjunct a selection made
-    // while an ORDINARY enrolment probe was outstanding put that probe's answer in the
-    // exception's scope on a rig with no fault in its history, and §6's "any valid response ->
-    // ENROLLED" was discarded — for failures too, so the table went blind in both directions
-    // (red team round 1 on #578, finding 1). Demonstrated by "a selection under an outstanding
-    // probe does not suppress that probe's outcome ..." and "every node that answers a probe
-    // enrols ..." in tests/unit/test_link_busfault.cpp.
-    const bool late_fault_probe =
+    // Which probes those are is READ, from the bit clear_fault() wrote while this very probe
+    // was outstanding, not inferred from its rate differing from the rate in use: that
+    // inference held only while a clear was the one writer of `bus_.bit_rate` (a control on the
+    // file's contents, never a language guarantee), and set_bit_rate is a second writer.
+    // Without this conjunct a selection made while an ORDINARY enrolment probe was outstanding
+    // put that probe's answer in the exception's scope on a rig with no fault in its history,
+    // and §6's "any valid response -> ENROLLED" was discarded — for failures too, so the table
+    // went blind in both directions (red team round 1 on #578, finding 1). The bit says
+    // "outstanding ACROSS A CLEAR" and not "issued while a fault stood", which was the same
+    // conjunct one round too narrow: an ordinary probe issued BEFORE the declare outlives a
+    // short episode (a whole one fits inside kOutcomeWindowUs) and a clear at the fallback rate
+    // then read its reference-rate answer as evidence about a trunk it has never answered (red
+    // team round 3 on #578, finding 1). Every fault-time probe still live at the clear takes the
+    // bit there, so this is a WIDENING of the contract's "fault-time probe" and suppresses
+    // nothing the contract's own wording keeps — !bus_.fault after an episode is reached only
+    // through clear_fault (docs/OPEN-QUESTIONS.md 2026-09-16, ruling pending). Demonstrated by
+    // "a selection under an outstanding probe does not suppress that probe's outcome ...",
+    // "every node that answers a probe enrols ..." and "a probe issued BEFORE an episode does
+    // not enrol its node ..." in tests/unit/test_link_busfault.cpp.
+    const bool late_stranded_probe =
         !bus_.fault && (bus_.probe_live & probe_bit(addr)) != 0 &&
-        (bus_.probe_fault_time & probe_bit(addr)) != 0 &&
+        (bus_.probe_across_clear & probe_bit(addr)) != 0 &&
         elapsed_us(now_us, records_[addr].probe_issued_us) <= kOutcomeWindowUs &&
         at_reference != (bus_.bit_rate == omgp::TRUNK_bit_rate);
     // The outcome consumes the live record — read above first, cleared here (round 16).
     bus_.probe_live = static_cast<uint16_t>(bus_.probe_live & ~probe_bit(addr));
-    if (is_answerer || late_fault_probe) {
-        // Recorded already, or a fault-time probe's late outcome at the other rate — nothing to
-        // record, nothing to apply; the pass-advance block below still consumes this outcome
-        // if it is the outstanding pass probe's.
+    if (is_answerer || late_stranded_probe) {
+        // Recorded already, or the late outcome of a probe a clear stranded at the other rate —
+        // nothing to record, nothing to apply; the pass-advance block below still consumes this
+        // outcome if it is the outstanding pass probe's.
     } else if (fallback_answer) {
         // §7: a fallback-rate answer neither clears the fault nor moves that node's state —
         // enrolling it here would have it status-polled at a rate it cannot hear, fail into
@@ -537,16 +547,15 @@ void HealthTracker::note_probe(uint8_t addr, uint32_t bit_rate, uint64_t now_us)
     // newest handout is live" and reinstated round 6's oscillation for every other outstanding
     // probe (round-10 review, finding 1); withdrawn.
     bus_.probe_live = static_cast<uint16_t>(bus_.probe_live | probe_bit(addr));
-    // …and whether it is a FAULT-TIME probe, which is what bounds on_result's late-outcome
-    // exception (health.hpp, BusState::probe_fault_time). Recorded here rather than inferred
-    // there from "its rate is not the rate in use": that inference held only while a clear was
-    // the one writer of `bus_.bit_rate`, and HealthTracker::set_bit_rate is a second one (red
-    // team round 1 on #578, finding 1). Assigned on every handout, not only when the fault
-    // stands, so the bit describes THIS probe and no earlier one.
-    if (bus_.fault)
-        bus_.probe_fault_time = static_cast<uint16_t>(bus_.probe_fault_time | probe_bit(addr));
-    else
-        bus_.probe_fault_time = static_cast<uint16_t>(bus_.probe_fault_time & ~probe_bit(addr));
+    // …and this probe has NOT been stranded by a clear: it is going out now, at the rate this
+    // layer holds now, so whatever an earlier probe to this address lived through is not its
+    // history (health.hpp, BusState::probe_across_clear; clear_fault is the only writer that
+    // sets the bit). Left standing, that bit re-armed on_result's late-outcome exception for
+    // the address for ever and every later probe's outcome was discarded once the layer above
+    // moved the rate under it — demonstrated by "a probe issued after the clear is not read as
+    // the fault-time probe that address had during the episode" in
+    // tests/unit/test_link_busfault.cpp, which is what kills the dropped-clear mutant.
+    bus_.probe_across_clear = static_cast<uint16_t>(bus_.probe_across_clear & ~probe_bit(addr));
     records_[addr].probe_issued_us = now_us;
 }
 
@@ -660,6 +669,22 @@ void HealthTracker::clear_fault(uint32_t bit_rate, uint64_t now_us) {
     // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
     bus_.fault = false;
     bus_.bit_rate = bit_rate;
+    // Every probe this layer is still owed an outcome by was issued BEFORE the line above
+    // decided the rate in use, so its answer is evidence about the rate it went out at and not
+    // about this one: that is what bounds on_result's late-outcome exception (health.hpp,
+    // BusState::probe_across_clear). Set here, at the decision, rather than at the handout —
+    // a probe issued while the fault stood is one of these (the alternation and the pass choose
+    // their own rates and every episode ends here), and so is an ORDINARY probe issued before
+    // the declare and still outstanding, which recording it at the handout missed: a whole
+    // episode fits inside one outcome window, and a clear at the fallback rate then enrolled
+    // such a node on a trunk it has never answered (round-15 red team on #530; red team round 3
+    // on #578, finding 1). `probe_live` is read, not `fallback_seen` or the pass state, because
+    // the question is only "does this layer still owe this address a reading?" — a bit whose
+    // window has closed is set too, and on_result's own window conjunct is what discards it.
+    // Demonstrated by "a probe issued BEFORE an episode does not enrol its node at the rate the
+    // clear moved the trunk to" and "a selection after a clear voids the outcome of a FAULT-TIME
+    // probe still outstanding ..." in tests/unit/test_link_busfault.cpp.
+    bus_.probe_across_clear = static_cast<uint16_t>(bus_.probe_across_clear | bus_.probe_live);
     note_wire_rate(bit_rate);
     // The deferred §6 transition of a fallback-rate answerer is applied BEFORE the pass state
     // is reset and before the declare rule is next evaluated — resetting first would lose the

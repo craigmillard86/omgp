@@ -91,9 +91,9 @@ class HealthTracker {
     // state, notifies nothing and ends no episode. What it does to a probe still outstanding
     // when it is called depends on which probe that is, and the difference is stated rather
     // than claimed away (CLAUDE.md rule 11; red team rounds 1 and 2 on #578): an ORDINARY
-    // enrolment probe's outcome is read exactly as it would have been without the call
-    // (BusState::probe_fault_time is what makes that true), while a FAULT-TIME probe still
-    // outstanding after its episode cleared is caught by the late-outcome exception the
+    // enrolment probe's outcome — one issued since the last clear — is read exactly as it
+    // would have been without the call (BusState::probe_across_clear is what makes that true),
+    // while a probe outstanding across a clear is caught by the late-outcome exception the
     // contract writes as "issued at a rate other than the rate now in use"
     // (contracts/link-cpp.md "Health tracker") — so a selection that moves the rate in use
     // away from that probe's rate voids its §6 transition. Both demonstrated by
@@ -225,19 +225,34 @@ class HealthTracker {
         // never drops an earlier live bit — the window is the only bound (round 9's "newest
         // handout supersedes" rule reinstated round 6's oscillation; withdrawn at round 10).
         uint16_t probe_live = 0;
-        // One bit per address: the probe `probe_live` above is waiting on went out while a
-        // fault stood — the alternation's or the reference pass's. Written by note_probe()
-        // with every handout and read only alongside that address's live bit, so a stale bit
-        // is unreadable. Not a data-model.md §7 field: it is what bounds on_result's
-        // late-outcome exception to "a FAULT-TIME probe" (contracts/link-cpp.md "Health
-        // tracker"). That bound used to be inferred — a probe whose rate differs from the rate
-        // in use — which held only while a clear was the one writer of `bit_rate`;
-        // set_bit_rate is a second one, and with it the inference put an ordinary enrolment
-        // probe's answer, on a rig that had never faulted, in the exception's scope and left
-        // the node UNENROLLED (red team round 1 on #578, finding 1). Demonstrated by "a
-        // selection under an outstanding probe does not suppress that probe's outcome ..." and
-        // "every node that answers a probe enrols ..." in tests/unit/test_link_busfault.cpp.
-        uint16_t probe_fault_time = 0;
+        // One bit per address: a §7 CLEAR decided the rate in use while the probe `probe_live`
+        // above is waiting on was already outstanding. Set by clear_fault() for every address
+        // still owing an outcome, cleared by note_probe() on the next handout to that address;
+        // read only alongside that address's live bit, so a stale bit is unreadable. Not a
+        // data-model.md §7 field: it is what bounds on_result's late-outcome exception, which
+        // contracts/link-cpp.md "Health tracker" writes as "a FAULT-TIME probe".
+        //
+        // That bound used to be INFERRED — a probe whose rate differs from the rate in use —
+        // which held only while a clear was the one writer of `bit_rate`; set_bit_rate is a
+        // second one, and with it the inference put an ordinary enrolment probe's answer, on a
+        // rig that had never faulted, in the exception's scope and left the node UNENROLLED
+        // (red team round 1 on #578, finding 1). Recording "went out while a fault stood"
+        // instead was narrower than the rule needs, in the other direction: a whole episode
+        // fits inside one outcome window, so an ordinary probe issued BEFORE the declare can
+        // still be outstanding at a clear that pins the FALLBACK rate for ever (FR-025/FR-026),
+        // and applying its reference-rate answer enrolled the node on a trunk it has never
+        // answered — round 15's harm, back (red team round 3 on #578, finding 1). The clear is
+        // what both cases have in common: it is the moment this layer decides the rate in use
+        // under a frame already on the wire. A WIDENING of the contract's "fault-time probe",
+        // recorded in docs/OPEN-QUESTIONS.md 2026-09-16, ruling pending; it suppresses no
+        // outcome the contract's own wording does not, since !bus_fault() after an episode is
+        // reached only through clear_fault and every fault-time probe still live there takes
+        // the bit. Demonstrated by "a selection under an outstanding probe does not suppress
+        // that probe's outcome ...", "every node that answers a probe enrols ...", "a probe
+        // issued after the clear is not read as the fault-time probe ..." and "a probe issued
+        // BEFORE an episode does not enrol its node ..." in
+        // tests/unit/test_link_busfault.cpp.
+        uint16_t probe_across_clear = 0;
     };
 
     void notify(Notice notice, uint8_t addr);
