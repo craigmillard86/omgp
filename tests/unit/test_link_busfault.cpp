@@ -2357,6 +2357,80 @@ TEST_CASE("a probe issued after the clear is not read as the fault-time probe th
     REQUIRE(tracker.state(kNodeD) == HealthState::ENROLLED);
 }
 
+TEST_CASE("a probe issued BEFORE an episode does not enrol its node at the rate the clear moved "
+          "the trunk to",
+          "[timing:bit_rate_fallback]") {
+    // Red team round 3 on #578, finding 1 [HIGH]. The late-outcome exception is bounded by a
+    // RECORDED bit rather than by the old "its rate differs from the rate in use" inference,
+    // and the first form of that bit — "this probe went out while a fault stood" — was too
+    // narrow. A whole episode fits inside one outcome window (kOutcomeWindowUs is ~24.6 ms; a
+    // declare, one alternation probe, a one-address reference pass and a clear take a few
+    // hundred microseconds of injected time), so an ORDINARY enrolment probe issued before the
+    // declare can still be outstanding when the episode clears at the FALLBACK rate — which §7
+    // then leaves in place for ever (FR-025/FR-026, no automatic return). Its answer came back
+    // at the reference rate; reading it as evidence about the rate now in use enrolled the node
+    // on a trunk it has never answered and made it poll_due() there at once, which is exactly
+    // the harm round 15 on #530 introduced this exception for. The bit therefore records what
+    // the rule actually needs — "a §7 clear decided the rate in use while this probe was
+    // outstanding" (BusState::probe_across_clear) — which covers every fault-time probe (no
+    // episode ends without a clear) and this one too.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+    // The fallback answerer, outside ThreeNodeRig: the pass covers only enrolled addresses, so
+    // the episode below needs one address that answers the alternation's fallback probe.
+    constexpr uint8_t kNodeE = omgp::ADDR_backplane_min + 4; // 0x05
+
+    enrol(tracker, kNodeA, 0);
+    enrol(tracker, kNodeB, 0);
+    enrol(tracker, kNodeC, 0);
+    REQUIRE_FALSE(tracker.bus_fault()); // no fault has ever been declared here…
+
+    // …and D's probe is an ORDINARY enrolment probe, at the rate then in use. A, B and C are
+    // ENROLLED, so the rotation's first candidate is D.
+    const Probe pd = tracker.next_probe(100);
+    REQUIRE(pd.addr == kNodeD);
+    REQUIRE(pd.bit_rate == omgp::TRUNK_bit_rate);
+
+    // A whole episode, declared and cleared inside D's outcome window and without a single
+    // further probe to D: the pass skips D (never enrolled) and the alternation does not
+    // reach it before the clear.
+    fail_to_suspect(tracker, kNodeA, ThreeNodeRig::kSuspectA);
+    fail_to_suspect(tracker, kNodeB, ThreeNodeRig::kSuspectB);
+    fail_to_suspect(tracker, kNodeC, ThreeNodeRig::kSuspectC);
+    REQUIRE(tracker.bus_fault());
+    const Probe pe = tracker.next_probe(3'500); // FR-025: the alternation starts at the fallback
+    REQUIRE(pe.addr == kNodeE);
+    REQUIRE(pe.bit_rate == omgp::TRUNK_bit_rate_fallback);
+    tracker.on_result(kNodeE, true, 3'600); // a fallback answer starts the reference pass
+    uint64_t t = 3'700;
+    for (int i = 0; i < 3; ++i) { // …which draws nothing: A, B, C once each, all failures
+        const Probe pp = tracker.next_probe(t);
+        REQUIRE(pp.bit_rate == omgp::TRUNK_bit_rate);
+        tracker.on_result(pp.addr, false, t + 100);
+        t += 200;
+    }
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback); // cleared at the fallback rate
+    REQUIRE(tracker.state(kNodeD) == HealthState::UNENROLLED);
+    const size_t enrolled_before = listener.count(Notice::ENROLLED); // A, B, C and the answerer
+
+    // D answers its pre-fault probe, inside its window. That answer is that probe's — proof it
+    // hears 1 Mb/s, and the trunk now runs at 115.2 kb/s — so it moves no §6 state.
+    tracker.on_result(kNodeD, true, 5'000);
+    REQUIRE(tracker.state(kNodeD) == HealthState::UNENROLLED);
+    REQUIRE_FALSE(tracker.poll_due(kNodeD, 6'000)); // …and it is not polled at that rate
+    REQUIRE(listener.count(Notice::ENROLLED) == enrolled_before);
+
+    // Not stranded, either: the live bit was consumed by that outcome, so the next probe — at
+    // the rate now in use — enrols D on its answer like any other. The exception suppresses one
+    // stale outcome, it does not blind the address (round-16 review and red team on #530).
+    REQUIRE(probe_until(tracker, kNodeD, omgp::TRUNK_bit_rate_fallback).addr == kNodeD);
+    tracker.on_result(kNodeD, true, 7'000);
+    REQUIRE(tracker.state(kNodeD) == HealthState::ENROLLED);
+    REQUIRE(listener.count(Notice::ENROLLED) == enrolled_before + 1);
+}
+
 TEST_CASE("a selection after a clear voids the outcome of a FAULT-TIME probe still outstanding, "
           "and that is the contract's exception, not an invariance set_bit_rate can claim",
           "[timing:bit_rate_fallback]") {
