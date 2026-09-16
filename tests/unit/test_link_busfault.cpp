@@ -2264,6 +2264,34 @@ TEST_CASE("every node that answers a probe enrols, whatever the layer above does
     REQUIRE_FALSE(tracker.bus_fault());
 }
 
+TEST_CASE("a probe issued after the clear is not read as the fault-time probe that address had "
+          "during the episode",
+          "[timing:bit_rate_fallback]") {
+    // The other half of the bound above: note_probe() records what THIS probe is, so the
+    // fault-time bit of an address probed during an episode is CLEARED by the next probe to it
+    // outside one. Left standing, that bit would re-arm the exception for that address for
+    // ever, and D — probed again after the clear, answering, with the layer above moving the
+    // rate under it — would be discarded exactly as in the case above. D is the rig's never-
+    // enrolled address, so the enrolment rotation reaches it on both sides of the clear.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    ThreeNodeRig::build(tracker);
+    REQUIRE(probe_until(tracker, kNodeD, omgp::TRUNK_bit_rate_fallback).addr == kNodeD);
+    // B's last probe goes out at the reference rate, so its answer clears the fault there.
+    REQUIRE(probe_until(tracker, kNodeB, omgp::TRUNK_bit_rate).addr == kNodeB);
+    tracker.on_result(kNodeB, true, 2'000);
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+    REQUIRE(tracker.state(kNodeD) == HealthState::UNENROLLED); // D never answered anything
+
+    REQUIRE(probe_until(tracker, kNodeD, omgp::TRUNK_bit_rate).addr == kNodeD); // a fresh probe
+    tracker.set_bit_rate(omgp::TRUNK_bit_rate_fallback);                        // rate moves…
+    tracker.on_result(kNodeD, true, 3'000);                                     // …and D answers
+    REQUIRE(tracker.state(kNodeD) == HealthState::ENROLLED);
+}
+
 TEST_CASE("a selection of the rate already in use still counts the wire move it makes",
           "[timing:bit_rate_fallback]") {
     // Red team round 1 on #578, finding 2. F3 obligation 3 puts the selected rate on the wire
