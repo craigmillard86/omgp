@@ -75,8 +75,10 @@ def test_missing_citation_flagged_in_l3(tmp_path):
 
 
 def test_citation_not_required_outside_cite_dirs(tmp_path):
+    # `sim` is host-only code: scanned only when named explicitly via --dirs, and never in
+    # the --cite-dirs default (l3 link core), so the citation rule must not fire here.
     rc, out = run(tmp_path, {"nocite.cpp": "#include <cstdint>\nuint8_t g() { return 1; }\n"},
-                  dirname="core")
+                  dirname="sim")
     assert rc == 0, out
 
 
@@ -85,6 +87,27 @@ def test_missing_citation_flagged_in_link(tmp_path):
                   dirname="link")
     assert rc == 1
     assert "no spec citation" in out
+
+
+def test_missing_citation_flagged_in_core(tmp_path):
+    """spec 003 T004 / plan.md:90 (Constitution Check IX): every core/ file cites its spec."""
+    rc, out = run(tmp_path, {"nocite.cpp": "#include <cstdint>\nuint8_t g() { return 1; }\n"},
+                  dirname="core")
+    assert rc == 1
+    assert "no spec citation" in out
+
+
+def test_core_citation_accepted(tmp_path):
+    """Companion to the case above: the core/ rule is satisfiable, not merely triggerable.
+
+    Repointing test_citation_not_required_outside_cite_dirs at `sim` removes the only
+    dirname="core" coverage, so without this nothing shows that a citing core/ file passes.
+    plan.md:90 fixes the accepted tokens as `trunk §…` / `protocol-l3 §…`, both already
+    matched by CITATION (:54) — no regex change expected.
+    """
+    body = "// trunk §6: superframe poll order\n#include <cstdint>\nuint8_t g() { return 1; }\n"
+    rc, out = run(tmp_path, {"cited.cpp": body}, dirname="core")
+    assert rc == 0, out
 
 
 def test_flags_restated_trunk_timing_literal_in_link(tmp_path):
