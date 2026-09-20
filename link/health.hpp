@@ -9,8 +9,7 @@
 // (F3) that this layer assumes and cannot enforce are recorded in contracts/link-cpp.md
 // "What F3/F4 need"; `on_result` and `next_probe` below say where the first two are relied
 // on. The third (the wire and this tracker set to the layer above's rate in the same step,
-// ruling 2026-09-14) belongs with `HealthTracker::set_bit_rate`, which is NOT implemented
-// here — tasks.md T041/T043 carry it as a red-first follow-up slice.
+// ruling 2026-09-14) is assumed by `HealthTracker::set_bit_rate`.
 #pragma once
 
 #include "link/clock.hpp"
@@ -66,6 +65,14 @@ class HealthTracker {
     // address while bus_fault() (data-model.md §6, amended 2026-09-13: no status polls while
     // a fault is declared, only next_probe() drives the wire).
     bool poll_due(uint8_t addr, uint64_t now_us) const;
+    // Call when a status poll for `addr` goes out (poll_due() said so). Besides the
+    // poll-period stamp poll_due() reads, this now also records the rate the poll went out at
+    // (the rate in use, while !bus_fault()) the same way a probe's own issue is recorded —
+    // fixed #578 red team round 5, finding 1: without it, an ordinary poll's later outcome was
+    // classified by whatever bus_.bit_rate a set_bit_rate() call and a declare happened to
+    // leave behind, not the rate the poll actually used, inverting both of trunk §7's clear
+    // rules. Signature unchanged; the rate recorded is read from this tracker's own state, not
+    // a new parameter — see link/health.cpp's note_probe() for the shared mechanism.
     void mark_polled(uint8_t addr, uint64_t now_us);
     // Enrolment rotation over UNENROLLED/OFFLINE backplane addresses. When no candidate
     // exists (healthy-rig steady state), returns Probe{ADDR_host, ...} as the sentinel:
@@ -81,7 +88,49 @@ class HealthTracker {
     Probe next_probe(uint64_t now_us);
 
     bool bus_fault() const;
-    uint32_t bit_rate() const; // the rate in use; assigned only by a clear (data-model.md §7)
+    // The rate in use; assigned by a clear (data-model.md §7) or by set_bit_rate below, and
+    // always one of trunk §9's two rates — see set_bit_rate's refusal.
+    uint32_t bit_rate() const;
+    // trunk §7: the layer above's rate selection — bringing a rig up AT the fallback rate, or
+    // restoring the reference rate after a fallback-rate clear, which §7 leaves in place for
+    // ever (ruling 2026-09-14). Assigns what bit_rate() reports and, while !bus_fault(), the
+    // rate enrolment probes go out at; during a fault the probe's rate is the probe's own
+    // (the alternation, the reference pass). NEVER a clear: the call itself moves no node
+    // state, notifies nothing and ends no episode. What it does to a probe still outstanding
+    // when it is called depends on which probe that is, and the difference is stated rather
+    // than claimed away (CLAUDE.md rule 11; red team rounds 1 and 2 on #578): an ORDINARY
+    // enrolment probe's outcome — one issued since the last clear — is read exactly as it
+    // would have been without the call (BusState::probe_across_clear is what makes that true).
+    // That is a statement about the READING, and the state it produces is the other half of
+    // it: an ok enrols, so the node is poll_due() at the rate just selected on the strength of
+    // an answer at the rate before it, and if it cannot hear the new one it walks to SUSPECT
+    // and — as the only enrolled address — declares a BUS_FAULT on a healthy trunk. A CLEAR
+    // that makes the identical move strands that probe instead; the two rate-movers differ,
+    // the contract's sentence covers only the clear's side ("a FAULT-TIME probe"), and which
+    // of the two is right is a contract question recorded in docs/OPEN-QUESTIONS.md 2026-09-16
+    // (third entry), ruling pending — not resolved here (red team round 4 on #578, finding 1).
+    // Demonstrated by "the node enrolled by the two cases above is then polled at the rate the
+    // selection moved to ...". Meanwhile a probe outstanding across a clear IS caught by the
+    // late-outcome exception the
+    // contract writes as "issued at a rate other than the rate now in use"
+    // (contracts/link-cpp.md "Health tracker") — so a selection that moves the rate in use
+    // away from that probe's rate voids its §6 transition. Both demonstrated by
+    // tests/unit/test_link_busfault.cpp ("a selection under an outstanding probe does not
+    // suppress that probe's outcome ..." and "a selection after a clear voids the outcome of a
+    // FAULT-TIME probe still outstanding ..."). Counts one rate change when it moves the rate
+    // in use or the wire (the two come apart during a fault) and none when it moves neither.
+    // Refused — assigning nothing and counting nothing — on every rate other than trunk §9's
+    // two: the rate in use is a one-bit quantity everywhere below this line, so a third rate
+    // was classified as the reference rate and cleared faults there (red team round 2 on #578,
+    // finding 1). STRICTER than Master::set_bit_rate's predicate (link/master.cpp: bps == 0 or
+    // a byte time that truncates to 0 us), which it subsumes — both §9 rates have a nonzero
+    // byte time. A stated DIVERGENCE from contracts/link-cpp.md's "refused on exactly
+    // Master::set_bit_rate's rule", recorded in docs/OPEN-QUESTIONS.md 2026-09-16, ruling
+    // pending. The caller moves the wire in the same step: F3 obligation 3 in
+    // contracts/link-cpp.md "What F3/F4 need", ASSUMED here, not enforceable at this layer —
+    // a caller that selects a rate this refuses puts the two out of step, which is that
+    // obligation's violation, not a state this layer can represent.
+    void set_bit_rate(uint32_t bps);
     // Bus-level counters (data-model.md §8): `rate_changes` and `bus_faults` as decided by
     // this tracker. `BusStats::discards` is the Master engine's field and is never written
     // here — the tracker sees no frames. (Accessor added by T043 alongside the bus-fault
@@ -112,8 +161,13 @@ class HealthTracker {
     // integers, a positional list is one transposition away from compiling with two values
     // swapped. Still an aggregate (C++17) and still no dynamic allocation.
     struct BusState {
-        uint32_t bit_rate = omgp::TRUNK_bit_rate; // the rate in use; assigned only by a clear
-        bool fault = false;                       // BUS_FAULT declared
+        // The rate in use; assigned by a clear or by the layer above's set_bit_rate, and
+        // always one of trunk §9's two rates — everything that reads it reduces it to the
+        // one-bit "fallback : reference" question `probe_fallback` below asks, so a third
+        // value has no meaning here (set_bit_rate refuses one; a clear is called with the
+        // two constants only).
+        uint32_t bit_rate = omgp::TRUNK_bit_rate;
+        bool fault = false; // BUS_FAULT declared
         // The alternation's next rate; true (fallback) on declare.
         bool next_probe_fallback = false;
         // Address to enrol on a clear at the fallback rate; 0 = none recorded.
@@ -134,10 +188,13 @@ class HealthTracker {
         uint8_t pass_addr = 0; // the pass probe in flight; 0 = none outstanding
         // The pass's own cursor, in address order.
         uint8_t pass_next_addr = omgp::ADDR_backplane_min;
-        // The rate the host last put on the wire — a probe's rate, or a rate pinned by a
-        // clear. Not a data-model.md §7 field: it is how this implementation counts
+        // The rate the host last put on the wire — a probe's rate, a rate pinned by a clear,
+        // or one the layer above selected (which moves the wire in the same step, F3
+        // obligation 3). Not a data-model.md §7 field: it is how this implementation counts
         // `rate_changes` (§8: at the point the change is decided). Before any probe has been
-        // issued it is the rate in use.
+        // issued it is the rate in use. It is NOT the whole of the counting rule: §8 counts a
+        // change of the RATE IN USE too (data-model.md:267), and during a fault the two come
+        // apart — see set_bit_rate in health.cpp.
         uint32_t wire_rate = omgp::TRUNK_bit_rate;
         // One bit per address (bit N = address N): set when the last probe to that address
         // went out at TRUNK_bit_rate_fallback, clear when it went out at the reference rate.
@@ -186,6 +243,34 @@ class HealthTracker {
         // never drops an earlier live bit — the window is the only bound (round 9's "newest
         // handout supersedes" rule reinstated round 6's oscillation; withdrawn at round 10).
         uint16_t probe_live = 0;
+        // One bit per address: a §7 CLEAR decided the rate in use while the probe `probe_live`
+        // above is waiting on was already outstanding. Set by clear_fault() for every address
+        // still owing an outcome, cleared by note_probe() on the next handout to that address;
+        // read only alongside that address's live bit, so a stale bit is unreadable. Not a
+        // data-model.md §7 field: it is what bounds on_result's late-outcome exception, which
+        // contracts/link-cpp.md "Health tracker" writes as "a FAULT-TIME probe".
+        //
+        // That bound used to be INFERRED — a probe whose rate differs from the rate in use —
+        // which held only while a clear was the one writer of `bit_rate`; set_bit_rate is a
+        // second one, and with it the inference put an ordinary enrolment probe's answer, on a
+        // rig that had never faulted, in the exception's scope and left the node UNENROLLED
+        // (red team round 1 on #578, finding 1). Recording "went out while a fault stood"
+        // instead was narrower than the rule needs, in the other direction: a whole episode
+        // fits inside one outcome window, so an ordinary probe issued BEFORE the declare can
+        // still be outstanding at a clear that pins the FALLBACK rate for ever (FR-025/FR-026),
+        // and applying its reference-rate answer enrolled the node on a trunk it has never
+        // answered — round 15's harm, back (red team round 3 on #578, finding 1). The clear is
+        // what both cases have in common: it is the moment this layer decides the rate in use
+        // under a frame already on the wire. A WIDENING of the contract's "fault-time probe",
+        // recorded in docs/OPEN-QUESTIONS.md 2026-09-16, ruling pending; it suppresses no
+        // outcome the contract's own wording does not, since !bus_fault() after an episode is
+        // reached only through clear_fault and every fault-time probe still live there takes
+        // the bit. Demonstrated by "a selection under an outstanding probe does not suppress
+        // that probe's outcome ...", "every node that answers a probe enrols ...", "a probe
+        // issued after the clear is not read as the fault-time probe ..." and "a probe issued
+        // BEFORE an episode does not enrol its node ..." in
+        // tests/unit/test_link_busfault.cpp.
+        uint16_t probe_across_clear = 0;
     };
 
     void notify(Notice notice, uint8_t addr);

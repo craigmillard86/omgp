@@ -98,17 +98,46 @@ Everything either needs is specified in `contracts/link-cpp.md` and
 `byte-wire-and-clock.md`, with `contracts/mock-wire.md` for the step table; no interface
 outside those files is required.
 
-Three places where the contract is ahead of the code, so that a reader coding against it is
+Two places where the contract is ahead of the code, so that a reader coding against it is
 not surprised. `contracts/link-cpp.md`'s SC-010 list says `Master::begin/poll/feed`, but there
 is no public `feed()` — `poll()` and `begin()` drain `ByteWire::receive()` themselves and that
-is the only receive path. `HealthTracker::set_bit_rate` is specified but not yet declared in
-`health.hpp` (tasks.md T041/T043 carry it as a red-first slice, as the header comment records).
-And of the seven step kinds above only `Respond`, `Silence`, `CrcError` and `Duplicate` are
-implemented in `tests/support/mock_wire.cpp` today: `Garbage`, `Babble` and `Rate` are declared
+is the only receive path. And of the seven step kinds above only `Respond`, `Silence`,
+`CrcError` and `Duplicate` are implemented in `tests/support/mock_wire.cpp` today: `Garbage`, `Babble` and `Rate` are declared
 so scripts can name them, but the switch raises a "not implemented until T030" test fault
 instead of producing the behaviour (`tests/support/mock_wire.hpp:6-10`,
 `tests/support/mock_wire.cpp` `case Kind::Garbage:`). F4's mapping for garbage, babble and
 rate-change waits on T030, or on F4 implementing them in its own `ByteWire`.
+
+Three places where the code does not sit exactly on the contract, for the same reason — all
+in `HealthTracker`, all recorded in `docs/OPEN-QUESTIONS.md` 2026-09-16, rulings pending.
+
+*Stricter.* `contracts/link-cpp.md` says `HealthTracker::set_bit_rate` is "refused on exactly
+`Master::set_bit_rate`'s rule" (`bps == 0`, or a byte time that truncates to 0 µs); the
+tracker refuses every rate other than trunk §9's two. It stores each probe's rate as one bit
+and reduces the rate in use to the same bit, so a third rate was classified as the reference
+rate and cleared faults there. `Master`'s own domain is unchanged — it times bytes, it does
+not classify rates.
+
+*Wider.* The contract's late-outcome exception covers "a **fault-time** probe still
+outstanding inside its outcome window and issued at a rate other than the rate now in use";
+`on_result` applies it to every probe still outstanding when a §7 **clear** decided the rate
+in use (`BusState::probe_across_clear`). That is a superset — no episode ends without a
+clear, so every fault-time probe the contract names is in it — and the addition is an
+*ordinary* enrolment probe issued before the declare and still outstanding at the clear: a
+whole episode fits inside one outcome window, and reading such a probe's reference-rate
+answer after a fallback-rate clear enrolled the node on a trunk it has never answered.
+
+*Asymmetric.* The same exception is bounded by the **clear** alone, so a rate move made by
+`set_bit_rate` does **not** strand an outstanding probe while the identical move made by a
+clear does. An ordinary probe issued at 1 Mb/s, a selection of the fallback rate while it is
+on the wire, and that probe's 1 Mb/s answer therefore enrol the node — after which it is
+polled at 115.2 kb/s, a rate it has answered nothing at, and can walk to SUSPECT and declare a
+`BUS_FAULT` on a trunk that never had one. That reading is what the contract's sentence says
+(it names a *fault-time* probe, which this is not), so the code is on the contract here and
+the asymmetry is between the contract's two halves; widening the exception to cover a
+selection as well is the recommended option of the third `OPEN-QUESTIONS` entry and waits on
+the ruling, because it reverses a behaviour this same slice pinned with tests one round
+earlier.
 
 ## Files
 

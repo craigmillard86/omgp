@@ -4502,6 +4502,160 @@ T040/#58 ruling (the amend-the-criterion precedent, option C).
 
 ---
 
+## 2026-09-16 — the rate in use is a ONE-BIT quantity in `HealthTracker`, so `set_bit_rate` cannot mirror `Master`'s refusal rule
+
+**Context:** red team round 2 on PR #651 (#578), finding 1 [MEDIUM].
+`contracts/link-cpp.md` "Health tracker" specifies `HealthTracker::set_bit_rate` as
+"Refused (not assigned) on **exactly** `Master::set_bit_rate`'s rule — `bps == 0` or
+`bps > 10 Mb/s`". That rule is a *byte-timing* precondition, and it admits every rate from
+1 bit/s to 10 Mb/s. `HealthTracker` cannot hold such a rate. Every trunk §7 rule in
+`link/health.cpp` stores a probe's rate as ONE BIT (`BusState::probe_fallback`,
+"fallback : reference"), and `evaluate_declare()` reduces the rate in use to that same bit
+(`bus_.bit_rate == TRUNK_bit_rate_fallback ? kAllProbeBits : 0`). With a third rate
+accepted, every address owing the layer no outcome was recorded as "polled at the REFERENCE
+rate": an answer to a poll that went out at 500 kb/s took §7's first clear rule, cleared the
+fault at 1 Mb/s, moved the rate in use to 1 Mb/s and enrolled its node there — the same
+inversion the "a new episode at the fallback rate reads a pre-declare poll's answer as a
+fallback one" case exists to prevent, one rate to the side of the two
+`docs/trunk-link-layer.md` §9 names. Reachable only through `set_bit_rate`: before it,
+`bus_.bit_rate` was written only by the private `clear_fault`, which is called with §9's two
+constants and nothing else (a control on the file's contents, not a language guarantee).
+
+**Options:** (a) **refuse, at this layer, every rate §9 does not name** — the rate model
+gains no third value and the §7 rules keep the domain they are written for; stricter than
+`Master`'s rule and subsuming it (both §9 rates have a nonzero byte time), so the property
+that rule exists for still holds. (b) Give the rate model a real rate rather than a bit
+(per-address stored rates, §7's clear rules rewritten in terms of "the rate this probe went
+out at" vs "the rate in use") — a large change, and it needs §7 semantics for a rate §9 does
+not define. (c) Leave `set_bit_rate` permissive and have F3 promise never to select a third
+rate — an unenforceable obligation guarding a silent, rig-level misbehaviour.
+
+**Recommended:** (a), implemented on `task/578`: `bps != TRUNK_bit_rate && bps !=
+TRUNK_bit_rate_fallback` returns, assigning nothing and counting nothing. This is a **stated
+divergence** from the contract sentence quoted above, not a silent one; the contract file is
+unchanged here (a human-ruling artefact). Two consequences a ruling should address: the
+contract's "exactly `Master::set_bit_rate`'s rule" needs amending to "§9's two rates" for
+this method, and F3 obligation 3 ("the wire and this tracker set to the layer above's rate
+in the same step") becomes unsatisfiable for a rate outside §9 — a caller that selects one
+puts the two out of step, which is that obligation's violation and not a state this layer
+can represent. `Master::set_bit_rate` itself is untouched: it times bytes, it does not
+classify rates, so the 2026-09-06 amendment's recommendation (a) still stands there and its
+option (d) — restricting `Master` contractually to §9's two rates — is still unruled and
+still not taken.
+
+**Ruling:** pending — human (contract text; `contracts/link-cpp.md` "Health tracker").
+**Related:** the 2026-09-06 "Master::set_bit_rate refuses any rate whose byte time truncates
+to 0 µs" entry, whose option (d) this is the `HealthTracker`-side analogue of; that entry is
+neither amended nor superseded — its subject is `Master`.
+**Supersedes:** none.
+
+---
+
+## 2026-09-16 — the late-outcome exception is bounded by the CLEAR, not by the fault at the handout: a stated WIDENING of "a fault-time probe"
+
+**Context:** red team round 3 on PR #651 (#578), finding 1 [HIGH].
+`contracts/link-cpp.md` "Health tracker" writes the exception as: outside a fault, the late
+outcome — ok or failure — of **a fault-time probe** still outstanding inside its outcome
+window and issued at a rate other than the rate now in use moves no state. Bounding it by
+"went out while `bus_fault()` was true", recorded at the handout, leaves a hole the rule's
+own rationale (round 15 on #530 — never enrol a node on a trunk it has not answered) does
+not: `kOutcomeWindowUs` is ~24.6 ms and a whole episode — declare, one alternation probe, a
+one-address reference pass, clear — fits inside it. An **ordinary** enrolment probe issued
+before the declare therefore survives the episode, and when that episode clears at the
+FALLBACK rate (§7's second clear rule, which FR-025/FR-026 leave in place for ever), its
+reference-rate answer was applied: §6's `UNENROLLED | ok -> ENROLLED` fired and the node was
+`poll_due()` at once, at 115.2 kb/s, on the strength of an answer at 1 Mb/s. It would then
+fail back into SUSPECT and re-declare the fault that had just cleared. Demonstrated by "a
+probe issued BEFORE an episode does not enrol its node at the rate the clear moved the trunk
+to" in `tests/unit/test_link_busfault.cpp`, red before the change.
+
+**Options:** (a) **bound the exception by the clear** — one bit per address
+(`BusState::probe_across_clear`), set by `clear_fault()` for every address still owing this
+layer an outcome and cleared by `note_probe()` on the next handout to that address.
+(b) Leave the bound at the handout and have `set_bit_rate` clear `probe_live` for the probes
+its selection strands — same effect for round 1's case, but it also releases a FAULT-TIME
+probe the contract's sentence keeps, so it narrows the contract instead of widening it.
+(c) Read the contract's "fault-time probe" literally and accept the enrolment above as
+correct — rejected: it is the harm the exception exists for, one input to the side.
+
+**Recommended:** (a), implemented on `task/578`. It is a **widening**: the set is "every
+probe outstanding when a §7 clear decided the rate in use", a strict superset of the
+contract's "fault-time probe", because `!bus_fault()` after an episode is reached only
+through `clear_fault` and every fault-time probe still live there takes the bit. So no
+outcome the contract's own wording preserves is suppressed; what is added is the ordinary
+pre-declare probe. A ruling should either amend the contract sentence to "a probe still
+outstanding when a clear decided the rate in use" or say why the pre-declare probe's answer
+should be applied at a rate it was not issued at. Not resolved in a code comment: the
+divergence is named in `link/health.{hpp,cpp}`, `link/README.md` and here.
+
+**Ruling:** pending — human (contract text; `contracts/link-cpp.md` "Health tracker", the
+"Rules:" paragraph).
+**Related:** the 2026-09-16 "the rate in use is a ONE-BIT quantity" entry above (same PR,
+same contract section, independent question); the 2026-09-13 "no automatic return" ruling,
+which is what leaves the fallback rate in use after the clear and so makes this reachable.
+**Supersedes:** none.
+
+---
+
+## 2026-09-16 — a rate move by `set_bit_rate` does not strand an outstanding probe; the same move by a clear does. Which of the two is right is a contract question
+
+**Context:** red team round 4 on PR #651 (#578), finding 1 [HIGH]; the review at the same
+head (`c6a8d08`) reached the same asymmetry and classified it a follow-up needing a ruling.
+`contracts/link-cpp.md` "Health tracker" scopes the late-outcome exception to **a fault-time
+probe**. An ORDINARY enrolment probe on a rig with no fault in its history is therefore
+outside it, and §6's "any valid response → ENROLLED" applies — which is what the code does.
+The trajectory that follows: `next_probe()` hands out a probe at 1 Mb/s; the layer above
+selects the fallback rate while it is on the wire (trunk §7's own use case, F3 obligation 3);
+the node's 1 Mb/s answer arrives inside `kOutcomeWindowUs` and enrols it; it is `poll_due()`
+at once at 115.2 kb/s, a rate it has answered nothing at; being strapped to 1 Mb/s (trunk §2)
+it answers no poll, reaches SUSPECT after `TRUNK_suspect_after_failures`, and — as the one
+enrolled address — FR-023 declares `BUS_FAULT` on a trunk that never had one. Demonstrated by
+"the node enrolled by the two cases above is then polled at the rate the selection moved to,
+and can walk to SUSPECT and declare a fault there" in `tests/unit/test_link_busfault.cpp`, a
+characterization case: green before and after the run that added it, with a control tracker
+whose only difference is that the selection precedes the handout.
+
+The asymmetry: a **clear** that makes the identical move (1 Mb/s probe outstanding, rate in
+use moved to 115.2 kb/s) strands that probe and voids its outcome — the entry above, and "a
+probe issued BEFORE an episode does not enrol its node at the rate the clear moved the trunk
+to". `set_bit_rate` does not. The physics are the same on both sides; only the mover differs.
+
+**Options:** (a) **Leave it** — the contract's "fault-time probe" is read as written and the
+enrolment is correct; the trajectory above is F3's to avoid under obligations 2 and 3 (one
+`next_probe()` per probe issued, and the wire and tracker moved in the same step), since the
+scheduler is what owns probe/outcome ordering and is the only thing that can know a probe is
+in flight when it selects. (b) **Widen the exception a second time**, to "every probe
+outstanding when the rate in use moved, by a clear or by a selection" — `set_bit_rate` would
+`|= probe_live` into `BusState::probe_across_clear` exactly as `clear_fault()` does, the
+field renamed to say "the rate in use moved under this probe". The node then stays
+UNENROLLED, which self-heals: UNENROLLED addresses are what the enrolment rotation probes,
+at the rate now in use, within one rotation. (c) Make the exception asymmetric in the outcome
+— suppress an `ok` (no enrolment at a rate the node has not answered) but apply a failure.
+Rejected as a recommendation: it re-opens round 1's finding from the other side (a voided
+failure and an applied failure blind the table in opposite directions) and no contract
+sentence distinguishes the two.
+
+**Recommended:** (b), and **not implemented on `task/578`**. Two reasons, both bounds rather
+than judgements about which behaviour is better. It would be a **second** widening of a
+contract sentence whose first widening (the entry above) is itself awaiting a ruling, and the
+contract is a human-ruling artefact (OPERATING-POLICY §2) — CLAUDE.md's working agreement is
+to record a spec ambiguity and implement nothing speculative. And it would require inverting
+the assertions of "a selection under an outstanding probe does not suppress that probe's
+outcome ..." and "every node that answers a probe enrols ...", two cases added red-first in
+this same PR to fix red team round 1's finding 1, which was itself BLOCKING: reversing one
+blocking finding's fix to satisfy another is a ruling, not a review fix. A ruling that takes
+(b) should say so on both entries at once, since (b) subsumes the bit the entry above
+introduces.
+
+**Ruling:** pending — human (contract text; `contracts/link-cpp.md` "Health tracker", the
+"Rules:" paragraph and F3 obligations 2/3 under "What F3/F4 need").
+**Related:** the 2026-09-16 "the late-outcome exception is bounded by the CLEAR" entry
+immediately above — same sentence, same PR; a ruling for (b) here settles that one too. The
+2026-09-13 "no automatic return" ruling, which is why the selected rate stays in use.
+**Supersedes:** none.
+
+---
+
 ## 2026-09-15 — BusStats has two disjoint owners: ruled by design, never summed (#574)
 
 **Context:** `BusStats` (`data-model.md` §8) is produced by two engines — `Master`'s own
