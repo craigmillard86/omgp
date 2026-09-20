@@ -92,6 +92,11 @@ Definition of done for any task: unit tests green, scenario suite green,
 diffcheck green, both builds compile, no new sanitizer findings, docs/YAML
 updated if the protocol changed.
 
+Optional local pre-push gate: `git config core.hooksPath .githooks` (once per
+clone) runs `pipeline.sh quality` before every push — the same
+formatting/embedded-path check `quality` runs in CI, just earlier and faster.
+Skip once with `git push --no-verify`.
+
 ## Repo layout
 
 ```

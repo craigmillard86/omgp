@@ -193,7 +193,7 @@ def test_agent_pick_wip_cap_against_mocked_github(tmp_path):
 def test_wip_cap_wiring():
     """The knob is a T3 config value read by the workflow, not a constant in the script."""
     cfg = (ROOT / ".github" / "agent-config.yml").read_text()
-    assert "wip_cap: 2" in cfg
+    assert "wip_cap: 4" in cfg
     wf = yaml.safe_load((ROOT / ".github" / "workflows" / "agent-dispatch.yml").read_text())
     steps = wf["jobs"]["pick"]["steps"]
     script_step = next(s for s in steps if "actions/github-script" in s.get("uses", ""))
@@ -1591,8 +1591,9 @@ def test_round_budget_steps_fail_soft():
 
 
 def test_round_budget_config_key_is_present_and_sane():
-    """The default is the ruling's: 3. Read here so a silent deletion of the key (which the
-    script reads as "budget off") is a test failure rather than an invisible policy reversal."""
+    """The ruled range is 1..10 (#666 lowered the value itself to 1). Read here so a silent
+    deletion of the key (which the script reads as "budget off") is a test failure rather
+    than an invisible policy reversal."""
     cfg = (ROOT / ".github" / "agent-config.yml").read_text()
     m = re.search(r"^adversarial_round_budget:\s*(\d+)", cfg, re.MULTILINE)
     assert m, "agent-config.yml lost adversarial_round_budget — the budget would be off"

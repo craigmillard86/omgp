@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Local pre-push gate: catches formatting/embedded-path breaks before they cost
+# a CI run. Enable once per clone: git config core.hooksPath .githooks
+#
+# Deliberately runs only `quality` (seconds, no build needed) — not `unit`/`build`,
+# which need a full, serially-compiled CMake tree and aren't cheap on a cold cache.
+# This catches the same class of failure ci-gate's quality stage catches, just
+# earlier and faster; it complements ci-gate, it doesn't replace it. Skip once
+# with `git push --no-verify`, same as any git hook.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+bash pipeline.sh quality

@@ -4593,3 +4593,26 @@ gate). Implemented in `.github/workflows/ci.yml`.
 **Amends:** none — this is the decision the two entries above left PENDING, recorded here with
 its own dated entry per the "supersede by appending, never by editing" rule; their own `Ruling:`
 lines are updated to point here rather than restate the decision twice. **Supersedes:** none.
+
+---
+
+## 2026-09-20 — Batch single-purpose governance/workflow-tuning PRs instead of same-day, one-off
+
+**Context:** A delivery-data audit (git history, PR/issue graph, `origin/metrics`
+delivery-log.jsonl/task-log.jsonl, and full review-fix/red-team comment bodies) found that of 67
+`risk:t3` PRs, 58 (87%) touch `.github/workflows/**` and 18 (27%) touch nothing else —
+single-purpose automation edits, each its own CODEOWNERS-gated review cycle. `feature:none` PRs
+are 47 of 98 delivery-ledger entries. This is the verified driver of T3/CODEOWNERS review
+volume: checked directly against every T3 PR's changed-file list, and 0 of the 67 were triggered
+by `specs/**` housekeeping alone, ruling out an earlier hypothesis that `risk-score` over-fires
+on spec/doc paths.
+
+**Recommendation:** Batch routine workflow/process tuning into the existing weekly
+`continuous-improvement` review (docs/GOVERNANCE.md, "Weekly governance feedback") instead of a
+same-day PR per tweak. Keep the same-day fast path for LIVE correctness/security gaps only —
+e.g. the `agent-approve`/`review-followups` trigger gaps found and fixed same-day on 2026-09-15
+were correctly urgent and should stay so under this recommendation, not be deferred.
+
+**Ruling:** pending — human.
+
+**Supersedes:** none.
