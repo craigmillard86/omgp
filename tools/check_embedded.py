@@ -8,8 +8,9 @@ Findings (exit 1, one `file:line: message` per finding):
     (opcode, error code, TLV type, event, module type, flag, limit, addressing or timing
     value) — such values must come from the generated header. Values below 0x10 are
     ignored (bit masks and small counts are too common to police by grep);
-  * missing citation: every file under l3/ must cite a `protocol-l3 §` section
-    (constitution Principle IX).
+  * missing citation: every file under a --cite-dirs directory (default l3/ link/ core/)
+    must cite a `protocol-l3 §` or `trunk §` section (constitution Principle IX; for core/,
+    specs/003-host-core-engine/plan.md:90).
 Escape hatch: `// literal-ok: <reason>` on the same line suppresses the literal check
 for that line. Comments and string literals are stripped before matching.
 
@@ -169,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dirs", nargs="+", default=["l3", "link", "core"],
                     help="directories to scan (relative to repo root or absolute)")
     ap.add_argument("--yaml", default=str(ROOT / "protocol" / "omgp-protocol.yaml"))
-    ap.add_argument("--cite-dirs", nargs="*", default=["l3", "link"],
+    ap.add_argument("--cite-dirs", nargs="*", default=["l3", "link", "core"],
                     help="directory basenames whose files must cite a spec section")
     args = ap.parse_args(argv)
 

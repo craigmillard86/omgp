@@ -42,7 +42,7 @@ each story's phase, not deferred to one final polish phase).
       ../../../build/gen)`, `-fno-exceptions -fno-rtti`) and a placeholder
       `esp32-host/main/core_smoke.cpp` (references only `core/core_types.hpp` until T045
       completes it against the real `CoreEngine`)
-- [ ] T004 [P] Change `tools/check_embedded.py` default `--cite-dirs` to `l3 link core` and add
+- [x] T004 [P] Change `tools/check_embedded.py` default `--cite-dirs` to `l3 link core` and add
       a case to `tools/refimpl/test_check_embedded.py`: a `core/` file without a `trunk §` or
       `protocol-l3 §` citation fails (write the test first; it fails on the old default)
 - [ ] T005 `protocol/omgp-protocol.yaml`: add `l3_payloads.BP_SLOT_MAP` (replacing
