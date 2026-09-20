@@ -376,6 +376,18 @@ assert no bus fault.
   its window could attribute it — and inside that window it counts as `crc_failures`, not as
   a discard). The per-address discard counter therefore means "a decoded frame discarded
   during that address's own transaction" and nothing else. Implementation: #144.)*
+  *(Ruled 2026-09-15, `OPEN-QUESTIONS.md` "BusStats has two disjoint owners" (#574): "per bus"
+  above is two independently-owned blocks, not one — `Master` produces `discards` and its own
+  `rate_changes` (a `set_bit_rate` call it made); `HealthTracker` produces its own
+  `rate_changes` (a change of the rate *in use*) and `bus_faults` (a declare). Each block is
+  independently readable and resettable by the layer above, as this requirement already says;
+  what it does not require, and what is ruled here, is that the two are ever summed into one
+  view — they answer different questions ("what the wire was told" vs "what the rate in use
+  did"), by design, matching the already-ruled split for `rate_changes` alone
+  (`contracts/link-cpp.md` "Health tracker", round-3 red team on #523). `Master`'s own
+  `bus_faults` field stays declared-but-unwritten: `Master` decides no faults. Implementation
+  of `HealthTracker::reset_stats()` (the one asymmetry `Master` did not share) is a follow-up,
+  not this ruling.)*
 - **FR-012**: The engine MUST model transmission time from the frame's stuffed length and
   the bit rate in use (10 bits per byte, 8N1) so that "final stop bit" instants — from
   which turnaround and timeout are measured — are computed, not assumed, and change
