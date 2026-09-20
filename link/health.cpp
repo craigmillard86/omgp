@@ -384,6 +384,33 @@ void HealthTracker::mark_polled(uint8_t addr, uint64_t now_us) {
     if (!is_node_addr(addr))
         return;
     records_[addr].last_poll_us = now_us;
+    // Red team round 5 on #578, finding 1: evaluate_declare()'s per-episode reset (below)
+    // reads bus_.bit_rate for every address it owes no outcome to, as a proxy for "the rate
+    // this address's outstanding traffic went out at" -- and that proxy is only sound while
+    // nothing can move bus_.bit_rate between the traffic going out and the declare that reads
+    // it. note_probe() already gives real probes their own per-address record instead of
+    // relying on that proxy (BusState::probe_fallback/probe_live), which is exactly why an
+    // ordinary ENROLMENT PROBE outstanding across a set_bit_rate() call reads correctly (health.hpp
+    // set_bit_rate's own doc block) -- but an ordinary STATUS POLL took no such record, so the
+    // same proxy that is safe for a probe was the WHOLE of a poll's rate history, and
+    // set_bit_rate becoming a second writer of bus_.bit_rate broke it: a poll issued at one
+    // rate, answered after a set_bit_rate() call and a declare, was classified at whatever
+    // rate the declare happened to see -- inverting both of trunk §7's clear rules (red team's
+    // reproducer: "upward" enrolled a node at a rate it cannot hear on the strength of a
+    // fallback-rate answer; "downward" pinned a healthy reference-rate trunk at the fallback
+    // rate forever on the strength of a reference-rate answer).
+    //
+    // The fix is not new machinery: a poll IS the same shape of thing a probe is from this
+    // tracker's point of view -- a transaction to `addr`, at the rate in use while !bus_fault()
+    // (contracts/link-cpp.md "Health tracker", set_bit_rate), with an outcome this layer is
+    // owed until on_result() reads it. Routing it through note_probe() gives it the exact same
+    // protection: evaluate_declare()'s reset SKIPS an address with a live record (probe_live),
+    // so a poll's true issue rate survives a declare that lands before its answer does, exactly
+    // as an enrolment probe's already does. bus_.bit_rate, not a parameter: mark_polled's own
+    // signature is unchanged (contracts/link-cpp.md is not touched by this fix) -- while
+    // !bus_fault() the rate a poll goes out at IS the rate in use, by the same contract line
+    // set_bit_rate's doc cites.
+    note_probe(addr, bus_.bit_rate, now_us);
 }
 
 uint8_t HealthTracker::next_backplane_addr(uint8_t addr) const {
@@ -526,9 +553,13 @@ void HealthTracker::note_probe(uint8_t addr, uint32_t bit_rate, uint64_t now_us)
     // wire moves on: while a probe to this address is outstanding, another next_probe() call
     // (F3 obligation 2 violated) puts a different address's probe on the wire at the other
     // rate, and the classification must not follow it (red team round 2 on #530, finding 1).
-    // Every caller is a probe about to be issued for a rotation address, in range by the
-    // static_assert above; ADDR_host, which is the "nothing to probe" sentinel and never goes
-    // on the wire, is not one of them.
+    // Two kinds of caller, both about to put a real transaction on the wire for `addr`, in
+    // range by the static_assert above; ADDR_host, which is the "nothing to probe" sentinel and
+    // never goes on the wire, is not one of them: next_probe()'s own handouts (a rotation
+    // address, during the enrolment rotation or a fault), and mark_polled() (an already-ENROLLED
+    // or SUSPECT address's ordinary status poll, added by red team round 5 on #578 finding 1 —
+    // the same per-address record a probe gets, so a poll's issue rate survives a declare that
+    // lands before its answer does, exactly as a probe's already did).
     if (bit_rate == omgp::TRUNK_bit_rate_fallback)
         bus_.probe_fallback = static_cast<uint16_t>(bus_.probe_fallback | probe_bit(addr));
     else

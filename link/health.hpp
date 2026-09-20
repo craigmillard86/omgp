@@ -65,6 +65,14 @@ class HealthTracker {
     // address while bus_fault() (data-model.md §6, amended 2026-09-13: no status polls while
     // a fault is declared, only next_probe() drives the wire).
     bool poll_due(uint8_t addr, uint64_t now_us) const;
+    // Call when a status poll for `addr` goes out (poll_due() said so). Besides the
+    // poll-period stamp poll_due() reads, this now also records the rate the poll went out at
+    // (the rate in use, while !bus_fault()) the same way a probe's own issue is recorded —
+    // fixed #578 red team round 5, finding 1: without it, an ordinary poll's later outcome was
+    // classified by whatever bus_.bit_rate a set_bit_rate() call and a declare happened to
+    // leave behind, not the rate the poll actually used, inverting both of trunk §7's clear
+    // rules. Signature unchanged; the rate recorded is read from this tracker's own state, not
+    // a new parameter — see link/health.cpp's note_probe() for the shared mechanism.
     void mark_polled(uint8_t addr, uint64_t now_us);
     // Enrolment rotation over UNENROLLED/OFFLINE backplane addresses. When no candidate
     // exists (healthy-rig steady state), returns Probe{ADDR_host, ...} as the sentinel:
