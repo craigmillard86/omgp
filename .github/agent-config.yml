@@ -19,7 +19,13 @@ auto_fix_max_attempts: 4
 # Stories an agent may have in flight at once (open agent-authored PRs ∪ claimed
 # task issues, one story counted once; ruling 2026-09-03). 1 restores the original
 # single-slot behaviour and is the kill switch; unreadable values fail closed to 1.
-wip_cap: 2
+# Raised 2 -> 4 (#666): measured flow efficiency is 3% (89h median issue lead time
+# vs 2.9h median active time) — work is queued, not being worked. Both fix loops
+# are now provably bounded (a 4-attempt ceiling either way), which is what made 2
+# a conservative starting point. Note: as of this ruling, two open agent PRs
+# (#651, #663) sit needs-human and may already occupy WIP slots — raising this
+# number alone may not move throughput until a human resolves them.
+wip_cap: 4
 
 # Highest ACTUAL risk tier (risk-score label on the PR) at which a clean
 # machine-readable review verdict may satisfy the required PR approval for
@@ -57,7 +63,15 @@ review_fix_max_attempts: 4
 # unbounded loop; an unreadable value fails closed the same way (stricter,
 # never wider). Values above 10 are clamped DOWN to 10 — a typo must not make
 # the budget unreachable. Read at RUN time from the default branch.
-adversarial_round_budget: 3
+# Lowered 3 -> 1 (#666): a finding-level audit of every review-fix/red-team
+# comment on the 14 PRs that hit review-fix-4 plus 7 that stopped at round 1-2
+# found the SAME substance/wording finding mix in both groups (59%/41% vs
+# 58%/42%) — the wider budget wasn't buying qualitatively different scrutiny
+# at round 2-3, just more rounds of the same mix. ~19/120 merged PRs reached
+# round 3, at ~45-50 min/round measured gate time (#149, #145) — recoverable
+# capacity. The [HIGH]/regression/false-claim exemptions above are unchanged
+# by this value, so nothing that must always block, stops blocking.
+adversarial_round_budget: 1
 
 # How many times a no-op agent run is retried IN-JOB before the claim is released and the job
 # fails loudly (#361). A run that exits `success` having produced no branch, no PR and no comment
