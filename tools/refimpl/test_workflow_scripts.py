@@ -403,8 +403,12 @@ def test_bot_triggered_agent_workflows_allow_their_bot_actors():
                           ("ci-failure-router.yml", "github-actions"),  # workflow_run caused by bot pushes/dispatches
                           ("claude-review.yml", "claude"),            # agent PRs are opened by the Claude App
                           ("claude-review.yml", "github-actions"),    # synchronize from a router auto-fix push runs as github-actions (live: run 33435939888 on #108)
+                          ("claude-review.yml", "dependabot"),        # a Dependabot PR's own push is the triggering actor (live 401 on #661, 2026-09-20)
+                          ("claude-review.yml", "Copilot"),           # a Copilot coding-agent push (e.g. resolving conflicts) is the triggering actor (live 401 on #647, 2026-09-20)
                           ("red-team.yml", "claude"),
                           ("red-team.yml", "github-actions"),     # same synchronize path once red-team gains it; opened-by-bot today
+                          ("red-team.yml", "dependabot"),         # same class as claude-review.yml above
+                          ("red-team.yml", "Copilot"),            # same class as claude-review.yml above
                           ("review-fix.yml", "claude")]:          # the trigger is claude[bot]'s own findings verdict
         wf = yaml.safe_load((ROOT / ".github" / "workflows" / workflow).read_text())
         actions = [s for j in wf["jobs"].values() for s in j.get("steps", []) if "claude-code-action" in s.get("uses", "")]

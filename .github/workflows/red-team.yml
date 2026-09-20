@@ -197,7 +197,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_bots: claude,github-actions   # claude: agent PRs are opened by the Claude App. github-actions: router auto-fix pushes arrive as synchronize events with that actor (same class as claude-review run 33435939888)
+          allowed_bots: claude,github-actions,dependabot,Copilot   # claude: agent PRs are opened by the Claude App. github-actions: router auto-fix pushes arrive as synchronize events with that actor (same class as claude-review run 33435939888). dependabot/Copilot (added 2026-09-20, #647/#661): same 401 App-token-exchange refusal as claude-review.yml, same fix, see that file's comment
           prompt: |
             You are the red team. Your stance: PR
             #${{ github.event.pull_request.number }} is WRONG and your job
@@ -363,7 +363,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_bots: claude,github-actions   # schedule/dispatch actors are usually human; named for parity with attack-pr (regression test covers every step)
+          allowed_bots: claude,github-actions,dependabot,Copilot   # schedule/dispatch actors are usually human; named for parity with attack-pr (regression test covers every step)
           prompt: |
             You are the protocol red team for an OPEN hardware platform:
             assume module firmware is written by adversaries. Read
