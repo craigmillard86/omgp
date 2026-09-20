@@ -2639,3 +2639,130 @@ TEST_CASE("a whole fault episode allocates nothing", "[link]") {
 
     REQUIRE_FALSE(tracker.bus_fault());
 }
+
+// --- #578 red team round 5, finding 1 [HIGH]: mark_polled's own rate record --------------
+// evaluate_declare()'s per-episode reset reads bus_.bit_rate for every address it owes no
+// outcome to, as a proxy for "the rate this address's outstanding traffic went out at" — sound
+// only while nothing can move bus_.bit_rate between that traffic going out and the declare that
+// reads it. set_bit_rate is a second writer of bus_.bit_rate (the first is clear_fault), and an
+// ORDINARY STATUS POLL — unlike an enrolment probe, which note_probe() already gives its own
+// per-address record — had no record of its own: the proxy was the whole of its rate history.
+//
+// A SECOND node (B) drives the declare, not A itself: on_result() unconditionally consumes the
+// live record of whatever address it is called for (health.cpp, "the outcome consumes the live
+// record"), so an address cannot both keep a mark_polled() record live AND be the one whose own
+// failures complete the declare — driving A to SUSPECT with its own failures after mark_polled()
+// would clear A's protection before evaluate_declare() ever ran, which is a gap in how the
+// episode is driven, not in the fix. A is put at SUSPECT BEFORE the interesting poll, stays
+// there untouched (no on_result(A, ...) between mark_polled(A, ...) and the late answer), and B's
+// own failures complete "every enrolled node is SUSPECT" once B catches up.
+//
+// Each pair below is an attack arm plus its control: the same episode with the set_bit_rate
+// call deleted, so a control failing the same way the attack does would mean the divergence is
+// not the call's doing. Both controls pass; both attacks, before the fix, failed.
+TEST_CASE("upward: a FALLBACK-rate poll's answer does not clear the fault at the REFERENCE "
+          "rate it never heard",
+          "[link]") {
+    // A rig running AT the fallback rate; the layer above restores the reference rate while a
+    // fallback-rate status poll to A (already SUSPECT) is still in flight, and B's own failures
+    // — untouched by A's record — complete the declare. §7: a fallback-rate answer "neither
+    // clears the fault nor moves that node's state" — before the fix this cleared at the
+    // reference rate and enrolled A on the strength of an answer it gave at 115.2 kb/s.
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    tracker.set_bit_rate(omgp::TRUNK_bit_rate_fallback); // set_bit_rate's own documented use case
+    tracker.on_result(kNodeA, true, 0);    // A ENROLLED; its polls go out at 115.2 kb/s
+    tracker.on_result(kNodeB, true, 0);    // B ENROLLED too, so A alone does not
+                                           // already satisfy "every enrolled" below
+    fail_to_suspect(tracker, kNodeA, 100); // A -> SUSPECT; B still ENROLLED, so this
+    REQUIRE_FALSE(tracker.bus_fault());    // does not itself declare yet
+
+    tracker.mark_polled(kNodeA, 500);           // F3 puts A's (already-SUSPECT) status poll on the
+                                                // wire AT THE FALLBACK RATE here
+    tracker.set_bit_rate(omgp::TRUNK_bit_rate); // the layer above restores 1 Mb/s
+    fail_to_suspect(tracker, kNodeB, 600);      // B's own later polls draw nothing -> declare
+    REQUIRE(tracker.bus_fault());
+
+    tracker.on_result(kNodeA, true, 700); // the in-flight FALLBACK poll's answer lands, late
+    REQUIRE(tracker.bus_fault());         // §7: a fallback answer clears nothing
+    REQUIRE(tracker.state(kNodeA) != HealthState::ENROLLED);
+    // Not touched by a fallback answer (health.cpp, on_result's fallback_answer branch): the
+    // rate in use stays exactly what the layer above last selected.
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+}
+
+TEST_CASE("upward CONTROL: the same episode, minus the mid-flight selection", "[link]") {
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    tracker.set_bit_rate(omgp::TRUNK_bit_rate_fallback);
+    tracker.on_result(kNodeA, true, 0);
+    tracker.on_result(kNodeB, true, 0);
+    fail_to_suspect(tracker, kNodeA, 100);
+    REQUIRE_FALSE(tracker.bus_fault());
+
+    tracker.mark_polled(kNodeA, 500);
+    // <- the ONLY difference from the attack above: no set_bit_rate() here
+    fail_to_suspect(tracker, kNodeB, 600);
+    REQUIRE(tracker.bus_fault());
+
+    tracker.on_result(kNodeA, true, 700);
+    REQUIRE(tracker.bus_fault());
+    REQUIRE(tracker.state(kNodeA) != HealthState::ENROLLED);
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+}
+
+TEST_CASE("downward: a REFERENCE-rate poll's answer clears the fault at once, not after a "
+          "reference pass",
+          "[link]") {
+    // A rig at the reference rate; the layer above selects the fallback rate while a
+    // reference-rate status poll to A (already SUSPECT) is still in flight, and B's own
+    // failures complete the declare. §7 rule 1: a valid answer at the reference rate clears AT
+    // ONCE — before the fix this instead recorded A as the episode's fallback answerer, ran a
+    // full reference pass, and pinned a healthy trunk at the fallback rate forever (FR-025/
+    // FR-026: no automatic return).
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    tracker.on_result(kNodeA, true, 0); // A ENROLLED; its polls go out at 1 Mb/s (the default)
+    tracker.on_result(kNodeB, true, 0); // B ENROLLED too
+    fail_to_suspect(tracker, kNodeA, 100);
+    REQUIRE_FALSE(tracker.bus_fault());
+
+    tracker.mark_polled(kNodeA, 500);                    // F3 puts A's (already-SUSPECT) status
+                                                         // poll on the wire AT THE REFERENCE
+                                                         // RATE here
+    tracker.set_bit_rate(omgp::TRUNK_bit_rate_fallback); // the layer above slows the trunk
+    fail_to_suspect(tracker, kNodeB, 600);               // B's own later polls draw nothing
+    REQUIRE(tracker.bus_fault());
+
+    tracker.on_result(kNodeA, true, 700); // the in-flight REFERENCE poll's answer
+    REQUIRE_FALSE(tracker.bus_fault());   // §7 rule 1: a reference answer clears AT ONCE
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+    REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED);
+}
+
+TEST_CASE("downward CONTROL: the same episode, minus the mid-flight selection", "[link]") {
+    FakeClock clock;
+    RecordingListener listener;
+    HealthTracker tracker(clock, listener);
+
+    tracker.on_result(kNodeA, true, 0);
+    tracker.on_result(kNodeB, true, 0);
+    fail_to_suspect(tracker, kNodeA, 100);
+    REQUIRE_FALSE(tracker.bus_fault());
+
+    tracker.mark_polled(kNodeA, 500);
+    // <- the ONLY difference from the attack above: no set_bit_rate() here
+    fail_to_suspect(tracker, kNodeB, 600);
+    REQUIRE(tracker.bus_fault());
+
+    tracker.on_result(kNodeA, true, 700);
+    REQUIRE_FALSE(tracker.bus_fault());
+    REQUIRE(tracker.bit_rate() == omgp::TRUNK_bit_rate);
+    REQUIRE(tracker.state(kNodeA) == HealthState::ENROLLED);
+}
