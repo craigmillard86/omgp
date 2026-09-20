@@ -109,6 +109,70 @@ jobs:
           path: esp32-host/build/*.bin
           if-no-files-found: ignore
 
+  bootstrap:
+    name: bootstrap (g++ fallback, no cmake)
+    # T049/AC2's standing evidence (docs/OPEN-QUESTIONS.md "#62 (T044) AC2", option B, ruled
+    # 2026-09-16): pipeline.sh's bootstrap g++ path (stage_build's `command -v cmake` branch,
+    # pipeline.sh:218) had never been exercised anywhere in CI. Every job in this file installs
+    # cmake explicitly, and the one place that tried NOT to (the dispatch agent's own PATH grant)
+    # found the runner image ships a pre-installed copy regardless — that entry's fact (3):
+    # `which cmake` -> /usr/local/bin/cmake, separate from apt's /usr/bin/cmake. "Never installs
+    # cmake" is therefore not sufficient on its own; this job actively removes every cmake it
+    # finds on PATH and ASSERTS none is reachable before building, rather than assuming it —
+    # the same claim that entry's own red team disproved once already when stated as a universal.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: tools/requirements.txt
+      - name: Python deps (pinned clang-format + pytest) — no cmake, no ninja
+        run: pip install -r tools/requirements.txt
+
+      - name: Remove cmake from PATH and prove it — never assume
+        # Bounded, not `while ... do sudo rm; done`: a `rm` that fails silently (permissions, a
+        # read-only mount) would otherwise spin until the job's own timeout kills it instead of
+        # failing loud immediately — found by exactly that hang in a sandbox with no sudo while
+        # drafting this job. 10 is generous headroom over the ≤2 copies this image is known to
+        # carry (apt's /usr/bin, the toolcache's /usr/local/bin).
+        run: |
+          sudo apt-get remove -y cmake >/dev/null 2>&1 || true
+          for _ in $(seq 1 10); do
+            command -v cmake >/dev/null 2>&1 || break
+            sudo rm -f "$(command -v cmake)"
+          done
+          if command -v cmake >/dev/null 2>&1; then
+            echo "::error::cmake still on PATH after 10 removal attempts: $(command -v cmake)"
+            exit 1
+          fi
+
+      - name: Pipeline — bootstrap g++ path, all local stages
+        # Tee'd so the next step greps THIS run's own output rather than assuming which build
+        # branch pipeline.sh took.
+        run: ./pipeline.sh codegen quality build unit refimpl diffcheck scenarios 2>&1 | tee /tmp/pipeline.log
+
+      - name: Confirm the bootstrap branch actually ran, not just that the pipeline passed
+        # A green pipeline above proves nothing about WHICH branch ran unless this checks for
+        # the branch's own tell (pipeline.sh:223). Without this, a runner image that silently
+        # re-adds cmake to PATH would take the CMake branch and this job would keep passing
+        # while proving nothing about the bootstrap path — the exact overclaim
+        # docs/OPEN-QUESTIONS.md "#62 (T044) AC2" exists to prevent.
+        run: grep -qF "cmake not found -> bootstrap g++ build" /tmp/pipeline.log
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bootstrap-failure-logs
+          path: |
+            build/native/**/*.log
+            /tmp/pipeline.log
+          if-no-files-found: ignore
+
   budgets:
     # Gate budgets — this job's timeout, the Claude action's turn cap and (red team) the
     # posting deadline — come from .github/agent-config.yml on the DEFAULT branch, never
@@ -223,13 +287,14 @@ jobs:
   # so adding/removing jobs never means editing protection rules.
   gate:
     name: ci-gate
-    needs: [native, esp32, deep-verify, budgets]
+    needs: [native, bootstrap, esp32, deep-verify, budgets]
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Verify all jobs succeeded (deep-verify may be skipped, never failed)
         run: |
           [ "${{ needs.native.result }}" = "success" ] || exit 1
+          [ "${{ needs.bootstrap.result }}" = "success" ] || exit 1
           [ "${{ needs.esp32.result }}" = "success" ] || exit 1
           [ "${{ needs.deep-verify.result }}" = "success" ] || [ "${{ needs.deep-verify.result }}" = "skipped" ] || exit 1
           # budgets feeds deep-verify's timeout: if it failed, deep-verify was SKIPPED for the
