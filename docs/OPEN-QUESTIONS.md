@@ -4148,10 +4148,9 @@ corrected not to claim that it does.
 - **C. Amend AC2** to name whichever mechanism is chosen, so the criterion and the evidence
   agree.
 
-**Ruling:** PENDING — human. A→C above is a GOVERNANCE §3 choice (`ci.yml`/`pipeline.sh`), and
-#62 should not be re-released with AC2 still unsatisfiable by the job that would claim it.
-**Amends:** the 2026-09-15 maintainer ruling on #62 blocker 2 (records that its fix is necessary
-but not sufficient). **Supersedes:** none.
+**Ruling:** ANSWERED, human, 2026-09-16 — **option B**, implemented directly (see the entry
+below, "#62 (T044) AC2, option B implemented"). **Amends:** the 2026-09-15 maintainer ruling on
+#62 blocker 2 (records that its fix is necessary but not sufficient). **Supersedes:** none.
 
 ---
 
@@ -4489,9 +4488,8 @@ bypassing it. Not implemented and **not run** here (allow-list): only that the b
 *selectable* that way is established — that it *builds green* is unexamined. B is still recommended
 over D, on the same ground as before: D yields a transcript, B yields a standing gate.
 
-**Ruling:** PENDING — human, unchanged. This entry adds evidence, not a decision; A→D remains a
-GOVERNANCE §3 choice over `ci.yml`/`pipeline.sh`/the dispatch allow-list. Nothing speculative was
-implemented on `task/62`: AC4's floor raise is the whole source diff.
+**Ruling:** ANSWERED, human, 2026-09-16 — **option B**, implemented directly (see the entry
+below, "#62 (T044) AC2, option B implemented").
 
 **Amends:** the 2026-09-15 "#62 (T044) AC2" entry — its facts (1) and (2) move from proved-by-
 construction to demonstrated-by-execution; its "No PATH value fixes this" gains the
@@ -4544,3 +4542,54 @@ in this same change to say so explicitly, clearing PR #530's "pending a ruling" 
 **Amends:** none — this is the first ruling on the question; the PR #530 contract marker it
 clears was never itself a ruling, only a flag that one was owed. **Supersedes:** none.
 **Related:** settles the 2026-09-14 "T042 (#60) AC3…" entry above in the same direction.
+
+---
+
+## 2026-09-16 — #62 (T044) AC2, option B implemented: a standing `bootstrap` job in `ci.yml`
+
+**Context:** the two entries above (2026-09-15, "AC2: the bootstrap grant lifts the denial but
+does not mask `cmake`" and its correction "AC2, corroborated by execution") both recommended
+**option B** — a CI job that never installs `cmake`, making pipeline.sh's bootstrap g++ fallback
+(`stage_build`, `pipeline.sh:218`) a standing gate instead of a one-off dispatch-agent
+transcript — and left the choice among A/B/C/D `PENDING — human`. Ruled: option B.
+
+**What "never installs `cmake`" turned out to need**, learned from the entries above's own
+correction and not assumed here either: the runner image ships a pre-installed `cmake` (fact
+(3), previous entry — `/usr/local/bin/cmake`, separate from anything `apt-get install` would
+add at `/usr/bin`). A job that simply omits `apt-get install cmake` still has one on `PATH`. The
+new `bootstrap` job (`.github/workflows/ci.yml`) therefore:
+
+1. Installs `tools/requirements.txt` only (the pinned `clang-format` and `pytest`) — no
+   `cmake`, no `ninja`.
+2. Actively removes every `cmake` found on `PATH` (bounded to 10 attempts, not an unbounded
+   `while` — an early draft of this job hung in a sandbox with no `sudo` when a removal failed
+   silently; bounding it turns that failure mode into an immediate loud error instead of a
+   25-minute timeout).
+3. **Asserts** `command -v cmake` then fails, rather than assuming the removal worked — the same
+   discipline the entries above applied to "no PATH value fixes this" after it was falsified as
+   a universal once already.
+4. Runs `./pipeline.sh codegen quality build unit refimpl diffcheck scenarios`, tee'd to a log.
+5. Greps that log for `pipeline.sh`'s own tell (`pipeline.sh:223`,
+   `"cmake not found -> bootstrap g++ build"`) and fails if it is absent — so a future runner
+   image that silently re-adds `cmake` to `PATH` reds this job instead of quietly taking the
+   CMake branch and reporting nothing about the path it exists to prove.
+
+Added to `ci-gate`'s required jobs (`needs: [native, bootstrap, esp32, deep-verify, budgets]`)
+— a standing gate, not an advisory job, per the "gate" word in option B's own description above.
+
+**Disposes of two open items, as the previous entry predicted:** T049's bootstrap-path half
+(`specs/002-trunk-link-layer/tasks.md`, "with `cmake` masked from PATH") now has the CI evidence
+it asked a dispatch agent to produce by hand; the quickstart.md walkthrough half of T049 is
+untouched by this and remains its own task. AC2 itself: the checkpoint's own criterion asked
+whether the bootstrap path builds green with `cmake` masked, which this job now demonstrates on
+every PR and on `main` — #62 may cite this job's own green runs as AC2's evidence going forward,
+though closing #62 is still a maintainer action, not this entry's.
+
+**Ruling:** human, 2026-09-16. Option B, over A (proves the branch, not the detection `stage_
+build` performs — worse once fact (3) above was known), C (amends the criterion rather than
+meeting it) and D (a shim-directory PATH grant — yields a transcript per PR, not a standing
+gate). Implemented in `.github/workflows/ci.yml`.
+
+**Amends:** none — this is the decision the two entries above left PENDING, recorded here with
+its own dated entry per the "supersede by appending, never by editing" rule; their own `Ruling:`
+lines are updated to point here rather than restate the decision twice. **Supersedes:** none.
