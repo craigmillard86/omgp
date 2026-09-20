@@ -159,7 +159,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_bots: claude,github-actions   # claude: agent PRs are opened by the Claude App (found on #76). github-actions: a ci-failure-router auto-fix push arrives as a synchronize event with that actor (live: run 33435939888 on #108, 2026-08-31)
+          allowed_bots: claude,github-actions,dependabot,Copilot   # claude: agent PRs are opened by the Claude App (found on #76). github-actions: a ci-failure-router auto-fix push arrives as a synchronize event with that actor (live: run 33435939888 on #108, 2026-08-31). dependabot/Copilot (added 2026-09-20, #647/#661): both were refusing outright (401, App token exchange, not a findings verdict) whenever their own push was the triggering actor -- exact casing is the raw `actor.login` GitHub reports for each (`dependabot[bot]` and `Copilot` respectively; the action strips a bot's own `[bot]` suffix before matching, which is why `claude`/`github-actions` above are bare too)
           prompt: |
             Review PR #${{ github.event.pull_request.number || inputs.pr }} (risk
             ${{ steps.tier.outputs.label }}). Read CLAUDE.md and
