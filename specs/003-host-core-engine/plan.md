@@ -18,7 +18,14 @@ traffic (spec FR-020); and node lifecycle reporting — presence, derived module
 forwarded backplane/bus health (R-03) — through a function-pointer-plus-context callback
 interface (R-04, no `std::function`), delivered only via an explicit, caller-invoked
 `drain_callbacks()` off two pending-delivery rings so `run_superframe()` itself can never
-block on application code (spec FR-021; R-04's `/speckit-analyze` correction). Tests: a
+block on application code (spec FR-021; R-04's `/speckit-analyze` correction). Two hardening
+corrections (2026-09-21) reconcile this design with pre-existing human-ruled findings from
+issue #110's 2026-09-06 review that the first draft did not carry forward: event draining is
+capped at one per node per superframe with its own delivery-rate fault reporting (spec
+FR-025/FR-026, `docs/OPEN-QUESTIONS.md` "#110 F6"), and the superframe budget is computed from
+each backplane's/node's own *measured* transaction duration rather than an assumed worst-case
+bound, with demotion of a consistently expensive target's demand-item priority — never its
+mandatory status poll or the enrolment probe (spec FR-027/FR-028, "#110 F2c"). Tests: a
 message-level scripted test double this feature
 builds itself (`MockL3Node`, R-08 — F2 did not deliver the `MockTransport` the original
 roadmap assumed) driving the real `Master`+`HealthTracker` over a `FakeClock`; full
@@ -94,6 +101,13 @@ struct (data-model §7) removed the design pressure toward a class hierarchy tha
 pushed `core/` toward RTTI-adjacent dispatch; the free-pool node-ID allocator (R-06) removed
 the pressure toward a fixed-block formula that Phase 0 research showed does not fit the
 protocol's own stated backplane slot-count range.
+
+**Post-hardening re-check (2026-09-21, after reconciling #159/#162)**: unchanged, one addition
+to row I's own note. The two corrections add fields to `NodeRecord`/`BackplaneRecord`
+(data-model §3/§4) and two `LifecycleKind` pairs, not new public API or new dependencies — no
+principle's status moves. Both are amendments to *this feature's own* design decisions
+(R-07, R-11), not to the protocol or the generated header, so they carry no YAML/codegen
+change themselves; row I's T3-adjacent flag stays scoped to R-01 alone.
 
 ## Project Structure
 

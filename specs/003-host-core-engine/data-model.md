@@ -56,13 +56,23 @@ struct NodeRecord {
     bool switch_outstanding = false;
     uint8_t switch_channel = 0;
     uint64_t switch_deadline_us = 0;  // set from the descriptor's SwitchingRec::settle_ms
+    // Event-rate / flood defence (spec FR-025/FR-026, research.md R-07 correction):
+    uint8_t events_drained_this_window = 0;  // count within event_rate_window_start_us
+    uint64_t event_rate_window_start_us = 0;
+    bool event_faulted = false;       // true once the rate budget is exceeded; stops draining
+    // Transaction cost / demotion (spec FR-027/FR-028, research.md R-11 correction):
+    uint64_t last_measured_duration_us = 0;  // 0 = never measured; seeded conservatively on use
+    uint8_t consecutive_overrun_superframes = 0;
+    bool demoted = false;             // demand items drop to the back of their FIFO (R-07)
 };
 ```
 
 A node degrades to unreachable immediately when `backplane_addr`'s own `link::HealthTracker`
 state is SUSPECT/OFFLINE or the trunk is `bus_fault()` (R-03), independent of
 `consecutive_failures` — reported once as its own lifecycle event, not conflated with the
-backplane's own forwarded notice.
+backplane's own forwarded notice. `event_faulted` and `demoted` are independent flags: a
+flooding node is not necessarily an expensive one, and vice versa; each has its own lifecycle
+report (§7).
 
 ## 4. Backplane record
 
@@ -78,6 +88,15 @@ struct BackplaneRecord {
                                           // LIMIT_bp_slot_map_max_slots, not slot_count, so a
                                           // backplane cannot overrun this table by lying about
                                           // its own slot_count (bounds-checked on every write)
+    // Transaction cost / demotion for this backplane's OWN status poll (spec FR-027/FR-028,
+    // R-11 correction) — separate from any NodeRecord's own fields: a backplane's status poll
+    // and its modules' demand traffic are measured and demoted independently, since a slow
+    // module bus does not necessarily mean a slow backplane-level poll itself.
+    uint64_t last_measured_duration_us = 0;
+    uint8_t consecutive_overrun_superframes = 0;
+    bool demoted = false;   // demotes only this backplane's MODULES' demand-item priority
+                             // (R-07); the backplane's own status poll (FR-002) and the
+                             // enrolment probe (FR-003) are never affected — see FR-028
 };
 ```
 
@@ -127,7 +146,7 @@ struct ParamOpItem {
 };
 ```
 
-## 7. Lifecycle event (spec FR-016/017/022, callback R-04)
+## 7. Lifecycle event (spec FR-016/017/022/026/028, callback R-04)
 
 One discriminated struct, not a class hierarchy (matches `link::Notice` + `addr`):
 
@@ -146,6 +165,16 @@ enum class LifecycleKind : uint8_t {
     ChannelSettled, ChannelSwitchTimedOut,                  // spec User Story 3
     ModuleEvent,                                            // a drained l3::GetEventResp
     ParamSetFailed,                                         // spec FR-023 (Set only; Get failure is a ParamResult, R-10)
+    NodeEventFault, NodeEventFaultCleared,                  // spec FR-026: a node's event-delivery
+                                                             // rate exceeded budget / recovered
+                                                             // (research.md R-07 correction)
+    Demoted, DemotionCleared,                               // spec FR-028: a node's, or a
+                                                             // backplane's own modules',
+                                                             // demand-traffic priority reduced /
+                                                             // restored (research.md R-11
+                                                             // correction) — never the backplane's
+                                                             // own status poll or the enrolment
+                                                             // probe, which demotion never touches
 };
 
 struct LifecycleEvent {
@@ -155,6 +184,8 @@ struct LifecycleEvent {
     uint8_t module_event_type = 0, module_event_remaining = 0;  // ModuleEvent
     const uint8_t* module_event_detail = nullptr; uint8_t module_event_detail_len = 0;
     uint8_t failed_param_id = 0, failed_reason = 0;              // ParamSetFailed
+    bool demoted_is_backplane = false;  // Demoted/DemotionCleared: node_id names a module, or
+                                         // (this true) a backplane whose MODULES were demoted
 };
 ```
 
@@ -198,9 +229,14 @@ struct SuperframeBudget {
 };
 ```
 
-Debited by each scheduled transaction's own worst-case wire time at the rate `Master::
-bit_rate()` currently reports (the same reasoning `link/health.cpp`'s `kOutcomeWindowUs`
-already applies at L2) — never by a fixed per-item cost (R-11).
+Debited by each scheduled transaction's cost estimate: that target's own
+`last_measured_duration_us` (§3, §4) once one exists, or the worst-case wire time at the rate
+`Master::bit_rate()` currently reports (the same reasoning `link/health.cpp`'s
+`kOutcomeWindowUs` already applies at L2) as the seed for a target never yet measured — never a
+fixed per-item cost, and never the worst-case bound once a real measurement exists (R-11,
+corrected 2026-09-21 per spec FR-027). The actual elapsed time of every completed transaction
+(via `Clock`) then updates that target's `last_measured_duration_us` for the next superframe
+that schedules it.
 
 ## 10. `BP_SLOT_MAP` response payload (R-01, new protocol addition)
 

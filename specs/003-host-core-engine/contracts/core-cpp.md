@@ -31,15 +31,21 @@ class CoreEngine {
     CoreEngine(link::ByteWire& wire, Clock& clock, uint8_t host_addr, CoreCallbacks callbacks);
 
     // Runs exactly one superframe (spec FR-001): drains link::Master's receive path, issues
-    // this superframe's status polls (FR-002), one enrolment probe (FR-003), then demand
-    // items up to the remaining budget in event/desc-chunk/param order (FR-020, R-07), and
-    // finally advances link::HealthTracker::tick(). Called once per TRUNK_T_poll_us of
-    // simulated time by the caller's own loop — this engine does not own or read a wall clock
-    // (CLAUDE.md rule 3); the caller decides cadence, this engine only assumes it is called
-    // often enough that no superframe is skipped (an assumption, not enforced — mirrors F3
-    // obligation 2 in contracts/link-cpp.md, one layer up). Never invokes a callback itself
-    // (spec FR-021, R-04 correction) — outcomes are enqueued onto the pending-delivery rings
-    // (data-model.md §8a); only drain_callbacks() below calls back into the application.
+    // this superframe's status polls (FR-002) and one enrolment probe (FR-003) — both
+    // unconditional, never skipped or reduced by demotion (FR-028) — then demand items up to
+    // the remaining budget in event/desc-chunk/param order (FR-020, R-07), each node's event
+    // drain capped at one per its own turn (FR-025) with its delivery rate tracked (FR-026),
+    // and finally advances link::HealthTracker::tick(). The remaining demand budget itself is
+    // computed from this superframe's own measured status-poll/probe durations, not an assumed
+    // bound (FR-027); a backplane or node whose measured cost stays high across several
+    // superframes has its own demand-item priority reduced and reported (FR-028, never its
+    // mandatory status poll or the probe). Called once per TRUNK_T_poll_us of simulated time by
+    // the caller's own loop — this engine does not own or read a wall clock (CLAUDE.md rule 3);
+    // the caller decides cadence, this engine only assumes it is called often enough that no
+    // superframe is skipped (an assumption, not enforced — mirrors F3 obligation 2 in
+    // contracts/link-cpp.md, one layer up). Never invokes a callback itself (spec FR-021, R-04
+    // correction) — outcomes are enqueued onto the pending-delivery rings (data-model.md §8a);
+    // only drain_callbacks() below calls back into the application.
     void run_superframe(uint64_t now_us);
 
     // Invokes at most `max_deliveries` queued CoreCallbacks calls (default: everything
