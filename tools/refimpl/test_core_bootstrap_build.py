@@ -28,12 +28,15 @@ establish. Two constraints, neither negotiable here:
   case would cost minutes and prove nothing extra. So these tests establish the
   COMMAND LINES, not that the resulting objects link.
 
-What this does NOT establish, and what does: that the real bootstrap path is
-green end to end at this head. That is ci.yml's `bootstrap` job (ruled
-2026-09-16, docs/OPEN-QUESTIONS.md "#62 (T044) AC2" option B), which removes
-every cmake it can find, asserts none is reachable, runs all local stages and
-greps its own log for the branch's tell. These tests are the fast, targeted
-half; that job is the load-bearing half.
+What this does NOT establish: that the real bootstrap path is green end to end.
+ci.yml's `bootstrap` job (ruled 2026-09-16, docs/OPEN-QUESTIONS.md "#62 (T044)
+AC2" option B) removes every cmake it can find, asserts none is reachable, runs
+all local stages and greps its own log for the branch's tell — but read its LOG,
+not its pass/fail: its pipeline step pipes into `tee` without `shell: bash`, so
+the step's status is `tee`'s and the job is green whatever `pipeline.sh` exits
+(ci.yml:156; reported by review round 2, not to be repaired from this PR — T3).
+So these tests are the fast, targeted half; that job's log lines are the
+end-to-end half, and its green tick on its own is not evidence.
 """
 from __future__ import annotations
 
@@ -150,17 +153,25 @@ def test_catch_binary_compiles_core_sources(with_core):
 
 
 def test_catch_binary_gets_core_include_dir(with_core):
-    """A core/ source including its own header by bare name (`#include "core_types.hpp"`,
-    what T011/T015 write) needs -Icore. Distinct failure from the one above: a missing
-    include is a compile error, a missing source a link error."""
+    """-Icore is load-bearing for includers OUTSIDE core/ — a test or a tools/ source
+    writing `#include "core_types.hpp"` (what T011/T015's headers are named). It is NOT
+    needed by a core/ source including its own sibling header by bare name: the quoted
+    form searches the including file's own directory first, so that case compiles either
+    way. Distinct failure from the one above: a missing include is a compile error, a
+    missing source a link error."""
     line = only_line(with_core, "tests/unit/test_alpha.cpp")
     assert "-Icore" in line, f"-Icore is not on the Catch2 compile line:\n{line}"
 
 
 def test_l3_helper_links_core_sources(with_core):
-    """T002's clause "and into l3_helper" — the task text, not an analogy."""
+    """T002's clause "and into l3_helper" — the task text, not an analogy. Both halves,
+    as on the Catch2 line: without -Icore a tools/ source including a core/ header by
+    bare name fails to compile here while building fine on the CMake path (omgp_core's
+    INTERFACE include dirs). Asserting the source alone left dropping -Icore from this
+    line a surviving mutant (red team, round 1)."""
     line = only_line(with_core, "tools/l3_helper.cpp")
     assert CORE_SOURCE in line, f"core/*.cpp is not linked into l3_helper:\n{line}"
+    assert "-Icore" in line, f"-Icore is not on the l3_helper line:\n{line}"
 
 
 def test_smoke_keeps_its_bare_compile_line(with_core):
