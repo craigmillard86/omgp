@@ -228,11 +228,14 @@ stage_build() {
     if [ ! -f "$BIN/catch2.o" ] || [ third_party/catch2/catch_amalgamated.cpp -nt "$BIN/catch2.o" ]; then
       g++ ${CXXFLAGS_BOOT/-Werror/} -Ithird_party/catch2 -c third_party/catch2/catch_amalgamated.cpp -o "$BIN/catch2.o"
     fi
-    local support l3srcs linksrcs t name
+    local support l3srcs linksrcs coresrcs t name
     # canonical.cpp/l3_helper_dispatch.cpp: host-only, used by tests + l3_helper
     support="$(ls tests/support/*.cpp) tools/canonical.cpp tools/l3_helper_dispatch.cpp"
     l3srcs=$(ls l3/*.cpp 2>/dev/null || true)
     linksrcs=$(ls link/*.cpp 2>/dev/null || true)
+    # core/ holds only .gitkeep until T015 lands core_engine.cpp, so the glob must tolerate
+    # zero matches exactly as the two above do (specs/003-host-core-engine tasks.md T002).
+    coresrcs=$(ls core/*.cpp 2>/dev/null || true)
     # One binary per unit_sources() entry, named by basename — so basenames must be unique.
     # test_smoke keeps its own main (linking it with Catch2's main would be a duplicate symbol).
     unit_sources_plain || return 1
@@ -242,13 +245,13 @@ stage_build() {
       if [ "$name" = test_smoke ]; then
         g++ $CXXFLAGS_BOOT "$t" -o "$BIN/test_smoke"
       else
-        g++ $CXXFLAGS_BOOT -I. -Il3 -Itools -Ithird_party/catch2 -Itests/support \
-          "$t" $support $l3srcs $linksrcs "$BIN/catch2.o" $WRAP_LDFLAGS -o "$BIN/$name"
+        g++ $CXXFLAGS_BOOT -I. -Il3 -Icore -Itools -Ithird_party/catch2 -Itests/support \
+          "$t" $support $l3srcs $linksrcs $coresrcs "$BIN/catch2.o" $WRAP_LDFLAGS -o "$BIN/$name"
       fi
     done < <(unit_sources)
     g++ $CXXFLAGS_BOOT tools/crc_helper.cpp -o "$BIN/crc_helper"
-    g++ $CXXFLAGS_BOOT -I. -Il3 -Itools tools/l3_helper.cpp tools/l3_helper_dispatch.cpp \
-      tools/canonical.cpp $l3srcs $linksrcs -o "$BIN/l3_helper"
+    g++ $CXXFLAGS_BOOT -I. -Il3 -Icore -Itools tools/l3_helper.cpp tools/l3_helper_dispatch.cpp \
+      tools/canonical.cpp $l3srcs $linksrcs $coresrcs -o "$BIN/l3_helper"
   fi
 }
 
