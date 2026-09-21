@@ -30,7 +30,7 @@ from the tree on 2026-08-29; facts about the trunk protocol come from
 
 ## R-02 — Frame buffer sizing: 142 bytes, derived from generated symbols
 
-- **Decision**: `kMaxUnstuffed = 4 + LIMIT_max_l3_payload + 2 = 70`,
+- **Decision**: `kMaxUnstuffed = 4 + LIMIT_max_l3_message + 2 = 70`,
   `kMaxWire = 2 + 2 * kMaxUnstuffed = 142`, both `constexpr` from the generated header;
   every WIRE-byte buffer is sized from it — encoder output and the replay buffer as
   `kMaxWire` arrays, the mock-wire queues at `4 × kMaxWire` (contracts/mock-wire.md) —
@@ -43,7 +43,7 @@ from the tree on 2026-08-29; facts about the trunk protocol come from
   bits accepted, spec Edge Cases — for 69 escapables, but CRC parity bars both CRC
   bytes escaping in that class, so 141 is unreachable; see SC-008. This plan's earlier
   "1.42 ms worst case" conflated the bound with the maximum).
-- **Rationale**: the plan input asks for buffers "sized from limits.max_l3_payload plus
+- **Rationale**: the plan input asks for buffers "sized from limits.max_l3_message plus
   worst-case stuffing"; the bound assumes every byte of dst..crc escaped — deliberately
   conservative: an emitted `ctrl` (low nibble ≤ 0x3) and any `len` (≤ 0x40) cannot
   escape, and even the received-frame case tops out at 140 (SC-008's parity argument) —

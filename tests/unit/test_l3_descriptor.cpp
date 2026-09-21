@@ -333,6 +333,49 @@ TEST_CASE("F7 descriptor field ranges: at the limit is Ok, one over is OutOfRang
         Status::OutOfRange);
 }
 
+// F7 (#110/#154): CHANNEL.index / PARAM.param_id uniqueness — CHANNEL and PARAM are both
+// `repeated: true`, so DuplicateRecord (keyed by TLV type) never fires for them by design;
+// this is a second, independent bitmap keyed by the field value.
+TEST_CASE("F7 CHANNEL.index / PARAM.param_id must be unique; DuplicateKey names the offender",
+          "[rules]") {
+    DescriptorReport r;
+    // A second channel with a DIFFERENT index is fine (this is what "repeated" means).
+    REQUIRE(validate(with(MIN, tlv(omgp::TLV_CHANNEL, with({1}, str("Crunch")))), r) == Status::Ok);
+    // A second channel with the SAME index as CHANNEL0 (index 0) is not.
+    auto dup_channel = with(MIN, tlv(omgp::TLV_CHANNEL, with({0}, str("Lead"))));
+    REQUIRE(validate(dup_channel, r) == Status::DuplicateKey);
+    REQUIRE((r.type == omgp::TLV_CHANNEL && r.offset == MIN.size()));
+
+    // A second param with a DIFFERENT param_id is fine.
+    auto param2 =
+        tlv(omgp::TLV_PARAM, with({2, 0xFF, omgp::KIND_CONTINUOUS, 0x00, 0x08}, str("Level")));
+    REQUIRE(validate(with(MIN, param2), r) == Status::Ok);
+    // A second param with the SAME param_id as PARAM1 (id 1) is not.
+    auto dup_param =
+        tlv(omgp::TLV_PARAM, with({1, 0xFF, omgp::KIND_CONTINUOUS, 0x00, 0x08}, str("Level")));
+    REQUIRE(validate(with(MIN, dup_param), r) == Status::DuplicateKey);
+    REQUIRE((r.type == omgp::TLV_PARAM && r.offset == MIN.size()));
+
+    // A malformed CHANNEL (empty value, so index is undefined) reports MalformedRecord, not
+    // a spurious DuplicateKey — check order (protocol-l3 §4.1 note) puts field checks first.
+    REQUIRE(validate(with(MIN, tlv(omgp::TLV_CHANNEL, {}))) == Status::MalformedRecord);
+
+    // The writer refuses the same collisions, nothing written on failure.
+    uint8_t buf[256];
+    DescriptorWriter w(buf, sizeof buf);
+    const uint8_t clean[] = "Clean";
+    REQUIRE(w.add_channel(ChannelRec{0, Str{clean, 5}}) == Status::Ok);
+    const size_t before = w.size();
+    REQUIRE(w.add_channel(ChannelRec{0, Str{clean, 5}}) == Status::DuplicateKey);
+    REQUIRE(w.size() == before);
+    const uint8_t gain[] = "Gain";
+    REQUIRE(w.add_param(ParamRec{1, 0xFF, omgp::KIND_CONTINUOUS, 0, Str{gain, 4}}) == Status::Ok);
+    const size_t before2 = w.size();
+    REQUIRE(w.add_param(ParamRec{1, 0xFF, omgp::KIND_CONTINUOUS, 0, Str{gain, 4}}) ==
+            Status::DuplicateKey);
+    REQUIRE(w.size() == before2);
+}
+
 TEST_CASE("typed decoders expose views into the blob", "[cursor]") {
     RecordCursor c(MIN.data(), MIN.size());
     RecordView v;

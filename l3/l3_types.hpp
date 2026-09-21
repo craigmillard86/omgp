@@ -24,6 +24,9 @@ enum class Status : uint8_t {
     InvalidUtf8,       // string is not well-formed UTF-8 (§4: "Strings UTF-8")
     MalformedRecord,   // fixed-length record with the wrong len, or len 0 where fields exist
     ReservedViolation, // encoder asked to set reserved flag bits or a reserved node id
+    DuplicateKey,      // two CHANNEL records share an index, or two PARAM records a param_id
+                       // (F7, #110/#154: one shared status for both keys, not
+                       // DuplicateIndex/DuplicateParamId — ruled in this PR, protocol-l3 §4.1)
 };
 
 // Enumerator name as a string literal ("Ok", "Truncated", ...). Used by tools and tests;

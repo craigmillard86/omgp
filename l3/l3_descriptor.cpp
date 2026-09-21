@@ -175,6 +175,11 @@ Status validate_descriptor(const uint8_t* blob, size_t len, DescriptorReport& r)
         return r.status;
     }
     uint32_t seen[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    // F7 (#110/#154): CHANNEL.index / PARAM.param_id uniqueness, keyed by value (0-255), not
+    // by TLV type — both types are `repeated: true` so the `seen` bitmap above never fires
+    // for them (deliberately: multiple channels/params are legal, a duplicate *key* is not).
+    uint32_t seen_channel_index[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    uint32_t seen_param_id[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     size_t pos = 0;
     while (pos < len) {
         const uint8_t type = blob[pos];
@@ -211,10 +216,26 @@ Status validate_descriptor(const uint8_t* blob, size_t len, DescriptorReport& r)
                 r.offset = off;
                 return st;
             }
-            if (type == TLV_CHANNEL)
+            if (type == TLV_CHANNEL) {
+                // check_record already enforced len >= kChannelMin, so value[0] is safe here.
+                if (bit(seen_channel_index, value[0])) {
+                    r.status = Status::DuplicateKey;
+                    r.type = type;
+                    r.offset = off;
+                    return r.status;
+                }
+                set_bit(seen_channel_index, value[0]);
                 ++r.channel_count;
-            else if (type == TLV_PARAM)
+            } else if (type == TLV_PARAM) {
+                if (bit(seen_param_id, value[0])) {
+                    r.status = Status::DuplicateKey;
+                    r.type = type;
+                    r.offset = off;
+                    return r.status;
+                }
+                set_bit(seen_param_id, value[0]);
                 ++r.param_count;
+            }
         }
         pos += 2 + static_cast<size_t>(rlen);
     }
@@ -366,7 +387,8 @@ Status decode_vendor(const RecordView& v, VendorRec& out) {
 
 DescriptorWriter::DescriptorWriter(uint8_t* buf, size_t cap)
     // mutant-ok(equivalent, cxx_lt_to_le): both arms yield kMaxBlob when cap == kMaxBlob
-    : buf_(buf), cap_(cap < kMaxBlob ? cap : kMaxBlob), size_(0), seen_{0, 0, 0, 0, 0, 0, 0, 0} {}
+    : buf_(buf), cap_(cap < kMaxBlob ? cap : kMaxBlob), size_(0), seen_{0, 0, 0, 0, 0, 0, 0, 0},
+      seen_channel_index_{0, 0, 0, 0, 0, 0, 0, 0}, seen_param_id_{0, 0, 0, 0, 0, 0, 0, 0} {}
 
 Status DescriptorWriter::append(uint8_t type, const uint8_t* value, uint8_t len) {
     const TlvInfo* info = tlv_info(type);
@@ -376,6 +398,12 @@ Status DescriptorWriter::append(uint8_t type, const uint8_t* value, uint8_t len)
         const Status st = check_record(type, value, len);
         if (st != Status::Ok)
             return st;
+        // F7 (#110/#154): check_record already enforced the minimum length, so value[0] is
+        // safe to read here for both CHANNEL.index and PARAM.param_id.
+        if (type == TLV_CHANNEL && bit(seen_channel_index_, value[0]))
+            return Status::DuplicateKey;
+        if (type == TLV_PARAM && bit(seen_param_id_, value[0]))
+            return Status::DuplicateKey;
     }
     const size_t need = 2 + static_cast<size_t>(len);
     if (size_ + need > cap_)
@@ -385,8 +413,13 @@ Status DescriptorWriter::append(uint8_t type, const uint8_t* value, uint8_t len)
     for (size_t i = 0; i < len; ++i)
         buf_[size_ + 2 + i] = value[i];
     size_ += need;
-    if (info != nullptr)
+    if (info != nullptr) {
         set_bit(seen_, type);
+        if (type == TLV_CHANNEL)
+            set_bit(seen_channel_index_, value[0]);
+        else if (type == TLV_PARAM)
+            set_bit(seen_param_id_, value[0]);
+    }
     return Status::Ok;
 }
 

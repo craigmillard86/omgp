@@ -39,7 +39,7 @@ Python 3.10-compatible tooling and reference (3.12 in CI).
 (existing); GCC 11 / Clang 14 locally, Clang 18 in CI; ESP-IDF v5.3 via Docker.
 Tests: vendored Catch2 v3 + `tests/support` (listener, heap guard), pytest, libFuzzer,
 Mull 0.34.0 (deep-verify). Generated header `build/gen/omgp_protocol.h` supplies
-`TRUNK_*`, `LIMIT_max_l3_payload`, CRC variant; `link/crc16.hpp` (existing) is the CRC.
+`TRUNK_*`, `LIMIT_max_l3_message`, CRC variant; `link/crc16.hpp` (existing) is the CRC.
 
 **Storage**: files only — golden vectors (`tests/vectors/frame_*.json`, immutable), the
 generated vectors header, seeded corpora generated in memory.
@@ -62,7 +62,7 @@ worst-case frame 140 bytes / 1.40 ms (SC-008, corrected 2026-08-31; `kMaxWire = 
 is the buffer bound, unreachable on the wire); nothing else is throughput-bound.
 
 **Constraints**: all timing via `Clock` (CLAUDE.md rule 3); symbols only (rule 4,
-`check_embedded`); fixed buffers of `kMaxWire = 2 + 2·(4 + LIMIT_max_l3_payload + 2)`
+`check_embedded`); fixed buffers of `kMaxWire = 2 + 2·(4 + LIMIT_max_l3_message + 2)`
 (rule 5); L2 opaque to L3 (payload = bytes); every `link/` file cites `trunk §`; both
 builds green; `UNIT_TEST_FLOOR` raised; mutation triage gate on changed lines.
 

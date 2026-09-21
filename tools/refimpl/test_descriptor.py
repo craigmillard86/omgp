@@ -218,6 +218,39 @@ def test_f7_field_ranges_at_the_limit_and_one_over(limit_name, at_max, over_max)
         D.encode_value(over_max(m))
 
 
+def test_f7_channel_index_and_param_id_must_be_unique():
+    """F7 (#110/#154): CHANNEL and PARAM are both `repeated: true`, so DuplicateRecord
+    (keyed by TLV type) never fires for them by design -- DuplicateKey is a second,
+    independent check keyed by the field value."""
+    # a second channel/param with a DIFFERENT key is fine
+    assert D.validate_descriptor(MIN + tlv(G.TLV_CHANNEL, bytes([1]) + s("Crunch"))).status == "Ok"
+    param2 = tlv(G.TLV_PARAM, bytes([2, 0xFF, G.KIND_CONTINUOUS]) + bytes.fromhex("0008") + s("Level"))
+    assert D.validate_descriptor(MIN + param2).status == "Ok"
+
+    # the SAME key (CHANNEL0's index 0 / PARAM1's param_id 1) is not
+    dup_channel = MIN + tlv(G.TLV_CHANNEL, bytes([0]) + s("Lead"))
+    r = D.validate_descriptor(dup_channel)
+    assert (r.status, r.type, r.offset) == ("DuplicateKey", G.TLV_CHANNEL, len(MIN))
+    with raises("DuplicateKey"):
+        D.parse_descriptor(dup_channel)
+
+    dup_param = MIN + tlv(G.TLV_PARAM, bytes([1, 0xFF, G.KIND_CONTINUOUS]) + bytes.fromhex("0008") + s("Level"))
+    r = D.validate_descriptor(dup_param)
+    assert (r.status, r.type, r.offset) == ("DuplicateKey", G.TLV_PARAM, len(MIN))
+
+    # a malformed CHANNEL (empty value, index undefined) is MalformedRecord, not a spurious
+    # DuplicateKey -- field checks run before the key-uniqueness check (protocol-l3 §4.1)
+    with raises("MalformedRecord"):
+        D.parse_descriptor(MIN.replace(CHANNEL0, tlv(G.TLV_CHANNEL, b""), 1))
+
+    # the builder refuses the same collisions
+    with raises("DuplicateKey"):
+        D.build_descriptor([D.ChannelRec(0, "A"), D.ChannelRec(0, "B")])
+    with raises("DuplicateKey"):
+        D.build_descriptor([D.ParamRec(1, 0xFF, G.KIND_CONTINUOUS, 0, "A"),
+                            D.ParamRec(1, 0xFF, G.KIND_CONTINUOUS, 0, "B")])
+
+
 def test_builder_enforces_the_same_rules():
     with raises("DuplicateRecord"):
         D.build_descriptor(D.parse_descriptor(MIN) + [D.ProtocolRec(1, 0)])

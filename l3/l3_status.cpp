@@ -32,6 +32,8 @@ const char* status_name(Status s) {
         return "MalformedRecord";
     case Status::ReservedViolation:
         return "ReservedViolation";
+    case Status::DuplicateKey:
+        return "DuplicateKey";
     }
     return "?"; // unreachable for valid enumerators; keeps -Wreturn-type quiet on all compilers
 }

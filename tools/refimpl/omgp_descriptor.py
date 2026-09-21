@@ -356,6 +356,11 @@ def _walk(blob: bytes) -> tuple[Report, list]:
     if n > _MAX:
         return Report("BlobTooLarge", 0, 0, 0, 0, 0), []
     seen: set[int] = set()
+    # F7 (#110/#154): CHANNEL.index / PARAM.param_id uniqueness, keyed by value, not by TLV
+    # type -- both are `repeated: true` so `seen` above never catches them (deliberately:
+    # multiple channels/params are legal, a duplicate *key* is not).
+    seen_channel_index: set[int] = set()
+    seen_param_id: set[int] = set()
     skipped = channels = params = 0
     recs: list = []
     off = 0
@@ -376,13 +381,20 @@ def _walk(blob: bytes) -> tuple[Report, list]:
                 return Report("DuplicateRecord", t, off, skipped, channels, params), recs
             seen.add(t)
             try:
-                recs.append(decode_value(t, value))
+                rec = decode_value(t, value)
             except L3Error as e:
                 return Report(e.status, t, off, skipped, channels, params), recs
             if t == G.TLV_CHANNEL:
+                if rec.index in seen_channel_index:
+                    return Report("DuplicateKey", t, off, skipped, channels, params), recs
+                seen_channel_index.add(rec.index)
                 channels += 1
             elif t == G.TLV_PARAM:
+                if rec.param_id in seen_param_id:
+                    return Report("DuplicateKey", t, off, skipped, channels, params), recs
+                seen_param_id.add(rec.param_id)
                 params += 1
+            recs.append(rec)
         off += 2 + ln
     for e in G.TLV_INFO:  # sorted by type
         if e["required"] and e["type"] not in seen:
@@ -404,6 +416,8 @@ def parse_descriptor(blob: bytes) -> list:
 def build_descriptor(records) -> bytes:
     out = bytearray()
     seen: set[int] = set()
+    seen_channel_index: set[int] = set()  # F7 (#110/#154): see _walk's own comment
+    seen_param_id: set[int] = set()
     for rec in records:
         t, value = encode_value(rec)
         info = _INFO.get(t)
@@ -411,6 +425,14 @@ def build_descriptor(records) -> bytes:
             if not info["repeated"] and t in seen:
                 raise _err("DuplicateRecord", t)
             seen.add(t)
+            if isinstance(rec, ChannelRec):
+                if rec.index in seen_channel_index:
+                    raise _err("DuplicateKey", t)
+                seen_channel_index.add(rec.index)
+            elif isinstance(rec, ParamRec):
+                if rec.param_id in seen_param_id:
+                    raise _err("DuplicateKey", t)
+                seen_param_id.add(rec.param_id)
         if len(value) > 0xFF:
             raise _err("StringTooLong" if not isinstance(rec, (VendorRec, UnknownRec)) else "OutOfRange", t,
                        "value exceeds the length byte")

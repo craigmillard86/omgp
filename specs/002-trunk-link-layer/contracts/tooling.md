@@ -41,7 +41,7 @@ touches `.github/` — the existing CI already runs every stage this feature ext
   `T_turn_min_us → [timing:T_turn_min]`, `T_turn_max_us → [timing:T_turn_max]`,
   `T_resp_us → [timing:T_resp]`, `T_gap_us → [timing:T_gap]`, `T_poll_us → [timing:T_poll]`,
   `bit_rate → [timing:bit_rate]`, `bit_rate_fallback → [timing:bit_rate_fallback]`,
-  `retries → [timing:retries]`, plus `limits.max_l3_payload → [timing:max_payload]`.
+  `retries → [timing:retries]`, plus `limits.max_l3_message → [timing:max_payload]`.
 - Greps `tests/unit/test_link_*.cpp` and `tests/property/test_link_*.cpp`; fails naming any
   tag with zero occurrences; prints the tag → `TEST_CASE` name map (SC-001's listing).
 

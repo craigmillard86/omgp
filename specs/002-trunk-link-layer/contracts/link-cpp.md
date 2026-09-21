@@ -12,7 +12,7 @@ enum class Status : uint8_t { Ok = 0, PayloadTooLong, ReservedAddress, BufferToo
 const char* status_name(Status);
 
 constexpr size_t kHeaderLen = 4, kCrcLen = 2;
-constexpr size_t kMaxUnstuffed = kHeaderLen + LIMIT_max_l3_payload + kCrcLen;   // 70
+constexpr size_t kMaxUnstuffed = kHeaderLen + LIMIT_max_l3_message + kCrcLen;   // 70
 constexpr size_t kMaxWire = 2 + 2 * kMaxUnstuffed;                               // 142
 constexpr size_t kAddrCount = 16;                                                // trunk §5
 constexpr uint32_t byte_time_us(uint32_t bit_rate);                              // 10 bits per byte, 8N1
@@ -33,7 +33,7 @@ struct BusStats  { uint32_t rate_changes, bus_faults, discards; };   // discards
 
 ```cpp
 Status encode_frame(const FrameFields&, uint8_t* out, size_t cap, size_t& written);
-// PayloadTooLong if len > LIMIT_max_l3_payload; ReservedAddress if dst == 0xFF (trunk §5);
+// PayloadTooLong if len > LIMIT_max_l3_message; ReservedAddress if dst == 0xFF (trunk §5);
 // BufferTooSmall if cap < 2 + 2*(kHeaderLen + len + kCrcLen) worst case (writes nothing).
 // Reserved ctrl bits are never set.
 

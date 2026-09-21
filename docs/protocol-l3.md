@@ -126,8 +126,13 @@ Maximum descriptor size v1: 2048 bytes. Chunk size ≤ 28 bytes on the module bu
 | 0x7E | VENDOR | u16 vendor id, opaque | – |
 
 `CHANNEL.index` and `PARAM.param_id` MUST be unique within one descriptor (F7,
-`docs/OPEN-QUESTIONS.md` #110/#154, 2026-09-06 ruling) — a duplicate index/id is rejected as
-`DuplicateIndex`/`DuplicateParamId`. Each is a u8, so at most `limits.max_channels` (256) /
+`docs/OPEN-QUESTIONS.md` #110/#154, 2026-09-06 ruling) — a duplicate index or id is rejected
+as `DuplicateKey`, one shared status for both keys rather than separate
+`DuplicateIndex`/`DuplicateParamId` values (the ruling left this a PR-time choice). Unlike
+`DuplicateRecord` (a non-repeated TLV *type* seen twice — CHANNEL and PARAM are both
+`repeated: true`, so that check never fires for them), `DuplicateKey` tracks the *value* of
+`index`/`param_id` with its own 256-bit bitmap, checked only once the record itself is
+already known well-formed. Each is a u8, so at most `limits.max_channels` (256) /
 `limits.max_params` (256) distinct records are representable per descriptor — the id width, not
 the 2048-byte blob cap, is the binding constraint (a minimum 4-byte CHANNEL record fits 512 in
 2048 bytes; a minimum 7-byte PARAM record fits 292).
