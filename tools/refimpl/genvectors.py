@@ -34,7 +34,10 @@ def msg(name, spec_ref, opcode, node, seq, flags, obj=None, note=None):
             "header": (opcode, node, seq, flags), "obj": obj, "note": note}
 
 
-TAIL61 = bytes(range(61))
+# F10 (#110/#154, 2026-09-06 ruling): LIMIT_max_l3_payload is now 59 (max_l3_message(64) minus
+# the 5-byte L3 header) — the READ_DESC response tail bound moved from 61 to 56 accordingly.
+_READ_DESC_TAIL_MAX = G.LIMIT_max_l3_payload - 3  # offset u16 + len u8
+TAIL_MAX = bytes(range(_READ_DESC_TAIL_MAX))
 
 # Every opcode in both directions where a layout exists (IDENTIFY response is created in
 # T047 once the sample descriptor makes desc_crc computable), plus boundary values.
@@ -46,8 +49,9 @@ MESSAGES = [
     msg("msg_identify_req", "protocol-l3 §3.1 IDENTIFY", G.OP_IDENTIFY, 0x10, 5, 0),
     msg("msg_read_desc_req", "protocol-l3 §3.1 READ_DESC (module-bus chunk)", G.OP_READ_DESC, 0x10, 2, 0,
         l3.ReadDescReq(0, G.LIMIT_module_bus_chunk)),
-    msg("msg_read_desc_resp_max", "protocol-l3 §3.1 READ_DESC response, 61-byte tail", G.OP_READ_DESC,
-        0x10, 2, RESP, l3.ReadDescResp(1987, TAIL61), note="boundary: payload_len 64"),
+    msg("msg_read_desc_resp_max", f"protocol-l3 §3.1 READ_DESC response, {_READ_DESC_TAIL_MAX}-byte tail",
+        G.OP_READ_DESC, 0x10, 2, RESP, l3.ReadDescResp(1987, TAIL_MAX),
+        note=f"boundary: payload_len {G.LIMIT_max_l3_payload}"),
     msg("msg_read_desc_resp_short", "protocol-l3 §3.1 READ_DESC response, last chunk", G.OP_READ_DESC,
         0x10, 3, RESP, l3.ReadDescResp(2040, bytes(range(1, 9)))),
     msg("msg_select_channel_req", "protocol-l3 §3.1/§3.2 SELECT_CHANNEL", G.OP_SELECT_CHANNEL, 0x10, 7, 0,
@@ -124,7 +128,7 @@ FRAMES = [
      link.Frame(dst=0x00, src=0x01, response=True, retry=False, seq=5, payload=_ping_resp_bytes()), None),
     ("frame_retry", "trunk §4 retry bit set; seq at the 4-bit maximum",
      link.Frame(dst=0x01, src=0x00, response=False, retry=True, seq=15, payload=_ping_req_bytes()), None),
-    ("frame_max_payload", "trunk §4 payload at LIMIT_max_l3_payload",
+    ("frame_max_payload", "trunk §4 payload at LIMIT_max_l3_message",
      link.Frame(dst=0x01, src=0x00, response=False, retry=False, seq=0, payload=bytes(range(64))),
      "72 wire bytes; CRC 0xE3F2 escapes neither byte (ruling 2026-08-31)"),
     ("frame_worst_stuffing", "trunk §4 worst-case stuffing: dst, src, payload and CRC all escape",

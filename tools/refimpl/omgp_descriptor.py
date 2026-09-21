@@ -212,7 +212,11 @@ def decode_value(t: int, v: bytes):
     if t == G.TLV_SWITCHING:
         if n != 3:
             raise _err("MalformedRecord", t)
-        return SwitchingRec(v[0], struct.unpack("<H", v[1:3])[0])
+        settle_ms = struct.unpack("<H", v[1:3])[0]
+        # F7 (#110/#154): no spec-stated ceiling; 5s is headroom over spec §7/§21 settle times.
+        if settle_ms > G.LIMIT_switching_settle_ms_max:
+            raise _err("OutOfRange", t, "settle_ms")
+        return SwitchingRec(v[0], settle_ms)
     if t == G.TLV_PARAM:
         if n < 5:
             raise _err("MalformedRecord", t)
@@ -233,17 +237,33 @@ def decode_value(t: int, v: bytes):
         r = AudioRec(v[0], v[1], *struct.unpack("<HH", v[2:6]))
         if r.input_mode > 1:
             raise _err("OutOfRange", t, "input_mode")
+        # F7 (#110/#154): spec §9's highest documented reference figure, ~10 Vrms.
+        if r.in_max_mvrms > G.LIMIT_audio_max_mvrms or r.out_max_mvrms > G.LIMIT_audio_max_mvrms:
+            raise _err("OutOfRange", t, "max_mvrms")
         return r
     if t == G.TLV_POWER_LV:
         if n != 8:
             raise _err("MalformedRecord", t)
-        return PowerLvRec(*struct.unpack("<HHHH", v))
+        r = PowerLvRec(*struct.unpack("<HHHH", v))
+        # F7 (#110/#154): spec §15 per-slot targets, one bound per rail.
+        if (r.p15_ma > G.LIMIT_power_lv_p15_ma_max or r.n15_ma > G.LIMIT_power_lv_n15_ma_max or
+                r.p9_ma > G.LIMIT_power_lv_p9_ma_max or r.p5_ma > G.LIMIT_power_lv_p5_ma_max):
+            raise _err("OutOfRange", t, "rail current")
+        return r
     if t == G.TLV_POWER_TUBE:
         if n != 11:
             raise _err("MalformedRecord", t)
         r = PowerTubeRec(*struct.unpack("<BBBHHHBB", v))
         if not 1 <= r.power_class <= 4:
             raise _err("OutOfRange", t, "power_class")
+        # F7 (#110/#154): spec §18 (T4's 2.0A heater allocation; the 40 mA v1 B+ cap) and §19
+        # (B+ architectural range ~180-300V DC).
+        if r.heater_max_ma > G.LIMIT_tube_heater_max_ma_ceiling:
+            raise _err("OutOfRange", t, "heater_max_ma")
+        if r.bplus_nom_v > G.LIMIT_tube_bplus_nom_v_max:
+            raise _err("OutOfRange", t, "bplus_nom_v")
+        if r.bplus_max_ma > G.LIMIT_tube_bplus_max_ma_ceiling:
+            raise _err("OutOfRange", t, "bplus_max_ma")
         return r
     if t == G.TLV_VENDOR:
         if n < 2:
@@ -275,6 +295,8 @@ def encode_value(rec) -> tuple[int, bytes]:
         if isinstance(rec, ChannelRec):
             return t, struct.pack("<B", rec.index) + _utf8_bytes(t, rec.name)
         if isinstance(rec, SwitchingRec):
+            if rec.settle_ms > G.LIMIT_switching_settle_ms_max:
+                raise _err("OutOfRange", t, "settle_ms")
             return t, struct.pack("<BH", rec.flags, rec.settle_ms)
         if isinstance(rec, ParamRec):
             name = _utf8_bytes(t, rec.name)
@@ -288,12 +310,23 @@ def encode_value(rec) -> tuple[int, bytes]:
         if isinstance(rec, AudioRec):
             if rec.input_mode > 1:
                 raise _err("OutOfRange", t, "input_mode")
+            if rec.in_max_mvrms > G.LIMIT_audio_max_mvrms or rec.out_max_mvrms > G.LIMIT_audio_max_mvrms:
+                raise _err("OutOfRange", t, "max_mvrms")
             return t, struct.pack("<BBHH", rec.io_flags, rec.input_mode, rec.in_max_mvrms, rec.out_max_mvrms)
         if isinstance(rec, PowerLvRec):
+            if (rec.p15_ma > G.LIMIT_power_lv_p15_ma_max or rec.n15_ma > G.LIMIT_power_lv_n15_ma_max or
+                    rec.p9_ma > G.LIMIT_power_lv_p9_ma_max or rec.p5_ma > G.LIMIT_power_lv_p5_ma_max):
+                raise _err("OutOfRange", t, "rail current")
             return t, struct.pack("<HHHH", rec.p15_ma, rec.n15_ma, rec.p9_ma, rec.p5_ma)
         if isinstance(rec, PowerTubeRec):
             if not 1 <= rec.power_class <= 4:
                 raise _err("OutOfRange", t, "power_class")
+            if rec.heater_max_ma > G.LIMIT_tube_heater_max_ma_ceiling:
+                raise _err("OutOfRange", t, "heater_max_ma")
+            if rec.bplus_nom_v > G.LIMIT_tube_bplus_nom_v_max:
+                raise _err("OutOfRange", t, "bplus_nom_v")
+            if rec.bplus_max_ma > G.LIMIT_tube_bplus_max_ma_ceiling:
+                raise _err("OutOfRange", t, "bplus_max_ma")
             return t, struct.pack("<BBBHHHBB", rec.power_class, rec.tubes, rec.sections, rec.heater_nom_ma,
                                   rec.heater_max_ma, rec.bplus_nom_v, rec.bplus_exp_ma, rec.bplus_max_ma)
         if isinstance(rec, VendorRec):

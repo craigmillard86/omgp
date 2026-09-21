@@ -521,13 +521,13 @@ TEST_CASE("a conforming node's answer is accepted at every legal payload length,
     // start bit"); nothing licenses abandoning a frame already arriving. At TRUNK_bit_rate
     // (10us/byte) with a conforming T_turn_min turnaround, only payloads of 11 bytes or
     // fewer used to fit inside T_resp's own remainder once the start bit is accounted for -
-    // this sweeps every legal length up to LIMIT_max_l3_payload (64).
-    for (size_t len = 0; len <= omgp::LIMIT_max_l3_payload; ++len) {
+    // this sweeps every legal length up to LIMIT_max_l3_message (64).
+    for (size_t len = 0; len <= omgp::LIMIT_max_l3_message; ++len) {
         FakeClock clock;
         MockWire wire(clock);
         const uint8_t dst = 0x06;
         Master master(wire, clock, omgp::ADDR_host);
-        uint8_t payload[omgp::LIMIT_max_l3_payload];
+        uint8_t payload[omgp::LIMIT_max_l3_message];
         for (size_t i = 0; i < len; ++i)
             payload[i] = static_cast<uint8_t>(0xC0 + i);
 
@@ -2214,7 +2214,7 @@ TEST_CASE("the cap on the T_resp in-flight hold admits the longest legitimate an
     FakeClock clock;
     MockWire wire(clock);
     const uint8_t dst = 0x03;
-    static const uint8_t payload[omgp::LIMIT_max_l3_payload] = {
+    static const uint8_t payload[omgp::LIMIT_max_l3_message] = {
         0x7E, 0x7D, 0x7D, 0x7E, 0x7E, 0x7D, 0x7D, 0x7E, 0x7D, 0x7D, 0x7E, 0x7E, 0x7E,
         0x7E, 0x7E, 0x7E, 0x7D, 0x7D, 0x7E, 0x7E, 0x7E, 0x7E, 0x7E, 0x7D, 0x7D, 0x7E,
         0x7E, 0x7E, 0x7D, 0x7E, 0x7D, 0x7D, 0x7D, 0x7E, 0x7D, 0x7D, 0x7E, 0x7E, 0x7E,
@@ -2533,7 +2533,7 @@ struct StaleAnswerRig {
 
         // Maximal stuffing: a payload of FLAG bytes makes the stale answer as long as a
         // response can be, so it spans from before the retry to well inside its window.
-        std::vector<uint8_t> pay(omgp::LIMIT_max_l3_payload,
+        std::vector<uint8_t> pay(omgp::LIMIT_max_l3_message,
                                  static_cast<uint8_t>(omgp::TRUNK_flag_byte));
         const auto stale = response_bytes(dst, 0, pay.data(), pay.size());
         stale_end = retry_window_start + stale_end_after_window_start;
@@ -2901,18 +2901,18 @@ TEST_CASE("begin() refuses a 65-byte payload before anything reaches the wire", 
     MockWire wire(clock);
     Master master(wire, clock, omgp::ADDR_host);
 
-    uint8_t payload[omgp::LIMIT_max_l3_payload + 1] = {};
+    uint8_t payload[omgp::LIMIT_max_l3_message + 1] = {};
     REQUIRE(master.begin(0x01, payload, sizeof payload) == Status::PayloadTooLong);
     REQUIRE(wire.transcript_size() == 0);
     REQUIRE_FALSE(master.busy());
 }
 
-TEST_CASE("begin() accepts a payload exactly at LIMIT_max_l3_payload bytes", "[link]") {
+TEST_CASE("begin() accepts a payload exactly at LIMIT_max_l3_message bytes", "[link]") {
     FakeClock clock;
     MockWire wire(clock);
     Master master(wire, clock, omgp::ADDR_host);
 
-    uint8_t payload[omgp::LIMIT_max_l3_payload] = {};
+    uint8_t payload[omgp::LIMIT_max_l3_message] = {};
     REQUIRE(master.begin(0x01, payload, sizeof payload) == Status::Ok);
     REQUIRE(master.busy());
 }
@@ -2928,7 +2928,7 @@ TEST_CASE("a begin() refused with PayloadTooLong does not burn the destination's
     MockWire wire(clock);
     const uint8_t dst = 0x05;
     Master master(wire, clock, omgp::ADDR_host);
-    uint8_t too_long[omgp::LIMIT_max_l3_payload + 1] = {};
+    uint8_t too_long[omgp::LIMIT_max_l3_message + 1] = {};
     REQUIRE(master.begin(dst, too_long, sizeof too_long) == Status::PayloadTooLong);
     REQUIRE(wire.transcript_size() == 0);
     const uint8_t ok_payload[] = {0x7F};
@@ -3324,7 +3324,7 @@ namespace {
 // A full-length frame of some other conversation on the trunk (neither addressed to nor from
 // the host), long enough that a single T_poll-cadence poll lands inside it.
 std::vector<uint8_t> foreign_frame() {
-    uint8_t p[omgp::LIMIT_max_l3_payload];
+    uint8_t p[omgp::LIMIT_max_l3_message];
     for (size_t i = 0; i < sizeof p; ++i)
         p[i] = static_cast<uint8_t>(0x11 + (i % 0x40));
     return encode_expected(0x03, 0x04, false, false, 0x05, p, sizeof p);
@@ -3398,7 +3398,7 @@ TEST_CASE("a begin() issued on Answered defers for the polled node's own duplica
     Master master(wire, clock, omgp::ADDR_host);
 
     const uint8_t dst = 0x01;
-    uint8_t payload[omgp::LIMIT_max_l3_payload];
+    uint8_t payload[omgp::LIMIT_max_l3_message];
     for (size_t i = 0; i < sizeof payload; ++i)
         payload[i] = static_cast<uint8_t>(0x21 + (i % 0x40));
     // delay_us on a Duplicate step is the GAP before the repeated copy (contracts/mock-wire.md).
@@ -3899,7 +3899,7 @@ TEST_CASE("a response opening exactly at tx_end — the window's closed lower bo
         request_bytes(dst, 0, false, payload, sizeof payload).size() * byte_us();
     const uint64_t deadline = tx_end + omgp::TRUNK_T_resp_us;
 
-    uint8_t long_body[omgp::LIMIT_max_l3_payload];
+    uint8_t long_body[omgp::LIMIT_max_l3_message];
     for (size_t i = 0; i < sizeof long_body; ++i)
         long_body[i] = static_cast<uint8_t>(i);
     const std::vector<uint8_t> resp = response_bytes(dst, 0, long_body, sizeof long_body);

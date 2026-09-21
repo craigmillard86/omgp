@@ -7,11 +7,11 @@
 
 #include <string>
 
-TEST_CASE("kMaxWire is 142, derived from LIMIT_max_l3_payload", "[timing:max_payload]") {
+TEST_CASE("kMaxWire is 142, derived from LIMIT_max_l3_message", "[timing:max_payload]") {
     STATIC_REQUIRE(omgp::link::kHeaderLen == 4);
     STATIC_REQUIRE(omgp::link::kCrcLen == 2);
     STATIC_REQUIRE(omgp::link::kMaxUnstuffed ==
-                   omgp::link::kHeaderLen + omgp::LIMIT_max_l3_payload + omgp::link::kCrcLen);
+                   omgp::link::kHeaderLen + omgp::LIMIT_max_l3_message + omgp::link::kCrcLen);
     STATIC_REQUIRE(omgp::link::kMaxWire == 2 + 2 * omgp::link::kMaxUnstuffed);
     STATIC_REQUIRE(omgp::link::kMaxWire == 142);
 }

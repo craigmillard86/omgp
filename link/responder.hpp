@@ -118,7 +118,7 @@ class Responder {
     // which is what made those revisions fail.
     struct HeldRequest {
         FrameFields f = {};
-        uint8_t payload[omgp::LIMIT_max_l3_payload] = {};
+        uint8_t payload[omgp::LIMIT_max_l3_message] = {};
         uint64_t request_end_us = 0;
     };
 

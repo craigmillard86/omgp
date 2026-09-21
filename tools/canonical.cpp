@@ -425,7 +425,7 @@ Status parse_payload(uint8_t opcode, Dir dir, Tokens& t, std::vector<uint8_t>& o
     } else if (opcode == OP_ERROR && resp) {
         if (!(t.take_named("err", names::ERROR_TABLE, a) && t.take_hex("detail", tail)))
             return Status::Ok;
-        if (tail.size() > LIMIT_max_l3_payload)
+        if (tail.size() > LIMIT_error_detail_max) // F2 (#110/#154): ERROR.detail's own cap
             return Status::OutOfRange;
         st = encode_error_resp(ErrorResp{static_cast<uint8_t>(a),
                                          Bytes{tail.data(), static_cast<uint8_t>(tail.size())}},
@@ -591,7 +591,7 @@ bool parse_frame_line(const std::string& canonical, omgp::link::FrameFields& out
     Tokens t;
     unsigned dst = 0, src = 0, flags = 0, seq = 0;
     std::vector<uint8_t> payload;
-    // payload.size() > LIMIT_max_l3_payload is left for encode_frame's own PayloadTooLong
+    // payload.size() > LIMIT_max_l3_message is left for encode_frame's own PayloadTooLong
     // check below; only >0xFF (which out.len, a uint8_t, cannot represent at all) is
     // rejected here as malformed text.
     // flags' real domain is 0x00-0x03: trunk §4's ctrl byte is bit0=response, bit1=retry,

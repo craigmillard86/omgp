@@ -19,7 +19,7 @@ namespace link {
 // silent counters, never a Status).
 enum class Status : uint8_t {
     Ok = 0,
-    PayloadTooLong,  // encode_frame: len > LIMIT_max_l3_payload
+    PayloadTooLong,  // encode_frame: len > LIMIT_max_l3_message
     ReservedAddress, // encode_frame: dst == 0xFF (trunk §5); Master::begin: dst >= kAddrCount
     BufferTooSmall,  // caller output buffer insufficient (nothing written)
     Busy,            // Master::begin: a transaction is already open
@@ -33,7 +33,7 @@ const char* status_name(Status s);
 // trunk §4: unstuffed frame layout is dst src ctrl len payload[len] crc_lo crc_hi.
 constexpr size_t kHeaderLen = 4;
 constexpr size_t kCrcLen = 2;
-constexpr size_t kMaxUnstuffed = kHeaderLen + LIMIT_max_l3_payload + kCrcLen; // 70
+constexpr size_t kMaxUnstuffed = kHeaderLen + LIMIT_max_l3_message + kCrcLen; // 70
 // trunk §4: worst case every unstuffed byte is escaped, plus the two FLAG bytes.
 constexpr size_t kMaxWire = 2 + 2 * kMaxUnstuffed; // 142
 // trunk §5: addresses 0x00 (host) through 0x0F (last backplane slot) are the trunk's

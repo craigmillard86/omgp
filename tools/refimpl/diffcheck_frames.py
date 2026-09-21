@@ -28,7 +28,7 @@ import torture
 
 G = P()
 FRAME_COUNT = 10_000
-MAX_PAYLOAD = G.LIMIT_max_l3_payload
+MAX_PAYLOAD = G.LIMIT_max_l3_message
 # trunk §5: dst 0xFF is reserved; excluded from the valid-frame corpus. Imported from the
 # reference codec rather than restated (review on #121: this was the third independent
 # hardcoding — the YAML has no symbol for the L2 reserved dst, so link.py is the anchor).

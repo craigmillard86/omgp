@@ -79,7 +79,7 @@ size_t encode_crc_corrupted(const omgp::link::FrameFields& f, uint8_t* out, size
     // overflow. Every in-repo caller happens to pass cap <= kMaxWire, which bounds f.len to
     // 64 -- but that is a property of the repo's current contents, a control, not a guarantee
     // this function may rely on.
-    if (f.len > omgp::LIMIT_max_l3_payload)
+    if (f.len > omgp::LIMIT_max_l3_message)
         return 0;
     const size_t needed = 2 + 2 * (kHeaderLen + static_cast<size_t>(f.len) + kCrcLen);
     if (cap < needed)
@@ -305,7 +305,7 @@ void MockWire::enqueue_frame(const uint8_t* buf, size_t written, uint64_t t0, bo
 }
 
 bool MockWire::build_response(const omgp::link::FrameFields& request,
-                              uint8_t (&payload_buf)[omgp::LIMIT_max_l3_payload],
+                              uint8_t (&payload_buf)[omgp::LIMIT_max_l3_message],
                               omgp::link::FrameFields& out) {
     out = response_fields(request);
 
@@ -324,10 +324,10 @@ bool MockWire::build_response(const omgp::link::FrameFields& request,
 
     // contracts/link-cpp.md "Responder engine": handle(req, len, resp, cap) returns how many
     // bytes of `resp` it wrote. `cap` is the protocol's own payload bound, the largest answer
-    // a frame can carry (docs/protocol-l3.md; LIMIT_max_l3_payload).
+    // a frame can carry (docs/protocol-l3.md; LIMIT_max_l3_message).
     const size_t n =
-        handler->handle(request.payload, request.len, payload_buf, omgp::LIMIT_max_l3_payload);
-    if (n > omgp::LIMIT_max_l3_payload) {
+        handler->handle(request.payload, request.len, payload_buf, omgp::LIMIT_max_l3_message);
+    if (n > omgp::LIMIT_max_l3_message) {
         // A handler claiming more than a frame can carry. Neither truncating (which would put
         // a silently-wrong answer on the wire and make the engine under test assert against
         // it) nor dropping quietly (indistinguishable from Kind::Silence): the answer is
@@ -335,7 +335,7 @@ bool MockWire::build_response(const omgp::link::FrameFields& request,
         // failure here (see fault_'s declaration in mock_wire.hpp).
         if (fault_ == nullptr)
             fault_ = "MockWire: RequestHandler returned a response longer than "
-                     "LIMIT_max_l3_payload";
+                     "LIMIT_max_l3_message";
         return false;
     }
     // n == 0 is a legitimate answer: a zero-payload response FRAME, not silence. Silence
@@ -353,7 +353,7 @@ void MockWire::schedule_respond(const omgp::link::FrameFields& request, uint64_t
 
     // contracts/mock-wire.md:16: "the node's RequestHandler ... answers". build_response()
     // invokes it once, or falls back to the interim echo for a node with none registered.
-    uint8_t payload_buf[omgp::LIMIT_max_l3_payload];
+    uint8_t payload_buf[omgp::LIMIT_max_l3_message];
     omgp::link::FrameFields response{};
     if (!build_response(request, payload_buf, response))
         return; // fault already recorded; nothing goes on the wire
@@ -381,7 +381,7 @@ void MockWire::schedule_crc_error(const omgp::link::FrameFields& request, uint64
 
     // "the real response with its last CRC byte replaced" — and since #147 the real response
     // is the node's RequestHandler's, built by the one invocation below, not an echo.
-    uint8_t payload_buf[omgp::LIMIT_max_l3_payload];
+    uint8_t payload_buf[omgp::LIMIT_max_l3_message];
     omgp::link::FrameFields response{};
     if (!build_response(request, payload_buf, response))
         return;
@@ -405,7 +405,7 @@ void MockWire::schedule_duplicate(const omgp::link::FrameFields& request, uint64
     // mock-wire.md's Duplicate row: "the real response, then the same bytes again"). A
     // per-copy invocation would hand a stateful handler — a real Responder's replay buffer,
     // the eventual consumer of this seat — a second, spurious transaction to account for.
-    uint8_t payload_buf[omgp::LIMIT_max_l3_payload];
+    uint8_t payload_buf[omgp::LIMIT_max_l3_message];
     omgp::link::FrameFields response{};
     if (!build_response(request, payload_buf, response))
         return;

@@ -81,10 +81,10 @@ std::vector<uint8_t> expected_respond_answer(const std::vector<uint8_t>& req) {
 // The single max-payload request the RX-overflow case below retransmits unchanged: seq and
 // content don't affect whether the RX queue overflows, only total byte volume does, so one
 // encode suffices. kMaxWire is sized for exactly this worst case (2 + 2*(kHeaderLen +
-// LIMIT_max_l3_payload + kCrcLen) == kMaxWire), so encode_frame cannot refuse it while that
+// LIMIT_max_l3_message + kCrcLen) == kMaxWire), so encode_frame cannot refuse it while that
 // invariant holds.
 std::vector<uint8_t> encode_max_payload_request() {
-    uint8_t big_payload[omgp::LIMIT_max_l3_payload];
+    uint8_t big_payload[omgp::LIMIT_max_l3_message];
     std::fill(std::begin(big_payload), std::end(big_payload), uint8_t{0x11});
     FrameFields f{0x01, omgp::ADDR_host, false, false, 0, sizeof big_payload, big_payload};
     uint8_t out[kMaxWire];
@@ -606,7 +606,7 @@ TEST_CASE("encode_crc_corrupted refuses a payload longer than the protocol allow
 
     // ...and still encodes the longest payload the protocol DOES allow, so the guard is a
     // bound and not a blanket refusal.
-    const std::vector<uint8_t> ok(omgp::LIMIT_max_l3_payload, 0xCD);
+    const std::vector<uint8_t> ok(omgp::LIMIT_max_l3_message, 0xCD);
     const omgp::link::FrameFields g{0x01,
                                     omgp::ADDR_host,
                                     /*response=*/true,
@@ -637,7 +637,7 @@ namespace {
 // hazard mock_wire.hpp's fault_ deferral exists to avoid; test_link_loop.cpp's CountingHandler
 // takes the same care). Every check below runs on the test's own stack afterwards.
 struct ScriptedHandler : RequestHandler {
-    uint8_t answer[omgp::LIMIT_max_l3_payload] = {};
+    uint8_t answer[omgp::LIMIT_max_l3_message] = {};
     size_t answer_len = 0;
     // Return a value that is NOT what was written — the only way to drive the overlong-answer
     // refusal without writing past `cap` (which would be this handler's own bug, not
@@ -646,7 +646,7 @@ struct ScriptedHandler : RequestHandler {
     size_t forced_return = 0;
 
     unsigned invocations = 0;
-    uint8_t seen_request[omgp::LIMIT_max_l3_payload] = {};
+    uint8_t seen_request[omgp::LIMIT_max_l3_message] = {};
     size_t seen_len = 0;
     size_t seen_cap = 0;
     bool seen_null_request = false;
@@ -733,7 +733,7 @@ TEST_CASE("Kind::Respond answers from the node's registered RequestHandler, at "
     REQUIRE_FALSE(handler.seen_null_request);
     REQUIRE(handler.seen_len == 1);
     REQUIRE(handler.seen_request[0] == kRequestByte);
-    REQUIRE(handler.seen_cap == omgp::LIMIT_max_l3_payload);
+    REQUIRE(handler.seen_cap == omgp::LIMIT_max_l3_message);
 
     const std::vector<uint8_t> expected =
         expected_answer_with(req, handler.answer_bytes(), handler.answer_size());
@@ -919,7 +919,7 @@ TEST_CASE("With no handler registered for the addressed node, Respond, CrcError 
     }
 }
 
-TEST_CASE("A RequestHandler answer longer than LIMIT_max_l3_payload enqueues no frame and "
+TEST_CASE("A RequestHandler answer longer than LIMIT_max_l3_message enqueues no frame and "
           "records a fault, rather than a truncated frame or a silent drop",
           "[link][mock_wire]") {
     FakeClock clock;
@@ -929,7 +929,7 @@ TEST_CASE("A RequestHandler answer longer than LIMIT_max_l3_payload enqueues no 
     // Claims more than it wrote: MockWire must judge the RETURNED length, since that is what it
     // would put in the frame's len field and copy out of the buffer.
     handler.force_return = true;
-    handler.forced_return = omgp::LIMIT_max_l3_payload + 1;
+    handler.forced_return = omgp::LIMIT_max_l3_message + 1;
     wire.set_handler(0x01, handler);
 
     const std::vector<uint8_t> req = encode_request(0x01, 2, kRequestByte);

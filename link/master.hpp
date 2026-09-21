@@ -161,7 +161,7 @@ class Master {
     uint8_t dst_ = 0;
     uint8_t seq_ = 0;
     uint8_t attempt_count_ = 0; // transmissions sent so far for the open/last transaction
-    uint8_t payload_[LIMIT_max_l3_payload] = {};
+    uint8_t payload_[LIMIT_max_l3_message] = {};
     uint8_t len_ = 0;
     // AwaitResponse: the response-window deadline (tx_end + T_resp). PendingTransmit: the
     // instant transmission is deferred to (data-model.md §4 "Gap").
@@ -218,7 +218,7 @@ class Master {
     bool has_last_activity_ = false;
     uint64_t last_activity_ = 0;
 
-    uint8_t response_buf_[LIMIT_max_l3_payload] = {};
+    uint8_t response_buf_[LIMIT_max_l3_message] = {};
 
     AddrStats stats_[kAddrCount] = {};
     BusStats bus_stats_ = {};

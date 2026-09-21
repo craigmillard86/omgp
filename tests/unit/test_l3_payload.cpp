@@ -93,20 +93,23 @@ TEST_CASE("IDENTIFY response layout and module-type range", "[rules]") {
     REQUIRE(encode_identify_resp(r, buf, sizeof buf, n) == Status::OutOfRange);
 }
 
-TEST_CASE("READ_DESC request/response including the 61-byte tail bound", "[rules]") {
-    uint8_t buf[64];
+TEST_CASE("READ_DESC request/response including the tail bound", "[rules]") {
+    // tail bound = LIMIT_max_l3_payload - 3 (offset u16 + len u8); 56 bytes at the current
+    // 59-byte LIMIT_max_l3_payload (F10, #110/#154).
+    constexpr size_t kTailMax = omgp::LIMIT_max_l3_payload - 3;
+    uint8_t buf[omgp::LIMIT_max_l3_payload + 1];
     size_t n;
     REQUIRE(encode_read_desc_req(ReadDescReq{1987, 61}, buf, sizeof buf, n) == Status::Ok);
     REQUIRE(hx("C3 07 3D") == std::vector<uint8_t>(buf, buf + n));
     REQUIRE(encode_read_desc_req(ReadDescReq{2048, 1}, buf, sizeof buf, n) == Status::OutOfRange);
-    uint8_t tail[62];
+    uint8_t tail[kTailMax + 1];
     for (size_t i = 0; i < sizeof tail; ++i)
         tail[i] = static_cast<uint8_t>(i);
-    REQUIRE(encode_read_desc_resp(ReadDescResp{1987, Bytes{tail, 61}}, buf, sizeof buf, n) ==
+    REQUIRE(encode_read_desc_resp(ReadDescResp{1987, Bytes{tail, kTailMax}}, buf, sizeof buf, n) ==
             Status::Ok);
-    REQUIRE(n == 64);
-    REQUIRE(encode_read_desc_resp(ReadDescResp{0, Bytes{tail, 62}}, buf, sizeof buf, n) ==
-            Status::OutOfRange);
+    REQUIRE(n == omgp::LIMIT_max_l3_payload);
+    REQUIRE(encode_read_desc_resp(ReadDescResp{0, Bytes{tail, kTailMax + 1}}, buf, sizeof buf,
+                                  n) == Status::OutOfRange);
     ReadDescResp d;
     auto w = hx("00 00 05 01 02");
     REQUIRE(decode_read_desc_resp(w.data(), w.size(), d) == Status::Truncated);
@@ -137,9 +140,12 @@ TEST_CASE("status block, events, errors, bypass", "[rules]") {
     REQUIRE(decode_get_event_resp(w.data(), w.size(), ev) == Status::OutOfRange);
     w = hx("00");
     REQUIRE(decode_get_event_resp(w.data(), w.size(), ev) == Status::Truncated);
-    uint8_t big[63] = {0};
-    REQUIRE(encode_get_event_resp(GetEventResp{omgp::EVT_NONE, 0, Bytes{big, 63}}, buf, sizeof buf,
-                                  n) == Status::OutOfRange);
+    // detail max = LIMIT_max_l3_payload - 2 (event_type + remaining_count); one over refuses.
+    constexpr size_t kEventDetailMax = omgp::LIMIT_max_l3_payload - 2;
+    uint8_t big[kEventDetailMax + 1] = {0};
+    REQUIRE(encode_get_event_resp(
+                GetEventResp{omgp::EVT_NONE, 0, Bytes{big, kEventDetailMax + 1}}, buf, sizeof buf,
+                n) == Status::OutOfRange);
 
     ErrorResp er;
     w = hx("02 04 05");
@@ -164,8 +170,9 @@ TEST_CASE("opaque backplane payloads pass through verbatim", "[rules]") {
     OpaquePayload d;
     REQUIRE(decode_opaque(w.data(), 0, d) == Status::Ok);
     REQUIRE(d.bytes.len == 0);
-    uint8_t big[65] = {0};
-    REQUIRE(encode_opaque(OpaquePayload{Bytes{big, 65}}, buf, sizeof buf, n) == Status::OutOfRange);
+    uint8_t big[omgp::LIMIT_max_l3_payload + 1] = {0};
+    REQUIRE(encode_opaque(OpaquePayload{Bytes{big, omgp::LIMIT_max_l3_payload + 1}}, buf,
+                          sizeof buf, n) == Status::OutOfRange);
     uint8_t out[3];
     REQUIRE(encode_opaque(OpaquePayload{Bytes{big, 4}}, out, sizeof out, n) ==
             Status::BufferTooSmall);
@@ -176,9 +183,14 @@ TEST_CASE("opaque backplane payloads pass through verbatim", "[rules]") {
 TEST_CASE("every encoder: exact capacity succeeds; one byte less fails with written == 0",
           "[rules]") {
     // Kills the `cap < N` → `cap <= N` and `written = 0` → constant survivors in every encoder
-    // (l3_payload.cpp:64-381), plus the `== limit` value edges carried by the inputs
-    // (desc_len 2048, value 4095, bypass 1, detail 62/63, opaque 64).
-    uint8_t d[64];
+    // (l3_payload.cpp:64-381), plus the `== limit` value edges carried by the inputs (desc_len
+    // 2048, value 4095, bypass 1, read_desc/event tails and opaque at LIMIT_max_l3_payload,
+    // ERROR detail at LIMIT_error_detail_max — F10/F2, #110/#154).
+    constexpr size_t kReadDescTailMax = omgp::LIMIT_max_l3_payload - 3;
+    constexpr size_t kEventDetailMax = omgp::LIMIT_max_l3_payload - 2;
+    constexpr size_t kOpaqueMax = omgp::LIMIT_max_l3_payload;
+    constexpr size_t kErrorDetailMax = omgp::LIMIT_error_detail_max;
+    uint8_t d[kOpaqueMax];
     for (size_t i = 0; i < sizeof d; ++i)
         d[i] = static_cast<uint8_t>(i);
     using Enc = std::function<Status(uint8_t*, size_t, size_t&)>;
@@ -189,22 +201,22 @@ TEST_CASE("every encoder: exact capacity succeeds; one byte less fails with writ
     };
     const IdentifyResp id{1, 0, omgp::MT_TUBE_PREAMP, omgp::LIMIT_max_descriptor_bytes, 0};
     const ReadDescReq rq{omgp::LIMIT_max_descriptor_bytes - 1, 61};
-    const ReadDescResp rr{omgp::LIMIT_max_descriptor_bytes - 1, Bytes{d, 61}};
+    const ReadDescResp rr{omgp::LIMIT_max_descriptor_bytes - 1, Bytes{d, kReadDescTailMax}};
     const SelectChannelReq sc{3};
     const SetBypassReq sb{1};
     const SetParamReq sp{1, 0xFF, omgp::LIMIT_param_value_max};
     const GetParamReq gq{1, 0xFF};
     const GetParamResp gr{1, 0xFF, omgp::LIMIT_param_value_max};
     const StatusBlock st{omgp::STATE_READY, 0, 1, 0, 0, 0};
-    const GetEventResp ev{omgp::EVT_NONE, 0, Bytes{d, 62}};
-    const OpaquePayload op{Bytes{d, 64}};
-    const ErrorResp er{omgp::ERR_BAD_PAYLOAD, Bytes{d, 63}};
+    const GetEventResp ev{omgp::EVT_NONE, 0, Bytes{d, kEventDetailMax}};
+    const OpaquePayload op{Bytes{d, kOpaqueMax}};
+    const ErrorResp er{omgp::ERR_BAD_PAYLOAD, Bytes{d, kErrorDetailMax}};
     const Case cases[] = {
         {"identify_resp", 7,
          [&](uint8_t* o, size_t c, size_t& n) { return encode_identify_resp(id, o, c, n); }},
         {"read_desc_req", 3,
          [&](uint8_t* o, size_t c, size_t& n) { return encode_read_desc_req(rq, o, c, n); }},
-        {"read_desc_resp", 64,
+        {"read_desc_resp", 3 + kReadDescTailMax,
          [&](uint8_t* o, size_t c, size_t& n) { return encode_read_desc_resp(rr, o, c, n); }},
         {"select_channel", 1,
          [&](uint8_t* o, size_t c, size_t& n) { return encode_select_channel(sc, o, c, n); }},
@@ -218,15 +230,16 @@ TEST_CASE("every encoder: exact capacity succeeds; one byte less fails with writ
          [&](uint8_t* o, size_t c, size_t& n) { return encode_get_param_resp(gr, o, c, n); }},
         {"status_block", 7,
          [&](uint8_t* o, size_t c, size_t& n) { return encode_status_block(st, o, c, n); }},
-        {"get_event_resp", 64,
+        {"get_event_resp", 2 + kEventDetailMax,
          [&](uint8_t* o, size_t c, size_t& n) { return encode_get_event_resp(ev, o, c, n); }},
-        {"opaque", 64, [&](uint8_t* o, size_t c, size_t& n) { return encode_opaque(op, o, c, n); }},
-        {"error_resp", 64,
+        {"opaque", kOpaqueMax,
+         [&](uint8_t* o, size_t c, size_t& n) { return encode_opaque(op, o, c, n); }},
+        {"error_resp", 1 + kErrorDetailMax,
          [&](uint8_t* o, size_t c, size_t& n) { return encode_error_resp(er, o, c, n); }},
     };
     for (const auto& k : cases) {
         INFO(k.name);
-        uint8_t buf[64];
+        uint8_t buf[omgp::LIMIT_max_l3_payload];
         size_t n = 99;
         REQUIRE(k.enc(buf, k.size, n) == Status::Ok);
         REQUIRE(n == k.size);
@@ -237,7 +250,10 @@ TEST_CASE("every encoder: exact capacity succeeds; one byte less fails with writ
 }
 
 TEST_CASE("decoders at the exact limits", "[rules]") {
-    uint8_t d[65];
+    // F10/F2 (#110/#154): LIMIT_max_l3_payload is 59 (was 64); ERROR.detail has its own
+    // separate 4-byte cap (LIMIT_error_detail_max), not LIMIT_max_l3_payload - 1.
+    constexpr size_t kMaxPayload = omgp::LIMIT_max_l3_payload;
+    uint8_t d[kMaxPayload + 1];
     for (size_t i = 0; i < sizeof d; ++i)
         d[i] = static_cast<uint8_t>(i);
     // l3_payload.cpp:117/124/148: offset 2048 is out of range, 2047 is the last valid one.
@@ -253,7 +269,7 @@ TEST_CASE("decoders at the exact limits", "[rules]") {
     w = hx("00 00 00"); // l3_payload.cpp:139: a three-byte response carries zero bytes
     REQUIRE(decode_read_desc_resp(w.data(), w.size(), rr) == Status::Ok);
     REQUIRE(rr.bytes.len == 0);
-    uint8_t buf[64];
+    uint8_t buf[kMaxPayload];
     size_t n;
     REQUIRE(encode_read_desc_resp(ReadDescResp{2048, Bytes{d, 0}}, buf, sizeof buf, n) ==
             Status::OutOfRange);
@@ -269,24 +285,25 @@ TEST_CASE("decoders at the exact limits", "[rules]") {
     w = hx("01 02 01 00 4D 00 01");
     REQUIRE(decode_status_block(w.data(), w.size(), sb) == Status::Ok);
     REQUIRE(sb.bypass == 1);
-    // l3_payload.cpp:337 and :39: a 64-byte event payload (62 detail bytes) with a
-    // user-defined type inside the range; 65 bytes is out of range.
+    // l3_payload.cpp:337 and :39: a kMaxPayload-byte event payload (kMaxPayload-2 detail
+    // bytes) with a user-defined type inside the range; one byte more is out of range.
     GetEventResp ev;
     d[0] = 0xF5;
-    REQUIRE(decode_get_event_resp(d, 64, ev) == Status::Ok);
-    REQUIRE((ev.event_type == 0xF5 && ev.detail.len == 62));
-    REQUIRE(decode_get_event_resp(d, 65, ev) == Status::OutOfRange);
-    // l3_payload.cpp:360: opaque payloads of exactly 64 bytes.
+    REQUIRE(decode_get_event_resp(d, kMaxPayload, ev) == Status::Ok);
+    REQUIRE((ev.event_type == 0xF5 && ev.detail.len == kMaxPayload - 2));
+    REQUIRE(decode_get_event_resp(d, kMaxPayload + 1, ev) == Status::OutOfRange);
+    // l3_payload.cpp:360: opaque payloads of exactly kMaxPayload bytes.
     OpaquePayload op;
-    REQUIRE(decode_opaque(d, 64, op) == Status::Ok);
-    REQUIRE(op.bytes.len == 64);
-    REQUIRE(decode_opaque(d, 65, op) == Status::OutOfRange);
-    // l3_payload.cpp:392: a 64-byte error payload (63 detail bytes); 65 is out of range.
+    REQUIRE(decode_opaque(d, kMaxPayload, op) == Status::Ok);
+    REQUIRE(op.bytes.len == kMaxPayload);
+    REQUIRE(decode_opaque(d, kMaxPayload + 1, op) == Status::OutOfRange);
+    // l3_payload.cpp:392 (F2, #110/#154): a 1+LIMIT_error_detail_max-byte error payload;
+    // one byte more is out of range — bounded by LIMIT_error_detail_max, not kMaxPayload.
     ErrorResp er;
     d[0] = omgp::ERR_BAD_PAYLOAD;
-    REQUIRE(decode_error_resp(d, 64, er) == Status::Ok);
-    REQUIRE(er.detail.len == 63);
-    REQUIRE(decode_error_resp(d, 65, er) == Status::OutOfRange);
+    REQUIRE(decode_error_resp(d, 1 + omgp::LIMIT_error_detail_max, er) == Status::Ok);
+    REQUIRE(er.detail.len == omgp::LIMIT_error_detail_max);
+    REQUIRE(decode_error_resp(d, 2 + omgp::LIMIT_error_detail_max, er) == Status::OutOfRange);
 }
 
 TEST_CASE("payload_bounds dispatch covers every opcode and rejects the rest", "[rules]") {

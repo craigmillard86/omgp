@@ -12,7 +12,7 @@ namespace link {
 
 Status encode_frame(const FrameFields& f, uint8_t* out, size_t cap, size_t& written) {
     written = 0;
-    if (f.len > omgp::LIMIT_max_l3_payload)
+    if (f.len > omgp::LIMIT_max_l3_message)
         return Status::PayloadTooLong;
     if (f.dst == 0xFF) // literal-ok: trunk §5 reserved broadcast address, not an L3 event code
         return Status::ReservedAddress;

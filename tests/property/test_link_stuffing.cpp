@@ -42,7 +42,7 @@ TEST_CASE("random frames, including 7E/7D-dense payloads, round-trip through "
         const bool response = (rng() & 1) != 0;
         const bool retry = (rng() & 1) != 0;
         const uint8_t seq = static_cast<uint8_t>(rng() % 16);
-        const uint8_t len = static_cast<uint8_t>(rng() % (omgp::LIMIT_max_l3_payload + 1));
+        const uint8_t len = static_cast<uint8_t>(rng() % (omgp::LIMIT_max_l3_message + 1));
         std::vector<uint8_t> payload(len);
         for (auto& b : payload)
             // Every third frame: payload dense in exactly the two bytes that force
@@ -113,7 +113,7 @@ TEST_CASE("encode_frame's CRC bytes equal crc16_ccitt_false(dst..payload); publi
         const bool response = (rng() & 1) != 0;
         const bool retry = (rng() & 1) != 0;
         const uint8_t seq = static_cast<uint8_t>(rng() % 16);
-        const uint8_t len = static_cast<uint8_t>(rng() % (omgp::LIMIT_max_l3_payload + 1));
+        const uint8_t len = static_cast<uint8_t>(rng() % (omgp::LIMIT_max_l3_message + 1));
         std::vector<uint8_t> payload(len);
         for (auto& b : payload)
             b = safe_byte();
@@ -152,7 +152,7 @@ TEST_CASE("frame time equals wire length times byte_time_us, at both bit rates",
           "[timing:bit_rate][timing:bit_rate_fallback]") {
     // frame_max_payload (contracts/frame-vectors.md): 72 wire bytes, CRC escapes neither
     // byte — a directed, reproducible wire length to multiply against the timing symbols.
-    uint8_t payload[omgp::LIMIT_max_l3_payload];
+    uint8_t payload[omgp::LIMIT_max_l3_message];
     for (size_t i = 0; i < sizeof payload; ++i)
         payload[i] = static_cast<uint8_t>(i);
     const FrameFields f{0x01, 0x00, false, false, 0, static_cast<uint8_t>(sizeof payload), payload};

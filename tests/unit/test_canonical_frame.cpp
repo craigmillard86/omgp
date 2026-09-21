@@ -183,9 +183,9 @@ TEST_CASE("encode_frame_line surfaces encode_frame's own refusal spellings", "[f
         "frame dst=0xFF src=0x00 flags=0x00 seq=0 payload=", out, error));
     REQUIRE(error == "ERR ReservedAddress");
 
-    // one byte past LIMIT_max_l3_payload.
+    // one byte past LIMIT_max_l3_message.
     std::string long_payload;
-    for (unsigned i = 0; i < omgp::LIMIT_max_l3_payload + 1; ++i)
+    for (unsigned i = 0; i < omgp::LIMIT_max_l3_message + 1; ++i)
         long_payload += "00";
     REQUIRE_FALSE(omgp::canon::encode_frame_line(
         "frame dst=0x01 src=0x00 flags=0x00 seq=0 payload=" + long_payload, out, error));

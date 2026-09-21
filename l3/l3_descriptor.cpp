@@ -79,8 +79,12 @@ Status check_record(uint8_t type, const uint8_t* value, uint8_t len) {
             return Status::MalformedRecord;
         return utf8_valid(value + 1, len - 1) ? Status::Ok : Status::InvalidUtf8;
     }
-    if (type == TLV_SWITCHING)
-        return len == kSwitchingLen ? Status::Ok : Status::MalformedRecord;
+    if (type == TLV_SWITCHING) {
+        if (len != kSwitchingLen)
+            return Status::MalformedRecord;
+        // F7 (#110/#154): no spec-stated ceiling; 5s is headroom over spec §7/§21 settle times.
+        return get16(value + 1) > LIMIT_switching_settle_ms_max ? Status::OutOfRange : Status::Ok;
+    }
     if (type == TLV_PARAM) {
         if (len < kParamMin)
             return Status::MalformedRecord;
@@ -101,15 +105,36 @@ Status check_record(uint8_t type, const uint8_t* value, uint8_t len) {
     if (type == TLV_AUDIO) {
         if (len != kAudioLen)
             return Status::MalformedRecord;
-        return value[1] > 1 ? Status::OutOfRange : Status::Ok;
+        if (value[1] > 1)
+            return Status::OutOfRange;
+        // F7 (#110/#154): spec §9's highest documented reference figure, ~10 Vrms.
+        if (get16(value + 2) > LIMIT_audio_max_mvrms || get16(value + 4) > LIMIT_audio_max_mvrms)
+            return Status::OutOfRange;
+        return Status::Ok;
     }
-    if (type == TLV_POWER_LV)
-        return len == kPowerLvLen ? Status::Ok : Status::MalformedRecord;
+    if (type == TLV_POWER_LV) {
+        if (len != kPowerLvLen)
+            return Status::MalformedRecord;
+        // F7 (#110/#154): spec §15 per-slot targets, one bound per rail.
+        if (get16(value) > LIMIT_power_lv_p15_ma_max || get16(value + 2) > LIMIT_power_lv_n15_ma_max ||
+            get16(value + 4) > LIMIT_power_lv_p9_ma_max || get16(value + 6) > LIMIT_power_lv_p5_ma_max)
+            return Status::OutOfRange;
+        return Status::Ok;
+    }
     if (type == TLV_POWER_TUBE) {
         if (len != kPowerTubeLen)
             return Status::MalformedRecord;
-        return (value[0] < kPowerClassMin || value[0] > kPowerClassMax) ? Status::OutOfRange
-                                                                        : Status::Ok;
+        if (value[0] < kPowerClassMin || value[0] > kPowerClassMax)
+            return Status::OutOfRange;
+        // F7 (#110/#154): spec §18 (T4's 2.0A heater allocation; the 40 mA v1 B+ cap) and §19
+        // (B+ architectural range ~180-300V DC).
+        if (get16(value + 5) > LIMIT_tube_heater_max_ma_ceiling)
+            return Status::OutOfRange;
+        if (get16(value + 7) > LIMIT_tube_bplus_nom_v_max)
+            return Status::OutOfRange;
+        if (value[10] > LIMIT_tube_bplus_max_ma_ceiling)
+            return Status::OutOfRange;
+        return Status::Ok;
     }
     if (type == TLV_VENDOR)
         return len >= kVendorMin ? Status::Ok : Status::MalformedRecord;
@@ -390,7 +415,7 @@ Status DescriptorWriter::add_serial(Str s) {
     return append(TLV_SERIAL, s.data, s.len);
 }
 Status DescriptorWriter::add_channel(const ChannelRec& r) {
-    uint8_t v[256];
+    uint8_t v[256]; // literal-ok: scratch buffer sized to a u8 length field's max, not a channel count
     if (r.name.len > 254)
         return Status::StringTooLong;
     v[0] = r.index;
@@ -406,7 +431,7 @@ Status DescriptorWriter::add_switching(const SwitchingRec& r) {
     return append(TLV_SWITCHING, v, kSwitchingLen);
 }
 Status DescriptorWriter::add_param(const ParamRec& r) {
-    uint8_t v[256];
+    uint8_t v[256]; // literal-ok: scratch buffer sized to a u8 length field's max, not a param count
     if (r.name.len > 250)
         return Status::StringTooLong;
     v[0] = r.param_id;
@@ -419,7 +444,7 @@ Status DescriptorWriter::add_param(const ParamRec& r) {
     return append(TLV_PARAM, v, static_cast<uint8_t>(kParamMin + r.name.len));
 }
 Status DescriptorWriter::add_param_enum(const ParamEnumRec& r) {
-    uint8_t v[256];
+    uint8_t v[256]; // literal-ok: scratch buffer sized to a u8 length field's max, not a param count
     if (r.label.len > 253)
         return Status::StringTooLong;
     v[0] = r.param_id;
@@ -458,7 +483,7 @@ Status DescriptorWriter::add_power_tube(const PowerTubeRec& r) {
     return append(TLV_POWER_TUBE, v, kPowerTubeLen);
 }
 Status DescriptorWriter::add_vendor(const VendorRec& r) {
-    uint8_t v[256];
+    uint8_t v[256]; // literal-ok: scratch buffer sized to a u8 length field's max, unrelated to channel/param counts
     if (r.data.len > 253)
         return Status::OutOfRange;
     put16(v, r.vendor_id);

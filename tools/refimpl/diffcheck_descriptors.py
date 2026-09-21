@@ -33,6 +33,12 @@ def _string(rng: random.Random, max_bytes: int) -> str:
     return s
 
 
+def _bounded(rng: random.Random, hi: int) -> int:
+    """Boundary-biased pick in [0, hi] — same pattern ParamRec.default already used, extended
+    to the F7 (#110/#154) descriptor field caps so 'seeded valid descriptors' stay valid."""
+    return rng.choice([0, hi, rng.randint(0, hi)])
+
+
 def random_records(rng: random.Random) -> list:
     recs = [D.ProtocolRec(rng.randint(0, 255), rng.randint(0, 255)),
             D.ModuleTypeRec(rng.choice(list(G.MODULE_TYPE_NAMES))),
@@ -42,19 +48,22 @@ def random_records(rng: random.Random) -> list:
         recs.append(D.SerialRec(_string(rng, 16)))
     for i in range(rng.randint(1, 6)):
         recs.append(D.ChannelRec(i, _string(rng, 30)))
-    recs.append(D.SwitchingRec(rng.randint(0, 255), rng.randint(0, 65535)))
+    recs.append(D.SwitchingRec(rng.randint(0, 255), _bounded(rng, G.LIMIT_switching_settle_ms_max)))
     for i in range(rng.randint(1, 12)):
         recs.append(D.ParamRec(i, rng.choice([0xFF, rng.randint(0, 255)]), rng.choice(list(G.KIND_NAMES)),
                                rng.choice([0, G.LIMIT_param_value_max, rng.randint(0, G.LIMIT_param_value_max)]),
                                _string(rng, 30)))
         if rng.random() < 0.3:
             recs.append(D.ParamEnumRec(i, rng.randint(0, 7), _string(rng, 12)))
-    recs.append(D.AudioRec(rng.randint(0, 255), rng.randint(0, 1), rng.randint(0, 65535), rng.randint(0, 65535)))
-    recs.append(D.PowerLvRec(*(rng.randint(0, 65535) for _ in range(4))))
+    recs.append(D.AudioRec(rng.randint(0, 255), rng.randint(0, 1), _bounded(rng, G.LIMIT_audio_max_mvrms),
+                           _bounded(rng, G.LIMIT_audio_max_mvrms)))
+    recs.append(D.PowerLvRec(_bounded(rng, G.LIMIT_power_lv_p15_ma_max), _bounded(rng, G.LIMIT_power_lv_n15_ma_max),
+                             _bounded(rng, G.LIMIT_power_lv_p9_ma_max), _bounded(rng, G.LIMIT_power_lv_p5_ma_max)))
     if rng.random() < 0.5:
         recs.append(D.PowerTubeRec(rng.randint(1, 4), rng.randint(0, 255), rng.randint(0, 255), rng.randint(0, 65535),
-                                   rng.randint(0, 65535), rng.randint(0, 65535), rng.randint(0, 255),
-                                   rng.randint(0, 255)))
+                                   _bounded(rng, G.LIMIT_tube_heater_max_ma_ceiling),
+                                   _bounded(rng, G.LIMIT_tube_bplus_nom_v_max), rng.randint(0, 255),
+                                   _bounded(rng, G.LIMIT_tube_bplus_max_ma_ceiling)))
     if rng.random() < 0.5:
         recs.append(D.VendorRec(rng.randint(0, 65535), bytes(rng.randrange(256) for _ in range(rng.randint(0, 60)))))
     for _ in range(rng.randint(0, 3)):

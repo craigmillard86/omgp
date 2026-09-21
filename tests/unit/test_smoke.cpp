@@ -18,7 +18,8 @@ int main() {
     CHECK(omgp::OP_ERROR == 0x7F);
     CHECK(omgp::ERR_BUSY == 0x04);
     CHECK(omgp::TRUNK_T_poll_us == 2000);
-    CHECK(omgp::LIMIT_max_l3_payload == 64);
+    CHECK(omgp::LIMIT_max_l3_message == 64);
+    CHECK(omgp::LIMIT_max_l3_payload == 59); // F10 (#110/#154): max_l3_message(64) - HEADER_LEN(5)
     CHECK(omgp::ADDR_module_i2c_base == 0x20);
     // CRC published check value: "123456789" -> 0x29B1
     const char* s = "123456789";

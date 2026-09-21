@@ -223,7 +223,7 @@ def test_deframer_discard_reason_renders_err(reason, stream):
 
 ENCODE_REFUSALS = [
     ("PayloadTooLong",
-     L.Frame(dst=0x01, src=0x00, response=False, retry=False, seq=0, payload=bytes(G.LIMIT_max_l3_payload + 1))),
+     L.Frame(dst=0x01, src=0x00, response=False, retry=False, seq=0, payload=bytes(G.LIMIT_max_l3_message + 1))),
     ("ReservedAddress",
      L.Frame(dst=0xFF, src=0x00, response=False, retry=False, seq=0, payload=b"")),
 ]
