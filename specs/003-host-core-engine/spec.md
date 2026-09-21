@@ -65,6 +65,18 @@ win and the disagreement is a defect in this specification.
   reported through the callback interface, identifying the operation and the reason,
   rather than being the one silent failure mode in an otherwise fully-reported system.
   See FR-023.
+
+### Session 2026-09-21
+
+- Two pre-existing, human-ruled findings from issue #110's 2026-09-06 review
+  (`docs/OPEN-QUESTIONS.md` "#110 F6" and "#110 F2c") identify gaps this spec's first
+  draft did not carry forward: an unbounded per-node event drain can let one node's
+  backlog monopolise the event-priority share of every superframe (#159), and a
+  worst-case-bound superframe budget (as originally drafted) both wastes budget on
+  well-behaved traffic and still under-reads a legally expensive one (§8's example: an
+  `ERROR` response padded with `0x7E` detail costs 3.3× an honest poll). Both are
+  amended in below — FR-025/FR-026 for the first, FR-027/FR-028 for the second — rather
+  than left as an unreconciled gap between this spec and a standing ruling.
 - Q: How does the application receive a GET_PARAM value — synchronously, or delivered
   later through the callback interface like everything else in this feature? → A:
   Asynchronously, through the callback interface. GET_PARAM returns having queued the
@@ -268,6 +280,19 @@ confirm the application is told it has become unreachable and later told when it
   changed-in-flight descriptor)? Treated as a fresh, uncached descriptor — not matched
   against any prior cache entry — since the cache key is exactly the pair the module
   itself reported as current.
+- What happens when a single node keeps reporting more events pending than the schedule
+  can ever fully drain (a flooding or malfunctioning module)? Its own backlog is drained
+  no faster than one event per its own superframe turn (FR-025), never faster regardless
+  of how large its self-reported count claims to be; once its delivery rate exceeds
+  budget it is reported faulted (FR-026) and stops being drained, rather than continuing
+  to consume the event-priority share every other node's own events are waiting on.
+- What happens when a backplane's own status poll, or the demand traffic bridged
+  through it, consistently costs several times an honest transaction's duration (a
+  legally-formed but padded response, or a slow module bus)? The superframe's remaining
+  demand budget is computed from what was actually measured for that backplane (FR-027),
+  not an assumed cost, and a backplane or node whose measured cost stays high is demoted
+  in demand-traffic priority and reported (FR-028) — but its own mandatory status poll
+  (FR-002) and the enrolment probe (FR-003) are never skipped by demotion.
 - What happens when the application-facing callback is invoked for a lifecycle event,
   an event drain, or a channel-switch outcome and the application is slow to return
   control? The callback interface is non-blocking from the scheduler's point of view:
@@ -298,6 +323,20 @@ confirm the application is told it has become unreachable and later told when it
 - **FR-005**: A superframe's total scheduled traffic MUST NOT exceed its period; demand
   traffic that does not fit MUST carry over to a later superframe rather than extending
   the current one.
+- **FR-027**: The engine MUST compute each superframe's remaining demand-traffic budget
+  (FR-004/FR-005) from the measured duration of that superframe's own status polls and
+  enrolment probe, taken via the injected time source, not from an assumed worst-case
+  bound — except for a backplane or address not yet measured, where a conservative seed
+  value stands in until a real measurement exists (amended 2026-09-21, `docs/
+  OPEN-QUESTIONS.md` "#110 F2c": a worst-case bound both wastes budget on well-behaved
+  traffic and still under-reads a legally expensive one).
+- **FR-028**: The engine MUST reduce the demand-traffic scheduling priority of a node, or
+  of the modules behind a backplane, whose measured transaction durations consistently
+  exceed their fair share of the superframe budget, and MUST report the demotion to the
+  application — without ever skipping that backplane's own status poll (FR-002) or the
+  enrolment probe (FR-003), both of which stay unconditional — so a single slow or
+  hostile talker's demand traffic cannot make the schedule unsatisfiable for its
+  siblings' demand traffic (amended 2026-09-21, `docs/OPEN-QUESTIONS.md` "#110 F2c").
 - **FR-006**: The engine MUST discover a newly enrolled node's identity by issuing
   IDENTIFY, learning its module type, descriptor length and descriptor CRC.
 - **FR-007**: The engine MUST read a node's descriptor in chunks via READ_DESC,
@@ -333,7 +372,19 @@ confirm the application is told it has become unreachable and later told when it
   request that produced it (clarified 2026-09-20).
 - **FR-015**: For any node whose most recent status poll reported a nonzero
   `event_pending` count, the engine MUST drain its queued events, continuing across
-  superframes under the demand-traffic budget until that node's queue is empty.
+  superframes under the demand-traffic budget until that node's queue is empty, bounded
+  per superframe by FR-025.
+- **FR-025**: The engine MUST drain at most one event per node per superframe turn (K=1),
+  even when that node's status poll reports further events still pending; the remainder
+  waits for that node's next turn in the event-priority order (FR-020) — bounding how
+  much of one superframe's event budget a single node's backlog can consume, regardless
+  of how large `remaining_count` claims it is (amended 2026-09-21, `docs/OPEN-QUESTIONS.md`
+  "#110 F6"; `remaining_count` is advisory and MUST NOT size a buffer or bound a loop).
+- **FR-026**: The engine MUST track each node's event-delivery rate; a node whose rate
+  exceeds a configured budget MUST be reported to the application as faulted (a distinct
+  lifecycle event, separate from FR-022's health transitions) and MUST NOT have further
+  events drained from it until its rate returns within budget (amended 2026-09-21,
+  `docs/OPEN-QUESTIONS.md` "#110 F6").
 - **FR-016**: The engine MUST deliver every drained event to the application through the
   callback interface, in the order the module reported them.
 - **FR-017**: The engine MUST report node lifecycle transitions — discovered/live,
@@ -384,7 +435,12 @@ confirm the application is told it has become unreachable and later told when it
   first.
 - **Lifecycle Event**: a notification delivered to the application describing a change
   in a node's presence, discovery state, trunk-level health (SUSPECT/OFFLINE/recovered,
-  bus-fault/bus-recovered) or channel-switch outcome.
+  bus-fault/bus-recovered), channel-switch outcome, event-flood fault (FR-026) or
+  demand-traffic demotion (FR-028).
+- **Transaction Cost Estimate**: the engine's own record of a backplane's or node's most
+  recently measured transaction duration, used to budget the next superframe that
+  transacts with it (FR-027); a target never yet measured uses a conservative seed value
+  until a real measurement replaces it.
 
 ## Success Criteria *(mandatory)*
 
@@ -405,6 +461,16 @@ confirm the application is told it has become unreachable and later told when it
   seen module reappears (the same physical module reinserted, or a like-for-like
   replacement), its descriptor is not re-read from the module — only its presence and
   node-ID assignment are re-established.
+- **SC-006**: A single node whose status poll always reports events pending never
+  prevents any other node's own pending event from being drained within the SC-002
+  bound — its own backlog is drained no faster than one event per its own superframe
+  turn (FR-025), and once its delivery rate exceeds budget it is reported faulted
+  (FR-026) rather than continuing to consume event-priority share.
+- **SC-007**: A backplane or node whose transactions cost several times an honest
+  transaction's duration (the amplification scenario in `docs/OPEN-QUESTIONS.md` "#110
+  F2c": a legal but padded `ERROR` response) is demoted and reported within a bounded
+  number of superframes, and every other enrolled backplane continues receiving its own
+  unconditional status poll throughout (FR-002 unaffected).
 - **SC-005**: The same scripted scenario produces the same sequence of operations and
   the same end state regardless of how quickly the simulated clock is advanced between
   steps.

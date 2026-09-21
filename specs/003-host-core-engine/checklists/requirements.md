@@ -39,6 +39,11 @@
   transitions (FR-017, FR-022, User Story 5); parameter-operation failures are reported,
   not dropped (FR-023); GET_PARAM is asynchronous, delivered via the callback interface
   (FR-014, FR-024). All checklist items pass; no markers remain.
+- Hardening pass (2026-09-21): reconciled two pre-existing human-ruled findings (#159,
+  #162, from issue #110's 2026-09-06 review) that the first draft did not carry forward
+  — added FR-025/FR-026 (bounded event drain, event-fault reporting) and FR-027/FR-028
+  (measured-time superframe budgeting, demotion) with matching SC-006/SC-007 and two new
+  Edge Cases. No new [NEEDS CLARIFICATION] markers; all sections still pass.
 - This is embedded/protocol-domain work (per the existing `002-trunk-link-layer`
   precedent), so "non-technical stakeholders" and "user value" are read as this
   project's own audience: the developer building on this engine and the trunk spec's

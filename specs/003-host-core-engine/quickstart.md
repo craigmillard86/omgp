@@ -53,6 +53,16 @@ swap the demand-drain order in `core_engine.cpp` to param-queue-first → a conc
 × TRUNK_T_poll_us`, and the SC-002 latency assertion in this same binary fails naming the
 event's actual vs. bound latency.
 
+**SC-007 (2026-09-21 hardening amendment)**: a backplane scripted to answer every status poll
+costing several times an honest poll's duration (padded `ERROR.detail`) has its own modules'
+demand items demoted within a bounded number of superframes — `LifecycleKind::Demoted`
+delivered, `demoted_is_backplane` set — while every OTHER enrolled backplane's own status poll
+still appears in every superframe's transcript throughout, unaffected. **Discriminating
+check**: hardcode the worst-case-bound estimate instead of using
+`last_measured_duration_us` → the demotion never fires (or fires against the wrong target),
+and the transcript assertion naming which backplane got demoted, and by which superframe,
+fails.
+
 ## 5. A channel switch completes and the application is told (US3)
 
 ```bash
@@ -73,6 +83,15 @@ Expected: a `StatusStep` reporting `event_pending > 0` followed by `EventStep`s 
 drained (`NONE` reached) within `(backplane poll period) + 2 × TRUNK_T_poll_us` of simulated
 time in every case the binary drives, including the SC-002 "with concurrent parameter-set
 traffic" case (shared with #4's binary via a tagged `[concurrent-load]` case).
+
+**SC-006 (2026-09-21 hardening amendment)**: a node scripted to always report `event_pending
+> 0` (a flood) is drained no faster than one event per its own superframe turn regardless of
+`remaining_count`, and a second, well-behaved node's own single event still lands inside the
+SC-002 bound in the same run; once the flooding node's measured delivery rate exceeds budget,
+`LifecycleKind::NodeEventFault` is delivered and no further `Master::begin` calls target that
+node's `GET_EVENT` until a later window brings its rate back down. **Discriminating check**:
+remove the K=1 cap (drain a node's whole backlog per turn) → the well-behaved node's event
+latency assertion fails once the flooding node's script is added to the same run.
 
 ## 7. The application always knows which nodes are live (US5, R-03)
 

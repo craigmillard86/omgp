@@ -197,6 +197,11 @@ failed `SET_PARAM`/`GET_PARAM` is reported, and `GetParam` is asynchronous and c
       polls (AS1); an oversized burst carries the unsent remainder to later superframes rather
       than extending the current one (AS2); a concurrent `event_pending` burst still drains
       inside User Story 4's bound while the parameter burst is in flight (AS3, ties to SC-002)
+      — plus, from the 2026-09-21 hardening amendment: SC-007's measured-time case (a scripted
+      backplane whose answers cost several times an honest poll gets its own modules' demand
+      items demoted within a bounded number of superframes, `LifecycleKind::Demoted` reported,
+      while every OTHER enrolled backplane keeps receiving its own status poll every superframe
+      throughout — FR-002 unaffected)
 - [ ] T026 [P] [US2] Write `tests/unit/test_core_params.cpp` (write first, RED): a scripted
       `ParamStep{ok:false,...}` makes a queued `set_param` produce
       `LifecycleKind::ParamSetFailed` with the scripted reason (spec FR-023); `get_param`
@@ -210,14 +215,29 @@ failed `SET_PARAM`/`GET_PARAM` is reported, and `GetParam` is asynchronous and c
       `param_queue_`, `CoreStatus::QueueFull` refusal (not a silent drop) when the ring is at
       capacity; `get_param` additionally assigns/reuses a `ParamRequestId` (R-10) — make T026's
       queuing half pass
-- [ ] T028 [US2] Implement `SuperframeBudget` accounting (R-11): debit `budget_.remaining_us`
-      by each scheduled transaction's own worst-case wire time at `master_.bit_rate()` (the
-      same reasoning `link/health.cpp`'s `kOutcomeWindowUs` uses), reset at the start of every
-      `run_superframe()` call
+- [ ] T028 [US2] Implement `SuperframeBudget` accounting (R-11, amended 2026-09-21 per spec
+      FR-027/FR-028): debit `budget_.remaining_us` by each scheduled transaction's cost
+      estimate — that backplane's/node's own `last_measured_duration_us` (data-model.md §3/§4)
+      once one exists, else the worst-case wire time at `master_.bit_rate()` as the seed (the
+      same reasoning `link/health.cpp`'s `kOutcomeWindowUs` uses) — reset `remaining_us` at the
+      start of every `run_superframe()` call; after each transaction completes, record its
+      actual elapsed time (via `clock_`) into that target's `last_measured_duration_us`. Track
+      `consecutive_overrun_superframes` per backplane/node against a computed fair share (the
+      remaining demand budget divided by the number of targets currently competing for it);
+      past a configured threshold set `demoted = true` and enqueue `LifecycleKind::Demoted`
+      (`demoted_is_backplane` set for a backplane-level demotion) onto `pending_lifecycle_`;
+      clear it and enqueue `DemotionCleared` once measured cost returns to normal. Never demotes
+      a backplane's own status poll or the enrolment probe (FR-002/FR-003 stay unconditional) —
+      only the demand-item priority of that backplane's modules, or of a demoted node itself.
 - [ ] T029 [US2] Implement the demand-item drain loop (spec FR-004/FR-005/FR-020, R-07): after
       status polls and the enrolment probe, drain `event_queue_` then `desc_queue_` then
       `param_queue_`, one item at a time, stopping the moment an item would exceed
-      `budget_.remaining_us` (carry-over, not truncation mid-item) — make T025 pass
+      `budget_.remaining_us` (carry-over, not truncation mid-item) — make T025 pass. Amended
+      2026-09-21 (spec FR-025, FR-028): within each ring, an item whose node (or whose owning
+      backplane) has `demoted == true` (T028) is skipped to the back of that ring for this
+      superframe rather than drained in plain arrival order; `event_queue_` additionally drains
+      at most one item per distinct `node_id` per superframe turn (K=1, T039 owns the rate
+      tracking this enforces against) regardless of how many of that node's events are queued.
 - [ ] T030 [US2] Implement parameter-result decoding: on a `ParamOpItem::Kind::Get`
       transaction's `Answered` event, decode `GetParamResp` or `ErrorResp` and call
       `on_param_result`; on a `Kind::Set` transaction's failure (an `ErrorResp`, or the
@@ -292,7 +312,13 @@ measure simulated time to callback delivery against the calculable bound.
       node that queues events faster than one drain cycle empties them is not abandoned —
       draining continues across superframes under the demand budget (AS3); a
       `[concurrent-load]`-tagged case shared with `test_core_scheduler.cpp` (T025 AS3) for
-      SC-002 under a simultaneous parameter burst
+      SC-002 under a simultaneous parameter burst — plus, from the 2026-09-21 hardening
+      amendment (spec FR-025/FR-026, SC-006): a node whose status poll always reports
+      `event_pending > 0` is drained no faster than one event per its own superframe turn
+      regardless of the `remaining_count` it claims, and never delays any OTHER node's own
+      pending event past the SC-002 bound; once its measured delivery rate exceeds the
+      configured budget it is reported `LifecycleKind::NodeEventFault` and stops being drained
+      until its rate recovers, reported `NodeEventFaultCleared`
 
 ### Implementation for User Story 4
 
@@ -300,7 +326,13 @@ measure simulated time to callback delivery against the calculable bound.
       `StatusBlock` and `EventDrainItem` enqueueing (spec FR-015); `GET_EVENT` issuance and
       `GetEventResp` decode in the drain loop (T029), delivering
       `LifecycleKind::ModuleEvent` per drained event, re-enqueueing while
-      `remaining_count > 0` — make T038 pass
+      `remaining_count > 0` (subject to T029's K=1-per-turn cap) — make T038 pass. Amended
+      2026-09-21 (spec FR-025/FR-026): increment `events_drained_this_window` on every
+      delivered `ModuleEvent`; once `event_rate_window_start_us` (data-model.md §3) has elapsed
+      a configured window, compare the count against a configured rate budget — over budget
+      sets `event_faulted = true`, enqueues `LifecycleKind::NodeEventFault`, and the drain loop
+      (T029) skips that node's `EventDrainItem`s entirely until a later window's count falls
+      back under budget, which clears the flag and enqueues `NodeEventFaultCleared`.
 - [ ] T040 [US4] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; local
       mutation run; confirm the SC-002 latency assertion holds in both the isolated and
       concurrent-load cases
@@ -468,3 +500,11 @@ merge-conflict risk this feature has.
 - Commit after each task or logical (RED, then GREEN) group, per this repo's established
   pattern (`test(...)`, then `fix(...)`/`feat(...)` commits).
 - Verify tests fail before implementing.
+- Hardening amendment (2026-09-21): T025, T028, T029, T038 and T039 were amended in place to
+  fold in two pre-existing human-ruled findings this feature's first draft did not carry
+  forward (#159 bounded event drain, #162 measured-time superframe budgeting — both
+  `docs/OPEN-QUESTIONS.md` "#110 F6"/"#110 F2c", human-ruled 2026-09-06). No task IDs were
+  added or renumbered, to avoid invalidating the dependency/cross-reference numbering already
+  established on the filed GitHub issues (#672-#720) and `tools/tasks-to-issues.py`'s `T\d+`
+  format requirement. `Closes #159` and `Closes #162` belong on whichever PR lands T028/T029
+  (the budget/demotion half) and T039 (the event-rate half) respectively.

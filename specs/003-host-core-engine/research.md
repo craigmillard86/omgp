@@ -248,6 +248,34 @@ order, not a weighted scheduler.
 three fixed-capacity rings emptied in a fixed order is simpler, allocates nothing, and gives
 the same observable order for this feature's three kinds without a per-item comparison.
 
+**Correction (2026-09-21, spec FR-025/FR-026): event-first priority alone does not bound a
+single node's own backlog.** Issue #159 (`docs/OPEN-QUESTIONS.md` "#110 F6", human-ruled
+2026-09-06) found the gap this decision as first drafted did not close: nothing stopped one
+node's `event_pending` count from keeping the event FIFO occupied with that same node's own
+backlog, superframe after superframe, ahead of every other node's events — "drained event-first"
+bounds demand *kinds* against each other, not one node's own repeated re-queueing against the
+rest of the event FIFO. Two additions: (a) a node's event drain is capped at one `GetEventResp`
+per its own superframe turn (K=1) — the rest of that node's backlog re-queues behind every
+*other* node's own pending event, not behind the same node's own next event; `remaining_count`
+is read from the response only to decide whether to re-queue, never to size a loop or a buffer
+(the flooding vector #159 names — an unbounded loop trusting a module-authored count). (b) each
+node's event-delivery rate is tracked (a rolling count over a window of superframes); a node
+whose rate exceeds a configured budget is reported faulted (a new `LifecycleKind`, distinct
+from FR-022's health transitions since this is a *behavioural* fault, not a connectivity one)
+and stops being drained until its rate falls back within budget — so a module that answers
+every poll but floods events cannot be caught by `HealthTracker`'s own SUSPECT/OFFLINE logic
+(R-03), which sees only poll success/failure, and needed this separate mechanism.
+
+**Alternatives considered (this correction)**: (a) an unbounded per-node cap, relying solely on
+the overall superframe time budget (R-11) to eventually stop a flood — rejected: the time
+budget bounds *total* superframe cost, but with events draining first (FR-020) a flooding
+node's own backlog can still consume the *entire* event-priority share of every superframe
+indefinitely, which is exactly what starves every other node's events past the SC-002 bound;
+K=1 bounds it per node directly, independent of how the overall time budget is spent. (b) a
+fixed global event-rate cap with no per-node attribution — rejected: it cannot distinguish one
+flooding node from a rig-wide burst of legitimate events (e.g. every node reporting a fault at
+once), and would throttle the legitimate case identically to the malicious one.
+
 ## R-08: Test double — this feature builds its own message-level `MockTransport`
 
 **Context**: the roadmap (`speckit-prompts.md`, F3's own plan line) says "unit tests with
@@ -321,6 +349,46 @@ rejected: item cost varies enormously by kind (an event drain's `GetEventResp` v
 `ReadDescResp` chunk) and by the rate in use (a fallback-rate transaction is ≈8.7× a
 reference-rate one, per `docs/trunk-link-layer.md` §7), so a fixed count either wastes budget
 at the reference rate or overruns it at the fallback rate.
+
+**Correction (2026-09-21, spec FR-027/FR-028): the worst-case bound above is now the *seed*
+for an unmeasured target, not the standing rule.** Issue #162 (`docs/OPEN-QUESTIONS.md` "#110
+F2c", human-ruled 2026-09-06) measured the worst-case-bound approach against the real frame
+encoder and found it wrong in both directions at once: it *wastes* budget against well-behaved
+traffic (an honest status poll measured at 480 µs, budgeted at its worst-case bound regardless),
+and it still *under-reads* a legally-formed but expensive one (one `ERROR` response padded with
+`0x7E` detail bytes measured at 1580 µs — 3.3× the honest poll, and the ruling's own bound is
+derived from what the frame encoder actually produces, which a fixed worst-case constant does
+not distinguish from the honest case at admission time). The fix: each backplane's and each
+node's own most recently *measured* transaction duration (taken via `Clock`, transmit start to
+terminal `Master` event) becomes that target's cost estimate for the *next* superframe that
+transacts with it — the worst-case bound above is retained only as the seed value for a target
+never yet measured, not discarded (R-11's original reasoning — a fixed count either wastes or
+overruns depending on the rate in use — is exactly why a *single* static number was already the
+wrong shape, before #162 ever surfaced it). A backplane's own status poll (FR-002) and the
+enrolment probe (FR-003) stay unconditional regardless of what they cost — demotion (FR-028)
+acts only on *demand-traffic* priority for the offending target, never on the mandatory traffic,
+so #162's "demotes a node that consistently overruns its share" is realised without contradicting
+FR-002's own "every superframe, every enrolled backplane" guarantee. "Consistently" is a rolling
+window (mirrors R-07's event-rate tracking, same shape): a target whose measured cost exceeds a
+computed fair share (the remaining demand budget divided by the number of targets currently
+competing for it) for more than a configured number of consecutive superframes is demoted —
+its own demand items drop to the back of their FIFO (R-07) until its measured cost returns to
+normal — and the demotion itself is one `LifecycleEvent`, so the application is told, not left
+to infer it from slower service.
+
+**Alternatives considered (this correction)**: (a) keep the worst-case bound and add demotion
+only — rejected: it does not close #162's own first half (budget wasted against well-behaved
+traffic is precision lost, not safety lost, but the ruling names both), and a target could still
+be flagged for "overrunning" a bound that was never an honest estimate of its real cost. (b)
+measure but never seed (start every target at zero / unknown) — rejected: a target's first-ever
+transaction would then be admitted with no budget check at all, which is worse than a
+conservative worst-case guess for something never observed. (c) a decaying average over many
+samples instead of "most recent measurement" — rejected as unnecessary complexity for a v1
+defensive mechanism: the *most recent* measurement is already what "this target's current
+behaviour" means for a scheduler deciding the *next* superframe, and a multi-sample average adds
+state and a tuning parameter (the decay rate) for a difference that only matters if a target's
+cost is itself oscillating superframe-to-superframe, which the rolling demotion window (not the
+estimate itself) is what actually needs to tolerate.
 
 ## R-12: Descriptor cache capacity
 
