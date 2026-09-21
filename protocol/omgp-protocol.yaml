@@ -218,12 +218,20 @@ l3_payloads:
   # byte bitmaps (occupied, changed) back to back — contracts/bp-slot-map.md is the
   # authoritative layout. Modelled here as slot_count + one combined trailing `bitmaps` field
   # (bound: 2*29 = 58 bytes, both bitmaps at their max size) rather than two separate `bytes`
-  # fields: codegen's `bytes` type is a bound-computation aid for the hand-written l3/l3_payload
-  # codecs, not a code generator for them, so this produces identical wire bytes and correct
-  # resp_min/resp_max (1 / 59) without a derived-length field form with no other consumer
-  # (docs/OPEN-QUESTIONS.md 2026-09-21 "BP_SLOT_MAP wire format (R-01)"). The request direction
-  # is artefact-silent in the contract; `[]` follows the GET_STATUS precedent (host-initiated
-  # poll, no request payload).
+  # fields, since codegen's schema supports only one trailing `bytes` field per direction —
+  # this gives byte-identical wire bytes and correct resp_min/resp_max (1 / 59) without a new
+  # derived-length field form with no other consumer.
+  # NOT LOSSLESS: PAYLOAD_FIELDS (tools/codegen.py, contracted by
+  # specs/001-protocol-foundation/contracts/generated-constants.md) is a documented
+  # machine-readable per-opcode field schema, and this collapsed model erases the real
+  # occupied/changed split and the len == ceil(slot_count/8) relationship from it — a
+  # consumer generating code from PAYLOAD_FIELDS alone gets a decoder that is wrong for this
+  # opcode. contracts/bp-slot-map.md and the hand-written l3/l3_payload codecs remain the
+  # actual source of truth for the two-bitmap shape (red team, PR #773 round 1, finding 3 —
+  # an earlier version of this comment claimed nothing was lost; that claim was false).
+  # (docs/OPEN-QUESTIONS.md 2026-09-21 "BP_SLOT_MAP wire format (R-01)"). The request
+  # direction is artefact-silent in the contract; `[]` follows the GET_STATUS precedent
+  # (host-initiated poll, no request payload).
   BP_SLOT_MAP:
     request:  []
     response: [{name: slot_count, type: u8}, {name: bitmaps, type: bytes, max: 58}]

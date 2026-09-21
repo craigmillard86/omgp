@@ -342,11 +342,16 @@ def encode_bp_slot_map_resp(r: BpSlotMapResp) -> bytes:
 def decode_bp_slot_map_resp(b: bytes) -> BpSlotMapResp:
     _need(len(b) >= 1, "Truncated", "slot_count")
     slot_count = b[0]
+    # Checked off the single slot_count byte, before the length checks below: a slot_count
+    # over the cap is a peer protocol violation (OutOfRange) regardless of how much data
+    # follows it, not a transport symptom (Truncated) -- checking this after the length
+    # checks made it unreachable on any real wire payload (red team, PR #773 round 1,
+    # finding 1).
+    _need(slot_count <= G.LIMIT_bp_slot_map_max_slots, "OutOfRange", "slot_count")
     bitmap_len = _bp_slot_map_bitmap_len(slot_count)
     total = 1 + 2 * bitmap_len
     _need(len(b) >= total, "Truncated", "bitmaps")
     _need(len(b) == total, "LengthMismatch", "bitmaps")
-    _need(slot_count <= G.LIMIT_bp_slot_map_max_slots, "OutOfRange", "slot_count")
     return BpSlotMapResp(slot_count, bytes(b[1:1 + bitmap_len]), bytes(b[1 + bitmap_len:total]))
 
 

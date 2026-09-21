@@ -21,6 +21,11 @@ regardless of who polled it — the backplane's own memory, not the host's). `BP
 stays `idempotent: true`: re-reading it is always safe, since it is current-state-plus-delta,
 never a queue that drains on read.
 
+Bits at index `>= slot_count` within the last byte of either bitmap (up to 7 per bitmap) are
+reserved: a backplane SHOULD leave them clear, and a host MUST ignore their value on receive
+rather than reject it (golden rule 7's forward-compatibility stance; red team, PR #773 round 1,
+finding 4 — this line was previously unstated).
+
 ## Bound
 
 `LIMIT_bp_slot_map_max_slots` is the largest `slot_count` whose payload

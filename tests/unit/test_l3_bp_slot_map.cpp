@@ -66,13 +66,52 @@ TEST_CASE("BP_SLOT_MAP: slot_count over the cap is OutOfRange, encode and decode
                               Bytes{chg.data(), static_cast<uint8_t>(chg.size())}},
                 buf, sizeof buf, n) == Status::OutOfRange);
 
-    // A wire message that only *declares* slot_count = over, with the bytes that would
-    // actually follow it: decode must refuse it too, not just the encoder.
+    // A full-shape wire message declaring slot_count = over, with the (over-long, not
+    // actually deliverable) bytes that shape would need: decode must refuse it too.
     buf[0] = over;
     for (size_t i = 0; i < blen; ++i)
         buf[1 + i] = buf[1 + blen + i] = 0;
     BpSlotMapResp d;
     REQUIRE(decode_bp_slot_map_resp(buf, 1 + 2 * blen, d) == Status::OutOfRange);
+}
+
+TEST_CASE("BP_SLOT_MAP: an over-cap slot_count is OutOfRange even off a short, wire-legal "
+          "payload — not masked by a Truncated length check (red team, PR #773 round 1)",
+          "[bp_slot_map]") {
+    // A payload this short could never legally carry slot_count = 233's own claimed shape
+    // (it would need 61 bytes, more than LIMIT_max_l3_payload itself), so decoding it must
+    // not be able to answer Truncated instead: the cap violation is checked off the single
+    // slot_count byte, before any length check, so it is reachable on every real L3 message
+    // a decoder can actually be handed — not just a codec-level probe with an oversized
+    // buffer no wire payload could ever deliver.
+    constexpr uint8_t over = static_cast<uint8_t>(omgp::LIMIT_bp_slot_map_max_slots + 1);
+    const uint8_t just_the_header[] = {over};
+    BpSlotMapResp d;
+    REQUIRE(decode_bp_slot_map_resp(just_the_header, sizeof just_the_header, d) ==
+            Status::OutOfRange);
+
+    // Also at the actual wire-legal ceiling: a full LIMIT_max_l3_payload-byte message.
+    uint8_t at_max_payload[omgp::LIMIT_max_l3_payload] = {};
+    at_max_payload[0] = over;
+    REQUIRE(decode_bp_slot_map_resp(at_max_payload, sizeof at_max_payload, d) ==
+            Status::OutOfRange);
+}
+
+TEST_CASE("BP_SLOT_MAP: reserved padding bits beyond slot_count are passed through, not "
+          "rejected (golden rule 7)",
+          "[bp_slot_map]") {
+    // slot_count=4 needs one bitmap byte; bits 4-7 of that byte are reserved padding (docs
+    // protocol-l3.md, contracts/bp-slot-map.md). A backplane setting them is unusual but not
+    // a shape violation: decode must accept it (the host is expected to ignore them, not the
+    // decoder to enforce it) and round-trip the byte verbatim.
+    const uint8_t wire[] = {4, 0xF0, 0x00};
+    BpSlotMapResp d;
+    REQUIRE(decode_bp_slot_map_resp(wire, sizeof wire, d) == Status::Ok);
+    REQUIRE((d.slot_count == 4 && d.occupied.len == 1 && d.occupied.data[0] == 0xF0));
+    uint8_t buf[8];
+    size_t n = 0;
+    REQUIRE(encode_bp_slot_map_resp(d, buf, sizeof buf, n) == Status::Ok);
+    REQUIRE(std::vector<uint8_t>(buf, buf + n) == std::vector<uint8_t>(wire, wire + sizeof wire));
 }
 
 TEST_CASE("BP_SLOT_MAP: encoder rejects a bitmap whose length disagrees with slot_count",

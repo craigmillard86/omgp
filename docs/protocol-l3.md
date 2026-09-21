@@ -77,7 +77,11 @@ it is always safe, current-state-plus-delta, never a draining queue. `slot_count
 `limits.bp_slot_map_max_slots` (232 — the largest count whose two bitmaps still fit
 `limits.max_l3_payload`; distinct from `limits.max_slots_per_backplane`, §5's reference-design
 capacity, which this wire cap deliberately exceeds); a backplane advertising more is a protocol
-violation, refused `OutOfRange` rather than truncated.
+violation, refused `OutOfRange` rather than truncated. Bits at index `>= slot_count` within the
+last byte of either bitmap (up to 7 per bitmap) are reserved: a backplane SHOULD leave them
+clear, and a host MUST ignore their value on receive rather than reject it — matching golden
+rule 7's forward-compatibility stance, not asserted as a shape violation (red team, PR #773
+round 1, finding 4).
 
 ### 3.2 Channel switching semantics
 
