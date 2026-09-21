@@ -108,8 +108,8 @@ TEST_CASE("READ_DESC request/response including the tail bound", "[rules]") {
     REQUIRE(encode_read_desc_resp(ReadDescResp{1987, Bytes{tail, kTailMax}}, buf, sizeof buf, n) ==
             Status::Ok);
     REQUIRE(n == omgp::LIMIT_max_l3_payload);
-    REQUIRE(encode_read_desc_resp(ReadDescResp{0, Bytes{tail, kTailMax + 1}}, buf, sizeof buf,
-                                  n) == Status::OutOfRange);
+    REQUIRE(encode_read_desc_resp(ReadDescResp{0, Bytes{tail, kTailMax + 1}}, buf, sizeof buf, n) ==
+            Status::OutOfRange);
     ReadDescResp d;
     auto w = hx("00 00 05 01 02");
     REQUIRE(decode_read_desc_resp(w.data(), w.size(), d) == Status::Truncated);
@@ -143,9 +143,8 @@ TEST_CASE("status block, events, errors, bypass", "[rules]") {
     // detail max = LIMIT_max_l3_payload - 2 (event_type + remaining_count); one over refuses.
     constexpr size_t kEventDetailMax = omgp::LIMIT_max_l3_payload - 2;
     uint8_t big[kEventDetailMax + 1] = {0};
-    REQUIRE(encode_get_event_resp(
-                GetEventResp{omgp::EVT_NONE, 0, Bytes{big, kEventDetailMax + 1}}, buf, sizeof buf,
-                n) == Status::OutOfRange);
+    REQUIRE(encode_get_event_resp(GetEventResp{omgp::EVT_NONE, 0, Bytes{big, kEventDetailMax + 1}},
+                                  buf, sizeof buf, n) == Status::OutOfRange);
 
     ErrorResp er;
     w = hx("02 04 05");

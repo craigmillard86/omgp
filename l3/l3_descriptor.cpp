@@ -116,8 +116,10 @@ Status check_record(uint8_t type, const uint8_t* value, uint8_t len) {
         if (len != kPowerLvLen)
             return Status::MalformedRecord;
         // F7 (#110/#154): spec §15 per-slot targets, one bound per rail.
-        if (get16(value) > LIMIT_power_lv_p15_ma_max || get16(value + 2) > LIMIT_power_lv_n15_ma_max ||
-            get16(value + 4) > LIMIT_power_lv_p9_ma_max || get16(value + 6) > LIMIT_power_lv_p5_ma_max)
+        if (get16(value) > LIMIT_power_lv_p15_ma_max ||
+            get16(value + 2) > LIMIT_power_lv_n15_ma_max ||
+            get16(value + 4) > LIMIT_power_lv_p9_ma_max ||
+            get16(value + 6) > LIMIT_power_lv_p5_ma_max)
             return Status::OutOfRange;
         return Status::Ok;
     }
@@ -415,7 +417,8 @@ Status DescriptorWriter::add_serial(Str s) {
     return append(TLV_SERIAL, s.data, s.len);
 }
 Status DescriptorWriter::add_channel(const ChannelRec& r) {
-    uint8_t v[256]; // literal-ok: scratch buffer sized to a u8 length field's max, not a channel count
+    uint8_t
+        v[256]; // literal-ok: scratch buffer sized to a u8 length field's max, not a channel count
     if (r.name.len > 254)
         return Status::StringTooLong;
     v[0] = r.index;
@@ -431,7 +434,8 @@ Status DescriptorWriter::add_switching(const SwitchingRec& r) {
     return append(TLV_SWITCHING, v, kSwitchingLen);
 }
 Status DescriptorWriter::add_param(const ParamRec& r) {
-    uint8_t v[256]; // literal-ok: scratch buffer sized to a u8 length field's max, not a param count
+    uint8_t
+        v[256]; // literal-ok: scratch buffer sized to a u8 length field's max, not a param count
     if (r.name.len > 250)
         return Status::StringTooLong;
     v[0] = r.param_id;
@@ -444,7 +448,8 @@ Status DescriptorWriter::add_param(const ParamRec& r) {
     return append(TLV_PARAM, v, static_cast<uint8_t>(kParamMin + r.name.len));
 }
 Status DescriptorWriter::add_param_enum(const ParamEnumRec& r) {
-    uint8_t v[256]; // literal-ok: scratch buffer sized to a u8 length field's max, not a param count
+    uint8_t
+        v[256]; // literal-ok: scratch buffer sized to a u8 length field's max, not a param count
     if (r.label.len > 253)
         return Status::StringTooLong;
     v[0] = r.param_id;
@@ -483,7 +488,8 @@ Status DescriptorWriter::add_power_tube(const PowerTubeRec& r) {
     return append(TLV_POWER_TUBE, v, kPowerTubeLen);
 }
 Status DescriptorWriter::add_vendor(const VendorRec& r) {
-    uint8_t v[256]; // literal-ok: scratch buffer sized to a u8 length field's max, unrelated to channel/param counts
+    uint8_t v[256]; // literal-ok: scratch buffer sized to a u8 length field's max, unrelated to
+                    // channel/param counts
     if (r.data.len > 253)
         return Status::OutOfRange;
     put16(v, r.vendor_id);

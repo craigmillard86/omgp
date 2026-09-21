@@ -26,6 +26,9 @@ std::vector<uint8_t> tlv(uint8_t type, std::vector<uint8_t> value) {
 std::vector<uint8_t> str(const char* s) {
     return std::vector<uint8_t>(s, s + std::strlen(s));
 }
+std::vector<uint8_t> u16le(unsigned v) {
+    return {static_cast<uint8_t>(v), static_cast<uint8_t>(v >> 8)};
+}
 std::vector<uint8_t> cat(std::initializer_list<std::vector<uint8_t>> parts) {
     std::vector<uint8_t> out;
     for (const auto& p : parts)
@@ -205,6 +208,129 @@ TEST_CASE("malformed fixed-length records and out-of-range values", "[rules]") {
                                                           20}))) == Status::OutOfRange);
     REQUIRE(validate(with(MIN, tlv(omgp::TLV_POWER_TUBE, {5, 2, 4, 0x58, 2, 0xBC, 2, 0xFA, 0, 12,
                                                           20}))) == Status::OutOfRange);
+}
+
+// F7 (#110/#154) descriptor field ranges: an "at the limit" (Ok) and "one over" (OutOfRange)
+// case per bound, mirroring the T1/T4 power_class edges above. Each pair kills both the
+// `cxx_gt_to_ge` mutant (caught at the "at the limit" case: `>=` would wrongly refuse the
+// legal boundary value) and the `cxx_replace_scalar_call` mutant (caught at "one over": a
+// read replaced by a constant would wrongly accept the illegal value) — spec.md §15/§18/§19/§9.
+TEST_CASE("F7 descriptor field ranges: at the limit is Ok, one over is OutOfRange", "[rules]") {
+    // SWITCHING.settle_ms <= LIMIT_switching_settle_ms_max (5000)
+    REQUIRE(validate(replace_once(MIN, SWITCHING,
+                                  tlv(omgp::TLV_SWITCHING,
+                                      with({0x01}, u16le(omgp::LIMIT_switching_settle_ms_max))))) ==
+            Status::Ok);
+    REQUIRE(
+        validate(replace_once(MIN, SWITCHING,
+                              tlv(omgp::TLV_SWITCHING,
+                                  with({0x01}, u16le(omgp::LIMIT_switching_settle_ms_max + 1))))) ==
+        Status::OutOfRange);
+
+    // AUDIO.in_max_mvrms / out_max_mvrms <= LIMIT_audio_max_mvrms (10000), independently
+    REQUIRE(validate(replace_once(
+                MIN, AUDIO,
+                tlv(omgp::TLV_AUDIO,
+                    cat({{3, 1}, u16le(omgp::LIMIT_audio_max_mvrms), u16le(0)})))) == Status::Ok);
+    REQUIRE(validate(replace_once(
+                MIN, AUDIO,
+                tlv(omgp::TLV_AUDIO,
+                    cat({{3, 1}, u16le(omgp::LIMIT_audio_max_mvrms + 1), u16le(0)})))) ==
+            Status::OutOfRange);
+    REQUIRE(validate(replace_once(
+                MIN, AUDIO,
+                tlv(omgp::TLV_AUDIO,
+                    cat({{3, 1}, u16le(0), u16le(omgp::LIMIT_audio_max_mvrms)})))) == Status::Ok);
+    REQUIRE(validate(replace_once(
+                MIN, AUDIO,
+                tlv(omgp::TLV_AUDIO,
+                    cat({{3, 1}, u16le(0), u16le(omgp::LIMIT_audio_max_mvrms + 1)})))) ==
+            Status::OutOfRange);
+
+    // POWER_LV's four rails, each independently <= its own LIMIT_power_lv_*_ma_max
+    REQUIRE(validate(replace_once(
+                MIN, POWER_LV,
+                tlv(omgp::TLV_POWER_LV, cat({u16le(omgp::LIMIT_power_lv_p15_ma_max), u16le(0),
+                                             u16le(0), u16le(0)})))) == Status::Ok);
+    REQUIRE(validate(replace_once(
+                MIN, POWER_LV,
+                tlv(omgp::TLV_POWER_LV, cat({u16le(omgp::LIMIT_power_lv_p15_ma_max + 1), u16le(0),
+                                             u16le(0), u16le(0)})))) == Status::OutOfRange);
+    REQUIRE(validate(replace_once(
+                MIN, POWER_LV,
+                tlv(omgp::TLV_POWER_LV, cat({u16le(0), u16le(omgp::LIMIT_power_lv_n15_ma_max),
+                                             u16le(0), u16le(0)})))) == Status::Ok);
+    REQUIRE(validate(replace_once(
+                MIN, POWER_LV,
+                tlv(omgp::TLV_POWER_LV, cat({u16le(0), u16le(omgp::LIMIT_power_lv_n15_ma_max + 1),
+                                             u16le(0), u16le(0)})))) == Status::OutOfRange);
+    REQUIRE(validate(replace_once(
+                MIN, POWER_LV,
+                tlv(omgp::TLV_POWER_LV,
+                    cat({u16le(0), u16le(0), u16le(omgp::LIMIT_power_lv_p9_ma_max), u16le(0)})))) ==
+            Status::Ok);
+    REQUIRE(validate(
+                replace_once(MIN, POWER_LV,
+                             tlv(omgp::TLV_POWER_LV,
+                                 cat({u16le(0), u16le(0), u16le(omgp::LIMIT_power_lv_p9_ma_max + 1),
+                                      u16le(0)})))) == Status::OutOfRange);
+    REQUIRE(validate(replace_once(
+                MIN, POWER_LV,
+                tlv(omgp::TLV_POWER_LV,
+                    cat({u16le(0), u16le(0), u16le(0), u16le(omgp::LIMIT_power_lv_p5_ma_max)})))) ==
+            Status::Ok);
+    REQUIRE(validate(replace_once(
+                MIN, POWER_LV,
+                tlv(omgp::TLV_POWER_LV, cat({u16le(0), u16le(0), u16le(0),
+                                             u16le(omgp::LIMIT_power_lv_p5_ma_max + 1)})))) ==
+            Status::OutOfRange);
+
+    // POWER_TUBE.heater_max_ma <= LIMIT_tube_heater_max_ma_ceiling (2000)
+    REQUIRE(validate(with(
+                MIN, tlv(omgp::TLV_POWER_TUBE, cat({{1, 2, 4},
+                                                    u16le(0),
+                                                    u16le(omgp::LIMIT_tube_heater_max_ma_ceiling),
+                                                    u16le(0),
+                                                    {12, 20}})))) == Status::Ok);
+    REQUIRE(validate(with(MIN, tlv(omgp::TLV_POWER_TUBE,
+                                   cat({{1, 2, 4},
+                                        u16le(0),
+                                        u16le(omgp::LIMIT_tube_heater_max_ma_ceiling + 1),
+                                        u16le(0),
+                                        {12, 20}})))) == Status::OutOfRange);
+    // POWER_TUBE.bplus_nom_v <= LIMIT_tube_bplus_nom_v_max (300)
+    REQUIRE(
+        validate(with(MIN, tlv(omgp::TLV_POWER_TUBE, cat({{1, 2, 4},
+                                                          u16le(0),
+                                                          u16le(0),
+                                                          u16le(omgp::LIMIT_tube_bplus_nom_v_max),
+                                                          {12, 20}})))) == Status::Ok);
+    REQUIRE(validate(with(
+                MIN, tlv(omgp::TLV_POWER_TUBE, cat({{1, 2, 4},
+                                                    u16le(0),
+                                                    u16le(0),
+                                                    u16le(omgp::LIMIT_tube_bplus_nom_v_max + 1),
+                                                    {12, 20}})))) == Status::OutOfRange);
+    // POWER_TUBE.bplus_max_ma <= LIMIT_tube_bplus_max_ma_ceiling (40)
+    REQUIRE(validate(with(
+                MIN, tlv(omgp::TLV_POWER_TUBE,
+                         cat({{1, 2, 4},
+                              u16le(0),
+                              u16le(0),
+                              u16le(0),
+                              {12},
+                              {static_cast<uint8_t>(omgp::LIMIT_tube_bplus_max_ma_ceiling)}})))) ==
+            Status::Ok);
+    REQUIRE(
+        validate(with(
+            MIN, tlv(omgp::TLV_POWER_TUBE,
+                     cat({{1, 2, 4},
+                          u16le(0),
+                          u16le(0),
+                          u16le(0),
+                          {12},
+                          {static_cast<uint8_t>(omgp::LIMIT_tube_bplus_max_ma_ceiling + 1)}})))) ==
+        Status::OutOfRange);
 }
 
 TEST_CASE("typed decoders expose views into the blob", "[cursor]") {

@@ -102,7 +102,8 @@ TEST_CASE("random valid payloads are stable under encode-decode-encode", "[prope
             break;
         }
         case 5: {
-            // F10 (#110/#154): detail bound = LIMIT_max_l3_payload - 2 (event_type + remaining_count).
+            // F10 (#110/#154): detail bound = LIMIT_max_l3_payload - 2 (event_type +
+            // remaining_count).
             uint8_t len = u8(0, omgp::LIMIT_max_l3_payload - 2);
             GetEventResp r{omgp::EVENT_CODES[u8(0, 4)], u8(0, 255), Bytes{tail, len}}, d;
             round_trip(
@@ -220,8 +221,8 @@ size_t random_descriptor(DescGen& g, uint8_t* buf, size_t cap) {
         REQUIRE(w.add_channel(ChannelRec{static_cast<uint8_t>(i), g.s(20)}) == Status::Ok);
     // F7 (#110/#154): settle_ms/mvrms/rail-current/heater-max/bplus fields are now range-
     // checked, so "random valid descriptor" must generate within LIMIT_* bounds, not 0-65535.
-    REQUIRE(w.add_switching(SwitchingRec{g.u8(0, 3), g.u16(0, omgp::LIMIT_switching_settle_ms_max)}) ==
-            Status::Ok);
+    REQUIRE(w.add_switching(SwitchingRec{
+                g.u8(0, 3), g.u16(0, omgp::LIMIT_switching_settle_ms_max)}) == Status::Ok);
     const int params = g.u8(1, 12);
     for (int i = 0; i < params; ++i) {
         REQUIRE(w.add_param(ParamRec{
@@ -238,11 +239,11 @@ size_t random_descriptor(DescGen& g, uint8_t* buf, size_t cap) {
                                       g.u16(0, omgp::LIMIT_power_lv_p9_ma_max),
                                       g.u16(0, omgp::LIMIT_power_lv_p5_ma_max)}) == Status::Ok);
     if (g.u8(0, 1))
-        REQUIRE(w.add_power_tube(PowerTubeRec{
-                    g.u8(1, 4), g.u8(0, 255), g.u8(0, 255), g.u16(0, 65535),
-                    g.u16(0, omgp::LIMIT_tube_heater_max_ma_ceiling),
-                    g.u16(0, omgp::LIMIT_tube_bplus_nom_v_max), g.u8(0, 255),
-                    g.u8(0, omgp::LIMIT_tube_bplus_max_ma_ceiling)}) == Status::Ok);
+        REQUIRE(w.add_power_tube(
+                    PowerTubeRec{g.u8(1, 4), g.u8(0, 255), g.u8(0, 255), g.u16(0, 65535),
+                                 g.u16(0, omgp::LIMIT_tube_heater_max_ma_ceiling),
+                                 g.u16(0, omgp::LIMIT_tube_bplus_nom_v_max), g.u8(0, 255),
+                                 g.u8(0, omgp::LIMIT_tube_bplus_max_ma_ceiling)}) == Status::Ok);
     if (g.u8(0, 1)) {
         const uint8_t n = g.u8(0, 40);
         uint8_t raw[42] = {g.u8(0, 255), g.u8(0, 255)};

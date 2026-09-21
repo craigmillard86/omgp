@@ -193,6 +193,31 @@ def test_value_ranges():
         D.build_descriptor([D.ProtocolRec(1, 0), D.ModuleTypeRec(0x63)])
 
 
+@pytest.mark.parametrize("limit_name,at_max,over_max", [
+    ("switching_settle_ms_max", lambda m: D.SwitchingRec(0x01, m), lambda m: D.SwitchingRec(0x01, m + 1)),
+    ("audio_max_mvrms", lambda m: D.AudioRec(3, 1, m, 0), lambda m: D.AudioRec(3, 1, m + 1, 0)),
+    ("audio_max_mvrms", lambda m: D.AudioRec(3, 1, 0, m), lambda m: D.AudioRec(3, 1, 0, m + 1)),
+    ("power_lv_p15_ma_max", lambda m: D.PowerLvRec(m, 0, 0, 0), lambda m: D.PowerLvRec(m + 1, 0, 0, 0)),
+    ("power_lv_n15_ma_max", lambda m: D.PowerLvRec(0, m, 0, 0), lambda m: D.PowerLvRec(0, m + 1, 0, 0)),
+    ("power_lv_p9_ma_max", lambda m: D.PowerLvRec(0, 0, m, 0), lambda m: D.PowerLvRec(0, 0, m + 1, 0)),
+    ("power_lv_p5_ma_max", lambda m: D.PowerLvRec(0, 0, 0, m), lambda m: D.PowerLvRec(0, 0, 0, m + 1)),
+    ("tube_heater_max_ma_ceiling", lambda m: D.PowerTubeRec(1, 2, 4, 0, m, 0, 12, 20),
+     lambda m: D.PowerTubeRec(1, 2, 4, 0, m + 1, 0, 12, 20)),
+    ("tube_bplus_nom_v_max", lambda m: D.PowerTubeRec(1, 2, 4, 0, 0, m, 12, 20),
+     lambda m: D.PowerTubeRec(1, 2, 4, 0, 0, m + 1, 12, 20)),
+    ("tube_bplus_max_ma_ceiling", lambda m: D.PowerTubeRec(1, 2, 4, 0, 0, 0, 12, m),
+     lambda m: D.PowerTubeRec(1, 2, 4, 0, 0, 0, 12, m + 1)),
+])
+def test_f7_field_ranges_at_the_limit_and_one_over(limit_name, at_max, over_max):
+    """F7 (#110/#154): spec.md §15/§18/§19/§9. Same at-limit/one-over pairing as
+    test_l3_descriptor.cpp's mutation-killing boundary test -- kept in sync so a future
+    change to one of these LIMIT_ values is caught on both sides."""
+    m = getattr(G, f"LIMIT_{limit_name}")
+    D.encode_value(at_max(m))  # does not raise
+    with raises("OutOfRange"):
+        D.encode_value(over_max(m))
+
+
 def test_builder_enforces_the_same_rules():
     with raises("DuplicateRecord"):
         D.build_descriptor(D.parse_descriptor(MIN) + [D.ProtocolRec(1, 0)])
