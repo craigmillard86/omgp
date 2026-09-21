@@ -16,6 +16,14 @@ would fail.
 
 ## 2. `BP_SLOT_MAP`'s new payload round-trips (R-01, prerequisite for US1)
 
+**Correction (2026-09-21, PR #773 review round 3).** This section originally named the
+248-slot full-occupancy vector as the discriminating check for an off-by-one bitmap-length
+bug. That was wrong, not just stale: 248 = 8 × 31 exactly, so `ceil(248/8)` and plain
+`248/8` give the same answer (31) — the check as originally written would never have
+discriminated anything, at either the original 248 cap or the corrected 232 one (also
+`8 × 29` exactly). Replaced below with a vector whose `slot_count` is *not* a multiple of 8
+(`msg_bp_slot_map_resp`, `slot_count = 4`), which does discriminate.
+
 ```bash
 python3 tools/diffcheck.py                            # includes the new bp_slot_map_* vectors
 ```
