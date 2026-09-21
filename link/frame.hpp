@@ -10,7 +10,7 @@ namespace omgp {
 namespace link {
 
 // Encodes fields into a FLAG-delimited, byte-stuffed wire frame (trunk §4). Validates
-// before writing any byte: `PayloadTooLong` if `f.len > LIMIT_max_l3_payload`;
+// before writing any byte: `PayloadTooLong` if `f.len > LIMIT_max_l3_message`;
 // `ReservedAddress` if `f.dst == 0xFF` (trunk §5); `BufferTooSmall` if `cap` is less than
 // the worst-case bound `2 + 2*(kHeaderLen + f.len + kCrcLen)` — a static bound on `len`,
 // not the achieved (possibly smaller) stuffed length. On any refusal `written == 0` and

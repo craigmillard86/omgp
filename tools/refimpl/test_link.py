@@ -22,7 +22,7 @@ G = P()
 FLAG = G.TRUNK_flag_byte
 ESC = G.TRUNK_escape_byte
 XOR = G.TRUNK_escape_xor
-MAX_PAYLOAD = G.LIMIT_max_l3_payload
+MAX_PAYLOAD = G.LIMIT_max_l3_message
 
 
 def raises(reason: str):

@@ -4,8 +4,11 @@
 //
 // Check order inside a record (shared with the Python reference so the differential test
 // compares Status names): DuplicateRecord → MalformedRecord (length shape) → StringTooLong
-// (max_len) → InvalidUtf8 → OutOfRange. Whole blob: BlobTooLarge before any record is
-// read; Truncated when a length overruns; MissingRequired after the last record.
+// (max_len) → InvalidUtf8 → OutOfRange → DuplicateKey (CHANNEL.index / PARAM.param_id
+// uniqueness, F7 #110/#154 — checked only once the record itself is well-formed, so a
+// malformed CHANNEL/PARAM never reports a spurious key collision). Whole blob: BlobTooLarge
+// before any record is read; Truncated when a length overruns; MissingRequired after the
+// last record.
 #pragma once
 
 #include "l3_types.hpp"
@@ -139,7 +142,9 @@ class DescriptorWriter {
     uint8_t* buf_;
     size_t cap_;
     size_t size_;
-    uint32_t seen_[8]; // 256-bit bitmap of record types written
+    uint32_t seen_[8];               // 256-bit bitmap of record types written
+    uint32_t seen_channel_index_[8]; // 256-bit bitmap of CHANNEL.index values written (F7)
+    uint32_t seen_param_id_[8];      // 256-bit bitmap of PARAM.param_id values written (F7)
 };
 
 // CRC-16/CCITT-FALSE over the whole blob exactly as served by READ_DESC (§4.1; ruling

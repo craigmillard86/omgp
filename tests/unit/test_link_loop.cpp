@@ -350,7 +350,7 @@ MasterEvent run_transaction(Loop& loop, uint8_t dst, const uint8_t* payload, siz
             // frame, and a stack buffer would dangle the moment run_transaction returns
             // (ASan stack-use-after-return, caught here before it was committed). The suite
             // is single-threaded and each cell reads the answer before the next call.
-            static uint8_t answer[omgp::LIMIT_max_l3_payload];
+            static uint8_t answer[omgp::LIMIT_max_l3_message];
             const uint8_t answer_len = ev.response.len;
             REQUIRE(answer_len <= sizeof answer);
             if (ev.kind == MasterEvent::Answered && answer_len > 0)
@@ -1291,7 +1291,7 @@ TEST_CASE("SC-004 a maximum-length payload survives the replay buffer byte-for-b
     Loop loop;
     // Worst case for the codec as well as for length: every byte is a FLAG or ESCAPE, so the
     // frame is maximally stuffed on both legs of the bridge.
-    uint8_t payload[omgp::LIMIT_max_l3_payload];
+    uint8_t payload[omgp::LIMIT_max_l3_message];
     for (size_t i = 0; i < sizeof payload; ++i)
         payload[i] = (i % 2 == 0) ? omgp::TRUNK_flag_byte : omgp::TRUNK_escape_byte;
 

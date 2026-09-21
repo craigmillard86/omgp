@@ -370,7 +370,9 @@ Status decode_opaque(const uint8_t* in, size_t len, OpaquePayload& out) {
 
 namespace {
 constexpr size_t kErrorHead = 1;
-constexpr size_t kErrorDetailMax = kMaxPayload - kErrorHead;
+// F2 (#110/#154): a fixed 4-byte cap, not kMaxPayload - kErrorHead like every other tail —
+// ERROR.detail is a short structured hint, not a general-purpose payload.
+constexpr size_t kErrorDetailMax = LIMIT_error_detail_max;
 } // namespace
 
 Status encode_error_resp(const ErrorResp& r, uint8_t* out, size_t cap, size_t& written) {

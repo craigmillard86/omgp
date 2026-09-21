@@ -47,7 +47,7 @@ std::string render_frame(const omgp::link::FrameFields& f);
 // field, a seq outside 0-15, flags outside 0x00-0x03, dst/src outside 0x00-0xFF, a numeric
 // token that overflows unsigned or the field's own width, and odd-length/non-hex/oversized
 // payload, without ever building a FrameFields for the codec to see; sets error to
-// "ERR BadRequest". A payload above LIMIT_max_l3_payload (but <= 0xFF) is deliberately NOT
+// "ERR BadRequest". A payload above LIMIT_max_l3_message (but <= 0xFF) is deliberately NOT
 // rejected here — that's left to encode_frame_line's own PayloadTooLong.
 bool parse_frame_line(const std::string& canonical, omgp::link::FrameFields& out,
                       std::vector<uint8_t>& payload_storage, std::string& error);

@@ -12,5 +12,5 @@
   "kind": "frame",
   "name": "frame_max_payload",
   "note": "72 wire bytes; CRC 0xE3F2 escapes neither byte (ruling 2026-08-31)",
-  "spec_ref": "trunk \u00a74 payload at LIMIT_max_l3_payload"
+  "spec_ref": "trunk \u00a74 payload at LIMIT_max_l3_message"
 }

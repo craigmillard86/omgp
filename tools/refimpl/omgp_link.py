@@ -23,7 +23,7 @@ _G = P()
 FLAG = _G.TRUNK_flag_byte
 ESC = _G.TRUNK_escape_byte
 XOR = _G.TRUNK_escape_xor
-MAX_PAYLOAD = _G.LIMIT_max_l3_payload
+MAX_PAYLOAD = _G.LIMIT_max_l3_message
 
 _HEADER_LEN = 4  # dst, src, ctrl, len (trunk §4)
 _CRC_LEN = 2

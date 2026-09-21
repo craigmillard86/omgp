@@ -37,6 +37,13 @@ u8  payload_len
 u8[payload_len] payload
 ```
 
+`payload_len` is bounded by `limits.max_l3_payload` (59 bytes) — not by trunk §4's 64-byte frame
+budget directly. The two are related but distinct (F10, `docs/OPEN-QUESTIONS.md` #110/#154,
+2026-09-06 ruling): `limits.max_l3_message` (64) is trunk §4's whole-frame payload — one entire
+L3 message, header included; `limits.max_l3_payload` (59) is what remains for the payload once
+the 5-byte header above is subtracted. L2 code bounds against `max_l3_message`; this document
+and the L3 payload codecs bound against `max_l3_payload`.
+
 Integrity is an L2 concern (CRC-16 on trunk frames, SMBus PEC on the module bus); L3 assumes delivered messages are intact. Retries and timeouts are L2 policy with L3 idempotency: all operations below are safe to retry (SET operations are absolute, never relative).
 
 ### 3.1 Opcodes — v1 core set
@@ -52,10 +59,10 @@ Integrity is an L2 concern (CRC-16 on trunk frames, SMBus PEC on the module bus)
 | 0x13 | GET_PARAM | H→M | payload = param_id, scope. Response: `u8 param_id, u8 scope, u16 value` |
 | 0x14 | GET_STATUS | H→N | Returns status block (see 3.3) |
 | 0x15 | GET_EVENT | H→N | Drains one queued event; repeat until empty. Response: `u8 event_type, u8 remaining_count, u8[] detail`; `event_type` 0x00 (NONE) when the queue is empty |
-| 0x20 | BP_SLOT_MAP | H→B | Backplane only: occupied slots, presence changes since last poll. Payload format not yet defined — v1 codecs pass it through as opaque bytes |
+| 0x20 | BP_SLOT_MAP | H→B | Backplane only: occupied slots, presence changes since last poll. Payload format not yet defined — v1 codecs pass it through as opaque bytes. Bound, once designed, by `limits.max_slots_per_backplane` (16 — spec §5's reference FX backplane, 8–16 positions, the larger of the two reference types; F12, `docs/OPEN-QUESTIONS.md` #110/#154) |
 | 0x21 | BP_POWER | H→B | Backplane only: rail enable/disable per slot, current/PG/fault readback. Payload format not yet defined — opaque in v1 codecs |
 | 0x22 | BP_ROUTE | H→B | Backplane only: local routing control (format TBD with routing hardware) — opaque in v1 codecs |
-| 0x7F | ERROR | N→H | flags.error set; payload = error code (u8) + optional detail |
+| 0x7F | ERROR | N→H | flags.error set; payload = error code (u8) + optional detail, capped at `limits.error_detail_max` (4 bytes) — a short structured hint, not a general-purpose tail (F2, `docs/OPEN-QUESTIONS.md` #110/#154) |
 
 Error codes (initial): `0x01` unknown opcode, `0x02` bad payload, `0x03` unknown param/channel, `0x04` busy/settling, `0x05` not permitted (e.g. rail not enabled), `0x06` internal fault.
 
@@ -82,6 +89,17 @@ Tube modules extend this with heater/B+ telemetry via read-only parameters, not 
 
 Queued on the module, drained by GET_EVENT. v1 event types: NONE (0x00 — returned by GET_EVENT when the queue is empty), CHANNEL_SETTLED (0x01), FAULT_RAISED (0x02), FAULT_CLEARED (0x03), PARAM_CHANGED_LOCALLY (0x04, reserved — modules have no local controls in v1, but the type is allocated so a future hardware-control capability does not break the model), USER_DEFINED (0xF0–0xFF).
 
+CHANNEL_SETTLED's `detail` is `u8 channel, u8 seq` (F9, `docs/OPEN-QUESTIONS.md` #110/#154,
+2026-09-06 ruling) — the channel that finished settling and the SELECT_CHANNEL request's own
+`seq`, so a host that issued several channel switches in quick succession can match a settled
+event to the request that caused it. This layout is a host-side interpretation rule, not a
+separate L3 codec: `protocol/omgp-protocol.yaml`'s `GET_EVENT` response keeps a generic
+`u8[] detail` tail for every event type (§3.1), and the host reads these two bytes only after
+seeing `event_type == CHANNEL_SETTLED`. **Host rule:** accept a CHANNEL_SETTLED event only for
+the channel currently outstanding a switch on that node, and cross-check it against the node's
+own most recent GET_STATUS `active_channel` before un-muting — a stale or duplicated event for a
+channel the host is no longer waiting on MUST NOT be acted on.
+
 ## 4. Descriptor format
 
 The descriptor is a read-only TLV blob served by the module, read in chunks via READ_DESC. TLV: `u8 type, u8 len, u8[len] value`. Unknown types MUST be skipped by length — this is the forward-compatibility mechanism. Multi-byte integers little-endian. Strings UTF-8, not NUL-terminated (length-delimited).
@@ -99,13 +117,33 @@ Maximum descriptor size v1: 2048 bytes. Chunk size ≤ 28 bytes on the module bu
 | 0x05 | MODEL_ID | u16 vendor-scoped, u16 hw rev, u16 fw rev | ✔ |
 | 0x06 | SERIAL | string ≤ 16 | – |
 | 0x10 | CHANNEL | u8 index, string name | ✔ (≥1) |
-| 0x11 | SWITCHING | u8 flags (bit0 mute-required, bit1 seamless), u16 settle_ms | ✔ |
+| 0x11 | SWITCHING | u8 flags (bit0 mute-required, bit1 seamless), u16 settle_ms (max `limits.switching_settle_ms_max` = 5000) | ✔ |
 | 0x20 | PARAM | u8 param_id, u8 scope (0xFF=module, else channel), u8 kind (0=continuous, 1=toggle, 2=enum, 3=momentary, 4=trigger, 5=readonly), u16 default, string name | ✔ per param |
 | 0x21 | PARAM_ENUM | u8 param_id, u8 index, string label | for enum params |
-| 0x30 | AUDIO | u8 io_flags (mono/stereo in/out), u8 input_mode (0=buffered, 1=PICKUP_SENSITIVE), u16 in_max_mVrms, u16 out_max_mVrms | ✔ |
-| 0x40 | POWER_LV | u16 mA per rail: +15, −15, +9, +5 (3V3_STBY implicit) | ✔ |
-| 0x41 | POWER_TUBE | u8 power_class (T1–T4), u8 tubes, u8 sections, u16 heater_nom_mA, u16 heater_max_mA, u16 bplus_nom_V, u8 bplus_exp_mA, u8 bplus_max_mA | tube modules |
+| 0x30 | AUDIO | u8 io_flags (mono/stereo in/out), u8 input_mode (0=buffered, 1=PICKUP_SENSITIVE), u16 in_max_mVrms, u16 out_max_mVrms (each max `limits.audio_max_mvrms` = 10000) | ✔ |
+| 0x40 | POWER_LV | u16 mA per rail: +15 (max `limits.power_lv_p15_ma_max` = 150), −15 (150), +9 (500), +5 (1000) (3V3_STBY implicit) | ✔ |
+| 0x41 | POWER_TUBE | u8 power_class (T1–T4), u8 tubes, u8 sections, u16 heater_nom_mA, u16 heater_max_mA (max `limits.tube_heater_max_ma_ceiling` = 2000), u16 bplus_nom_V (max `limits.tube_bplus_nom_v_max` = 300), u8 bplus_exp_mA, u8 bplus_max_mA (max `limits.tube_bplus_max_ma_ceiling` = 40) | tube modules |
 | 0x7E | VENDOR | u16 vendor id, opaque | – |
+
+`CHANNEL.index` and `PARAM.param_id` MUST be unique within one descriptor (F7,
+`docs/OPEN-QUESTIONS.md` #110/#154, 2026-09-06 ruling) — a duplicate index or id is rejected
+as `DuplicateKey`, one shared status for both keys rather than separate
+`DuplicateIndex`/`DuplicateParamId` values (the ruling left this a PR-time choice). Unlike
+`DuplicateRecord` (a non-repeated TLV *type* seen twice — CHANNEL and PARAM are both
+`repeated: true`, so that check never fires for them), `DuplicateKey` tracks the *value* of
+`index`/`param_id` with its own 256-bit bitmap, checked only once the record itself is
+already known well-formed. Each is a u8, so at most `limits.max_channels` (256) /
+`limits.max_params` (256) distinct records are representable per descriptor — the id width, not
+the 2048-byte blob cap, is the binding constraint (a minimum 4-byte CHANNEL record fits 512 in
+2048 bytes; a minimum 7-byte PARAM record fits 292).
+
+The numeric bounds above (F7) come from spec §15 (Power Rails), §18/§19 (Tube Power Classes/
+Supply Targets — including the v1 40 mA B+ allocation cap) and §9 (Audio Philosophy and Signal
+Levels — the highest documented reference figure, ~10 Vrms). `switching_settle_ms_max` has no
+spec-stated ceiling; 5 seconds is deliberate headroom over every settle time §7/§21 describe.
+Enforced by hand-written range checks in `l3/l3_descriptor.cpp` and
+`tools/refimpl/omgp_descriptor.py` (descriptor TLV records are not codegen'd field-by-field the
+way `l3_payloads` is) — an out-of-range value on any of these fields is `OutOfRange`.
 
 The descriptor CRC-16 in IDENTIFY lets the host cache descriptors: same MODEL_ID + CRC = skip the read. This makes reinsertion and power-up fast on the slow module bus. The CRC is CRC-16/CCITT-FALSE (the trunk's `crc16_ccitt_false`) computed over the entire descriptor blob exactly as served by READ_DESC (ruled 2026-08-28).
 

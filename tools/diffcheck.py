@@ -234,7 +234,7 @@ def random_payload(rng: random.Random, name: str, direction: str):
     if cls is l3.OpaquePayload:
         return cls(_tail(rng, G.LIMIT_max_l3_payload))
     if cls is l3.ErrorResp:
-        return cls(rng.choice(list(G.ERROR_NAMES)), _tail(rng, G.LIMIT_max_l3_payload - 1))
+        return cls(rng.choice(list(G.ERROR_NAMES)), _tail(rng, G.LIMIT_error_detail_max))
     raise AssertionError(cls)
 
 

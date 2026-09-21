@@ -157,8 +157,14 @@ def _bounds(p: dict, layout: dict, direction: str) -> tuple[int, int]:
     if fields is None:
         return 0, 0
     fixed = sum(FIELD_WIDTH.get(f["type"], 0) for f in fields)
-    has_tail = any(f["type"] == "bytes" for f in fields)
-    return fixed, (p["limits"]["max_l3_payload"] if has_tail else fixed)
+    tail = next((f for f in fields if f["type"] == "bytes"), None)
+    if tail is None:
+        return fixed, fixed
+    # A `max` on the tail field caps it below the payload-wide ceiling (F2, #110/#154:
+    # ERROR.detail's own 4-byte cap) — fixed + that cap, not max_l3_payload.
+    if "max" in tail:
+        return fixed, fixed + tail["max"]
+    return fixed, p["limits"]["max_l3_payload"]
 
 
 def build_model(p: dict, vectors_dir: pathlib.Path | None) -> dict:

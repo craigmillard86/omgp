@@ -36,7 +36,7 @@ RandFrame random_valid_frame(std::mt19937& rng) {
     f.response = (rng() & 1) != 0;
     f.retry = (rng() & 1) != 0;
     f.seq = static_cast<uint8_t>(rng() % 16);
-    const uint8_t len = static_cast<uint8_t>(rng() % (omgp::LIMIT_max_l3_payload + 1));
+    const uint8_t len = static_cast<uint8_t>(rng() % (omgp::LIMIT_max_l3_message + 1));
     f.payload.resize(len);
     for (auto& b : f.payload)
         b = static_cast<uint8_t>(rng() & 0xFF);
@@ -128,7 +128,7 @@ bool corrupt(Corruption c, std::mt19937& rng, std::vector<uint8_t>& body) {
         return true;
     }
     case Corruption::Garbage: {
-        const size_t n = 1 + rng() % omgp::LIMIT_max_l3_payload;
+        const size_t n = 1 + rng() % omgp::LIMIT_max_l3_message;
         body.resize(n);
         for (auto& b : body)
             b = random_byte_excluding(rng, {kFlag});
@@ -139,7 +139,7 @@ bool corrupt(Corruption c, std::mt19937& rng, std::vector<uint8_t>& body) {
         // deterministic TooLong abort; the escaped-boundary variant (the 71st byte
         // arriving via a valid escape, PR #99's bug class) is covered directly by
         // tests/unit/test_link_frame.cpp.
-        const size_t extra = 1 + rng() % omgp::LIMIT_max_l3_payload;
+        const size_t extra = 1 + rng() % omgp::LIMIT_max_l3_message;
         body.resize(kMaxUnstuffed + extra);
         for (auto& b : body)
             b = random_byte_excluding(rng, {kFlag, kEsc});

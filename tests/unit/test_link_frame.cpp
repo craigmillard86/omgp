@@ -154,9 +154,9 @@ TEST_CASE("frame_worst_stuffing's wire length is exactly 140 bytes", "[timing:ma
 
 // --- encode_frame refusals (FR-005: nothing written) --------------------------------
 
-TEST_CASE("encode_frame refuses payload longer than LIMIT_max_l3_payload, writes nothing",
+TEST_CASE("encode_frame refuses payload longer than LIMIT_max_l3_message, writes nothing",
           "[frame]") {
-    uint8_t payload[omgp::LIMIT_max_l3_payload + 1] = {};
+    uint8_t payload[omgp::LIMIT_max_l3_message + 1] = {};
     FrameFields f{0x01, 0x00, false, false, 0, static_cast<uint8_t>(sizeof payload), payload};
     uint8_t out[kMaxWire];
     std::memset(out, 0xA5, sizeof out);
@@ -183,7 +183,7 @@ TEST_CASE("encode_frame refuses dst == 0xFF (reserved broadcast), writes nothing
 
 TEST_CASE("BufferTooSmall checks the worst-case bound, not the achieved stuffed length",
           "[frame]") {
-    uint8_t payload[omgp::LIMIT_max_l3_payload];
+    uint8_t payload[omgp::LIMIT_max_l3_message];
     for (size_t i = 0; i < sizeof payload; ++i)
         payload[i] = static_cast<uint8_t>(i);
     FrameFields f{0x01, 0x00, false, false, 0, static_cast<uint8_t>(sizeof payload), payload};
@@ -286,7 +286,7 @@ TEST_CASE("an escape byte as the last byte before FLAG is BadEscape and resyncs"
 }
 
 TEST_CASE("a 71-byte unstuffed body is TooLong and resyncs", "[frame]") {
-    STATIC_REQUIRE(omgp::LIMIT_max_l3_payload == 64);
+    STATIC_REQUIRE(omgp::LIMIT_max_l3_message == 64);
     uint8_t bad[1 + 71 + 1];
     bad[0] = 0x7e;
     for (int i = 0; i < 71; ++i)

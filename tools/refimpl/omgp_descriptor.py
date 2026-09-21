@@ -212,7 +212,11 @@ def decode_value(t: int, v: bytes):
     if t == G.TLV_SWITCHING:
         if n != 3:
             raise _err("MalformedRecord", t)
-        return SwitchingRec(v[0], struct.unpack("<H", v[1:3])[0])
+        settle_ms = struct.unpack("<H", v[1:3])[0]
+        # F7 (#110/#154): no spec-stated ceiling; 5s is headroom over spec §7/§21 settle times.
+        if settle_ms > G.LIMIT_switching_settle_ms_max:
+            raise _err("OutOfRange", t, "settle_ms")
+        return SwitchingRec(v[0], settle_ms)
     if t == G.TLV_PARAM:
         if n < 5:
             raise _err("MalformedRecord", t)
@@ -233,17 +237,33 @@ def decode_value(t: int, v: bytes):
         r = AudioRec(v[0], v[1], *struct.unpack("<HH", v[2:6]))
         if r.input_mode > 1:
             raise _err("OutOfRange", t, "input_mode")
+        # F7 (#110/#154): spec §9's highest documented reference figure, ~10 Vrms.
+        if r.in_max_mvrms > G.LIMIT_audio_max_mvrms or r.out_max_mvrms > G.LIMIT_audio_max_mvrms:
+            raise _err("OutOfRange", t, "max_mvrms")
         return r
     if t == G.TLV_POWER_LV:
         if n != 8:
             raise _err("MalformedRecord", t)
-        return PowerLvRec(*struct.unpack("<HHHH", v))
+        r = PowerLvRec(*struct.unpack("<HHHH", v))
+        # F7 (#110/#154): spec §15 per-slot targets, one bound per rail.
+        if (r.p15_ma > G.LIMIT_power_lv_p15_ma_max or r.n15_ma > G.LIMIT_power_lv_n15_ma_max or
+                r.p9_ma > G.LIMIT_power_lv_p9_ma_max or r.p5_ma > G.LIMIT_power_lv_p5_ma_max):
+            raise _err("OutOfRange", t, "rail current")
+        return r
     if t == G.TLV_POWER_TUBE:
         if n != 11:
             raise _err("MalformedRecord", t)
         r = PowerTubeRec(*struct.unpack("<BBBHHHBB", v))
         if not 1 <= r.power_class <= 4:
             raise _err("OutOfRange", t, "power_class")
+        # F7 (#110/#154): spec §18 (T4's 2.0A heater allocation; the 40 mA v1 B+ cap) and §19
+        # (B+ architectural range ~180-300V DC).
+        if r.heater_max_ma > G.LIMIT_tube_heater_max_ma_ceiling:
+            raise _err("OutOfRange", t, "heater_max_ma")
+        if r.bplus_nom_v > G.LIMIT_tube_bplus_nom_v_max:
+            raise _err("OutOfRange", t, "bplus_nom_v")
+        if r.bplus_max_ma > G.LIMIT_tube_bplus_max_ma_ceiling:
+            raise _err("OutOfRange", t, "bplus_max_ma")
         return r
     if t == G.TLV_VENDOR:
         if n < 2:
@@ -275,6 +295,8 @@ def encode_value(rec) -> tuple[int, bytes]:
         if isinstance(rec, ChannelRec):
             return t, struct.pack("<B", rec.index) + _utf8_bytes(t, rec.name)
         if isinstance(rec, SwitchingRec):
+            if rec.settle_ms > G.LIMIT_switching_settle_ms_max:
+                raise _err("OutOfRange", t, "settle_ms")
             return t, struct.pack("<BH", rec.flags, rec.settle_ms)
         if isinstance(rec, ParamRec):
             name = _utf8_bytes(t, rec.name)
@@ -288,12 +310,23 @@ def encode_value(rec) -> tuple[int, bytes]:
         if isinstance(rec, AudioRec):
             if rec.input_mode > 1:
                 raise _err("OutOfRange", t, "input_mode")
+            if rec.in_max_mvrms > G.LIMIT_audio_max_mvrms or rec.out_max_mvrms > G.LIMIT_audio_max_mvrms:
+                raise _err("OutOfRange", t, "max_mvrms")
             return t, struct.pack("<BBHH", rec.io_flags, rec.input_mode, rec.in_max_mvrms, rec.out_max_mvrms)
         if isinstance(rec, PowerLvRec):
+            if (rec.p15_ma > G.LIMIT_power_lv_p15_ma_max or rec.n15_ma > G.LIMIT_power_lv_n15_ma_max or
+                    rec.p9_ma > G.LIMIT_power_lv_p9_ma_max or rec.p5_ma > G.LIMIT_power_lv_p5_ma_max):
+                raise _err("OutOfRange", t, "rail current")
             return t, struct.pack("<HHHH", rec.p15_ma, rec.n15_ma, rec.p9_ma, rec.p5_ma)
         if isinstance(rec, PowerTubeRec):
             if not 1 <= rec.power_class <= 4:
                 raise _err("OutOfRange", t, "power_class")
+            if rec.heater_max_ma > G.LIMIT_tube_heater_max_ma_ceiling:
+                raise _err("OutOfRange", t, "heater_max_ma")
+            if rec.bplus_nom_v > G.LIMIT_tube_bplus_nom_v_max:
+                raise _err("OutOfRange", t, "bplus_nom_v")
+            if rec.bplus_max_ma > G.LIMIT_tube_bplus_max_ma_ceiling:
+                raise _err("OutOfRange", t, "bplus_max_ma")
             return t, struct.pack("<BBBHHHBB", rec.power_class, rec.tubes, rec.sections, rec.heater_nom_ma,
                                   rec.heater_max_ma, rec.bplus_nom_v, rec.bplus_exp_ma, rec.bplus_max_ma)
         if isinstance(rec, VendorRec):
@@ -323,6 +356,11 @@ def _walk(blob: bytes) -> tuple[Report, list]:
     if n > _MAX:
         return Report("BlobTooLarge", 0, 0, 0, 0, 0), []
     seen: set[int] = set()
+    # F7 (#110/#154): CHANNEL.index / PARAM.param_id uniqueness, keyed by value, not by TLV
+    # type -- both are `repeated: true` so `seen` above never catches them (deliberately:
+    # multiple channels/params are legal, a duplicate *key* is not).
+    seen_channel_index: set[int] = set()
+    seen_param_id: set[int] = set()
     skipped = channels = params = 0
     recs: list = []
     off = 0
@@ -343,13 +381,20 @@ def _walk(blob: bytes) -> tuple[Report, list]:
                 return Report("DuplicateRecord", t, off, skipped, channels, params), recs
             seen.add(t)
             try:
-                recs.append(decode_value(t, value))
+                rec = decode_value(t, value)
             except L3Error as e:
                 return Report(e.status, t, off, skipped, channels, params), recs
             if t == G.TLV_CHANNEL:
+                if rec.index in seen_channel_index:
+                    return Report("DuplicateKey", t, off, skipped, channels, params), recs
+                seen_channel_index.add(rec.index)
                 channels += 1
             elif t == G.TLV_PARAM:
+                if rec.param_id in seen_param_id:
+                    return Report("DuplicateKey", t, off, skipped, channels, params), recs
+                seen_param_id.add(rec.param_id)
                 params += 1
+            recs.append(rec)
         off += 2 + ln
     for e in G.TLV_INFO:  # sorted by type
         if e["required"] and e["type"] not in seen:
@@ -371,6 +416,8 @@ def parse_descriptor(blob: bytes) -> list:
 def build_descriptor(records) -> bytes:
     out = bytearray()
     seen: set[int] = set()
+    seen_channel_index: set[int] = set()  # F7 (#110/#154): see _walk's own comment
+    seen_param_id: set[int] = set()
     for rec in records:
         t, value = encode_value(rec)
         info = _INFO.get(t)
@@ -381,6 +428,20 @@ def build_descriptor(records) -> bytes:
         if len(value) > 0xFF:
             raise _err("StringTooLong" if not isinstance(rec, (VendorRec, UnknownRec)) else "OutOfRange", t,
                        "value exceeds the length byte")
+        if info is not None and len(value) >= 1:
+            # F7 (#110/#154): keyed on the wire TYPE and the raw encoded byte -- like
+            # l3/l3_descriptor.cpp's append(), NOT on the Python record class, so a raw
+            # UnknownRec carrying type == TLV_CHANNEL/TLV_PARAM (the encode-side counterpart
+            # of DescriptorWriter::add_raw()) cannot bypass this the way an isinstance check
+            # would (round-trip bug caught by red team round 3, PR #757).
+            if t == G.TLV_CHANNEL:
+                if value[0] in seen_channel_index:
+                    raise _err("DuplicateKey", t)
+                seen_channel_index.add(value[0])
+            elif t == G.TLV_PARAM:
+                if value[0] in seen_param_id:
+                    raise _err("DuplicateKey", t)
+                seen_param_id.add(value[0])
         if len(out) + 2 + len(value) > _MAX:
             raise _err("BlobTooLarge", t)
         out += bytes([t, len(value)]) + value

@@ -107,7 +107,7 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
         // Any other intact request is new (data-model.md §5): a differing sequence, no
         // retry bit, a retry bit with nothing yet buffered to replay (spec US3 AS5), or a
         // retry whose sequence collides with a DIFFERENT station's buffered response.
-        uint8_t payload[omgp::LIMIT_max_l3_payload];
+        uint8_t payload[omgp::LIMIT_max_l3_message];
         const size_t resp_len = handler_.handle(f.payload, f.len, payload, sizeof payload);
         // A RequestHandler must never return more than its own `cap` (== sizeof payload
         // here); checked before the uint8_t cast below, which would otherwise wrap a
@@ -130,7 +130,7 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
         // buffer_.bytes must be big enough for encode_frame's own worst-case bound for
         // the largest payload a RequestHandler can write (it never depends on this
         // call's actual resp_len):
-        static_assert(kMaxWire >= 2 + 2 * (kHeaderLen + omgp::LIMIT_max_l3_payload + kCrcLen),
+        static_assert(kMaxWire >= 2 + 2 * (kHeaderLen + omgp::LIMIT_max_l3_message + kCrcLen),
                       "buffer_.bytes must hold encode_frame's worst case for the largest "
                       "response a RequestHandler can write");
         // `f.src == 0xFF` is already excluded above, so ReservedAddress cannot fire on
@@ -142,7 +142,7 @@ void Responder::on_request(const FrameFields& f, uint64_t request_end_us) {
         if (encode_frame(resp, buffer_.bytes, sizeof buffer_.bytes, written) != Status::Ok) {
             // Unreachable: all three of encode_frame's refusal conditions (link/frame.hpp)
             // are excluded above (PayloadTooLong and BufferTooSmall: resp_len bounded by
-            // sizeof payload == LIMIT_max_l3_payload, kMaxWire static_asserted;
+            // sizeof payload == LIMIT_max_l3_message, kMaxWire static_asserted;
             // ReservedAddress: f.src != 0xFF). Kept as defence in depth; no test can reach
             // the counter to observe which way it moves.
             // mutant-ok(accepted, cxx_post_inc_to_post_dec): unreachable by construction.
@@ -203,7 +203,7 @@ void Responder::hold_or_discard(const FrameFields& f, uint64_t request_end_us) {
     slot.f.payload = slot.payload;
     // f.len is bounded by the Deframer, which refuses anything longer as Discard::BadLength
     // (link/frame.cpp), so this copy cannot overrun slot.payload.
-    static_assert(omgp::LIMIT_max_l3_payload <= sizeof(HeldRequest::payload),
+    static_assert(omgp::LIMIT_max_l3_message <= sizeof(HeldRequest::payload),
                   "held_ payloads must hold the longest request the Deframer can deliver");
     // `f.len >= 0` is true for every uint8_t, and memcpy of 0 bytes is a no-op, so widening
     // the comparison changes nothing. Narrowing it the other way DOES lose the payload, and

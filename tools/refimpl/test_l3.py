@@ -48,11 +48,13 @@ def test_header_reserved_node_id_refused_for_requests_only():
 
 
 def test_header_payload_len_bound():
-    assert l3.encode_header(H(G.OP_BP_POWER, 2, 0, 0, 64))[4] == 64
+    # F10 (#110/#154): LIMIT_max_l3_payload is 59 (was 64, before the max_l3_message split).
+    at_max = G.LIMIT_max_l3_payload
+    assert l3.encode_header(H(G.OP_BP_POWER, 2, 0, 0, at_max))[4] == at_max
     with raises("OutOfRange"):
-        l3.encode_header(H(G.OP_BP_POWER, 2, 0, 0, 65))
+        l3.encode_header(H(G.OP_BP_POWER, 2, 0, 0, at_max + 1))
     with raises("OutOfRange"):
-        l3.decode_header(hx("21 02 00 00 41"))
+        l3.decode_header(bytes([0x21, 0x02, 0x00, 0x00, at_max + 1]))
     with raises("Truncated"):
         l3.decode_header(hx("21 02 00 00"))
 
@@ -96,12 +98,16 @@ def test_read_desc_request_and_response():
     assert l3.decode_read_desc_req(hx("C3 07 3D")) == l3.ReadDescReq(1987, 61)
     with raises("OutOfRange"):
         l3.encode_read_desc_req(l3.ReadDescReq(2048, 1))
-    tail = bytes(range(61))
+    # tail bound = LIMIT_max_l3_payload - 3 (offset u16 + len u8); F10, #110/#154. The
+    # response's own `len` byte (tail_max) is NOT the request's max_len (61) above — they
+    # only coincided by accident at the old 64-byte cap (both were 61).
+    tail_max = G.LIMIT_max_l3_payload - 3
+    tail = bytes(range(tail_max))
     enc = l3.encode_read_desc_resp(l3.ReadDescResp(1987, tail))
-    assert enc == hx("C3 07 3D") + tail and len(enc) == 64
+    assert enc == hx("C3 07") + bytes([tail_max]) + tail and len(enc) == G.LIMIT_max_l3_payload
     assert l3.decode_read_desc_resp(enc) == l3.ReadDescResp(1987, tail)
     with raises("OutOfRange"):
-        l3.encode_read_desc_resp(l3.ReadDescResp(0, bytes(62)))
+        l3.encode_read_desc_resp(l3.ReadDescResp(0, bytes(tail_max + 1)))
     with raises("Truncated"):
         l3.decode_read_desc_resp(hx("00 00 05 01 02"))
     with raises("LengthMismatch"):
@@ -141,8 +147,9 @@ def test_get_event_response():
     assert l3.decode_get_event_resp(hx("F0 00 DE AD BE EF")) == user
     with raises("OutOfRange"):
         l3.decode_get_event_resp(hx("63 00"))  # 0x63 is no event type
+    # detail max = LIMIT_max_l3_payload - 2 (event_type + remaining_count); F10, #110/#154.
     with raises("OutOfRange"):
-        l3.encode_get_event_resp(l3.GetEventResp(G.EVT_NONE, 0, bytes(63)))
+        l3.encode_get_event_resp(l3.GetEventResp(G.EVT_NONE, 0, bytes(G.LIMIT_max_l3_payload - 1)))
     with raises("Truncated"):
         l3.decode_get_event_resp(hx("00"))
 
@@ -154,6 +161,13 @@ def test_error_response():
         l3.decode_error_resp(hx("63"))
     with raises("Truncated"):
         l3.decode_error_resp(b"")
+    # F2 (#110/#154): detail has its own 4-byte cap, not LIMIT_max_l3_payload - 1.
+    at_max = G.LIMIT_error_detail_max
+    assert l3.encode_error_resp(l3.ErrorResp(G.ERR_BUSY, bytes(at_max))) == bytes([G.ERR_BUSY]) + bytes(at_max)
+    with raises("OutOfRange"):
+        l3.encode_error_resp(l3.ErrorResp(G.ERR_BUSY, bytes(at_max + 1)))
+    with raises("OutOfRange"):
+        l3.decode_error_resp(bytes([G.ERR_BUSY]) + bytes(at_max + 1))
 
 
 def test_opaque_backplane_payloads_pass_through():
@@ -161,7 +175,7 @@ def test_opaque_backplane_payloads_pass_through():
     assert l3.decode_opaque(hx("01 FF 00")) == l3.OpaquePayload(hx("01 FF 00"))
     assert l3.decode_opaque(b"") == l3.OpaquePayload(b"")
     with raises("OutOfRange"):
-        l3.encode_opaque(l3.OpaquePayload(bytes(65)))
+        l3.encode_opaque(l3.OpaquePayload(bytes(G.LIMIT_max_l3_payload + 1)))
 
 
 def test_empty_payloads():

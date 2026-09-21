@@ -7,11 +7,47 @@ protocol:
   minor: 0
 
 limits:
-  max_l3_payload: 64          # bytes; one L3 message per trunk frame
+  # F10 (#110/#154, 2026-09-06 ruling): the two were one symbol until this split conflated
+  # "how big a trunk frame's payload is" with "how big an L3 message's own payload field is".
+  # max_l3_message is trunk §4's frame-payload budget (one whole L3 message: 5-byte L3 header
+  # + L3 payload); max_l3_payload is what's left for the L3 payload itself once the header is
+  # subtracted. L2 code (link/) bounds against max_l3_message; L3 code (l3/) bounds
+  # payload_len and every payload codec against max_l3_payload.
+  max_l3_message: 64          # bytes; trunk §4 "Max payload" — one whole L3 message per frame
+  max_l3_payload: 59          # derived: max_l3_message(64) - l3::HEADER_LEN(5)
   max_descriptor_bytes: 2048
   module_bus_chunk: 28        # READ_DESC max_len on module bus (SMBus block fit)
   max_nodes: 128
   param_value_max: 4095       # 12-bit logical resolution
+  error_detail_max: 4         # F2 (#110/#154): ERROR.detail cap, both directions
+  # F7 (#110/#154): CHANNEL.index and PARAM.param_id are each u8 (protocol-l3 §4.1), so at
+  # most 256 distinct values exist to be unique over (0-255) — the binding constraint. The
+  # 2048-byte descriptor cap alone would allow more (a minimum 4-byte CHANNEL record fits
+  # 512x; a minimum 7-byte PARAM record fits 292x), so the id width, not the blob, decides.
+  max_channels: 256
+  max_params: 256
+  max_slots_per_backplane: 16 # F12 (#110/#154): spec §5 reference FX backplane, 8-16 positions
+                               # (the larger of the two reference backplane types — preamp is
+                               # capped at 4); BP_SLOT_MAP (opaque until #676/T005) will bind to
+                               # this once its wire format is designed
+  # F7 (#110/#154) descriptor field ranges — spec §15/§18/§19/§9. Enforced by hand-written
+  # range checks in l3/l3_descriptor.cpp and tools/refimpl/omgp_descriptor.py (descriptor TLV
+  # records are not codegen'd field-by-field the way l3_payloads is); named here so the value
+  # has one source (rule 1) even though nothing in tools/codegen.py consumes it structurally.
+  switching_settle_ms_max: 5000        # spec §21/§22 give no explicit ceiling; 5s is generous
+                                        # headroom over every settle time spec §7/§21 describes
+                                        # and keeps SwitchingRec.settle_ms comfortably below a
+                                        # pathological host-side timeout
+  power_lv_p15_ma_max: 150             # spec §15 +15V per-slot target
+  power_lv_n15_ma_max: 150             # spec §15 -15V per-slot target
+  power_lv_p9_ma_max: 500              # spec §15 +9V per-slot target
+  power_lv_p5_ma_max: 1000             # spec §15 +5V per-slot target
+  tube_heater_max_ma_ceiling: 2000     # spec §18 T4's 2.0A heater allocation (the largest class)
+  tube_bplus_max_ma_ceiling: 40        # spec §18 "Initial v1 maximum B+ allocation... is 40 mA"
+  tube_bplus_nom_v_max: 300            # spec §19 B+ architectural range ~180-300V DC
+  audio_max_mvrms: 10000               # spec §9 "Routing design target ~10 Vrms clean where
+                                        # practical" / "Raw power-amp output 8-10 Vrms clean
+                                        # target" — the highest documented reference figure
 
 addressing:
   host: 0x00
@@ -61,7 +97,13 @@ node_states:
 
 events:
   NONE:                   0x00   # GET_EVENT response when the queue is empty (ruled 2026-08-28)
-  CHANNEL_SETTLED:        0x01
+  CHANNEL_SETTLED:        0x01  # detail = [u8 channel, u8 seq] (F9, #110/#154, 2026-09-06
+                                 # ruling); GET_EVENT's detail tail stays generic bytes at the
+                                 # L3 codec level (protocol-l3 §3.4) — this layout is a host
+                                 # rule, applied by the consumer of a drained CHANNEL_SETTLED
+                                 # event, not a separate L3 codec: accept only for the channel
+                                 # currently outstanding a switch, cross-checked against the
+                                 # node's own last GET_STATUS.active_channel before un-muting
   FAULT_RAISED:           0x02
   FAULT_CLEARED:          0x03
   PARAM_CHANGED_LOCALLY:  0x04   # reserved; modules have no local controls in v1
@@ -168,7 +210,15 @@ l3_payloads:
   BP_POWER:    {opaque: true}
   BP_ROUTE:    {opaque: true}
   ERROR:
-    response: [{name: code, type: u8}, {name: detail, type: bytes}]
+    # detail is capped at 4 bytes (F2, #110/#154 — limits.error_detail_max), not
+    # max_l3_payload — a short structured hint (e.g. the offending param_id or an OutOfRange
+    # field's value), not a general-purpose tail. The literal 4 here must equal
+    # limits.error_detail_max (tools/codegen.py's `_bounds` has no cross-reference between a
+    # field's own `max` and a named limit; enforcement in l3/l3_payload.cpp and
+    # tools/refimpl/omgp_l3.py reads the named LIMIT_error_detail_max symbol instead, so a
+    # future edit here without also updating that limit fails a diffcheck round-trip, not
+    # silently).
+    response: [{name: code, type: u8}, {name: detail, type: bytes, max: 4}]
 
 descriptor:
   crc: crc16_ccitt_false        # over the entire blob as served by READ_DESC (ruled 2026-08-28);

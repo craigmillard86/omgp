@@ -318,9 +318,14 @@ def decode_opaque(b: bytes) -> OpaquePayload:
     return OpaquePayload(bytes(b))
 
 
+# F2 (#110/#154): a fixed cap, not _MAX_PAYLOAD - 1 like every other tail — ERROR.detail is a
+# short structured hint, not a general-purpose payload.
+_ERROR_DETAIL_MAX = G.LIMIT_error_detail_max
+
+
 def encode_error_resp(r: ErrorResp) -> bytes:
     _need(r.code in G.ERROR_NAMES, "OutOfRange", "error code")
-    _need(len(r.detail) <= _MAX_PAYLOAD - 1, "OutOfRange", "detail")
+    _need(len(r.detail) <= _ERROR_DETAIL_MAX, "OutOfRange", "detail")
     return _pack("<B", r.code) + bytes(r.detail)
 
 
@@ -328,7 +333,7 @@ def decode_error_resp(b: bytes) -> ErrorResp:
     _need(len(b) >= 1, "Truncated", "error code")
     r = ErrorResp(b[0], bytes(b[1:]))
     _need(r.code in G.ERROR_NAMES, "OutOfRange", "error code")
-    _need(len(r.detail) <= _MAX_PAYLOAD - 1, "OutOfRange", "detail")
+    _need(len(r.detail) <= _ERROR_DETAIL_MAX, "OutOfRange", "detail")
     return r
 
 

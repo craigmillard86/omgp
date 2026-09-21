@@ -10,7 +10,7 @@ here are the names the C++ (`omgp::link`) and Python (`omgp_link`) implementatio
 |---|---|---|---|
 | `TRUNK_flag_byte` | `flag_byte` | 0x7E | codec |
 | `TRUNK_escape_byte`, `TRUNK_escape_xor` | `escape_byte`, `escape_xor` | 0x7D, 0x20 | codec |
-| `LIMIT_max_l3_payload` | `limits.max_l3_payload` | 64 | codec, engines |
+| `LIMIT_max_l3_message` | `limits.max_l3_message` | 64 | codec, engines |
 | `TRUNK_bit_rate`, `TRUNK_bit_rate_fallback` | `bit_rate*` | 1 000 000, 115 200 | timing model, bus fault |
 | `TRUNK_T_turn_min_us`, `TRUNK_T_turn_max_us` | `T_turn_*` | 20, 100 | Responder |
 | `TRUNK_T_resp_us` | `T_resp_us` | 200 | Master |
@@ -21,7 +21,7 @@ here are the names the C++ (`omgp::link`) and Python (`omgp_link`) implementatio
 | `TRUNK_offline_after_suspect_ms` | `offline_after_suspect_ms` | 1000 | HealthTracker |
 
 Derived (`constexpr`, `link_types.hpp`): `kHeaderLen = 4`, `kCrcLen = 2`,
-`kMaxUnstuffed = kHeaderLen + LIMIT_max_l3_payload + kCrcLen` (70),
+`kMaxUnstuffed = kHeaderLen + LIMIT_max_l3_message + kCrcLen` (70),
 `kMaxWire = 2 + 2 * kMaxUnstuffed` (142), `kAddrCount = 16` (§5: 0x00–0x0F),
 `kSeqMask = 0x0F`, `kSuspectPollPeriod_us = 10 * TRUNK_T_poll_us`,
 `byte_time_us(bps) = 10_000_000 / bps` (8N1 → 10 bits; integer µs: 10 at 1 Mbit/s, 86 at

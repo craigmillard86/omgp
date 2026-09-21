@@ -70,7 +70,7 @@ Status Master::begin(uint8_t dst, const uint8_t* payload, size_t len) {
     // Same refusals as encode_frame (contracts/link-cpp.md), checked before any
     // transaction state changes: a refused begin() must leave next_seq_ untouched and
     // transmit nothing.
-    if (len > omgp::LIMIT_max_l3_payload)
+    if (len > omgp::LIMIT_max_l3_message)
         return Status::PayloadTooLong;
     // Master's own guard, beyond encode_frame's: next_seq_/stats_ are kAddrCount-entry
     // tables indexed directly by dst (data-model.md §4 "Sequence", §8 "Statistics"), so any
@@ -174,9 +174,9 @@ void Master::do_transmit(uint64_t at_us) {
     // (link/frame.cpp) are PayloadTooLong, refused identically at begin(); ReservedAddress
     // (0xFF), subsumed by begin()'s dst >= kAddrCount (static_assert above); and
     // BufferTooSmall, which needs `cap < 2 + 2*(kHeaderLen + len + kCrcLen)` — impossible
-    // for len <= LIMIT_max_l3_payload while buf is kMaxWire bytes:
+    // for len <= LIMIT_max_l3_message while buf is kMaxWire bytes:
     static_assert(
-        kMaxWire >= 2 + 2 * (kHeaderLen + omgp::LIMIT_max_l3_payload + kCrcLen),
+        kMaxWire >= 2 + 2 * (kHeaderLen + omgp::LIMIT_max_l3_message + kCrcLen),
         "buf must hold encode_frame's worst case for the largest payload begin() accepts");
     // Were any of those to lapse, encode_frame would leave written == 0 and the wire would
     // see nothing while the transaction was counted and a T_resp window opened (PR #137

@@ -77,7 +77,7 @@ uint32_t xorshift32_next(uint32_t& state);
 // CrcError's corrupted CRC byte"). Same stuffed wire length as an uncorrupted
 // encode_frame(f, ...). Returns 0 (nothing written) if `cap` is too small, mirroring
 // encode_frame's BufferTooSmall convention without a Status return.
-// Precondition: f.len <= omgp::LIMIT_max_l3_payload; returns 0 if it is not, as it does
+// Precondition: f.len <= omgp::LIMIT_max_l3_message; returns 0 if it is not, as it does
 // when `cap` is too small (review @c69679c: the payload bound is the caller's to respect,
 // and refusing is how this function says so on an -fno-exceptions stack).
 size_t encode_crc_corrupted(const omgp::link::FrameFields& f, uint8_t* out, size_t cap);
@@ -172,7 +172,7 @@ class MockWire : public omgp::link::ByteWire {
         bool response, retry;
         uint8_t seq;
         uint8_t len;
-        uint8_t payload[omgp::LIMIT_max_l3_payload];
+        uint8_t payload[omgp::LIMIT_max_l3_message];
         uint64_t tx_start_us;
     };
     size_t transcript_size() const;
@@ -214,10 +214,10 @@ class MockWire : public omgp::link::ByteWire {
     // request's own payload. Called exactly ONCE per request, so Duplicate's two emitted
     // copies are two copies of one answer rather than two invocations.
     // Returns false, having recorded a fault and left `out` unusable, when the handler
-    // claims a response longer than omgp::LIMIT_max_l3_payload: the caller then enqueues
+    // claims a response longer than omgp::LIMIT_max_l3_message: the caller then enqueues
     // nothing (never a truncated frame, never a silent drop).
     bool build_response(const omgp::link::FrameFields& request,
-                        uint8_t (&payload_buf)[omgp::LIMIT_max_l3_payload],
+                        uint8_t (&payload_buf)[omgp::LIMIT_max_l3_message],
                         omgp::link::FrameFields& out);
 
     void schedule_respond(const omgp::link::FrameFields& request, uint64_t tx_end,

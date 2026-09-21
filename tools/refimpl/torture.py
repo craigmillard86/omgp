@@ -33,7 +33,7 @@ _G = P()
 FLAG = _G.TRUNK_flag_byte
 ESC = _G.TRUNK_escape_byte
 XOR = _G.TRUNK_escape_xor
-MAX_PAYLOAD = _G.LIMIT_max_l3_payload
+MAX_PAYLOAD = _G.LIMIT_max_l3_message
 
 _RESERVED_DST = 0xFF
 _GOOD_ESCAPES = (FLAG ^ XOR, ESC ^ XOR)

@@ -89,7 +89,8 @@ TEST_CASE("random valid payloads are stable under encode-decode-encode", "[prope
             break;
         }
         case 4: {
-            uint8_t len = u8(0, 61);
+            // F10 (#110/#154): tail bound = LIMIT_max_l3_payload - 3 (offset u16 + len u8).
+            uint8_t len = u8(0, omgp::LIMIT_max_l3_payload - 3);
             ReadDescResp r{u16(0, omgp::LIMIT_max_descriptor_bytes - 1), Bytes{tail, len}}, d;
             round_trip(
                 [&](uint8_t* o, size_t c, size_t& n) { return encode_read_desc_resp(r, o, c, n); },
@@ -101,7 +102,9 @@ TEST_CASE("random valid payloads are stable under encode-decode-encode", "[prope
             break;
         }
         case 5: {
-            uint8_t len = u8(0, 62);
+            // F10 (#110/#154): detail bound = LIMIT_max_l3_payload - 2 (event_type +
+            // remaining_count).
+            uint8_t len = u8(0, omgp::LIMIT_max_l3_payload - 2);
             GetEventResp r{omgp::EVENT_CODES[u8(0, 4)], u8(0, 255), Bytes{tail, len}}, d;
             round_trip(
                 [&](uint8_t* o, size_t c, size_t& n) { return encode_get_event_resp(r, o, c, n); },
@@ -113,7 +116,9 @@ TEST_CASE("random valid payloads are stable under encode-decode-encode", "[prope
             break;
         }
         case 6: {
-            uint8_t len = u8(0, 63);
+            // F2 (#110/#154): detail has its own 4-byte cap (LIMIT_error_detail_max), not
+            // LIMIT_max_l3_payload - 1 like every other tail.
+            uint8_t len = u8(0, omgp::LIMIT_error_detail_max);
             ErrorResp r{omgp::ERROR_CODES[u8(0, 5)], Bytes{tail, len}}, d;
             round_trip(
                 [&](uint8_t* o, size_t c, size_t& n) { return encode_error_resp(r, o, c, n); },
@@ -125,7 +130,7 @@ TEST_CASE("random valid payloads are stable under encode-decode-encode", "[prope
             break;
         }
         default: {
-            uint8_t len = u8(0, 64);
+            uint8_t len = u8(0, omgp::LIMIT_max_l3_payload);
             OpaquePayload r{Bytes{tail, len}}, d;
             round_trip([&](uint8_t* o, size_t c, size_t& n) { return encode_opaque(r, o, c, n); },
                        [&](const uint8_t* p, size_t n) {
@@ -214,7 +219,10 @@ size_t random_descriptor(DescGen& g, uint8_t* buf, size_t cap) {
     const int channels = g.u8(1, 6);
     for (int i = 0; i < channels; ++i)
         REQUIRE(w.add_channel(ChannelRec{static_cast<uint8_t>(i), g.s(20)}) == Status::Ok);
-    REQUIRE(w.add_switching(SwitchingRec{g.u8(0, 3), g.u16(0, 65535)}) == Status::Ok);
+    // F7 (#110/#154): settle_ms/mvrms/rail-current/heater-max/bplus fields are now range-
+    // checked, so "random valid descriptor" must generate within LIMIT_* bounds, not 0-65535.
+    REQUIRE(w.add_switching(SwitchingRec{
+                g.u8(0, 3), g.u16(0, omgp::LIMIT_switching_settle_ms_max)}) == Status::Ok);
     const int params = g.u8(1, 12);
     for (int i = 0; i < params; ++i) {
         REQUIRE(w.add_param(ParamRec{
@@ -224,14 +232,18 @@ size_t random_descriptor(DescGen& g, uint8_t* buf, size_t cap) {
             REQUIRE(w.add_param_enum(ParamEnumRec{static_cast<uint8_t>(i), g.u8(0, 7), g.s(12)}) ==
                     Status::Ok);
     }
-    REQUIRE(w.add_audio(AudioRec{g.u8(0, 255), g.u8(0, 1), g.u16(0, 65535), g.u16(0, 65535)}) ==
-            Status::Ok);
-    REQUIRE(w.add_power_lv(PowerLvRec{g.u16(0, 65535), g.u16(0, 65535), g.u16(0, 65535),
-                                      g.u16(0, 65535)}) == Status::Ok);
+    REQUIRE(w.add_audio(AudioRec{g.u8(0, 255), g.u8(0, 1), g.u16(0, omgp::LIMIT_audio_max_mvrms),
+                                 g.u16(0, omgp::LIMIT_audio_max_mvrms)}) == Status::Ok);
+    REQUIRE(w.add_power_lv(PowerLvRec{g.u16(0, omgp::LIMIT_power_lv_p15_ma_max),
+                                      g.u16(0, omgp::LIMIT_power_lv_n15_ma_max),
+                                      g.u16(0, omgp::LIMIT_power_lv_p9_ma_max),
+                                      g.u16(0, omgp::LIMIT_power_lv_p5_ma_max)}) == Status::Ok);
     if (g.u8(0, 1))
-        REQUIRE(w.add_power_tube(PowerTubeRec{g.u8(1, 4), g.u8(0, 255), g.u8(0, 255),
-                                              g.u16(0, 65535), g.u16(0, 65535), g.u16(0, 65535),
-                                              g.u8(0, 255), g.u8(0, 255)}) == Status::Ok);
+        REQUIRE(w.add_power_tube(
+                    PowerTubeRec{g.u8(1, 4), g.u8(0, 255), g.u8(0, 255), g.u16(0, 65535),
+                                 g.u16(0, omgp::LIMIT_tube_heater_max_ma_ceiling),
+                                 g.u16(0, omgp::LIMIT_tube_bplus_nom_v_max), g.u8(0, 255),
+                                 g.u8(0, omgp::LIMIT_tube_bplus_max_ma_ceiling)}) == Status::Ok);
     if (g.u8(0, 1)) {
         const uint8_t n = g.u8(0, 40);
         uint8_t raw[42] = {g.u8(0, 255), g.u8(0, 255)};

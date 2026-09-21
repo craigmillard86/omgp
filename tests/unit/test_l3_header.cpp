@@ -61,9 +61,12 @@ TEST_CASE("reserved node ids are refused for requests only", "[header]") {
 TEST_CASE("payload_len is bounded by LIMIT_max_l3_payload", "[header]") {
     uint8_t buf[5];
     size_t n;
-    REQUIRE(encode_header(Header{omgp::OP_BP_POWER, 2, 0, 0, 64}, buf, 5, n) == Status::Ok);
-    REQUIRE(encode_header(Header{omgp::OP_BP_POWER, 2, 0, 0, 65}, buf, 5, n) == Status::OutOfRange);
-    const uint8_t wire[] = {0x21, 0x02, 0x00, 0x00, 0x41};
+    const auto at_max = static_cast<uint8_t>(omgp::LIMIT_max_l3_payload);
+    const auto over_max = static_cast<uint8_t>(omgp::LIMIT_max_l3_payload + 1);
+    REQUIRE(encode_header(Header{omgp::OP_BP_POWER, 2, 0, 0, at_max}, buf, 5, n) == Status::Ok);
+    REQUIRE(encode_header(Header{omgp::OP_BP_POWER, 2, 0, 0, over_max}, buf, 5, n) ==
+            Status::OutOfRange);
+    const uint8_t wire[] = {0x21, 0x02, 0x00, 0x00, over_max};
     Header h;
     REQUIRE(decode_header(wire, 5, h) == Status::OutOfRange);
     REQUIRE(decode_header(wire, 4, h) == Status::Truncated);

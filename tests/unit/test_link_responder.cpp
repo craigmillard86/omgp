@@ -896,7 +896,7 @@ TEST_CASE("responses at very different payload lengths are each transmitted inta
     REQUIRE(wire.transcript(0).len == sizeof payload1);
     REQUIRE(std::memcmp(wire.transcript(0).payload, payload1, sizeof payload1) == 0);
 
-    uint8_t payload2[omgp::LIMIT_max_l3_payload];
+    uint8_t payload2[omgp::LIMIT_max_l3_message];
     for (size_t i = 0; i < sizeof payload2; ++i)
         payload2[i] = static_cast<uint8_t>(i);
     const uint64_t start2 = end1 + omgp::TRUNK_T_turn_min_us + 200 * byte_us();
