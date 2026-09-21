@@ -4770,3 +4770,69 @@ were correctly urgent and should stay so under this recommendation, not be defer
 **Ruling:** pending — human.
 
 **Supersedes:** none.
+
+---
+
+## 2026-09-21 — A body-only LOW finding costs a PR its whole review-fix budget the same as a code defect; #134's scope rule may need a narrower exception, not a reversal
+
+**Context:** PR #731 (T002, #673) went through all 4 `review-fix` attempts, each round fixing a
+real BLOCKING finding — three of the four were PR-**description** corrections (a false
+transcript, a stale claim), not code changes; `git diff e8752c4..5d77de0` and
+`git diff 7100f25..81dd0b6` are both empty. Round 5 (after the budget was exhausted) found one
+more BLOCKING finding, `[LOW]`, again body-only: a wrong `plan.md` line citation. Exhaustion
+fired and the PR was labelled `needs-human` — correct per #134's own rule ("false claim... never
+deferrable, at any severity"), but the actual fix, once looked at, was a one-line text edit that
+took under a minute. Separately (recorded here because it surfaced in the same incident, not
+folded into the recommendation below): the round-5 finding was itself **wrong** — the reviewer's
+claimed line range (`:118-125` as the "Documentation" tree) did not match the real file content
+at that head (`:118-125` is in fact the correct `core/` layout block; verified directly against
+`git show <head>:specs/003-host-core-engine/plan.md`). A human caught this only by re-reading the
+file instead of trusting the finding; nothing in the loop does that check today.
+
+**This is not the case #134 (2026-09-05) already settled.** That ruling's own example — "a LOW
+weakened assertion inside the diff should [block]" — is about a finding that is cheap to *state*
+but expensive to *miss*: a weakened test is a real, silent regression if waved through. A wrong
+line-citation in a PR description is cheap to state **and** cheap to fix **and** carries no
+regression risk if merged unfixed (it misleads a future reader, which matters, but does not ship
+a defect) — a different risk shape #134's text does not distinguish. #134 was itself a correction
+to an earlier severity-based policy that caused scope creep (PR #128 spent 4 rounds building
+unrequested gate machinery); this proposal is not a request to re-litigate that fix, only to add
+a narrower carve-out on top of it for a shape of finding #134 was not written against.
+
+**Options:**
+(a) **Give a blocking finding whose fix touches only the PR description (no source file in the
+diff) one small, separate attempt budget** — e.g. 1 extra attempt, gated on the fix being a body
+edit alone (a check the loop can already make: every round-fix comment so far states whether
+`git diff` is empty). Code-touching fixes keep the existing 4-attempt budget and #134's
+always-blocks rule untouched. Narrowest change; leaves #134's actual holding (severity does not
+excuse a real defect) completely alone.
+(b) **On exhaustion, if every remaining BLOCKING finding is `[LOW]` and body-only, apply the
+literal fix the finding already proposes and re-verify once, instead of escalating** — the
+exhaustion handler already has the finding's own text (review comments name the "smallest fix");
+mechanical, no new agent judgement. Slightly more automation than (a); same scope limit (never
+touches source).
+(c) **No change — keep the current rule.** `needs-human` here cost a human under a minute once
+looked at directly; the alternative (an unbounded or extended retry budget) is exactly the shape
+of risk #134 itself was written to close off (PR #128's scope creep came from a loop that kept
+trying). The cheapness of THIS instance's fix is not evidence the general case is cheap.
+(d) **Require the fixer (or a dedicated check) to independently re-verify a "false claim" finding
+against the real file before accepting it as blocking**, separately from (a)/(b)/(c) — this is
+what would have caught round 5's own error and is a reviewer-reliability fix, not a scope-policy
+fix; worth doing regardless of which of (a)–(c) is chosen, since an unverified false-claim finding
+can now cost a PR its terminal `needs-human` state on the strength of a hallucination.
+
+**Recommended:** (d) always, plus (a). (d) directly addresses what actually happened in this
+incident — the finding that triggered escalation was wrong, and nothing checked it — and is
+lower-risk than either (a) or (b) alone would be without it (an unverified LOW body-claim could
+otherwise consume a bonus attempt or an auto-applied fix on a hallucinated problem, same failure
+mode one level down). (a) over (b): a fresh, bounded verification round is more legible in the PR
+history than a mechanical self-edit with no independent check, and matches the loop's existing
+pattern of pushing an empty commit so reviewers re-read the corrected body.
+
+**Ruling:** pending — human.
+
+**Related:** the 2026-09-05 "#134" entry above (this proposes a narrow exception on top of it,
+not a reversal); the 2026-09-12 "#134 guardrail 2" entry (a prior narrowing of the same ruling,
+for FOLLOW-UP filing rather than BLOCKING routing — same pattern, different half of #134).
+
+**Amends:** none. **Supersedes:** none — additive to #134, not a replacement for it.
