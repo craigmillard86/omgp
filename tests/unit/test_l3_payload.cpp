@@ -182,9 +182,13 @@ TEST_CASE("opaque backplane payloads pass through verbatim", "[rules]") {
 TEST_CASE("every encoder: exact capacity succeeds; one byte less fails with written == 0",
           "[rules]") {
     // Kills the `cap < N` → `cap <= N` and `written = 0` → constant survivors in every encoder
-    // (l3_payload.cpp:64-381), plus the `== limit` value edges carried by the inputs (desc_len
-    // 2048, value 4095, bypass 1, read_desc/event tails and opaque at LIMIT_max_l3_payload,
-    // ERROR detail at LIMIT_error_detail_max — F10/F2, #110/#154).
+    // in this file, plus the `== limit` value edges carried by the inputs (desc_len 2048,
+    // value 4095, bypass 1, read_desc/event tails and opaque at LIMIT_max_l3_payload, ERROR
+    // detail at LIMIT_error_detail_max — F10/F2, #110/#154; bp_slot_map at
+    // LIMIT_bp_slot_map_max_slots, R-01/#676). Every encoder l3_payload.hpp declares must have
+    // a row here — encode_bp_slot_map_resp was the one gap PR #773 shipped with, caught only
+    // by the deep-verify mutation gate flagging its `written = 0;` line as an unlabelled
+    // survivor, not by this table (red team + review, PR #773 round 2).
     constexpr size_t kReadDescTailMax = omgp::LIMIT_max_l3_payload - 3;
     constexpr size_t kEventDetailMax = omgp::LIMIT_max_l3_payload - 2;
     constexpr size_t kOpaqueMax = omgp::LIMIT_max_l3_payload;
@@ -210,6 +214,9 @@ TEST_CASE("every encoder: exact capacity succeeds; one byte less fails with writ
     const GetEventResp ev{omgp::EVT_NONE, 0, Bytes{d, kEventDetailMax}};
     const OpaquePayload op{Bytes{d, kOpaqueMax}};
     const ErrorResp er{omgp::ERR_BAD_PAYLOAD, Bytes{d, kErrorDetailMax}};
+    constexpr size_t kBpSlotMapBitmapMax = (omgp::LIMIT_bp_slot_map_max_slots + 7) / 8;
+    const BpSlotMapResp bsm{omgp::LIMIT_bp_slot_map_max_slots, Bytes{d, kBpSlotMapBitmapMax},
+                            Bytes{d, kBpSlotMapBitmapMax}};
     const Case cases[] = {
         {"identify_resp", 7,
          [&](uint8_t* o, size_t c, size_t& n) { return encode_identify_resp(id, o, c, n); }},
@@ -235,6 +242,8 @@ TEST_CASE("every encoder: exact capacity succeeds; one byte less fails with writ
          [&](uint8_t* o, size_t c, size_t& n) { return encode_opaque(op, o, c, n); }},
         {"error_resp", 1 + kErrorDetailMax,
          [&](uint8_t* o, size_t c, size_t& n) { return encode_error_resp(er, o, c, n); }},
+        {"bp_slot_map_resp", 1 + 2 * kBpSlotMapBitmapMax,
+         [&](uint8_t* o, size_t c, size_t& n) { return encode_bp_slot_map_resp(bsm, o, c, n); }},
     };
     for (const auto& k : cases) {
         INFO(k.name);

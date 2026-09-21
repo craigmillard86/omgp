@@ -4908,3 +4908,77 @@ reconciles).
 
 **Amends:** none. **Supersedes:** the 2026-08-28 "Backplane opcode payloads" entry, for
 `BP_SLOT_MAP` only.
+
+## 2026-09-21 — `BP_SLOT_MAP`: PAYLOAD_FIELDS overclaim correction, and two questions the
+above entry did not actually rule on
+
+**Context:** PR #773 (implementing the entry above) went through two adversarial review/red-team
+rounds. Three things came out of them that this append records rather than silently folding
+back into the entry above (append-only; that entry's own text is unchanged).
+
+**1. Correction to item 3 above.** Item 3 said modelling `BP_SLOT_MAP.response` as one combined
+`bitmaps: bytes` field meant "only the YAML's bound-computation model is collapsed, not the
+actual codec or the wire format" — implying nothing externally visible was lost. That is false:
+`tools/codegen.py` also emits `PAYLOAD_FIELDS`, contracted by
+`specs/001-protocol-foundation/contracts/generated-constants.md` as a documented
+machine-readable per-opcode field schema. The collapsed model erases the real `occupied`/
+`changed` split and the `len == ceil(slot_count/8)` relationship from that published schema, not
+just from an internal bound computation — a consumer generating code from `PAYLOAD_FIELDS` alone
+gets a decoder that is wrong for this opcode. The engineering choice in item 3 (not extending
+`codegen.py` for a one-consumer derived-length field form) still stands; the claim that nothing
+is lost does not. Corrected in `protocol/omgp-protocol.yaml`'s comment on the `bitmaps` field
+(PR #773, `a22187a`).
+
+**2. Open question, not yet ruled: does `bp_slot_map_max_slots` (232) conflict with F12's
+adopted ruling?** F12 (this file, 2026-09-21 "#110 rulings"): *"`BP_SLOT_MAP` ... must respect
+the cap [`limits.max_slots_per_backplane`, 16]."* The entry above introduces a second, larger
+cap (232, the largest `slot_count` whose wire encoding fits `max_l3_payload`) and asserts the
+two are "not a collision" because they measure different things — but that assertion is this
+same entry's own reconciliation, made by the agent that also implemented it, not a human ruling
+on whether F12's "must respect the cap" already settled the question the other way. Failure
+scenario if 232 stands unruled: a backplane may legally claim `slot_count` up to 232, letting one
+backplane's `BP_SLOT_MAP` response occupy far more of the module id space
+(`ADDR_module_min..ADDR_module_max` = 112 ids) than F12's adopted reasoning ("without a cap a
+backplane can claim the whole node-id space for its slots") intended to prevent. No code in
+`core/` reads `slot_count` yet (`reconcile_slot_map()` is T018, unbuilt), so nothing is harmed
+today; T018 will be written against whichever cap stands. **Options:** (a) bind `slot_count` to
+`limits.max_slots_per_backplane` directly and drop `bp_slot_map_max_slots`; (b) a human
+explicitly amends F12 here — "must respect the cap" narrowed to "must respect its own wire cap,
+which may exceed the reference-design capacity" — with the reasoning for allowing headroom
+recorded, before the docs/YAML text that recorded the original constraint is left rewritten
+without it. **Recommendation:** (b), since the headroom reasoning (a future backplane class
+larger than the reference design should not need a wire-format break) is real, but it is a
+choice, not an already-adopted position — recorded here as unruled per this file's working
+agreement, not implemented as if ruled.
+
+**3. Open question, not yet ruled: is `BP_SLOT_MAP` actually `idempotent: true`?** Red team (PR
+#773 round 1, finding 2) built a reproducer: a backplane implementing `changed` exactly as
+`contracts/bp-slot-map.md` defines it — "differs from the backplane's own last-reported state
+... regardless of who polled it" — advances that reference point on every response it *sends*,
+whether or not the host receives it. Two identical requests (a poll whose response was lost,
+followed by a fresh poll next superframe, not a same-L2-sequence retry) then do not produce
+identical responses: the second's `changed` silently omits whatever the first (lost) response
+would have reported. `GET_EVENT` has the same drain-on-read property and is honestly flagged
+`idempotent: false` with a `replay-safe via L2 seq replay buffer` qualifier
+(`protocol/omgp-protocol.yaml`); `BP_SLOT_MAP` claims `idempotent: true` outright. `occupied` is
+unaffected (it is absolute state, always re-converges); only the `changed` edge signal can be
+lost this way — reachable per `link/responder.hpp`'s own documented note that replay suppression
+does not cover a fresh, differently-sequenced request. No code implements a backplane's
+`changed` state yet, so this is a design question, not a demonstrated field bug. **Options:**
+(a) flag `BP_SLOT_MAP` `idempotent: false` with the same `GET_EVENT`-style qualifier; (b) redefine
+`changed` against a reference point that does not advance on an unacknowledged send (e.g. only
+when the host's request sequence itself advances in a way the backplane can observe as
+acknowledgment — mechanism not designed); (c) accept the loss as bounded and documented (occupancy
+itself is never wrong, only a same-slot swap's evidence can be missed) and mark it explicitly
+rather than claim idempotency. **Recommendation:** (a) — cheapest, honest, and `reconcile_slot_map()`
+(T018) can then be written to poll for absolute `occupied` state and treat `changed` as a hint
+rather than a trustworthy delta, matching how the host already must treat `GET_EVENT`.
+
+**Ruling:** pending — human review at PR #773. Items 2 and 3 above are not implemented; #1 is
+(PR #773, `a22187a`).
+
+**Related:** the entry directly above (this one's item 1 corrects its item 3; items 2 and 3 are
+new, not previously filed as their own entries). F12, 2026-09-21 "#110 rulings".
+
+**Amends:** none (append-only; item 1 corrects a claim in the entry above by addition here, not
+by editing it). **Supersedes:** none.
