@@ -23,6 +23,7 @@ enable_testing()
 # --- portable libraries (embedded path: CLAUDE.md rule 5 enforced per target) ---
 add_subdirectory(l3)
 add_subdirectory(link)
+add_subdirectory(core) # INTERFACE until T015 gives it sources — rule 5 is documented, not yet enforced
 
 # --- test framework: vendored Catch2 v3 (third_party/catch2/VERSION records tag + sha256) ---
 add_library(catch2_amalgamated STATIC third_party/catch2/catch_amalgamated.cpp)
@@ -43,7 +44,8 @@ set(OMGP_WRAP_LDFLAGS -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc
 
 function(omgp_add_catch_test name)
   add_executable(${name} ${ARGN})
-  target_link_libraries(${name} PRIVATE omgp_l3 omgp_link omgp_test_support catch2_amalgamated)
+  target_link_libraries(${name} PRIVATE omgp_l3 omgp_link omgp_core omgp_test_support
+                                        catch2_amalgamated)
   target_link_options(${name} PRIVATE ${OMGP_WRAP_LDFLAGS})
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
