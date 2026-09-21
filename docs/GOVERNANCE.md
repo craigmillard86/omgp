@@ -237,6 +237,18 @@ the enforcement.
     `.github/workflows/*` itself. `0` disables the loop. Exhaustion
     releases `in-progress` and applies `needs-human`, exactly as the CI
     router does. Nothing resets the labels but a human.
+  - **Body-only exception (ruled 2026-09-21, #134 body-only exception,
+    after PR #731).** A fix whose diff touches no source file — a
+    PR-description correction — does not spend a `review_fix_max_attempts`
+    slot: `review-fix.yml`'s `source_diff` step measures the diff and
+    `tools/ci/agent-noop.js`'s `finalize` returns the attempt label instead
+    of leaving it spent, the same `dropLabel` path a no-op run already
+    used. #134's rule is otherwise unchanged — a false claim still always
+    blocks, at any severity — this only stops the attempt budget being
+    charged for fixing one. Paired with a review/red-team prompt change
+    (same ruling): a "false claim" finding must be independently
+    re-verified against the real file content before it is posted — the
+    finding that triggered #731's escalation was itself wrong.
   - **Never.** No approval, no merge, no weakened test or gate, no edit to
     `.github/workflows/` — the loop may not touch its own bounds.
   - **Kill switch:** disable the `review-fix` workflow. The general

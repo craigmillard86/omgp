@@ -448,6 +448,34 @@ const during = '2026-09-12T10:00:30Z';
   w = world({ labels: ['agent-authored', 'review-fix-1'] });
   await finalize({ ...w, env: { KIND: 'fix', PR: '452', ATTEMPT: '1', ATTEMPTS: '1', TURNS: '40', DENIALS: '0', NOOP: 'false', PRODUCED: 'true', ONLY_COMMENT: 'false', REASON: 'head moved from aaaaaaa to bbbbbbb' } });
   check('fix finalize: a produced, non-errored, non-comment-only run touches nothing', !w.state.labels.includes('needs-human') && w.state.labels.includes('review-fix-1') && !said(w, /comment:/) && w.outputs.__failed === undefined);
+
+  // === round 3 (2026-09-21, #731): body-only fixes do not spend an attempt =====================
+  // #134's own text: "a fix may SHRINK the diff (drop an out-of-scope claim or its machinery)".
+  // The smallest shrink is a PR-description-only correction — this is that case, given its own
+  // signal (SOURCE_CHANGED, computed by review-fix.yml's source_diff step via `git diff
+  // --name-only`), not tangled with the ONLY_COMMENT/PRODUCED shapes above (which are about
+  // whether the head moved at all, not what kind of diff moved it).
+  w = world({ labels: ['agent-authored', 'review-fix-1'] });
+  await finalize({ ...w, env: { KIND: 'fix', PR: '731', ATTEMPT: '1', ATTEMPTS: '1', TURNS: '12', DENIALS: '0', NOOP: 'false', PRODUCED: 'true', ONLY_COMMENT: 'false', SOURCE_CHANGED: 'false', REASON: 'head moved from aaaaaaa to bbbbbbb' } });
+  check('fix finalize: SOURCE_CHANGED=false returns the attempt label', w.state.labels.includes('review-fix-1') === false && said(w, /-review-fix-1/));
+  check('fix finalize: SOURCE_CHANGED=false does NOT escalate needs-human — the fix worked', !w.state.labels.includes('needs-human') && w.outputs.__failed === undefined);
+  // The literal string 'true' behaves exactly as the no-signal case above: nothing touched.
+  w = world({ labels: ['agent-authored', 'review-fix-1'] });
+  await finalize({ ...w, env: { KIND: 'fix', PR: '731', ATTEMPT: '1', ATTEMPTS: '1', TURNS: '12', DENIALS: '0', NOOP: 'false', PRODUCED: 'true', ONLY_COMMENT: 'false', SOURCE_CHANGED: 'true', REASON: 'head moved from aaaaaaa to bbbbbbb' } });
+  check('fix finalize: SOURCE_CHANGED=true counts the attempt as before', w.state.labels.includes('review-fix-1') && !w.state.labels.includes('needs-human'));
+  // Fail CLOSED: the source_diff step can only fail to produce 'changed' at all (a git error under
+  // `if: always()`), never emit a third value — but if it somehow did, or the env were simply
+  // unset (an older workflow definition), the attempt must still count. Never trust an absent
+  // signal to mean "free".
+  w = world({ labels: ['agent-authored', 'review-fix-1'] });
+  await finalize({ ...w, env: { KIND: 'fix', PR: '731', ATTEMPT: '1', ATTEMPTS: '1', TURNS: '12', DENIALS: '0', NOOP: 'false', PRODUCED: 'true', ONLY_COMMENT: 'false', REASON: 'head moved from aaaaaaa to bbbbbbb' } });
+  check('fix finalize: SOURCE_CHANGED absent counts the attempt (fail closed)', w.state.labels.includes('review-fix-1') && !w.state.labels.includes('needs-human'));
+  // Scoped to `fix` only: `implement` has no PR-description concept to shrink into, and ATTEMPT/PR
+  // are fix-only env vars — an implement run must never read SOURCE_CHANGED even if it were set.
+  w = world({ labels: ['task', 'in-progress'] });
+  await finalize({ ...w, env: { KIND: 'implement', ISSUE: '58', ATTEMPTS: '1', TURNS: '40', DENIALS: '0', NOOP: 'false', PRODUCED: 'true', PARTIAL: 'false', SOURCE_CHANGED: 'false', REASON: 'an open PR on task/58 was created or pushed to by this run' } });
+  check('fix finalize: SOURCE_CHANGED is ignored for KIND=implement', w.state.labels.includes('in-progress') && !said(w, /comment:/) && w.outputs.__failed === undefined);
+
   w = world({ labels: ['task', 'in-progress'] });
   await finalize({ ...w, env: { KIND: 'implement', ISSUE: '58', ATTEMPTS: '1', TURNS: '40', DENIALS: '0', NOOP: 'false', PRODUCED: 'true', PARTIAL: 'false', REASON: 'an open PR on task/58 was created or pushed to by this run' } });
   check('implement finalize: a produced, non-partial dispatch touches nothing', w.state.labels.includes('in-progress') && !said(w, /comment:/) && w.outputs.__failed === undefined);

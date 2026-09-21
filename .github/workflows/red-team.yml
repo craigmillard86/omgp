@@ -271,13 +271,18 @@ jobs:
             code the PR changed SINCE the previous verdict head
             (`git diff <previous head>..HEAD` — a regression the fix rounds
             themselves introduced), or (c) the PR body makes a claim that is
-            false at this head. Everything else — including a real weakness
-            you would otherwise block on — goes to "## FOLLOW-UPS", where
-            review-followups.yml files it as a `task` issue: it is
-            scheduled, not dropped. Attack no less hard; only the routing
-            changes. Say plainly in the comment that the budget applied and
-            name every finding it moved, so the human sees what was
-            deferred and can rule otherwise.
+            false at this head — and before posting a (c) finding, read the
+            cited file/lines yourself at this head and quote what is
+            actually there (ruled 2026-09-21, docs/OPEN-QUESTIONS.md "#134
+            body-only exception", after a round-5 finding on #731 claimed a
+            wrong line range and was itself false; a false-claim finding you
+            have not personally re-verified is not ready to post). Everything
+            else — including a real weakness you would otherwise block on —
+            goes to "## FOLLOW-UPS", where review-followups.yml files it as
+            a `task` issue: it is scheduled, not dropped. Attack no less
+            hard; only the routing changes. Say plainly in the comment that
+            the budget applied and name every finding it moved, so the human
+            sees what was deferred and can rule otherwise.
             INCREMENTAL SCOPE (ruling 2026-09-14, GOVERNANCE §4): the last
             red-team verdict at that previous head was
             `${{ steps.rounds.outputs.previous_red_team }}` (empty: none).

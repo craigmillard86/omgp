@@ -199,6 +199,14 @@ jobs:
               acceptance criterion of the linked issue, or a false claim
               the PR itself makes (dropping the claim is a valid, and often
               the smallest, fix). Each BLOCKS, whatever its severity.
+              BEFORE raising a "false claim" finding specifically: read the
+              cited file/lines yourself at this head and quote what is
+              actually there (ruled 2026-09-21, docs/OPEN-QUESTIONS.md "#134
+              body-only exception", after a round-5 finding on #731 claimed
+              a wrong line range and was itself false — caught only by a
+              human re-reading the file). A "false claim" finding you have
+              not personally re-verified against the real file content is
+              not ready to post; verify first or drop it.
             - FOLLOW-UP: a real improvement, hardening or pre-existing gap
               OUTSIDE the linked issue's acceptance criteria. Do NOT ask for
               it in this PR — that only grows the change (this is the
