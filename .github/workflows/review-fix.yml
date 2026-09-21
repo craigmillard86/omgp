@@ -28,6 +28,13 @@ name: review-fix
 # does. Kill switch: `review_fix_max_attempts: 0`, or disable this workflow.
 # The `gate` script is executed verbatim by tests/workflows/review_fix_harness.js.
 #
+# Body-only exception (ruled 2026-09-21, docs/OPEN-QUESTIONS.md "#134 body-only exception",
+# #731): a fix whose diff touches no source file — a PR-description correction, the smallest
+# shape of "a fix may SHRINK the diff" — does not spend an attempt. The `source_diff` step
+# below measures it; `tools/ci/agent-noop.js`'s `finalize` returns the spent `review-fix-<n>`
+# label instead of leaving it counted. #134's own rule is unchanged: a false claim still always
+# blocks, at any severity — this only stops the ATTEMPT BUDGET being charged for fixing one.
+#
 # `edited` (added 2026-09-15, #614 red team): same reasoning as agent-approve/review-followups
 # — claude-code-action posts a placeholder then edits the final verdict in. Parity, not a fix
 # for a live gap here: this gate's `listComments` rescan means a `findings` verdict missed on
@@ -375,6 +382,29 @@ jobs:
             const m = require(`${process.env.RUNNER_TEMP}/agent-noop.js`);
             await m.detect({github, context, core, env: process.env});
 
+      # Ruled 2026-09-21 (docs/OPEN-QUESTIONS.md "#134 body-only exception", #731): a fix that
+      # touches no source file — a PR-description correction — must not spend a
+      # review_fix_max_attempts slot the way a code fix does. This step is the ONLY source of
+      # SOURCE_CHANGED finalize reads; any failure here leaves it unset, and finalize's own
+      # default (anything but the literal 'false' counts the attempt) fails CLOSED. Runs against
+      # the checkout's own HEAD, which reflects whichever agent step actually pushed last (first
+      # pass or retry) — `needs.gate.outputs.head` is the commit the attempt STARTED from, reachable
+      # in this checkout because the job's own `actions/checkout@v7` used `fetch-depth: 0`.
+      - name: Did this attempt touch a source file?
+        id: source_diff
+        if: always()
+        run: |
+          set -euo pipefail
+          before="${{ needs.gate.outputs.head }}"
+          after="$(git rev-parse HEAD)"
+          if [ "$before" = "$after" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          elif [ -z "$(git diff --name-only "$before" "$after")" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Return the attempt and escalate if it produced nothing
         id: finalize
         if: always()
@@ -389,6 +419,7 @@ jobs:
           ONLY_COMMENT: ${{ steps.detect_retry.outputs.only_comment != '' && steps.detect_retry.outputs.only_comment || steps.detect.outputs.only_comment }}
           REFS_CHANGED: ${{ steps.detect_retry.outputs.refs_changed != '' && steps.detect_retry.outputs.refs_changed || steps.detect.outputs.refs_changed }}
           REFS_DETAIL: ${{ steps.detect_retry.outputs.refs_detail != '' && steps.detect_retry.outputs.refs_detail || steps.detect.outputs.refs_detail }}
+          SOURCE_CHANGED: ${{ steps.source_diff.outputs.changed }}
           ATTEMPTS: ${{ steps.agent_retry.conclusion != 'skipped' && '2' || '1' }}
           FIGURES_1: turns=${{ steps.detect.outputs.turns }}, denials=${{ steps.detect.outputs.denials }}
           FIGURES_2: ${{ steps.agent_retry.conclusion != 'skipped' && format('turns={0}, denials={1}', steps.detect_retry.outputs.turns, steps.detect_retry.outputs.denials) || '' }}

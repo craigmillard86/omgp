@@ -39,6 +39,15 @@
 //               ANY line, since the repo writes them backticked and with an attribution footer.
 // `is_error` is a no-op whatever else is true. Missing figures fail closed only where production
 // is UNKNOWN — once established, production is not un-established by an unreadable file.
+//
+// PRODUCTION vs BUDGET (fix only; ruled 2026-09-21, docs/OPEN-QUESTIONS.md "#134 body-only
+// exception"): these are now two separate questions. A pushed body-only fix (no source file in
+// the diff — `SOURCE_CHANGED='false'`, computed by review-fix.yml via `git diff --name-only`) IS
+// production (the head moved, review re-runs normally) but does NOT spend a
+// `review_fix_max_attempts` slot — `finalize` returns the `review-fix-<n>` label instead of
+// leaving it spent. #134's own scope rule (a false claim always blocks, at any severity) is
+// unchanged; this only stops a PR from being escalated to needs-human for having spent its whole
+// attempt budget on findings that were never defects in the shipped code.
 // An UNKNOWN run start (SINCE empty: `t0` skipped by an earlier step failure) is likewise an
 // unknown outcome and fails closed — every window test would otherwise fall OPEN and stale
 // evidence (an older PR, a stale branch, attempt 1's comment) would vouch for a run in which no
@@ -355,6 +364,24 @@ async function finalize({ github, context, core, env }) {
   // finalize. Compared against the literal 'true' — the workflow sends the STRING 'false' on
   // every ordinary run, and 'false' is truthy (round-1 red team on #466).
   if (env.NOOP === 'false' && env.ONLY_COMMENT !== 'true' && env.PARTIAL !== 'true' && env.REFS_CHANGED !== 'true') {
+    // Body-only fix (fix only; ruled 2026-09-21, docs/OPEN-QUESTIONS.md "#134 body-only
+    // exception"): the push touched no source file — a PR-description correction, the smallest
+    // possible shape of "a fix may SHRINK the diff" (review-fix.yml's own #134 policy comment).
+    // #731 spent 3 of its 4 attempts this way before a 4th, genuine LOW body-only finding
+    // exhausted the budget and escalated needs-human for a one-line citation fix. Such a fix does
+    // not spend a review_fix_max_attempts slot: the label is returned, mirroring the "produced
+    // nothing" path's dropLabel below — but unlike that path, this is NOT an escalation: the fix
+    // worked, review-fix simply does not charge for it. Fail CLOSED: SOURCE_CHANGED is set by a
+    // `git diff --name-only` step in review-fix.yml and defaults to unset on any failure there;
+    // anything but the literal string 'false' counts the attempt exactly as before a missing
+    // signal must never grant a free one.
+    if (env.KIND === 'fix' && env.SOURCE_CHANGED === 'false') {
+      const pr = Number(env.PR);
+      const label = `review-fix-${env.ATTEMPT}`;
+      const attempt = await dropLabel(github, owner, repo, pr, label, core);
+      core.notice(`agent-noop: review-fix on #${pr} fixed a body-only finding (no source file in the diff) — \`${label}\` ${attempt}; does not count against review_fix_max_attempts (ruled 2026-09-21).`);
+      return;
+    }
     core.notice('agent-noop: production established — nothing to finalize');
     return;
   }

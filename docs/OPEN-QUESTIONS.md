@@ -4829,10 +4829,24 @@ mode one level down). (a) over (b): a fresh, bounded verification round is more 
 history than a mechanical self-edit with no independent check, and matches the loop's existing
 pattern of pushing an empty commit so reviewers re-read the corrected body.
 
-**Ruling:** pending — human.
+**Ruling:** ADOPTED (human, 2026-09-21). Both (d) and (a), as recommended.
+- (d) implemented in `claude-review.yml` and `red-team.yml`'s attack-pr prompt: a "false claim"
+  finding must be personally re-verified against the real file content before it is posted.
+  Not applicable to `red-team.yml`'s separate scheduled protocol-scan prompt, which carries no
+  BLOCKING/false-claim classification at all.
+- (a) implemented as a body-only exception, not a separate attempt-budget state machine: a fix
+  whose diff touches no source file (`git diff --name-only`, computed by a new `source_diff`
+  step in `review-fix.yml`'s `fix` job) does not spend a `review_fix_max_attempts` slot —
+  `tools/ci/agent-noop.js`'s `finalize` returns the spent `review-fix-<n>` label instead of
+  leaving it counted, reusing the same `dropLabel` path the no-op case already used. #134's own
+  rule is untouched: a false claim (once verified per (d)) still always blocks, at any severity
+  — only the ATTEMPT BUDGET stops being charged for fixing one. Fails CLOSED throughout: an
+  absent or unreadable `SOURCE_CHANGED` signal counts the attempt exactly as before this ruling.
+  Tested: `tests/workflows/agent_noop_harness.js` (5 new cases) and
+  `tools/refimpl/test_workflow_scripts.py` (unchanged, still green).
 
-**Related:** the 2026-09-05 "#134" entry above (this proposes a narrow exception on top of it,
-not a reversal); the 2026-09-12 "#134 guardrail 2" entry (a prior narrowing of the same ruling,
-for FOLLOW-UP filing rather than BLOCKING routing — same pattern, different half of #134).
+**Related:** the 2026-09-05 "#134" entry above (this is a narrow exception on top of it, not a
+reversal); the 2026-09-12 "#134 guardrail 2" entry (a prior narrowing of the same ruling, for
+FOLLOW-UP filing rather than BLOCKING routing — same pattern, different half of #134).
 
 **Amends:** none. **Supersedes:** none — additive to #134, not a replacement for it.
