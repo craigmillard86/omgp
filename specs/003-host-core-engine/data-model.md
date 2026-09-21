@@ -11,16 +11,13 @@ literals. `research.md` decisions are cited as `R-NN`.
 | `LIMIT_max_nodes` | 128 | node table size (R-05) |
 | `ADDR_module_min` / `ADDR_module_max` | 0x10 / 0x7F | node table index range, id-pool bounds |
 | `ADDR_backplane_min` / `ADDR_backplane_max` | 0x01 / 0x0F | backplane table (reuses `link/`'s `kAddrCount`-shaped range) |
-| `LIMIT_max_l3_payload` | 64 | per-message payload cap; bounds `BP_SLOT_MAP` bitmap sizes (R-01) and `READ_DESC` chunk size (R-09) |
+| `LIMIT_max_l3_payload` | 59 (was 64 — F10, `docs/OPEN-QUESTIONS.md` "#110 rulings", 2026-09-21) | per-message payload cap; bounds `BP_SLOT_MAP` bitmap sizes (R-01) and `READ_DESC` chunk size (R-09) |
+| `LIMIT_max_l3_message` | 64 | trunk-frame budget (F10) — L2 code's own bound, distinct from `LIMIT_max_l3_payload` above |
+| `LIMIT_bp_slot_map_max_slots` | 232 (was 248 — recomputed against the corrected `LIMIT_max_l3_payload`, R-01) | `BP_SLOT_MAP`'s own wire-protocol slot-count ceiling; added by #676/T005, generated since |
 | `LIMIT_max_descriptor_bytes` | 2048 | descriptor cache entry capacity |
 | `TRUNK_T_poll_us` | 2000 | superframe period (R-11) |
 | `TRUNK_suspect_after_failures` | 3 | reused for module-level liveness counting (R-03) |
 | `TRUNK_offline_after_suspect_ms` | 1000 | reused for module-level liveness aging (R-03) |
-
-New, this feature (not yet generated — added by the `BP_SLOT_MAP` task, R-01):
-`LIMIT_bp_slot_map_max_slots` (recommended 248, the largest `slot_count` whose two bitmaps
-still fit `LIMIT_max_l3_payload`), added to `protocol/omgp-protocol.yaml` `limits` alongside
-the new `l3_payloads.BP_SLOT_MAP` entry.
 
 ## 2. Discovery state (per module)
 
@@ -84,10 +81,11 @@ Fixed table, `ADDR_backplane_max - ADDR_backplane_min + 1` (15) entries, indexed
 struct BackplaneRecord {
     bool enrolled = false;               // link::Notice::ENROLLED seen for this address
     uint8_t slot_count = 0;              // from the last BP_SLOT_MAP response (R-01)
-    uint8_t node_id_by_slot[248] = {};   // slot -> module node id (0 = unassigned); sized to
-                                          // LIMIT_bp_slot_map_max_slots, not slot_count, so a
-                                          // backplane cannot overrun this table by lying about
-                                          // its own slot_count (bounds-checked on every write)
+    uint8_t node_id_by_slot[232] = {};   // slot -> module node id (0 = unassigned); sized to
+                                          // LIMIT_bp_slot_map_max_slots (232, R-01 correction
+                                          // 2026-09-21), not slot_count, so a backplane cannot
+                                          // overrun this table by lying about its own
+                                          // slot_count (bounds-checked on every write)
     // Transaction cost / demotion for this backplane's OWN status poll (spec FR-027/FR-028,
     // R-11 correction) — separate from any NodeRecord's own fields: a backplane's status poll
     // and its modules' demand traffic are measured and demoted independently, since a slow
@@ -246,7 +244,7 @@ bytes occupied [ceil(slot_count/8)]   // bit i = slot i occupied
 bytes changed  [ceil(slot_count/8)]   // bit i = slot i changed since the last response
 ```
 
-`l3::BpSlotMapResp` (new type, `l3_types.hpp`), `encode_bp_slot_map_resp` /
-`decode_bp_slot_map_resp` (new, `l3_payload.hpp`), a new golden vector
-`bp_slot_map_full_occupancy` (`slot_count = 248`, every bit set, exercising the maximum size
-this payload can take before exceeding `LIMIT_max_l3_payload`).
+`l3::BpSlotMapResp` (`l3_types.hpp`), `encode_bp_slot_map_resp` / `decode_bp_slot_map_resp`
+(`l3_payload.hpp`), a golden vector `msg_bp_slot_map_resp_full_occupancy`
+(`slot_count = 232`, every bit set, exercising `LIMIT_bp_slot_map_max_slots` — the largest
+`slot_count` before exceeding `LIMIT_max_l3_payload`). Implemented in #676/T005-T010.

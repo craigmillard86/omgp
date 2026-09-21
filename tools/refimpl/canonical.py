@@ -158,6 +158,8 @@ def _render_payload(obj: Any) -> str:
                 f"detail={obj.detail.hex()}")
     if isinstance(obj, l3.OpaquePayload):
         return f"opaque={obj.data.hex()}"
+    if isinstance(obj, l3.BpSlotMapResp):
+        return f"slot_count={obj.slot_count} occupied={obj.occupied.hex()} changed={obj.changed.hex()}"
     if isinstance(obj, l3.ErrorResp):
         return f"err={_name_or_hex(G.ERROR_NAMES, obj.code)} detail={obj.detail.hex()}"
     if isinstance(obj, l3.RawPayload):
@@ -262,6 +264,9 @@ def _parse_payload(opcode_name: str | None, direction: str, kv: dict[str, str]) 
                    _hexbytes(_take(kv, "detail")))
     if cls is l3.OpaquePayload:
         return cls(_hexbytes(_take(kv, "opaque")))
+    if cls is l3.BpSlotMapResp:
+        return cls(_int(_take(kv, "slot_count")), _hexbytes(_take(kv, "occupied")),
+                   _hexbytes(_take(kv, "changed")))
     if cls is l3.ErrorResp:
         return cls(_parse_named("err", _take(kv, "err")), _hexbytes(_take(kv, "detail")))
     raise CanonicalError(f"no parser for {cls.__name__}")

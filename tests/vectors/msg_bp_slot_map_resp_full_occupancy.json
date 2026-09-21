@@ -1,0 +1,17 @@
+{
+  "bytes": "20 02 0C 01 3B E8 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF",
+  "canonical": "op=BP_SLOT_MAP node=0x02 seq=12 flags=0x01 slot_count=232 occupied=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff changed=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "fields": {
+    "changed": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "flags": 1,
+    "node_id": 2,
+    "occupied": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "opcode": "BP_SLOT_MAP",
+    "seq": 12,
+    "slot_count": 232
+  },
+  "kind": "message",
+  "name": "msg_bp_slot_map_resp_full_occupancy",
+  "note": "boundary: slot_count at the cap, every occupied/changed bit set",
+  "spec_ref": "protocol-l3 \u00a73.1 BP_SLOT_MAP response, slot_count at LIMIT_bp_slot_map_max_slots (R-01)"
+}

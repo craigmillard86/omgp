@@ -103,10 +103,16 @@ struct GetEventResp {
     uint8_t remaining_count;
     Bytes detail;
 };
-// BP_SLOT_MAP / BP_POWER / BP_ROUTE: format not yet defined, passed through verbatim
-// (spec 001 FR-009).
+// BP_POWER / BP_ROUTE: format not yet defined, passed through verbatim (spec 001 FR-009).
 struct OpaquePayload {
     Bytes bytes;
+};
+// BP_SLOT_MAP response (R-01, protocol-l3 §3.1): occupied.len == changed.len ==
+// ceil(slot_count/8); bit i of byte i/8 (LSB first) is slot i, 0 <= i < slot_count.
+struct BpSlotMapResp {
+    uint8_t slot_count;
+    Bytes occupied;
+    Bytes changed;
 };
 struct ErrorResp {
     uint8_t code;

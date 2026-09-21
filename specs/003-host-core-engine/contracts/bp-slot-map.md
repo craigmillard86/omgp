@@ -23,12 +23,17 @@ never a queue that drains on read.
 
 ## Bound
 
-`LIMIT_bp_slot_map_max_slots` (new limit; recommend 248) is the largest `slot_count` whose
-payload (`1 + 2 × ceil(slot_count/8)` bytes) still fits `LIMIT_max_l3_payload` (64): `1 + 2 ×
-31 = 63 <= 64` at `slot_count = 248`; `slot_count = 249` needs 2 × 32 = 64 bytes of bitmap
-alone, `1 + 64 = 65 > 64`. A backplane advertising `slot_count > 248` is a protocol violation
-— refused the same way an oversized descriptor is (`l3::Status::OutOfRange`), not silently
-truncated.
+`LIMIT_bp_slot_map_max_slots` is the largest `slot_count` whose payload
+(`1 + 2 × ceil(slot_count/8)` bytes) still fits `LIMIT_max_l3_payload`: **232**, against the
+current `LIMIT_max_l3_payload = 59` (`1 + 2×29 = 59`; `slot_count = 233` needs `2×30 = 60`
+bytes of bitmap alone, `1 + 60 = 61 > 59`). A backplane advertising `slot_count > 232` is a
+protocol violation — refused the same way an oversized descriptor is
+(`l3::Status::OutOfRange`), not silently truncated.
+
+*(Originally recommended 248, against the payload limit before it was 64 — F10,
+`docs/OPEN-QUESTIONS.md` "#110 rulings", 2026-09-06/2026-09-21 — split into `max_l3_message`
+(64, unchanged) and a smaller `max_l3_payload` (59). Recomputed and adopted at 232 in
+#676/T005; see `docs/OPEN-QUESTIONS.md` 2026-09-21 "BP_SLOT_MAP wire format (R-01)".)*
 
 ## L3 types and codec (`l3_types.hpp`, `l3_payload.hpp`)
 
@@ -50,9 +55,9 @@ no partial write... no decoder reads past `len`").
 
 ## Golden vector
 
-`bp_slot_map_full_occupancy`: `slot_count = 248`, every `occupied` and `changed` bit set — the
-largest legal payload, pinning the size boundary the way `frame_worst_stuffing` pins `kMaxWire`
-for framing (`specs/002-trunk-link-layer/contracts/frame-vectors.md`).
+`msg_bp_slot_map_resp_full_occupancy`: `slot_count = 232`, every `occupied` and `changed` bit
+set — the largest legal payload, pinning the size boundary the way `frame_worst_stuffing` pins
+`kMaxWire` for framing (`specs/002-trunk-link-layer/contracts/frame-vectors.md`).
 
 ## Differential coverage
 

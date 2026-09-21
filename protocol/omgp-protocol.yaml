@@ -28,8 +28,16 @@ limits:
   max_params: 256
   max_slots_per_backplane: 16 # F12 (#110/#154): spec §5 reference FX backplane, 8-16 positions
                                # (the larger of the two reference backplane types — preamp is
-                               # capped at 4); BP_SLOT_MAP (opaque until #676/T005) will bind to
-                               # this once its wire format is designed
+                               # capped at 4). Design guidance, not BP_SLOT_MAP's own wire cap —
+                               # see bp_slot_map_max_slots below, deliberately larger.
+  # R-01 (specs/003-host-core-engine, #676/T005), reconciled with F10's max_l3_payload split
+  # (docs/OPEN-QUESTIONS.md 2026-09-21 "BP_SLOT_MAP wire format (R-01)"): the largest
+  # slot_count whose two ceil(slot_count/8)-byte bitmaps (occupied, changed) still fit
+  # max_l3_payload (59): 1 + 2*ceil(n/8) <= 59 => n <= 232 (233 needs 1+2*30=61). Deliberately
+  # larger than max_slots_per_backplane (16, the reference design) so a bigger-than-reference
+  # backplane stays protocol-legal without a wire-format change — this is a protocol ceiling,
+  # not a hardware target.
+  bp_slot_map_max_slots: 232
   # F7 (#110/#154) descriptor field ranges — spec §15/§18/§19/§9. Enforced by hand-written
   # range checks in l3/l3_descriptor.cpp and tools/refimpl/omgp_descriptor.py (descriptor TLV
   # records are not codegen'd field-by-field the way l3_payloads is); named here so the value
@@ -206,7 +214,19 @@ l3_payloads:
   GET_EVENT:
     request:  []
     response: [{name: event_type, type: u8}, {name: remaining_count, type: u8}, {name: detail, type: bytes}]
-  BP_SLOT_MAP: {opaque: true}
+  # R-01 (specs/003-host-core-engine, #676/T005): u8 slot_count, then two ceil(slot_count/8)
+  # byte bitmaps (occupied, changed) back to back — contracts/bp-slot-map.md is the
+  # authoritative layout. Modelled here as slot_count + one combined trailing `bitmaps` field
+  # (bound: 2*29 = 58 bytes, both bitmaps at their max size) rather than two separate `bytes`
+  # fields: codegen's `bytes` type is a bound-computation aid for the hand-written l3/l3_payload
+  # codecs, not a code generator for them, so this produces identical wire bytes and correct
+  # resp_min/resp_max (1 / 59) without a derived-length field form with no other consumer
+  # (docs/OPEN-QUESTIONS.md 2026-09-21 "BP_SLOT_MAP wire format (R-01)"). The request direction
+  # is artefact-silent in the contract; `[]` follows the GET_STATUS precedent (host-initiated
+  # poll, no request payload).
+  BP_SLOT_MAP:
+    request:  []
+    response: [{name: slot_count, type: u8}, {name: bitmaps, type: bytes, max: 58}]
   BP_POWER:    {opaque: true}
   BP_ROUTE:    {opaque: true}
   ERROR:

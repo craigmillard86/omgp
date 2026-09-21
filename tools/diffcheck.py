@@ -235,6 +235,12 @@ def random_payload(rng: random.Random, name: str, direction: str):
         return cls(_tail(rng, G.LIMIT_max_l3_payload))
     if cls is l3.ErrorResp:
         return cls(rng.choice(list(G.ERROR_NAMES)), _tail(rng, G.LIMIT_error_detail_max))
+    if cls is l3.BpSlotMapResp:
+        slot_count = pick(G.LIMIT_bp_slot_map_max_slots)
+        blen = (slot_count + 7) // 8
+        occ = bytes(rng.randrange(256) for _ in range(blen))
+        chg = bytes(rng.randrange(256) for _ in range(blen))
+        return cls(slot_count, occ, chg)
     raise AssertionError(cls)
 
 

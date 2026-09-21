@@ -4850,3 +4850,61 @@ reversal); the 2026-09-12 "#134 guardrail 2" entry (a prior narrowing of the sam
 FOLLOW-UP filing rather than BLOCKING routing — same pattern, different half of #134).
 
 **Amends:** none. **Supersedes:** none — additive to #134, not a replacement for it.
+
+## 2026-09-21 — `BP_SLOT_MAP` wire format (R-01): reconciling the cap with F10's `max_l3_payload` split
+
+**Context:** `specs/003-host-core-engine/research.md` R-01 and `contracts/bp-slot-map.md`
+defined `BP_SLOT_MAP`'s response payload — `u8 slot_count` plus two `ceil(slot_count/8)`-byte
+bitmaps (`occupied`, `changed`) — as a *recommended default, ruling pending* (this file's
+working agreement: implement nothing speculative, proceed on a safe default). The contract
+computed its cap, `limits.bp_slot_map_max_slots = 248`, against the payload limit that existed
+when it was written (`LIMIT_max_l3_payload = 64`). #154 (2026-09-21, this file's own
+"#110 rulings" entries) split that single limit into `max_l3_message` (64, unchanged — the L2
+frame budget) and a new, smaller `max_l3_payload` (59 — 64 minus the 5-byte L3 header), and
+separately named `limits.max_slots_per_backplane: 16` (F12) — a *different* concept (the
+reference backplane's own physical slot count, spec §5) that this task's own issue (#676, AC1)
+flagged as a possible naming collision with the contract's `bp_slot_map_max_slots`.
+
+**Reconciliation (implemented in #676, the same PR/commit that adds the payload):**
+
+1. **The two symbols are not a collision — they measure different things, and both are kept.**
+   `limits.max_slots_per_backplane` (16) is design guidance: the largest reference backplane
+   spec §5 describes. `limits.bp_slot_map_max_slots` is the wire protocol's own representable
+   ceiling — necessarily larger, so a future backplane bigger than the reference design stays
+   protocol-legal without a wire-format change. Both are named in the YAML with a comment
+   cross-referencing the other, so a future reader does not have to rediscover this.
+2. **The value moves from 248 to 232**, recomputed against the corrected `LIMIT_max_l3_payload`
+   (59, not 64): the largest `slot_count` such that `1 + 2 × ceil(slot_count / 8) <= 59` is
+   232 (`1 + 2×29 = 59`); 233 needs `1 + 2×30 = 61 > 59`. The contract's own arithmetic pattern
+   is preserved exactly, only the input limit changed. Derivation restated in the YAML comment,
+   not left implicit.
+3. **AC3's codegen question is resolved by *not* extending `tools/codegen.py`.** The generator's
+   `bytes` field type is a bound-computation aid (`_bounds()` sums fixed-width fields and adds a
+   tail), not a code generator for the hand-written `l3_payload.cpp`/`omgp_l3.py` codecs — those
+   always implement the real encode/decode logic by hand regardless of the YAML shape. Modelling
+   `response` as `slot_count: u8` plus one combined trailing `bitmaps: bytes` field (bound
+   `max: 58`, i.e. two 29-byte bitmaps back to back) produces byte-identical wire bytes and the
+   correct `resp_min`/`resp_max` (1 / 59) without a new derived-length field form that would have
+   no other consumer. The hand-written codec still treats the wire bytes as two logically
+   separate `occupied`/`changed` bitmaps, exactly as `contracts/bp-slot-map.md` specifies —
+   only the YAML's bound-computation model is collapsed, not the actual codec or the wire format.
+4. **AC10: both pre-existing opaque golden vectors for this opcode are regenerated in this
+   commit** (`msg_bp_slot_map_req.json`, `msg_bp_slot_map_resp.json`) — their previous bytes were
+   `l3::OpaquePayload` passthrough content that is no longer a legal `BP_SLOT_MAP` response the
+   moment the payload stops being opaque (rule 9: regenerated with the reason stated in the
+   commit message, never hand-edited). The new `bp_slot_map_full_occupancy` vector (`slot_count
+   = 232`, every bit set — the corrected size boundary) is added alongside them.
+
+**Ruling:** *proceeding on this reconciliation as the recommended default, per the working
+agreement (`CLAUDE.md` "When a spec ambiguity blocks you... proceed only if a safe default
+exists") — ruling pending, human review at the #676 PR.* Nothing here is a new design decision
+beyond what R-01 and #154 already established; it is arithmetic and a codegen-scope choice
+flowing from combining rulings already made.
+
+**Related:** the 2026-08-28 "Backplane opcode payloads" entry above (superseded **for
+`BP_SLOT_MAP` only** — `BP_POWER`/`BP_ROUTE` remain opaque, that entry's reasoning for them is
+unchanged); the 2026-09-21 "#110 rulings" entries (F10, F12 — the two limits this entry
+reconciles).
+
+**Amends:** none. **Supersedes:** the 2026-08-28 "Backplane opcode payloads" entry, for
+`BP_SLOT_MAP` only.

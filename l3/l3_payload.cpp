@@ -366,6 +366,53 @@ Status decode_opaque(const uint8_t* in, size_t len, OpaquePayload& out) {
     return Status::Ok;
 }
 
+// --- BP_SLOT_MAP response: u8 slot_count, bytes occupied[ceil(slot_count/8)],
+//     bytes changed[ceil(slot_count/8)] (R-01, protocol-l3 §3.1) ---------------------------------
+
+namespace {
+constexpr size_t kBpSlotMapHead = 1;
+inline size_t bp_slot_map_bitmap_len(uint8_t slot_count) {
+    return (static_cast<size_t>(slot_count) + 7) / 8;
+}
+} // namespace
+
+Status encode_bp_slot_map_resp(const BpSlotMapResp& r, uint8_t* out, size_t cap, size_t& written) {
+    written = 0;
+    if (r.slot_count > LIMIT_bp_slot_map_max_slots)
+        return Status::OutOfRange;
+    const size_t bitmap_len = bp_slot_map_bitmap_len(r.slot_count);
+    if (r.occupied.len != bitmap_len || r.changed.len != bitmap_len)
+        return Status::OutOfRange;
+    const size_t total = kBpSlotMapHead + 2 * bitmap_len;
+    if (cap < total)
+        return Status::BufferTooSmall;
+    out[0] = r.slot_count;
+    copy_tail(r.occupied.data, r.occupied.len, out + kBpSlotMapHead);
+    copy_tail(r.changed.data, r.changed.len, out + kBpSlotMapHead + bitmap_len);
+    written = total;
+    return Status::Ok;
+}
+
+Status decode_bp_slot_map_resp(const uint8_t* in, size_t len, BpSlotMapResp& out) {
+    if (len < kBpSlotMapHead)
+        return Status::Truncated;
+    const uint8_t slot_count = in[0];
+    const size_t bitmap_len = bp_slot_map_bitmap_len(slot_count);
+    const size_t total = kBpSlotMapHead + 2 * bitmap_len;
+    if (len < total)
+        return Status::Truncated;
+    if (len > total)
+        return Status::LengthMismatch;
+    if (slot_count > LIMIT_bp_slot_map_max_slots)
+        return Status::OutOfRange;
+    out.slot_count = slot_count;
+    out.occupied.data = in + kBpSlotMapHead;
+    out.occupied.len = static_cast<uint8_t>(bitmap_len);
+    out.changed.data = in + kBpSlotMapHead + bitmap_len;
+    out.changed.len = static_cast<uint8_t>(bitmap_len);
+    return Status::Ok;
+}
+
 // --- ERROR response: u8 code, u8[] detail ----------------------------------------------------
 
 namespace {
