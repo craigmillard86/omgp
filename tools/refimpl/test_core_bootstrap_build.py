@@ -7,8 +7,10 @@ the CMake preset. It knew about `l3/` and `link/` only, so the first `core/`
 source to land (T015, `core/core_engine.cpp`) would have compiled on the CMake
 path and silently vanished from the bootstrap one — an undefined reference at
 link time on exactly the constrained hosts the fallback exists for. Written
-first: at the parent of the commit that edits pipeline.sh, the two `core` cases
-below fail on the missing source and the missing `-Icore`.
+first: run against the pre-T002 pipeline.sh, the THREE `core` cases below fail —
+the Catch2 source case, the Catch2 `-Icore` case and the l3_helper case, which
+fails on both halves (measured at this head, not asserted; the other three cases
+pass on both pipeline.sh versions, which is what makes the three informative).
 
 WHY A FAKE TREE AND A STUB COMPILER, stated because it bounds what these tests
 establish. Two constraints, neither negotiable here:
@@ -72,7 +74,14 @@ FAKE_SOURCES = (
     "l3/l3_stub.cpp",                     # control: already compiled in before T002
     "link/link_stub.cpp",                 # control: already compiled in before T002
 )
-CORE_SOURCE = "core/core_stub.cpp"
+# TWO core sources, not one, and every assertion below names both: `ls core/*.cpp` expands
+# to a list, so a regression that compiles only a SUBSET of it (a stray `| head -1`, a
+# `$(ls core/*.cpp | ...)` pipeline) is invisible to a suite that only ever checks one file.
+# Both are flat: `core/*.cpp` is one level deep, matching the l3srcs/linksrcs form T002 asked
+# to mirror and the flat core/ that specs/003-host-core-engine/plan.md:118-125 plans. A source
+# in a core/ SUBDIRECTORY is not compiled by that glob (red team round 3, F1) — out of scope
+# here and left to a follow-up, so no assertion below claims otherwise.
+CORE_SOURCES = ("core/core_stub.cpp", "core/core_second.cpp")
 
 
 def _write(path: pathlib.Path, text: str) -> None:
@@ -93,7 +102,8 @@ def make_tree(tmp_path: pathlib.Path, *, with_core: bool) -> tuple[pathlib.Path,
     for rel in FAKE_SOURCES:
         _write(tree / rel, f"// fake source for the bootstrap-path test: {rel}\n")
     if with_core:
-        _write(tree / CORE_SOURCE, f"// fake source for the bootstrap-path test: {CORE_SOURCE}\n")
+        for rel in CORE_SOURCES:
+            _write(tree / rel, f"// fake source for the bootstrap-path test: {rel}\n")
     else:
         (tree / "core").mkdir(exist_ok=True)   # present but empty, as core/ really is until T015
     (tree / "tests/property").mkdir(parents=True, exist_ok=True)   # exists and empty, as in the real tree at this head
@@ -145,11 +155,14 @@ def with_core(tmp_path_factory):
 
 def test_catch_binary_compiles_core_sources(with_core):
     """T002's first clause. Before it, this line named l3/ and link/ only, so a test
-    using a symbol from core/*.cpp failed with an undefined reference on this path."""
+    using a symbol from core/*.cpp failed with an undefined reference on this path. EVERY
+    core source must be on the line, not merely one: compiling a subset is the same
+    undefined-reference failure for whichever source was dropped."""
     line = only_line(with_core, "tests/unit/test_alpha.cpp")
     assert "l3/l3_stub.cpp" in line and "link/link_stub.cpp" in line, \
         f"control: the pre-existing l3/ and link/ sources are on the line at all:\n{line}"
-    assert CORE_SOURCE in line, f"core/*.cpp is not compiled into a Catch2 binary:\n{line}"
+    for src in CORE_SOURCES:
+        assert src in line, f"core/*.cpp is not compiled into a Catch2 binary ({src} missing):\n{line}"
 
 
 def test_catch_binary_gets_core_include_dir(with_core):
@@ -170,7 +183,8 @@ def test_l3_helper_links_core_sources(with_core):
     INTERFACE include dirs). Asserting the source alone left dropping -Icore from this
     line a surviving mutant (red team, round 1)."""
     line = only_line(with_core, "tools/l3_helper.cpp")
-    assert CORE_SOURCE in line, f"core/*.cpp is not linked into l3_helper:\n{line}"
+    for src in CORE_SOURCES:
+        assert src in line, f"core/*.cpp is not linked into l3_helper ({src} missing):\n{line}"
     assert "-Icore" in line, f"-Icore is not on the l3_helper line:\n{line}"
 
 
@@ -179,7 +193,7 @@ def test_smoke_keeps_its_bare_compile_line(with_core):
     either. Unchanged by T002; asserted so a future widening of the compile line is a
     failure here rather than a duplicate-symbol build error."""
     line = only_line(with_core, "tests/unit/test_smoke.cpp")
-    for other in (CORE_SOURCE, "l3/l3_stub.cpp", "link/link_stub.cpp", "catch2.o"):
+    for other in (*CORE_SOURCES, "l3/l3_stub.cpp", "link/link_stub.cpp", "catch2.o"):
         assert other not in line, f"test_smoke's compile line must stay bare, found {other}:\n{line}"
 
 
