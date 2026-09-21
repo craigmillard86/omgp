@@ -425,17 +425,23 @@ def build_descriptor(records) -> bytes:
             if not info["repeated"] and t in seen:
                 raise _err("DuplicateRecord", t)
             seen.add(t)
-            if isinstance(rec, ChannelRec):
-                if rec.index in seen_channel_index:
-                    raise _err("DuplicateKey", t)
-                seen_channel_index.add(rec.index)
-            elif isinstance(rec, ParamRec):
-                if rec.param_id in seen_param_id:
-                    raise _err("DuplicateKey", t)
-                seen_param_id.add(rec.param_id)
         if len(value) > 0xFF:
             raise _err("StringTooLong" if not isinstance(rec, (VendorRec, UnknownRec)) else "OutOfRange", t,
                        "value exceeds the length byte")
+        if info is not None and len(value) >= 1:
+            # F7 (#110/#154): keyed on the wire TYPE and the raw encoded byte -- like
+            # l3/l3_descriptor.cpp's append(), NOT on the Python record class, so a raw
+            # UnknownRec carrying type == TLV_CHANNEL/TLV_PARAM (the encode-side counterpart
+            # of DescriptorWriter::add_raw()) cannot bypass this the way an isinstance check
+            # would (round-trip bug caught by red team round 3, PR #757).
+            if t == G.TLV_CHANNEL:
+                if value[0] in seen_channel_index:
+                    raise _err("DuplicateKey", t)
+                seen_channel_index.add(value[0])
+            elif t == G.TLV_PARAM:
+                if value[0] in seen_param_id:
+                    raise _err("DuplicateKey", t)
+                seen_param_id.add(value[0])
         if len(out) + 2 + len(value) > _MAX:
             raise _err("BlobTooLarge", t)
         out += bytes([t, len(value)]) + value
