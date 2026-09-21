@@ -506,5 +506,5 @@ merge-conflict risk this feature has.
   `docs/OPEN-QUESTIONS.md` "#110 F6"/"#110 F2c", human-ruled 2026-09-06). No task IDs were
   added or renumbered, to avoid invalidating the dependency/cross-reference numbering already
   established on the filed GitHub issues (#672-#720) and `tools/tasks-to-issues.py`'s `T\d+`
-  format requirement. `Closes #159` and `Closes #162` belong on whichever PR lands T028/T029
-  (the budget/demotion half) and T039 (the event-rate half) respectively.
+  format requirement. `Closes #159` (event-rate/bounded-drain) belongs on whichever PR lands
+  T039; `Closes #162` (measured-time budget/demotion) belongs on whichever PR lands T028/T029.
