@@ -4892,8 +4892,8 @@ flagged as a possible naming collision with the contract's `bp_slot_map_max_slot
    commit** (`msg_bp_slot_map_req.json`, `msg_bp_slot_map_resp.json`) — their previous bytes were
    `l3::OpaquePayload` passthrough content that is no longer a legal `BP_SLOT_MAP` response the
    moment the payload stops being opaque (rule 9: regenerated with the reason stated in the
-   commit message, never hand-edited). The new `bp_slot_map_full_occupancy` vector (`slot_count
-   = 232`, every bit set — the corrected size boundary) is added alongside them.
+   commit message, never hand-edited). The new `msg_bp_slot_map_resp_full_occupancy` vector
+   (`slot_count = 232`, every bit set — the corrected size boundary) is added alongside them.
 
 **Ruling:** *proceeding on this reconciliation as the recommended default, per the working
 agreement (`CLAUDE.md` "When a spec ambiguity blocks you... proceed only if a safe default

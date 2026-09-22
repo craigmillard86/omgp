@@ -15,9 +15,9 @@ bytes occupied [ceil(slot_count/8)]
 bytes changed  [ceil(slot_count/8)]
 ```
 
-Bit *i* of `occupied`/`changed` (LSB of byte `i/8` = slot `i`, matching the existing
-`link/`-side bit convention in `BusState::probe_fallback` etc.) corresponds to slot index
-*i*, `0 <= i < slot_count`. `changed` bit *i* set means slot *i*'s occupancy differs from the
+Slot index *i*, `0 <= i < slot_count`, is bit `(i % 8)` of byte `i / 8` in `occupied`/`changed`
+(LSB-first within the byte, matching the existing `link/`-side bit convention in
+`BusState::probe_fallback` etc.). `changed` bit *i* set means slot *i*'s occupancy differs from the
 backplane's own last-reported state (as of the last `BP_SLOT_MAP` this backplane answered,
 regardless of who polled it — the backplane's own memory, not the host's, advanced the moment
 the backplane *sends* its response, not when that response is acknowledged received). That

@@ -108,7 +108,7 @@ struct OpaquePayload {
     Bytes bytes;
 };
 // BP_SLOT_MAP response (R-01, protocol-l3 §3.1): occupied.len == changed.len ==
-// ceil(slot_count/8); bit i of byte i/8 (LSB first) is slot i, 0 <= i < slot_count.
+// ceil(slot_count/8); bit (i % 8) of byte i/8 (LSB first) is slot i, 0 <= i < slot_count.
 struct BpSlotMapResp {
     uint8_t slot_count;
     Bytes occupied;

@@ -69,7 +69,7 @@ Error codes (initial): `0x01` unknown opcode, `0x02` bad payload, `0x03` unknown
 Responses to SELECT_CHANNEL, SET_BYPASS and SET_PARAM carry an empty payload (acceptance); failures arrive as ERROR. The response layouts above were ruled 2026-08-28 (`docs/OPEN-QUESTIONS.md`) and remain provisional until exercised in the simulator; `protocol/omgp-protocol.yaml` `l3_payloads` is the machine-readable form.
 
 `BP_SLOT_MAP`'s `occupied`/`changed` bitmaps (R-01, `docs/OPEN-QUESTIONS.md` 2026-09-21):
-bit *i* of byte `i/8`, LSB first, corresponds to slot index *i*, `0 <= i < slot_count` (matching
+bit `(i % 8)` of byte `i/8`, LSB first within the byte, corresponds to slot index *i*, `0 <= i < slot_count` (matching
 the existing `link/`-side bit convention). `changed` bit *i* set means slot *i*'s occupancy
 differs from the backplane's own last-reported state — the backplane's own memory of what it
 last told *any* poller, not the host's, advanced the moment the backplane *sends* a response,

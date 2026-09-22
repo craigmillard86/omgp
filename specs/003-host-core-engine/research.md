@@ -25,9 +25,11 @@ bytes changed   [ceil(slot_count/8)]  (bit i set = slot i's occupancy changed si
 
 `slot_count` up to 255 covers every backplane class in Spec §5 (reference FX: 8-16; reference
 preamp: up to 4) with headroom; both bitmaps together are at most 1 + 32 + 32 = 65 bytes for a
-255-slot backplane, comfortably under `LIMIT_max_l3_payload` (64 bytes) for any `slot_count` up
-to 248 — flagged as a real bound, not assumed unlimited (see Complexity Tracking in `plan.md`).
-`changed` lets the engine trust one poll's delta instead of diffing two full bitmaps itself.
+255-slot backplane, comfortably under `LIMIT_max_l3_payload` (**pre-F10 figure: 64 bytes,
+`slot_count` up to 248 — superseded, see the F10 Correction below; current values are 59 bytes
+and 232**) — flagged as a real bound, not assumed unlimited (see Complexity Tracking in
+`plan.md`). `changed` lets the engine trust one poll's delta instead of diffing two full
+bitmaps itself.
 
 **Correction (2026-09-22, `docs/OPEN-QUESTIONS.md` idempotency ruling, PR #773).** The
 paragraph above originally claimed this matches an `idempotent: true` flag (re-reading is
@@ -44,9 +46,10 @@ This is a protocol change (`protocol/omgp-protocol.yaml` `l3_payloads.BP_SLOT_MA
 `docs/protocol-l3.md` §3.1 table update, `python tools/codegen.py`, an `l3` codec pair
 `encode_bp_slot_map_resp`/`decode_bp_slot_map_resp` and its own golden vector) — CLAUDE.md
 golden rule 1 ("edit the YAML, run codegen, update the affected docs table in the same
-commit") applies, and it is recorded in `docs/OPEN-QUESTIONS.md` per the working agreement
-(recommended default stated above; proceeding on it, ruling pending) rather than resolved
-silently in `core/` code. It is `tasks.md`'s first task, ahead of anything that reads it.
+commit") applies, and it is recorded in `docs/OPEN-QUESTIONS.md` per the working agreement.
+The wire format, the `bp_slot_map_max_slots` cap, and the idempotency flag are all ADOPTED
+rulings (human, 2026-09-22) — see the Corrections above and `docs/OPEN-QUESTIONS.md` for the
+recorded reasoning. It is `tasks.md`'s first task, ahead of anything that reads it.
 
 **Alternatives considered**: (a) a flat list of occupied slot numbers (`u8 count, u8[count]
 slots`) — cannot express "changed" without the host keeping its own previous bitmap and
