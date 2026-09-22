@@ -27,9 +27,18 @@ bytes changed   [ceil(slot_count/8)]  (bit i set = slot i's occupancy changed si
 preamp: up to 4) with headroom; both bitmaps together are at most 1 + 32 + 32 = 65 bytes for a
 255-slot backplane, comfortably under `LIMIT_max_l3_payload` (64 bytes) for any `slot_count` up
 to 248 — flagged as a real bound, not assumed unlimited (see Complexity Tracking in `plan.md`).
-`changed` lets the engine trust one poll's delta instead of diffing two full bitmaps itself,
-and matches BP_SLOT_MAP's `idempotent: true` flag (re-reading it is always safe — the response
-describes current + since-last-poll state, not a queue that drains).
+`changed` lets the engine trust one poll's delta instead of diffing two full bitmaps itself.
+
+**Correction (2026-09-22, `docs/OPEN-QUESTIONS.md` idempotency ruling, PR #773).** The
+paragraph above originally claimed this matches an `idempotent: true` flag (re-reading is
+always safe, current + since-last-poll state, not a queue that drains). That was wrong: a
+backplane advances its own "last-reported" reference the moment it *sends* a `BP_SLOT_MAP`
+response, not when that response is acknowledged received, so a lost response permanently
+loses that delta on a later, independently-sequenced poll — the same drain-on-send property
+`GET_EVENT` already has. `BP_SLOT_MAP` is flagged `idempotent: false` with a `GET_EVENT`-style
+qualifier (replay-safe via L2 seq replay buffer only). `occupied` is still a trustworthy
+snapshot on every read; only `changed` is a best-effort hint, and `core/` discovery logic
+(R-03) must be built to treat it that way rather than as a guaranteed diff.
 
 This is a protocol change (`protocol/omgp-protocol.yaml` `l3_payloads.BP_SLOT_MAP`, a
 `docs/protocol-l3.md` §3.1 table update, `python tools/codegen.py`, an `l3` codec pair

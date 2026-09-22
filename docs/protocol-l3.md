@@ -72,8 +72,13 @@ Responses to SELECT_CHANNEL, SET_BYPASS and SET_PARAM carry an empty payload (ac
 bit *i* of byte `i/8`, LSB first, corresponds to slot index *i*, `0 <= i < slot_count` (matching
 the existing `link/`-side bit convention). `changed` bit *i* set means slot *i*'s occupancy
 differs from the backplane's own last-reported state — the backplane's own memory of what it
-last told *any* poller, not the host's — so `BP_SLOT_MAP` stays `idempotent: true`: re-reading
-it is always safe, current-state-plus-delta, never a draining queue. `slot_count` is capped at
+last told *any* poller, not the host's, advanced the moment the backplane *sends* a response,
+not when that response is acknowledged received. That makes `changed` a drain-on-send delta: a
+lost response permanently loses that delta on any later, independently-sequenced poll, so
+`BP_SLOT_MAP` is `idempotent: false` (R-01 idempotency ruling, `docs/OPEN-QUESTIONS.md`
+2026-09-22 — same `GET_EVENT`-style qualifier: replay-safe via L2 seq replay buffer only).
+`occupied` stays a trustworthy snapshot on every read; `changed` is a best-effort hint, and
+callers must treat it as such rather than as a guaranteed diff. `slot_count` is capped at
 `limits.bp_slot_map_max_slots` (232 — the largest count whose two bitmaps still fit
 `limits.max_l3_payload`; distinct from `limits.max_slots_per_backplane`, §5's reference-design
 capacity, which this wire cap deliberately exceeds); a backplane advertising more is a protocol

@@ -4974,8 +4974,25 @@ rather than claim idempotency. **Recommendation:** (a) — cheapest, honest, and
 (T018) can then be written to poll for absolute `occupied` state and treat `changed` as a hint
 rather than a trustworthy delta, matching how the host already must treat `GET_EVENT`.
 
-**Ruling:** pending — human review at PR #773. Items 2 and 3 above are not implemented; #1 is
-(PR #773, `a22187a`).
+**Ruling:** ADOPTED (human, 2026-09-22). Both recommended options, as recommended.
+- **Item 2, option (b):** F12 (this file, 2026-09-21 "#110 rulings") is hereby AMENDED — its
+  "must respect the cap" is narrowed from "the cap = `limits.max_slots_per_backplane`" to "must
+  respect its own wire cap (`limits.bp_slot_map_max_slots`), which may exceed
+  `max_slots_per_backplane`'s reference-design capacity." Reasoning adopted: a future backplane
+  class larger than the 8-16-slot reference design should not require a wire-format break;
+  `limits.max_slots_per_backplane` (16) remains the reference-design *guidance* value, and
+  `limits.bp_slot_map_max_slots` (232) the *protocol* ceiling — the two were always meant to
+  answer different questions, this ruling just makes that a decided position rather than an
+  agent's own reconciliation. No YAML/code change: `bp_slot_map_max_slots: 232` already
+  implements this. `docs/protocol-l3.md`/the contract's existing "distinct from
+  `max_slots_per_backplane` ... deliberately exceeds" wording now states the ruled position, not
+  an unruled default.
+- **Item 3, option (a):** `BP_SLOT_MAP` is flagged `idempotent: false` with a `GET_EVENT`-style
+  qualifier, implemented in PR #773. `occupied` stays trustworthy (absolute state, always
+  re-converges); `changed` is documented as a best-effort hint a lost response can silently
+  drop, never a guaranteed delta — `reconcile_slot_map()` (T018, not yet written) must be built
+  against that reading, the same way existing code already treats `GET_EVENT`.
+- Item 1 was already implemented (PR #773, `a22187a`).
 
 **Related:** the entry directly above (this one's item 1 corrects its item 3; items 2 and 3 are
 new, not previously filed as their own entries). F12, 2026-09-21 "#110 rulings".

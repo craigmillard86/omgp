@@ -80,7 +80,7 @@ opcodes:
   GET_PARAM:      {code: 0x13, target: module,    idempotent: true}
   GET_STATUS:     {code: 0x14, target: any,       idempotent: true}
   GET_EVENT:      {code: 0x15, target: any,       idempotent: false, note: drains queue; replay-safe via L2 seq replay buffer}
-  BP_SLOT_MAP:    {code: 0x20, target: backplane, idempotent: true}
+  BP_SLOT_MAP:    {code: 0x20, target: backplane, idempotent: false, note: "changed is a drain-on-send delta; replay-safe via L2 seq replay buffer only (R-01 idempotency ruling)"}
   BP_POWER:       {code: 0x21, target: backplane, idempotent: true}
   BP_ROUTE:       {code: 0x22, target: backplane, idempotent: true, status: provisional}
   ERROR:          {code: 0x7F, target: response_only}
