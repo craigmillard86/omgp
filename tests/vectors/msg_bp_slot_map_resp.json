@@ -1,14 +1,16 @@
 {
-  "bytes": "20 02 01 01 01 03",
-  "canonical": "op=BP_SLOT_MAP node=0x02 seq=1 flags=0x01 opaque=03",
+  "bytes": "20 02 01 01 03 04 0A 01",
+  "canonical": "op=BP_SLOT_MAP node=0x02 seq=1 flags=0x01 slot_count=4 occupied=0a changed=01",
   "fields": {
-    "data": "03",
+    "changed": "01",
     "flags": 1,
     "node_id": 2,
+    "occupied": "0a",
     "opcode": "BP_SLOT_MAP",
-    "seq": 1
+    "seq": 1,
+    "slot_count": 4
   },
   "kind": "message",
   "name": "msg_bp_slot_map_resp",
-  "spec_ref": "protocol-l3 \u00a73.1 BP_SLOT_MAP response (opaque)"
+  "spec_ref": "protocol-l3 \u00a73.1 BP_SLOT_MAP response (R-01)"
 }

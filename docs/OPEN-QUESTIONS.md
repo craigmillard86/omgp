@@ -4850,3 +4850,152 @@ reversal); the 2026-09-12 "#134 guardrail 2" entry (a prior narrowing of the sam
 FOLLOW-UP filing rather than BLOCKING routing — same pattern, different half of #134).
 
 **Amends:** none. **Supersedes:** none — additive to #134, not a replacement for it.
+
+## 2026-09-21 — `BP_SLOT_MAP` wire format (R-01): reconciling the cap with F10's `max_l3_payload` split
+
+**Context:** `specs/003-host-core-engine/research.md` R-01 and `contracts/bp-slot-map.md`
+defined `BP_SLOT_MAP`'s response payload — `u8 slot_count` plus two `ceil(slot_count/8)`-byte
+bitmaps (`occupied`, `changed`) — as a *recommended default, ruling pending* (this file's
+working agreement: implement nothing speculative, proceed on a safe default). The contract
+computed its cap, `limits.bp_slot_map_max_slots = 248`, against the payload limit that existed
+when it was written (`LIMIT_max_l3_payload = 64`). #154 (2026-09-21, this file's own
+"#110 rulings" entries) split that single limit into `max_l3_message` (64, unchanged — the L2
+frame budget) and a new, smaller `max_l3_payload` (59 — 64 minus the 5-byte L3 header), and
+separately named `limits.max_slots_per_backplane: 16` (F12) — a *different* concept (the
+reference backplane's own physical slot count, spec §5) that this task's own issue (#676, AC1)
+flagged as a possible naming collision with the contract's `bp_slot_map_max_slots`.
+
+**Reconciliation (implemented in #676, the same PR/commit that adds the payload):**
+
+1. **The two symbols are not a collision — they measure different things, and both are kept.**
+   `limits.max_slots_per_backplane` (16) is design guidance: the largest reference backplane
+   spec §5 describes. `limits.bp_slot_map_max_slots` is the wire protocol's own representable
+   ceiling — necessarily larger, so a future backplane bigger than the reference design stays
+   protocol-legal without a wire-format change. Both are named in the YAML with a comment
+   cross-referencing the other, so a future reader does not have to rediscover this.
+2. **The value moves from 248 to 232**, recomputed against the corrected `LIMIT_max_l3_payload`
+   (59, not 64): the largest `slot_count` such that `1 + 2 × ceil(slot_count / 8) <= 59` is
+   232 (`1 + 2×29 = 59`); 233 needs `1 + 2×30 = 61 > 59`. The contract's own arithmetic pattern
+   is preserved exactly, only the input limit changed. Derivation restated in the YAML comment,
+   not left implicit.
+3. **AC3's codegen question is resolved by *not* extending `tools/codegen.py`.** The generator's
+   `bytes` field type is a bound-computation aid (`_bounds()` sums fixed-width fields and adds a
+   tail), not a code generator for the hand-written `l3_payload.cpp`/`omgp_l3.py` codecs — those
+   always implement the real encode/decode logic by hand regardless of the YAML shape. Modelling
+   `response` as `slot_count: u8` plus one combined trailing `bitmaps: bytes` field (bound
+   `max: 58`, i.e. two 29-byte bitmaps back to back) produces byte-identical wire bytes and the
+   correct `resp_min`/`resp_max` (1 / 59) without a new derived-length field form that would have
+   no other consumer. The hand-written codec still treats the wire bytes as two logically
+   separate `occupied`/`changed` bitmaps, exactly as `contracts/bp-slot-map.md` specifies —
+   only the YAML's bound-computation model is collapsed, not the actual codec or the wire format.
+4. **AC10: both pre-existing opaque golden vectors for this opcode are regenerated in this
+   commit** (`msg_bp_slot_map_req.json`, `msg_bp_slot_map_resp.json`) — their previous bytes were
+   `l3::OpaquePayload` passthrough content that is no longer a legal `BP_SLOT_MAP` response the
+   moment the payload stops being opaque (rule 9: regenerated with the reason stated in the
+   commit message, never hand-edited). The new `msg_bp_slot_map_resp_full_occupancy` vector
+   (`slot_count = 232`, every bit set — the corrected size boundary) is added alongside them.
+
+**Ruling:** *proceeding on this reconciliation as the recommended default, per the working
+agreement (`CLAUDE.md` "When a spec ambiguity blocks you... proceed only if a safe default
+exists") — ruling pending, human review at the #676 PR.* Nothing here is a new design decision
+beyond what R-01 and #154 already established; it is arithmetic and a codegen-scope choice
+flowing from combining rulings already made.
+
+**Related:** the 2026-08-28 "Backplane opcode payloads" entry above (superseded **for
+`BP_SLOT_MAP` only** — `BP_POWER`/`BP_ROUTE` remain opaque, that entry's reasoning for them is
+unchanged); the 2026-09-21 "#110 rulings" entries (F10, F12 — the two limits this entry
+reconciles).
+
+**Amends:** none. **Supersedes:** the 2026-08-28 "Backplane opcode payloads" entry, for
+`BP_SLOT_MAP` only.
+
+## 2026-09-21 — `BP_SLOT_MAP`: PAYLOAD_FIELDS overclaim correction, and two questions the
+above entry did not actually rule on
+
+**Context:** PR #773 (implementing the entry above) went through two adversarial review/red-team
+rounds. Three things came out of them that this append records rather than silently folding
+back into the entry above (append-only; that entry's own text is unchanged).
+
+**1. Correction to item 3 above.** Item 3 said modelling `BP_SLOT_MAP.response` as one combined
+`bitmaps: bytes` field meant "only the YAML's bound-computation model is collapsed, not the
+actual codec or the wire format" — implying nothing externally visible was lost. That is false:
+`tools/codegen.py` also emits `PAYLOAD_FIELDS`, contracted by
+`specs/001-protocol-foundation/contracts/generated-constants.md` as a documented
+machine-readable per-opcode field schema. The collapsed model erases the real `occupied`/
+`changed` split and the `len == ceil(slot_count/8)` relationship from that published schema, not
+just from an internal bound computation — a consumer generating code from `PAYLOAD_FIELDS` alone
+gets a decoder that is wrong for this opcode. The engineering choice in item 3 (not extending
+`codegen.py` for a one-consumer derived-length field form) still stands; the claim that nothing
+is lost does not. Corrected in `protocol/omgp-protocol.yaml`'s comment on the `bitmaps` field
+(PR #773, `a22187a`).
+
+**2. Open question, not yet ruled: does `bp_slot_map_max_slots` (232) conflict with F12's
+adopted ruling?** F12 (this file, 2026-09-21 "#110 rulings"): *"`BP_SLOT_MAP` ... must respect
+the cap [`limits.max_slots_per_backplane`, 16]."* The entry above introduces a second, larger
+cap (232, the largest `slot_count` whose wire encoding fits `max_l3_payload`) and asserts the
+two are "not a collision" because they measure different things — but that assertion is this
+same entry's own reconciliation, made by the agent that also implemented it, not a human ruling
+on whether F12's "must respect the cap" already settled the question the other way. Failure
+scenario if 232 stands unruled: a backplane may legally claim `slot_count` up to 232, letting one
+backplane's `BP_SLOT_MAP` response occupy far more of the module id space
+(`ADDR_module_min..ADDR_module_max` = 112 ids) than F12's adopted reasoning ("without a cap a
+backplane can claim the whole node-id space for its slots") intended to prevent. No code in
+`core/` reads `slot_count` yet (`reconcile_slot_map()` is T018, unbuilt), so nothing is harmed
+today; T018 will be written against whichever cap stands. **Options:** (a) bind `slot_count` to
+`limits.max_slots_per_backplane` directly and drop `bp_slot_map_max_slots`; (b) a human
+explicitly amends F12 here — "must respect the cap" narrowed to "must respect its own wire cap,
+which may exceed the reference-design capacity" — with the reasoning for allowing headroom
+recorded, before the docs/YAML text that recorded the original constraint is left rewritten
+without it. **Recommendation:** (b), since the headroom reasoning (a future backplane class
+larger than the reference design should not need a wire-format break) is real, but it is a
+choice, not an already-adopted position — recorded here as unruled per this file's working
+agreement, not implemented as if ruled.
+
+**3. Open question, not yet ruled: is `BP_SLOT_MAP` actually `idempotent: true`?** Red team (PR
+#773 round 1, finding 2) built a reproducer: a backplane implementing `changed` exactly as
+`contracts/bp-slot-map.md` defines it — "differs from the backplane's own last-reported state
+... regardless of who polled it" — advances that reference point on every response it *sends*,
+whether or not the host receives it. Two identical requests (a poll whose response was lost,
+followed by a fresh poll next superframe, not a same-L2-sequence retry) then do not produce
+identical responses: the second's `changed` silently omits whatever the first (lost) response
+would have reported. `GET_EVENT` has the same drain-on-read property and is honestly flagged
+`idempotent: false` with a `replay-safe via L2 seq replay buffer` qualifier
+(`protocol/omgp-protocol.yaml`); `BP_SLOT_MAP` claims `idempotent: true` outright. `occupied` is
+unaffected (it is absolute state, always re-converges); only the `changed` edge signal can be
+lost this way — reachable per `link/responder.hpp`'s own documented note that replay suppression
+does not cover a fresh, differently-sequenced request. No code implements a backplane's
+`changed` state yet, so this is a design question, not a demonstrated field bug. **Options:**
+(a) flag `BP_SLOT_MAP` `idempotent: false` with the same `GET_EVENT`-style qualifier; (b) redefine
+`changed` against a reference point that does not advance on an unacknowledged send (e.g. only
+when the host's request sequence itself advances in a way the backplane can observe as
+acknowledgment — mechanism not designed); (c) accept the loss as bounded and documented (occupancy
+itself is never wrong, only a same-slot swap's evidence can be missed) and mark it explicitly
+rather than claim idempotency. **Recommendation:** (a) — cheapest, honest, and `reconcile_slot_map()`
+(T018) can then be written to poll for absolute `occupied` state and treat `changed` as a hint
+rather than a trustworthy delta, matching how the host already must treat `GET_EVENT`.
+
+**Ruling:** ADOPTED (human, 2026-09-22). Both recommended options, as recommended.
+- **Item 2, option (b):** F12 (this file, 2026-09-21 "#110 rulings") is hereby AMENDED — its
+  "must respect the cap" is narrowed from "the cap = `limits.max_slots_per_backplane`" to "must
+  respect its own wire cap (`limits.bp_slot_map_max_slots`), which may exceed
+  `max_slots_per_backplane`'s reference-design capacity." Reasoning adopted: a future backplane
+  class larger than the 8-16-slot reference design should not require a wire-format break;
+  `limits.max_slots_per_backplane` (16) remains the reference-design *guidance* value, and
+  `limits.bp_slot_map_max_slots` (232) the *protocol* ceiling — the two were always meant to
+  answer different questions, this ruling just makes that a decided position rather than an
+  agent's own reconciliation. No YAML/code change: `bp_slot_map_max_slots: 232` already
+  implements this. `docs/protocol-l3.md`/the contract's existing "distinct from
+  `max_slots_per_backplane` ... deliberately exceeds" wording now states the ruled position, not
+  an unruled default.
+- **Item 3, option (a):** `BP_SLOT_MAP` is flagged `idempotent: false` with a `GET_EVENT`-style
+  qualifier, implemented in PR #773. `occupied` stays trustworthy (absolute state, always
+  re-converges); `changed` is documented as a best-effort hint a lost response can silently
+  drop, never a guaranteed delta — `reconcile_slot_map()` (T018, not yet written) must be built
+  against that reading, the same way existing code already treats `GET_EVENT`.
+- Item 1 was already implemented (PR #773, `a22187a`).
+
+**Related:** the entry directly above (this one's item 1 corrects its item 3; items 2 and 3 are
+new, not previously filed as their own entries). F12, 2026-09-21 "#110 rulings".
+
+**Amends:** none (append-only; item 1 corrects a claim in the entry above by addition here, not
+by editing it). **Supersedes:** none.

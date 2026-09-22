@@ -43,9 +43,15 @@ Status decode_status_block(const uint8_t* in, size_t len, StatusBlock& out);
 Status encode_get_event_resp(const GetEventResp&, uint8_t* out, size_t cap, size_t& written);
 Status decode_get_event_resp(const uint8_t* in, size_t len, GetEventResp& out);
 
-// BP_SLOT_MAP / BP_POWER / BP_ROUTE: format not yet defined; bytes pass through verbatim.
+// BP_POWER / BP_ROUTE: format not yet defined; bytes pass through verbatim.
 Status encode_opaque(const OpaquePayload&, uint8_t* out, size_t cap, size_t& written);
 Status decode_opaque(const uint8_t* in, size_t len, OpaquePayload& out);
+
+// BP_SLOT_MAP response (R-01): OutOfRange if slot_count > LIMIT_bp_slot_map_max_slots or
+// either Bytes.len != ceil(slot_count/8); Truncated/LengthMismatch on decode per the file
+// header's shared rules.
+Status encode_bp_slot_map_resp(const BpSlotMapResp&, uint8_t* out, size_t cap, size_t& written);
+Status decode_bp_slot_map_resp(const uint8_t* in, size_t len, BpSlotMapResp& out);
 
 Status encode_error_resp(const ErrorResp&, uint8_t* out, size_t cap, size_t& written);
 Status decode_error_resp(const uint8_t* in, size_t len, ErrorResp& out);

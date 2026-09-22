@@ -25,19 +25,31 @@ bytes changed   [ceil(slot_count/8)]  (bit i set = slot i's occupancy changed si
 
 `slot_count` up to 255 covers every backplane class in Spec §5 (reference FX: 8-16; reference
 preamp: up to 4) with headroom; both bitmaps together are at most 1 + 32 + 32 = 65 bytes for a
-255-slot backplane, comfortably under `LIMIT_max_l3_payload` (64 bytes) for any `slot_count` up
-to 248 — flagged as a real bound, not assumed unlimited (see Complexity Tracking in `plan.md`).
-`changed` lets the engine trust one poll's delta instead of diffing two full bitmaps itself,
-and matches BP_SLOT_MAP's `idempotent: true` flag (re-reading it is always safe — the response
-describes current + since-last-poll state, not a queue that drains).
+255-slot backplane, comfortably under `LIMIT_max_l3_payload` (**pre-F10 figure: 64 bytes,
+`slot_count` up to 248 — superseded, see the F10 Correction below; current values are 59 bytes
+and 232**) — flagged as a real bound, not assumed unlimited (see Complexity Tracking in
+`plan.md`). `changed` lets the engine trust one poll's delta instead of diffing two full
+bitmaps itself.
+
+**Correction (2026-09-22, `docs/OPEN-QUESTIONS.md` idempotency ruling, PR #773).** The
+paragraph above originally claimed this matches an `idempotent: true` flag (re-reading is
+always safe, current + since-last-poll state, not a queue that drains). That was wrong: a
+backplane advances its own "last-reported" reference the moment it *sends* a `BP_SLOT_MAP`
+response, not when that response is acknowledged received, so a lost response permanently
+loses that delta on a later, independently-sequenced poll — the same drain-on-send property
+`GET_EVENT` already has. `BP_SLOT_MAP` is flagged `idempotent: false` with a `GET_EVENT`-style
+qualifier (replay-safe via L2 seq replay buffer only). `occupied` is still a trustworthy
+snapshot on every read; only `changed` is a best-effort hint, and `core/` discovery logic
+(R-03) must be built to treat it that way rather than as a guaranteed diff.
 
 This is a protocol change (`protocol/omgp-protocol.yaml` `l3_payloads.BP_SLOT_MAP`, a
 `docs/protocol-l3.md` §3.1 table update, `python tools/codegen.py`, an `l3` codec pair
 `encode_bp_slot_map_resp`/`decode_bp_slot_map_resp` and its own golden vector) — CLAUDE.md
 golden rule 1 ("edit the YAML, run codegen, update the affected docs table in the same
-commit") applies, and it is recorded in `docs/OPEN-QUESTIONS.md` per the working agreement
-(recommended default stated above; proceeding on it, ruling pending) rather than resolved
-silently in `core/` code. It is `tasks.md`'s first task, ahead of anything that reads it.
+commit") applies, and it is recorded in `docs/OPEN-QUESTIONS.md` per the working agreement.
+The wire format, the `bp_slot_map_max_slots` cap, and the idempotency flag are all ADOPTED
+rulings (human, 2026-09-22) — see the Corrections above and `docs/OPEN-QUESTIONS.md` for the
+recorded reasoning. It is `tasks.md`'s first task, ahead of anything that reads it.
 
 **Alternatives considered**: (a) a flat list of occupied slot numbers (`u8 count, u8[count]
 slots`) — cannot express "changed" without the host keeping its own previous bitmap and
@@ -45,6 +57,17 @@ diffing, which duplicates exactly the information the backplane already has; (b)
 records mirroring the descriptor format — no other opcode in v1 uses TLV outside the
 descriptor itself, and a fixed bitmap is simpler for firmware to produce from GPIO presence
 lines without new machinery.
+
+**Correction (2026-09-21, implemented in #676).** `LIMIT_max_l3_payload` split into
+`max_l3_message` (64, unchanged) and a smaller `max_l3_payload` (59 — 64 minus the 5-byte L3
+header) — `docs/OPEN-QUESTIONS.md` "#110 rulings", F10. Recomputed against 59, the largest
+`slot_count` whose two bitmaps still fit is **232**, not 248 (`1 + 2×29 = 59`; 233 needs
+`1 + 2×30 = 61 > 59`). `contracts/bp-slot-map.md`'s cap, `data-model.md`'s constants table and
+golden-vector description, and `tasks.md`'s T005/T006/T009 task text all carried the original
+248/249 figures and have been corrected to 232/233 in place — the reasoning above (255 covers
+every reference backplane class with headroom; the binding constraint is the payload limit, not
+the field width) is otherwise unchanged. Reconciliation recorded in `docs/OPEN-QUESTIONS.md`
+2026-09-21 "BP_SLOT_MAP wire format (R-01)".
 
 ## R-02: `core/`'s dependency surface is `Master` + `HealthTracker` + `Clock`, not a literal `OMGPTransport` wrapper class
 
@@ -304,14 +327,22 @@ duplicate `MockWire`.
 
 ## R-09: Descriptor-chunk read size
 
-**Decision**: request `max_len = 61` bytes per `READ_DESC` chunk — the largest that fits
+**Decision**: request `max_len` bytes per `READ_DESC` chunk — the largest that fits
 `ReadDescResp` (`u16 offset, u8 len, u8[len] bytes` = 3 + len bytes) inside
-`LIMIT_max_l3_payload` (64 bytes), matching the existing recorded default in
-`docs/OPEN-QUESTIONS.md` ("READ_DESC len ≤ 61") rather than introducing a second one. A full
-`LIMIT_max_descriptor_bytes` (2048) descriptor takes at most 34 chunk reads; each is one demand
-item (R-07), so a large descriptor may legitimately span several superframes — exactly what
-User Story 1's Acceptance Scenario 1 and the "budgeted demand slots with carry-over" scheduling
-already account for.
+`LIMIT_max_l3_payload`, matching the existing recorded default in `docs/OPEN-QUESTIONS.md`
+("READ_DESC len ≤ max_len") rather than introducing a second one. A full
+`LIMIT_max_descriptor_bytes` (2048) descriptor takes at most `ceil(2048 / max_len)` chunk
+reads; each is one demand item (R-07), so a large descriptor may legitimately span several
+superframes — exactly what User Story 1's Acceptance Scenario 1 and the "budgeted demand slots
+with carry-over" scheduling already account for.
+
+**Correction (2026-09-21, F10, `docs/OPEN-QUESTIONS.md` "#110 rulings").**
+`LIMIT_max_l3_payload` moved from 64 to 59 (the trunk-frame budget, now `max_l3_message`,
+stayed 64; `max_l3_payload` is what's left after the 5-byte L3 header). `max_len` is therefore
+**56** (59 − 3), not the original 61, and a full descriptor takes at most 37 chunk reads, not
+34. The literal numbers above are deliberately left as the formula, not restated as a number,
+to avoid this drifting stale again; T021/T022 (READ_DESC chunking, not yet implemented) must
+read `max_len` from `LIMIT_max_l3_payload - 3` at build time, never a literal 56 or 61.
 
 **Alternatives considered**: the module-bus chunk size (`LIMIT_module_bus_chunk` = 28) —
 rejected: that bound is the module bus's own SMBus block-size constraint

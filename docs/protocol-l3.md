@@ -59,7 +59,7 @@ Integrity is an L2 concern (CRC-16 on trunk frames, SMBus PEC on the module bus)
 | 0x13 | GET_PARAM | H→M | payload = param_id, scope. Response: `u8 param_id, u8 scope, u16 value` |
 | 0x14 | GET_STATUS | H→N | Returns status block (see 3.3) |
 | 0x15 | GET_EVENT | H→N | Drains one queued event; repeat until empty. Response: `u8 event_type, u8 remaining_count, u8[] detail`; `event_type` 0x00 (NONE) when the queue is empty |
-| 0x20 | BP_SLOT_MAP | H→B | Backplane only: occupied slots, presence changes since last poll. Payload format not yet defined — v1 codecs pass it through as opaque bytes. Bound, once designed, by `limits.max_slots_per_backplane` (16 — spec §5's reference FX backplane, 8–16 positions, the larger of the two reference types; F12, `docs/OPEN-QUESTIONS.md` #110/#154) |
+| 0x20 | BP_SLOT_MAP | H→B | Backplane only: occupied slots, presence changes since last poll. Response: `u8 slot_count, bytes occupied [ceil(slot_count/8)], bytes changed [ceil(slot_count/8)]` (R-01, `docs/OPEN-QUESTIONS.md` 2026-09-21). Empty request. |
 | 0x21 | BP_POWER | H→B | Backplane only: rail enable/disable per slot, current/PG/fault readback. Payload format not yet defined — opaque in v1 codecs |
 | 0x22 | BP_ROUTE | H→B | Backplane only: local routing control (format TBD with routing hardware) — opaque in v1 codecs |
 | 0x7F | ERROR | N→H | flags.error set; payload = error code (u8) + optional detail, capped at `limits.error_detail_max` (4 bytes) — a short structured hint, not a general-purpose tail (F2, `docs/OPEN-QUESTIONS.md` #110/#154) |
@@ -67,6 +67,26 @@ Integrity is an L2 concern (CRC-16 on trunk frames, SMBus PEC on the module bus)
 Error codes (initial): `0x01` unknown opcode, `0x02` bad payload, `0x03` unknown param/channel, `0x04` busy/settling, `0x05` not permitted (e.g. rail not enabled), `0x06` internal fault.
 
 Responses to SELECT_CHANNEL, SET_BYPASS and SET_PARAM carry an empty payload (acceptance); failures arrive as ERROR. The response layouts above were ruled 2026-08-28 (`docs/OPEN-QUESTIONS.md`) and remain provisional until exercised in the simulator; `protocol/omgp-protocol.yaml` `l3_payloads` is the machine-readable form.
+
+`BP_SLOT_MAP`'s `occupied`/`changed` bitmaps (R-01, `docs/OPEN-QUESTIONS.md` 2026-09-21):
+bit `(i % 8)` of byte `i/8`, LSB first within the byte, corresponds to slot index *i*, `0 <= i < slot_count` (matching
+the existing `link/`-side bit convention). `changed` bit *i* set means slot *i*'s occupancy
+differs from the backplane's own last-reported state — the backplane's own memory of what it
+last told *any* poller, not the host's, advanced the moment the backplane *sends* a response,
+not when that response is acknowledged received. That makes `changed` a drain-on-send delta: a
+lost response permanently loses that delta on any later, independently-sequenced poll, so
+`BP_SLOT_MAP` is `idempotent: false` (R-01 idempotency ruling, `docs/OPEN-QUESTIONS.md`
+2026-09-22 — same `GET_EVENT`-style qualifier: replay-safe via L2 seq replay buffer only).
+`occupied` stays a trustworthy snapshot on every read; `changed` is a best-effort hint, and
+callers must treat it as such rather than as a guaranteed diff. `slot_count` is capped at
+`limits.bp_slot_map_max_slots` (232 — the largest count whose two bitmaps still fit
+`limits.max_l3_payload`; distinct from `limits.max_slots_per_backplane`, §5's reference-design
+capacity, which this wire cap deliberately exceeds); a backplane advertising more is a protocol
+violation, refused `OutOfRange` rather than truncated. Bits at index `>= slot_count` within the
+last byte of either bitmap (up to 7 per bitmap) are reserved: a backplane SHOULD leave them
+clear, and a host MUST ignore their value on receive rather than reject it — matching golden
+rule 7's forward-compatibility stance, not asserted as a shape violation (red team, PR #773
+round 1, finding 4).
 
 ### 3.2 Channel switching semantics
 

@@ -308,6 +308,16 @@ Status render_payload(uint8_t opcode, Dir dir, Bytes p, std::string& text) {
                " detail=" + hex_lower(r.detail.data, r.detail.len);
         return Status::Ok;
     }
+    if (opcode == OP_BP_SLOT_MAP && resp) {
+        BpSlotMapResp r;
+        const Status st = decode_bp_slot_map_resp(p.data, p.len, r);
+        if (st != Status::Ok)
+            return st;
+        text = "slot_count=" + dec(r.slot_count) +
+               " occupied=" + hex_lower(r.occupied.data, r.occupied.len) +
+               " changed=" + hex_lower(r.changed.data, r.changed.len);
+        return Status::Ok;
+    }
     if (opcode == OP_ERROR && resp) {
         ErrorResp r;
         const Status st = decode_error_resp(p.data, p.len, r);
@@ -421,6 +431,18 @@ Status parse_payload(uint8_t opcode, Dir dir, Tokens& t, std::vector<uint8_t>& o
         st = encode_get_event_resp(
             GetEventResp{static_cast<uint8_t>(a), static_cast<uint8_t>(b),
                          Bytes{tail.data(), static_cast<uint8_t>(tail.size())}},
+            out.data(), out.size(), n);
+    } else if (opcode == OP_BP_SLOT_MAP && resp) {
+        std::vector<uint8_t> occupied, changed;
+        if (!(t.take_uint("slot_count", a) && t.take_hex("occupied", occupied) &&
+              t.take_hex("changed", changed)))
+            return Status::Ok;
+        if (a > 0xFF || occupied.size() > 0xFF || changed.size() > 0xFF)
+            return Status::OutOfRange;
+        st = encode_bp_slot_map_resp(
+            BpSlotMapResp{static_cast<uint8_t>(a),
+                          Bytes{occupied.data(), static_cast<uint8_t>(occupied.size())},
+                          Bytes{changed.data(), static_cast<uint8_t>(changed.size())}},
             out.data(), out.size(), n);
     } else if (opcode == OP_ERROR && resp) {
         if (!(t.take_named("err", names::ERROR_TABLE, a) && t.take_hex("detail", tail)))

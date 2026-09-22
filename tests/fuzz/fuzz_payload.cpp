@@ -51,5 +51,6 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     round<GetEventResp>(p, n, decode_get_event_resp, encode_get_event_resp);
     round<OpaquePayload>(p, n, decode_opaque, encode_opaque);
     round<ErrorResp>(p, n, decode_error_resp, encode_error_resp);
+    round<BpSlotMapResp>(p, n, decode_bp_slot_map_resp, encode_bp_slot_map_resp);
     return 0;
 }

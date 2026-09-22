@@ -45,26 +45,39 @@ each story's phase, not deferred to one final polish phase).
 - [x] T004 [P] Change `tools/check_embedded.py` default `--cite-dirs` to `l3 link core` and add
       a case to `tools/refimpl/test_check_embedded.py`: a `core/` file without a `trunk §` or
       `protocol-l3 §` citation fails (write the test first; it fails on the old default)
-- [ ] T005 `protocol/omgp-protocol.yaml`: add `l3_payloads.BP_SLOT_MAP` (replacing
-      `opaque: true`) and `limits.bp_slot_map_max_slots: 248` per `contracts/bp-slot-map.md`;
-      update `docs/protocol-l3.md` §3.1's `BP_SLOT_MAP` table row in the same commit (CLAUDE.md
-      golden rule 1); append the R-01 entry to `docs/OPEN-QUESTIONS.md` (recommended default,
-      ruling pending); run `python3 tools/codegen.py`
-- [ ] T006 [P] Write `tests/unit/test_l3_bp_slot_map.cpp` (write first, fails to compile until
-      T007): round-trip for `slot_count` 0, 1, 8, 248; `OutOfRange` for `slot_count` 249;
-      `Truncated`/`LengthMismatch` per the shared decoder rules (`l3_payload.hpp`'s file header)
-- [ ] T007 [US-shared] Add `BpSlotMapResp` to `l3/l3_types.hpp` and
+- [x] T005 `protocol/omgp-protocol.yaml`: add `l3_payloads.BP_SLOT_MAP` (replacing
+      `opaque: true`) and `limits.bp_slot_map_max_slots: 232` (232, not the originally
+      recommended 248 — recomputed against F10's corrected `LIMIT_max_l3_payload`, see the
+      2026-09-21 note below) per `contracts/bp-slot-map.md`; update `docs/protocol-l3.md`
+      §3.1's `BP_SLOT_MAP` table row in the same commit (CLAUDE.md golden rule 1); append the
+      R-01 reconciliation entry to `docs/OPEN-QUESTIONS.md`; run `python3 tools/codegen.py`
+- [x] T006 [P] Write `tests/unit/test_l3_bp_slot_map.cpp` (write first, fails to compile until
+      T007): round-trip for `slot_count` 0, 1, 8, 232 (the cap — 248 before the 2026-09-21
+      correction); `OutOfRange` for `slot_count` 233; `Truncated`/`LengthMismatch` per the
+      shared decoder rules (`l3_payload.hpp`'s file header)
+- [x] T007 [US-shared] Add `BpSlotMapResp` to `l3/l3_types.hpp` and
       `encode_bp_slot_map_resp`/`decode_bp_slot_map_resp` to `l3/l3_payload.hpp`/`.cpp` per
       `contracts/bp-slot-map.md` — make T006 pass
-- [ ] T008 [P] Write `tools/refimpl/test_l3.py` cases for `bp_slot_map` (write first) mirroring
+- [x] T008 [P] Write `tools/refimpl/test_l3.py` cases for `bp_slot_map` (write first) mirroring
       T006's cases in Python; implement the matching encode/decode pair in
       `tools/refimpl/omgp_l3.py` — make the new pytest cases pass (dual verification, constitution Principle III)
-- [ ] T009 Extend `tools/refimpl/genvectors.py` with `bp_slot_map_full_occupancy`
-      (`slot_count = 248`, every bit set) and generate it **once** into `tests/vectors/` —
-      human-triggered commit stating the creating reason (CLAUDE.md rule 9)
-- [ ] T010 Extend `tools/diffcheck.py`'s existing L3 payload differential path to cover
+- [x] T009 Extend `tools/refimpl/genvectors.py` with `msg_bp_slot_map_resp_full_occupancy`
+      (`slot_count = 232`, every bit set) and generate it **once** into `tests/vectors/` — also
+      regenerated the two pre-existing opaque `msg_bp_slot_map_req`/`_resp` vectors, which the
+      new typed codec made wrong (AC10, CLAUDE.md rule 9) — human-triggered commit stating the
+      reason
+- [x] T010 Extend `tools/diffcheck.py`'s existing L3 payload differential path to cover
       `bp_slot_map` (no `--frames`-style special case needed, R-01); confirm it runs inside the
       existing `diffcheck` stage time budget
+
+**Note (2026-09-21, #676).** T005-T010 landed together in one PR/commit, not T005 alone: AC9
+(green-tree obligation) required the codec (T007/T008) and vector regeneration (T009/AC10) in
+the same commit as T005's YAML change, since the two pre-existing opaque `BP_SLOT_MAP` vectors
+would otherwise fail the moment the codec stopped treating the opcode as opaque. T005's
+`limits.bp_slot_map_max_slots` also moved from the originally recommended 248 to 232, and
+T006/T009's slot_count boundary values from 248/249 to 232/233, reconciling with F10's
+`LIMIT_max_l3_payload` split (`docs/OPEN-QUESTIONS.md` "#110 rulings", "BP_SLOT_MAP wire
+format (R-01)").
 
 **Checkpoint**: `BP_SLOT_MAP` has a real wire format, a working codec, a Python reference, a
 golden vector and differential coverage — discovery (US1) can now be built.

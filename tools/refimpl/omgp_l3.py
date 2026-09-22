@@ -151,8 +151,15 @@ class GetEventResp:
 
 
 @dataclass(frozen=True)
-class OpaquePayload:  # BP_SLOT_MAP / BP_POWER / BP_ROUTE (format not yet defined)
+class OpaquePayload:  # BP_POWER / BP_ROUTE (format not yet defined)
     data: bytes
+
+
+@dataclass(frozen=True)
+class BpSlotMapResp:  # R-01, protocol-l3 §3.1
+    slot_count: int
+    occupied: bytes  # len == ceil(slot_count/8)
+    changed: bytes   # len == ceil(slot_count/8)
 
 
 @dataclass(frozen=True)
@@ -318,6 +325,36 @@ def decode_opaque(b: bytes) -> OpaquePayload:
     return OpaquePayload(bytes(b))
 
 
+# --- BP_SLOT_MAP response: u8 slot_count, bytes occupied[ceil(slot_count/8)],
+#     bytes changed[ceil(slot_count/8)] (R-01, protocol-l3 §3.1) --------------------------------
+
+def _bp_slot_map_bitmap_len(slot_count: int) -> int:
+    return (slot_count + 7) // 8
+
+
+def encode_bp_slot_map_resp(r: BpSlotMapResp) -> bytes:
+    _need(r.slot_count <= G.LIMIT_bp_slot_map_max_slots, "OutOfRange", "slot_count")
+    bitmap_len = _bp_slot_map_bitmap_len(r.slot_count)
+    _need(len(r.occupied) == bitmap_len and len(r.changed) == bitmap_len, "OutOfRange", "bitmap length")
+    return _pack("<B", r.slot_count) + bytes(r.occupied) + bytes(r.changed)
+
+
+def decode_bp_slot_map_resp(b: bytes) -> BpSlotMapResp:
+    _need(len(b) >= 1, "Truncated", "slot_count")
+    slot_count = b[0]
+    # Checked off the single slot_count byte, before the length checks below: a slot_count
+    # over the cap is a peer protocol violation (OutOfRange) regardless of how much data
+    # follows it, not a transport symptom (Truncated) -- checking this after the length
+    # checks made it unreachable on any real wire payload (red team, PR #773 round 1,
+    # finding 1).
+    _need(slot_count <= G.LIMIT_bp_slot_map_max_slots, "OutOfRange", "slot_count")
+    bitmap_len = _bp_slot_map_bitmap_len(slot_count)
+    total = 1 + 2 * bitmap_len
+    _need(len(b) >= total, "Truncated", "bitmaps")
+    _need(len(b) == total, "LengthMismatch", "bitmaps")
+    return BpSlotMapResp(slot_count, bytes(b[1:1 + bitmap_len]), bytes(b[1 + bitmap_len:total]))
+
+
 # F2 (#110/#154): a fixed cap, not _MAX_PAYLOAD - 1 like every other tail — ERROR.detail is a
 # short structured hint, not a general-purpose payload.
 _ERROR_DETAIL_MAX = G.LIMIT_error_detail_max
@@ -352,6 +389,7 @@ _TYPED: dict[tuple[str, str], Codec] = {
     ("GET_PARAM", "response"): (GetParamResp, encode_get_param_resp, decode_get_param_resp),
     ("GET_STATUS", "response"): (StatusBlock, encode_status_block, decode_status_block),
     ("GET_EVENT", "response"): (GetEventResp, encode_get_event_resp, decode_get_event_resp),
+    ("BP_SLOT_MAP", "response"): (BpSlotMapResp, encode_bp_slot_map_resp, decode_bp_slot_map_resp),
     ("ERROR", "response"): (ErrorResp, encode_error_resp, decode_error_resp),
 }
 _OPAQUE: Codec = (OpaquePayload, encode_opaque, decode_opaque)

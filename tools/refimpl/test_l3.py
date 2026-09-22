@@ -178,6 +178,78 @@ def test_opaque_backplane_payloads_pass_through():
         l3.encode_opaque(l3.OpaquePayload(bytes(G.LIMIT_max_l3_payload + 1)))
 
 
+def test_bp_slot_map_round_trips_at_zero_one_eight_and_the_cap():
+    for slot_count in (0, 1, 8, G.LIMIT_bp_slot_map_max_slots):
+        blen = (slot_count + 7) // 8
+        occ, chg = bytes([0xA5]) * blen, bytes([0x5A]) * blen
+        r = l3.BpSlotMapResp(slot_count, occ, chg)
+        enc = l3.encode_bp_slot_map_resp(r)
+        assert len(enc) == 1 + 2 * blen and enc[0] == slot_count
+        assert l3.decode_bp_slot_map_resp(enc) == r
+
+
+def test_bp_slot_map_over_the_cap_is_out_of_range_encode_and_decode():
+    over = G.LIMIT_bp_slot_map_max_slots + 1
+    blen = (over + 7) // 8
+    with raises("OutOfRange"):
+        l3.encode_bp_slot_map_resp(l3.BpSlotMapResp(over, bytes(blen), bytes(blen)))
+    with raises("OutOfRange"):
+        l3.decode_bp_slot_map_resp(bytes([over]) + bytes(2 * blen))
+
+
+def test_bp_slot_map_over_cap_slot_count_is_out_of_range_even_off_a_short_wire_legal_payload():
+    """Red team, PR #773 round 1: a payload this short can't legally carry slot_count=233's
+    own claimed shape (61 bytes, more than LIMIT_max_l3_payload itself), so decoding it must
+    not be able to answer Truncated instead -- the cap check runs off the single slot_count
+    byte, before any length check."""
+    over = G.LIMIT_bp_slot_map_max_slots + 1
+    with raises("OutOfRange"):
+        l3.decode_bp_slot_map_resp(bytes([over]))
+    at_max_payload = bytes([over]) + bytes(G.LIMIT_max_l3_payload - 1)
+    with raises("OutOfRange"):
+        l3.decode_bp_slot_map_resp(at_max_payload)
+
+
+def test_bp_slot_map_reserved_padding_bits_beyond_slot_count_are_passed_through():
+    """slot_count=4 needs one bitmap byte; bits 4-7 are reserved padding (golden rule 7:
+    forward compatibility, not a shape violation to reject)."""
+    wire = bytes([4, 0xF0, 0x00])
+    d = l3.decode_bp_slot_map_resp(wire)
+    assert (d.slot_count, d.occupied) == (4, bytes([0xF0]))
+    assert l3.encode_bp_slot_map_resp(d) == wire
+
+
+def test_bp_slot_map_encoder_rejects_a_bitmap_length_that_disagrees_with_slot_count():
+    with raises("OutOfRange"):
+        l3.encode_bp_slot_map_resp(l3.BpSlotMapResp(8, bytes(2), bytes(1)))
+    with raises("OutOfRange"):
+        l3.encode_bp_slot_map_resp(l3.BpSlotMapResp(8, bytes(1), bytes(2)))
+
+
+def test_bp_slot_map_decoder_truncated_and_length_mismatch():
+    with raises("Truncated"):
+        l3.decode_bp_slot_map_resp(b"")
+    with raises("Truncated"):
+        l3.decode_bp_slot_map_resp(bytes([8, 0xFF]))  # needs 1 + 2*1 = 3
+    with raises("LengthMismatch"):
+        l3.decode_bp_slot_map_resp(bytes([8, 0xFF, 0xFF, 0x00]))  # one more than 3
+    d = l3.decode_bp_slot_map_resp(bytes([0]))
+    assert d == l3.BpSlotMapResp(0, b"", b"")
+
+
+def test_bp_slot_map_payload_bounds_matches_generated_payload_info():
+    assert l3.payload_bounds(G.OP_BP_SLOT_MAP, "request") == (0, 0, False)
+    assert l3.payload_bounds(G.OP_BP_SLOT_MAP, "response") == (1, 1 + 2 * 29, False)
+
+
+def test_bp_slot_map_worst_case_size_at_the_cap_fits_max_l3_payload():
+    # AC4 (#676): computed from the generated constants, not restated as a literal.
+    worst_case_bitmap_len = (G.LIMIT_bp_slot_map_max_slots + 7) // 8
+    assert 1 + 2 * worst_case_bitmap_len <= G.LIMIT_max_l3_payload
+    one_more_bitmap_len = (G.LIMIT_bp_slot_map_max_slots + 1 + 7) // 8
+    assert 1 + 2 * one_more_bitmap_len > G.LIMIT_max_l3_payload
+
+
 def test_empty_payloads():
     assert l3.encode_payload("PING", "request", None) == b""
     assert l3.decode_payload("PING", "request", b"") is None
