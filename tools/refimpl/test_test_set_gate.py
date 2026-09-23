@@ -74,10 +74,10 @@ EXECUTED_LINE = f'echo "EXECUTED: {DEFAULT_EXECUTED}"'
 ZERO_LINE_PADDED = 'echo "EXECUTED: 0"'.ljust(len(EXECUTED_LINE))
 
 
-def _need(cond, why):
+def _need(cond, why, required=None):
     if cond:
         return
-    if ON_CI:
+    if required if required is not None else ON_CI:
         pytest.fail(f"{why} (this is the ctest path CI runs; the check cannot be skipped here)")
     pytest.skip(why)
 
@@ -1285,7 +1285,12 @@ def test_real_build_tree_verifies_every_source(tmp_path):
     # build -> unit -> refimpl in that order); the tool itself refuses a record older than
     # any registered binary, so a stale record fails here rather than vouching.
     _need(TOOL.exists(), f"{TOOL.name} missing")
-    _need((ROOT / "build/native/CTestTestfile.cmake").exists(), "no cmake build tree at build/native")
+    # required=ON_CI and HAVE_CTEST, not plain ON_CI: the `bootstrap` job (ci.yml) is
+    # GITHUB_ACTIONS=true with no cmake/ctest at all (#743/#747) — this control's own artefact
+    # cannot exist there by construction, so ON_CI alone wrongly demanded it. Still fails hard
+    # on the `native` job, where ctest is always installed before this stage runs.
+    _need((ROOT / "build/native/CTestTestfile.cmake").exists(), "no cmake build tree at build/native",
+          required=ON_CI and HAVE_CTEST)
     _need((ROOT / "build/native/Testing/junit.xml").exists(), "no ctest record: run `./pipeline.sh unit` first")
     pre = tmp_path / "pre.json"   # taken now, after the run: the unchanged-during-run rule is vacuous here
     pre.write_text(run_tool("--snapshot").stdout)
@@ -1301,7 +1306,10 @@ def test_real_artefacts_minus_one_registration_name_that_source(tmp_path):
     # ctest record, and the real CTestTestfile.cmake with test_link_master's lines deleted.
     _need(TOOL.exists(), f"{TOOL.name} missing")
     real = ROOT / "build/native"
-    _need((real / "CTestTestfile.cmake").exists(), "no cmake build tree at build/native")
+    # required=ON_CI and HAVE_CTEST — see the matching comment on the positive control above
+    # (#743/#747): the `bootstrap` job has no cmake/ctest, so this artefact cannot exist there.
+    _need((real / "CTestTestfile.cmake").exists(), "no cmake build tree at build/native",
+          required=ON_CI and HAVE_CTEST)
     _need((real / "Testing/junit.xml").exists(), "no ctest record: run `./pipeline.sh unit` first")
     root = tmp_path / "scratch"
     build = root / "build" / "native"
@@ -1339,7 +1347,10 @@ def test_real_artefacts_plus_one_decoy_entry_name_that_source(tmp_path):
     # test_link_master, and the registration-vs-record rule would fire on it instead.
     _need(TOOL.exists(), f"{TOOL.name} missing")
     real = ROOT / "build/native"
-    _need((real / "CTestTestfile.cmake").exists(), "no cmake build tree at build/native")
+    # required=ON_CI and HAVE_CTEST — see the matching comment on the positive control above
+    # (#743/#747): the `bootstrap` job has no cmake/ctest, so this artefact cannot exist there.
+    _need((real / "CTestTestfile.cmake").exists(), "no cmake build tree at build/native",
+          required=ON_CI and HAVE_CTEST)
     _need(all((real / Path(src).stem).exists() for src in SOURCES), "not every test binary is built")
     root = tmp_path / "scratch"
     build = root / "build" / "native"
