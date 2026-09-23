@@ -54,6 +54,14 @@ SOURCES = sorted(   # the same recursive set pipeline.sh's unit_sources() and th
 )
 ON_CI = bool(os.environ.get("GITHUB_ACTIONS"))
 HAVE_CTEST = shutil.which("ctest") is not None
+# NOT the same signal as HAVE_CTEST, and the three real-tree controls below need the
+# CMake one: ci.yml's `bootstrap` job removes `cmake` from PATH but not its sibling `ctest`/
+# `cpack` binaries in the same toolcache directory (/usr/local/bin) — measured directly, not
+# assumed, after HAVE_CTEST read True there and the three controls below fired anyway
+# (#743/#747 fix, round 2). `pipeline.sh` itself branches on `command -v cmake`
+# (pipeline.sh:218), so cmake's presence, not ctest's, is what actually predicts whether
+# `build/native/CTestTestfile.cmake` exists.
+HAVE_CMAKE = shutil.which("cmake") is not None
 # make_tree() copies the REAL pipeline.sh, so the REAL UNIT_TEST_FLOOR gates these fake trees
 # too. Both numbers are READ, never restated: the fake count was the literal 600000, chosen
 # when the floor was 509360, and the T032/#50 checkpoint raise (582360 -> 606565) put the floor
@@ -74,10 +82,10 @@ EXECUTED_LINE = f'echo "EXECUTED: {DEFAULT_EXECUTED}"'
 ZERO_LINE_PADDED = 'echo "EXECUTED: 0"'.ljust(len(EXECUTED_LINE))
 
 
-def _need(cond, why):
+def _need(cond, why, required=None):
     if cond:
         return
-    if ON_CI:
+    if required if required is not None else ON_CI:
         pytest.fail(f"{why} (this is the ctest path CI runs; the check cannot be skipped here)")
     pytest.skip(why)
 
@@ -1285,7 +1293,16 @@ def test_real_build_tree_verifies_every_source(tmp_path):
     # build -> unit -> refimpl in that order); the tool itself refuses a record older than
     # any registered binary, so a stale record fails here rather than vouching.
     _need(TOOL.exists(), f"{TOOL.name} missing")
-    _need((ROOT / "build/native/CTestTestfile.cmake").exists(), "no cmake build tree at build/native")
+    # required=ON_CI and HAVE_CMAKE, not plain ON_CI: the `bootstrap` job (ci.yml) removes
+    # cmake from PATH, so this control's own artefact cannot exist there by construction and
+    # ON_CI alone wrongly demanded it (#743/#747). HAVE_CMAKE, not HAVE_CTEST: that job's
+    # removal step strips only the `cmake` binary, not sibling `ctest`/`cpack` files in the
+    # same toolcache directory (measured — HAVE_CTEST read True there, round 1 of this fix).
+    # pipeline.sh itself branches on `command -v cmake` (pipeline.sh:218), so cmake's presence
+    # is what actually predicts this artefact, and this still fails hard on the `native` job,
+    # where cmake is always installed before this stage runs.
+    _need((ROOT / "build/native/CTestTestfile.cmake").exists(), "no cmake build tree at build/native",
+          required=ON_CI and HAVE_CMAKE)
     _need((ROOT / "build/native/Testing/junit.xml").exists(), "no ctest record: run `./pipeline.sh unit` first")
     pre = tmp_path / "pre.json"   # taken now, after the run: the unchanged-during-run rule is vacuous here
     pre.write_text(run_tool("--snapshot").stdout)
@@ -1301,7 +1318,10 @@ def test_real_artefacts_minus_one_registration_name_that_source(tmp_path):
     # ctest record, and the real CTestTestfile.cmake with test_link_master's lines deleted.
     _need(TOOL.exists(), f"{TOOL.name} missing")
     real = ROOT / "build/native"
-    _need((real / "CTestTestfile.cmake").exists(), "no cmake build tree at build/native")
+    # required=ON_CI and HAVE_CMAKE — see the matching comment on the positive control above
+    # (#743/#747): the `bootstrap` job has no cmake/ctest, so this artefact cannot exist there.
+    _need((real / "CTestTestfile.cmake").exists(), "no cmake build tree at build/native",
+          required=ON_CI and HAVE_CMAKE)
     _need((real / "Testing/junit.xml").exists(), "no ctest record: run `./pipeline.sh unit` first")
     root = tmp_path / "scratch"
     build = root / "build" / "native"
@@ -1339,7 +1359,10 @@ def test_real_artefacts_plus_one_decoy_entry_name_that_source(tmp_path):
     # test_link_master, and the registration-vs-record rule would fire on it instead.
     _need(TOOL.exists(), f"{TOOL.name} missing")
     real = ROOT / "build/native"
-    _need((real / "CTestTestfile.cmake").exists(), "no cmake build tree at build/native")
+    # required=ON_CI and HAVE_CMAKE — see the matching comment on the positive control above
+    # (#743/#747): the `bootstrap` job has no cmake/ctest, so this artefact cannot exist there.
+    _need((real / "CTestTestfile.cmake").exists(), "no cmake build tree at build/native",
+          required=ON_CI and HAVE_CMAKE)
     _need(all((real / Path(src).stem).exists() for src in SOURCES), "not every test binary is built")
     root = tmp_path / "scratch"
     build = root / "build" / "native"

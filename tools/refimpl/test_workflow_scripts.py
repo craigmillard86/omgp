@@ -1758,3 +1758,18 @@ def test_incremental_red_team_scope_is_pinned():
     assert "Gate budgets" in gov
     rt = next(s for s in _job("red-team.yml", "attack-pr")["steps"] if s.get("id") == "rounds")
     assert "previous_red_team=" in rt["run"], "the fail-soft fallback must define previous_red_team too"
+
+
+def test_bootstrap_pipeline_step_has_pipefail():
+    """Regression pin for #742/#746 (fixed on PR #800): the bootstrap job's pipeline step pipes
+    `./pipeline.sh` into `tee`. GitHub Actions' implicit default shell is `bash -e` with no
+    `pipefail`, so without `shell: bash` the step's reported exit status is `tee`'s (always 0),
+    not `pipeline.sh`'s — a required, T3-gating check silently green over a real pipeline
+    failure. Confirmed live: this exact gap shipped once already and was caught only by reading
+    a run's log by hand, not by any test — this pins the shape so a later edit that drops the
+    key cannot regress it back to that state unnoticed."""
+    boot = _job("ci.yml", "bootstrap")
+    step = next(s for s in boot["steps"] if "./pipeline.sh" in s.get("run", "") and "tee" in s.get("run", ""))
+    assert step.get("shell") == "bash", (
+        "ci.yml: the bootstrap job's pipeline step pipes into tee without shell: bash, so it "
+        "can report success while ./pipeline.sh itself fails (#742/#746)")
