@@ -836,3 +836,228 @@ TEST_CASE("a RESPONSE frame on the wire consumes no step and is never answered �
     REQUIRE(a.got);
     REQUIRE(a.hdr.opcode == omgp::OP_GET_STATUS);
 }
+
+// --- A wildcard is the whole NODE's disposition, not one class's ------------------------------
+
+// contracts/mock-l3-node.md gives SilenceStep as "node/backplane does not answer at all
+// (timeout)" and ErrorStep as "an explicit ERROR response" — neither names an opcode, so neither
+// is a statement about one class. The consumption rule stays per class (a wildcard is taken, in
+// script order, by the first class that reaches it), but a class with NO step of its own kind
+// then falls back to the wildcard the node has already taken, not to the unset-class
+// ERR_UNKNOWN_OPCODE default. Recorded in docs/OPEN-QUESTIONS.md 2026-09-23 (the superseding
+// entry), still Ruling: pending.
+
+TEST_CASE("a node scripted with one SilenceStep is mute to EVERY opcode class, not only to the "
+          "first class that reached the step",
+          "[core][mock_l3_node][timing:T_resp]") {
+    FakeClock clock;
+    MockL3Node node(clock);
+    const L3Step script[] = {L3Step::of(SilenceStep{})};
+    node.set_script(kNode, script, 1);
+    Master master(node, clock, omgp::ADDR_host);
+
+    // Four different classes, through the REAL Master: Status (which consumes the wildcard),
+    // Identify, Event (whose §3.4 NONE default must not resurrect a dead node either) and PING
+    // (no step kind answers it at all).
+    const uint8_t opcodes[] = {omgp::OP_GET_STATUS, omgp::OP_IDENTIFY, omgp::OP_GET_EVENT,
+                               omgp::OP_PING};
+    for (uint8_t i = 0; i < 4; ++i) {
+        INFO("opcode " << static_cast<int>(opcodes[i]));
+        const TxOutcome out =
+            transact(node, master, clock, kNode, request_msg(opcodes[i], kNode, i));
+        REQUIRE(out.kind == MasterEvent::Failed);
+        REQUIRE(out.reason == MasterEvent::Timeout);
+    }
+
+    // "Does not answer at all" (the contract's own words), for every class: not one byte, and
+    // the double saw every attempt of every transaction.
+    REQUIRE(node.bytes_scheduled() == 0);
+    REQUIRE(node.requests_seen() == 4 * (omgp::TRUNK_retries + 1));
+}
+
+TEST_CASE("an ErrorStep node answers EVERY opcode class with the step's own code, never a "
+          "second class with ERR_UNKNOWN_OPCODE",
+          "[core][mock_l3_node]") {
+    FakeClock clock;
+    MockL3Node node(clock);
+    const L3Step script[] = {L3Step::of(ErrorStep{omgp::ERR_BUSY})};
+    node.set_script(kNode, script, 1);
+
+    const uint8_t opcodes[] = {omgp::OP_GET_STATUS, omgp::OP_IDENTIFY, omgp::OP_GET_EVENT,
+                               omgp::OP_PING};
+    uint64_t at = 1000;
+    for (uint8_t i = 0; i < 4; ++i) {
+        INFO("opcode " << static_cast<int>(opcodes[i]));
+        const Answer a = ask(node, kNode, i, request_msg(opcodes[i], kNode, i), at);
+        at += 10000;
+        REQUIRE(a.got);
+        REQUIRE(a.hdr.opcode == omgp::OP_ERROR);
+        REQUIRE((a.hdr.flags & omgp::FLAG_error) != 0);
+        omgp::l3::ErrorResp r{};
+        REQUIRE(omgp::l3::decode_error_resp(a.payload.data(), a.payload.size(), r) ==
+                omgp::l3::Status::Ok);
+        REQUIRE(r.code == omgp::ERR_BUSY); // the step's code, not the unset-class default
+    }
+}
+
+TEST_CASE("a consumed wildcard never hijacks a class that has a step of its own kind: only a "
+          "class the script never mentions falls back to it",
+          "[core][mock_l3_node]") {
+    FakeClock clock;
+    MockL3Node node(clock);
+    const omgp::l3::StatusBlock blk = status_block(3, 99);
+    const L3Step script[] = {L3Step::of(ErrorStep{omgp::ERR_BUSY}), L3Step::of(StatusStep{blk})};
+    node.set_script(kNode, script, 2);
+
+    // IDENTIFY reaches the wildcard first and consumes it.
+    const Answer id = ask(node, kNode, 0, request_msg(omgp::OP_IDENTIFY, kNode, 0), 1000);
+    REQUIRE(id.got);
+    REQUIRE(id.hdr.opcode == omgp::OP_ERROR);
+
+    // GET_STATUS still gets its OWN step, then that step's steady state — a wildcard taken by
+    // another class is a fallback for the unscripted, never an override of the scripted.
+    for (uint8_t i = 0; i < 2; ++i) {
+        const Answer a = ask(node, kNode, static_cast<uint8_t>(1 + i),
+                             request_msg(omgp::OP_GET_STATUS, kNode, static_cast<uint8_t>(1 + i)),
+                             10000 + i * 10000);
+        REQUIRE(a.got);
+        REQUIRE(a.hdr.opcode == omgp::OP_GET_STATUS);
+        omgp::l3::StatusBlock got{};
+        REQUIRE(omgp::l3::decode_status_block(a.payload.data(), a.payload.size(), got) ==
+                omgp::l3::Status::Ok);
+        REQUIRE(got.uptime_s == blk.uptime_s);
+        REQUIRE(got.active_channel == blk.active_channel);
+    }
+}
+
+// --- The bit rate in use (trunk §9), not a hard-wired reference rate --------------------------
+
+TEST_CASE("the double schedules at the bit rate in use, so a rig moved to the fallback rate "
+          "measures the fallback rate's own instants",
+          "[core][mock_l3_node][timing:bit_rate][timing:bit_rate_fallback][timing:T_turn]") {
+    FakeClock clock;
+    MockL3Node node(clock);
+    const L3Step script[] = {L3Step::of(StatusStep{status_block(1, 42)})};
+    node.set_script(kNode, script, 1);
+
+    REQUIRE(node.bit_rate() == omgp::TRUNK_bit_rate); // the reference rate until moved
+    node.set_bit_rate(omgp::TRUNK_bit_rate_fallback); // trunk §9's own fallback symbol
+    REQUIRE(node.bit_rate() == omgp::TRUNK_bit_rate_fallback);
+
+    const uint64_t bt = byte_time_us(omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(bt > byte_us()); // the two rates are distinguishable at all, or this pins nothing
+
+    const std::vector<uint8_t> msg = request_msg(omgp::OP_GET_STATUS, kNode, 0);
+    const std::vector<uint8_t> frame = request_frame(kNode, 0, msg);
+    const uint64_t at = 1000;
+    const uint64_t tx_end = node.transmit(frame.data(), frame.size(), at);
+    // link/byte_wire.hpp: transmit() reports the last stop bit AT THE RATE IN USE.
+    REQUIRE(tx_end == at + static_cast<uint64_t>(frame.size()) * bt);
+
+    node.advance_to(tx_end + omgp::TRUNK_T_turn_min_us + static_cast<uint64_t>(kMaxWire) * bt);
+    std::vector<uint64_t> starts;
+    uint8_t b = 0;
+    uint64_t start = 0;
+    while (node.receive(b, start))
+        starts.push_back(start);
+
+    REQUIRE(starts.size() > 1);
+    // trunk §9: one T_turn after the request, then one byte every byte-time at that same rate.
+    REQUIRE(starts.front() == tx_end + omgp::TRUNK_T_turn_min_us);
+    for (size_t i = 1; i < starts.size(); ++i)
+        REQUIRE(starts[i] - starts[i - 1] == bt);
+}
+
+// --- trunk §7: a retry is replayed, never re-scripted -----------------------------------------
+
+TEST_CASE("a retry (same L2 seq, retry bit set) is answered from the node's single-frame replay "
+          "buffer, byte-identically, and consumes no further step",
+          "[core][mock_l3_node][timing:retries]") {
+    FakeClock clock;
+    MockL3Node node(clock);
+    const omgp::l3::StatusBlock s1 = status_block(1, 11);
+    const omgp::l3::StatusBlock s2 = status_block(2, 22);
+    const L3Step script[] = {L3Step::of(StatusStep{s1}), L3Step::of(StatusStep{s2})};
+    node.set_script(kNode, script, 2);
+
+    const uint8_t l2seq = 0x05;
+    const std::vector<uint8_t> msg = request_msg(omgp::OP_GET_STATUS, kNode, 0x07);
+    const std::vector<uint8_t> first_frame =
+        encode_one(kNode, omgp::ADDR_host, false, false, l2seq, msg);
+    const uint64_t first_at = 1000;
+    const uint64_t first_end = first_at + first_frame.size() * byte_us();
+    const Answer first = exchange(node, first_frame, first_at, answer_deadline(first_end));
+    REQUIRE(first.got);
+
+    // docs/trunk-link-layer.md §7: "A node receiving a retry of a sequence it already answered
+    // re-sends its previous response (single-frame replay buffer per node)." Same L2 seq, retry
+    // bit set — byte-for-byte the frame Master::poll() retransmits.
+    const std::vector<uint8_t> retry_frame =
+        encode_one(kNode, omgp::ADDR_host, false, true, l2seq, msg);
+    const uint64_t retry_at = 100000;
+    const uint64_t retry_end = retry_at + retry_frame.size() * byte_us();
+    const Answer again = exchange(node, retry_frame, retry_at, answer_deadline(retry_end));
+    REQUIRE(again.got);
+    REQUIRE(again.wire == first.wire); // the previous response, not the script's next step
+
+    // ...and the second StatusStep is untouched: the next REAL request gets it. CLAUDE.md rule 2
+    // — a retransmission at L2 must always be safe.
+    const Answer third =
+        ask(node, kNode, 0x06, request_msg(omgp::OP_GET_STATUS, kNode, 0x08), 200000);
+    REQUIRE(third.got);
+    omgp::l3::StatusBlock got{};
+    REQUIRE(omgp::l3::decode_status_block(third.payload.data(), third.payload.size(), got) ==
+            omgp::l3::Status::Ok);
+    REQUIRE(got.uptime_s == s2.uptime_s);
+    REQUIRE(got.active_channel == s2.active_channel);
+
+    // The retry was SEEN — it was simply not re-scripted.
+    REQUIRE(node.requests_seen() == 3);
+}
+
+// --- Two requests in flight: a named refusal, never a silently interleaved wire ---------------
+
+TEST_CASE("a second answer that would overlap one still on the wire is refused by name, never "
+          "merged byte-by-byte into an undecodable stream",
+          "[core][mock_l3_node]") {
+    FakeClock clock;
+    MockL3Node node(clock);
+    constexpr uint16_t kBlobLen = 200;
+    uint8_t blob[kBlobLen];
+    for (uint16_t i = 0; i < kBlobLen; ++i)
+        blob[i] = static_cast<uint8_t>(i * 3 + 5);
+    const L3Step script[] = {L3Step::of(DescChunkStep{blob, kBlobLen})};
+    node.set_script(kNode, script, 1);
+
+    // Two READ_DESCs back-to-back in ONE transmit(): not legal trunk traffic (§3 — the host runs
+    // one transaction at a time), and the answers are long enough that the second one's window
+    // opens while the first is still being clocked out. A double that merged them would hand the
+    // rig bytes no Deframer can read, with nothing raised.
+    uint8_t req[omgp::LIMIT_max_l3_payload];
+    size_t req_len = 0;
+    const omgp::l3::ReadDescReq rq{0, kMaxDescChunk};
+    REQUIRE(omgp::l3::encode_read_desc_req(rq, req, sizeof req, req_len) == omgp::l3::Status::Ok);
+    std::vector<uint8_t> burst =
+        request_frame(kNode, 1, request_msg(omgp::OP_READ_DESC, kNode, 1, req, req_len));
+    const std::vector<uint8_t> second =
+        request_frame(kNode, 2, request_msg(omgp::OP_READ_DESC, kNode, 2, req, req_len));
+    burst.insert(burst.end(), second.begin(), second.end());
+    node.transmit(burst.data(), burst.size(), 1000);
+
+    REQUIRE(node.requests_seen() == 2);
+    const char* fault = node.take_fault();
+    REQUIRE(fault != nullptr); // named, the way every other refusal in this double is
+
+    // ...and what IS on the wire is one whole frame — the refused answer was never scheduled,
+    // so nothing half-written or interleaved reached the rig.
+    node.advance_to(1000 + 4 * static_cast<uint64_t>(kMaxWire) * byte_us());
+    Deframer d;
+    FrameView v{};
+    size_t frames = 0;
+    uint8_t b = 0;
+    uint64_t start = 0;
+    while (node.receive(b, start))
+        if (d.feed(b, v))
+            ++frames;
+    REQUIRE(frames == 1);
+}
