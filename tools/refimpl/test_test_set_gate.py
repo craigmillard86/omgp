@@ -59,7 +59,7 @@ HAVE_CTEST = shutil.which("ctest") is not None
 # `cpack` binaries in the same toolcache directory (/usr/local/bin) — measured directly, not
 # assumed, after HAVE_CTEST read True there and the three controls below fired anyway
 # (#743/#747 fix, round 2). `pipeline.sh` itself branches on `command -v cmake`
-# (pipeline.sh:181), so cmake's presence, not ctest's, is what actually predicts whether
+# (pipeline.sh:218), so cmake's presence, not ctest's, is what actually predicts whether
 # `build/native/CTestTestfile.cmake` exists.
 HAVE_CMAKE = shutil.which("cmake") is not None
 # make_tree() copies the REAL pipeline.sh, so the REAL UNIT_TEST_FLOOR gates these fake trees
@@ -1298,7 +1298,7 @@ def test_real_build_tree_verifies_every_source(tmp_path):
     # ON_CI alone wrongly demanded it (#743/#747). HAVE_CMAKE, not HAVE_CTEST: that job's
     # removal step strips only the `cmake` binary, not sibling `ctest`/`cpack` files in the
     # same toolcache directory (measured — HAVE_CTEST read True there, round 1 of this fix).
-    # pipeline.sh itself branches on `command -v cmake` (pipeline.sh:181), so cmake's presence
+    # pipeline.sh itself branches on `command -v cmake` (pipeline.sh:218), so cmake's presence
     # is what actually predicts this artefact, and this still fails hard on the `native` job,
     # where cmake is always installed before this stage runs.
     _need((ROOT / "build/native/CTestTestfile.cmake").exists(), "no cmake build tree at build/native",
