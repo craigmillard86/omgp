@@ -181,6 +181,25 @@ Answer exchange(MockL3Node& node, const std::vector<uint8_t>& frame, uint64_t at
     return a;
 }
 
+// A decoded GET_EVENT response that OWNS its detail bytes: omgp::l3::GetEventResp::detail is a
+// view into the payload it was decoded from, so returning one from a helper would dangle.
+struct Event {
+    uint8_t event_type = 0;
+    uint8_t remaining_count = 0;
+    std::vector<uint8_t> detail;
+};
+
+Event decode_event(const Answer& a) {
+    omgp::l3::GetEventResp r{};
+    REQUIRE(omgp::l3::decode_get_event_resp(a.payload.data(), a.payload.size(), r) ==
+            omgp::l3::Status::Ok);
+    Event e;
+    e.event_type = r.event_type;
+    e.remaining_count = r.remaining_count;
+    e.detail.assign(r.detail.data, r.detail.data + r.detail.len);
+    return e;
+}
+
 // The same exchange, with the frame built from an L3 message and the deadline derived.
 Answer ask(MockL3Node& node, uint8_t dst, uint8_t l2seq, const std::vector<uint8_t>& msg,
            uint64_t at_us) {
@@ -409,31 +428,29 @@ TEST_CASE("EventStep's steady state is no event: two EventSteps answer two GET_E
     node.set_script(kNode, script, 2);
 
     auto drain = [&node](uint8_t seq, uint64_t at) {
-        const Answer a = ask(node, kNode, seq, request_msg(omgp::OP_GET_EVENT, kNode, seq), at);
+        const std::vector<uint8_t> msg = request_msg(omgp::OP_GET_EVENT, kNode, seq);
+        const Answer a = ask(node, kNode, seq, msg, at);
         REQUIRE(a.got);
         REQUIRE(a.hdr.opcode == omgp::OP_GET_EVENT);
-        omgp::l3::GetEventResp r{};
-        REQUIRE(omgp::l3::decode_get_event_resp(a.payload.data(), a.payload.size(), r) ==
-                omgp::l3::Status::Ok);
-        return r;
+        return decode_event(a);
     };
 
-    const omgp::l3::GetEventResp first = drain(0, 1000);
+    const Event first = drain(0, 1000);
     REQUIRE(first.event_type == omgp::EVT_FAULT_RAISED);
-    REQUIRE(first.detail.len == 1);
-    REQUIRE(first.detail.data[0] == detail_a[0]);
+    REQUIRE(first.remaining_count == 1); // the script's own value, not one the double invents
+    REQUIRE(first.detail == std::vector<uint8_t>(detail_a, detail_a + 1));
 
-    const omgp::l3::GetEventResp second = drain(1, 10000);
+    const Event second = drain(1, 10000);
     REQUIRE(second.event_type == omgp::EVT_FAULT_CLEARED);
-    REQUIRE(second.detail.len == 0);
+    REQUIRE(second.detail.empty());
 
     // protocol-l3 §3.4: NONE (0x00) is what GET_EVENT answers on an empty queue. A
     // last-step-repeats rule here would re-deliver event 2 forever.
     for (uint8_t i = 0; i < 2; ++i) {
-        const omgp::l3::GetEventResp none = drain(static_cast<uint8_t>(2 + i), 20000 + i * 10000);
+        const Event none = drain(static_cast<uint8_t>(2 + i), 20000 + i * 10000);
         REQUIRE(none.event_type == omgp::EVT_NONE);
         REQUIRE(none.remaining_count == 0);
-        REQUIRE(none.detail.len == 0);
+        REQUIRE(none.detail.empty());
     }
 }
 
@@ -590,28 +607,23 @@ TEST_CASE("ChannelStep accepts SELECT_CHANNEL immediately and, when it settles, 
 
     auto get_event = [&node](uint8_t seq, uint64_t request_end) {
         // Sent so that the GET_EVENT request FINISHES on the wire exactly at `request_end`.
-        const std::vector<uint8_t> frame =
-            request_frame(kNode, seq, request_msg(omgp::OP_GET_EVENT, kNode, seq));
+        const std::vector<uint8_t> msg = request_msg(omgp::OP_GET_EVENT, kNode, seq);
+        const std::vector<uint8_t> frame = request_frame(kNode, seq, msg);
         const uint64_t start = request_end - static_cast<uint64_t>(frame.size()) * byte_us();
         const Answer a = exchange(node, frame, start, answer_deadline(request_end));
         REQUIRE(a.got);
-        omgp::l3::GetEventResp r{};
-        REQUIRE(omgp::l3::decode_get_event_resp(a.payload.data(), a.payload.size(), r) ==
-                omgp::l3::Status::Ok);
-        return r;
+        return decode_event(a);
     };
 
     // One microsecond before the settle delay has elapsed: nothing to report.
-    const omgp::l3::GetEventResp early = get_event(1, due - 1);
+    const Event early = get_event(1, due - 1);
     REQUIRE(early.event_type == omgp::EVT_NONE);
 
     // At the settle instant: CHANNEL_SETTLED, whose detail is `u8 channel, u8 seq` (§3.4) —
     // the channel that settled and the SELECT_CHANNEL request's own L3 seq.
-    const omgp::l3::GetEventResp settled = get_event(2, due);
+    const Event settled = get_event(2, due);
     REQUIRE(settled.event_type == omgp::EVT_CHANNEL_SETTLED);
-    REQUIRE(settled.detail.len == 2);
-    REQUIRE(settled.detail.data[0] == channel);
-    REQUIRE(settled.detail.data[1] == sel_seq);
+    REQUIRE(settled.detail == std::vector<uint8_t>{channel, sel_seq});
 
     // Drained once, so it is gone: the queue, not the last step, is the steady state.
     REQUIRE(get_event(3, due + 10000).event_type == omgp::EVT_NONE);
@@ -641,10 +653,7 @@ TEST_CASE("ChannelStep{settles = false} never reports CHANNEL_SETTLED, however f
         const std::vector<uint8_t> get = request_msg(omgp::OP_GET_EVENT, kNode, i);
         const Answer a = ask(node, kNode, i, get, 10000 + i * kSettleUs);
         REQUIRE(a.got);
-        omgp::l3::GetEventResp r{};
-        REQUIRE(omgp::l3::decode_get_event_resp(a.payload.data(), a.payload.size(), r) ==
-                omgp::l3::Status::Ok);
-        REQUIRE(r.event_type == omgp::EVT_NONE);
+        REQUIRE(decode_event(a).event_type == omgp::EVT_NONE);
     }
 }
 
