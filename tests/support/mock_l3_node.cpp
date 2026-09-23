@@ -12,9 +12,11 @@
 // The two readings the contract does not state — what an opcode class with NO step of its kind
 // ever scripted answers, and how the two class-less kinds (SilenceStep/ErrorStep) are targeted
 // — are implemented per docs/OPEN-QUESTIONS.md 2026-09-23 "MockL3Node: an opcode class with no
-// step ever scripted, and how SilenceStep/ErrorStep are targeted" (ruling PENDING): an unset
-// class answers ERROR/ERR_UNKNOWN_OPCODE, and the two class-less kinds are wildcards consumed
-// in script order by the first request of any class that reaches them.
+// step ever scripted, and how SilenceStep/ErrorStep are targeted" and the same-day entry that
+// supersedes its (a) half (both ruling PENDING): the two class-less kinds are wildcards consumed
+// in script order by the first request of any class that reaches them, a class with no step of
+// its own kind falls back to the wildcard the node has already taken, and only a class with
+// neither answers ERROR/ERR_UNKNOWN_OPCODE.
 #include "mock_l3_node.hpp"
 
 #include "catch_amalgamated.hpp"
@@ -218,6 +220,11 @@ const L3Step* MockL3Node::take_step(NodeState& ns, OpClass cls) {
         ns.consumed[i] = true;
         ns.cursor[c] = i + 1;
         ns.last[c] = static_cast<int>(i);
+        if (is_wildcard(s.kind))
+            // A wildcard names no opcode, so consuming it says something about the whole NODE,
+            // not only about the class that happened to reach it first: it also becomes the
+            // fallback for every class with no step of its own kind (see answer()).
+            ns.last_wildcard = static_cast<int>(i);
         return &ns.steps[i];
     }
     // Exhausted. contracts/mock-l3-node.md: "an exhausted script answers the next request with
@@ -395,6 +402,15 @@ void MockL3Node::answer(uint8_t node, const omgp::l3::Header& req, const omgp::l
     NodeState& ns = nodes_[node];
     const OpClass cls = op_class(req.opcode);
     const L3Step* step = take_step(ns, cls);
+    if (step == nullptr && ns.last_wildcard >= 0)
+        // No step of this class's own kind was ever scripted, but the node HAS taken a wildcard.
+        // contracts/mock-l3-node.md gives SilenceStep as "node/backplane does not answer at all"
+        // and ErrorStep as "an explicit ERROR response" — neither is scoped to an opcode, so a
+        // node scripted {SilenceStep} is mute to every class, not to whichever class reached the
+        // step first while the other seven answered ERR_UNKNOWN_OPCODE. A class WITH steps of its
+        // own kind never gets here, so this is a fallback for the unscripted, never an override
+        // of the scripted (docs/OPEN-QUESTIONS.md 2026-09-23, the superseding entry).
+        step = &ns.steps[static_cast<size_t>(ns.last_wildcard)];
 
     uint8_t out[kPayloadCap] = {};
     size_t n = 0;
@@ -507,6 +523,16 @@ void MockL3Node::schedule_answer(const omgp::link::FrameFields& frame, const omg
         record_fault("MockL3Node: encode_frame refused a scripted answer");
         return;
     }
+
+    // Arm trunk §7's replay buffer with these exact bytes: a retry of this L2 seq re-sends them
+    // unchanged. frame.dst was bounds-checked by transmit() before answer() was called.
+    NodeState& ns = nodes_[frame.dst];
+    ns.replay_valid = true;
+    ns.replay_seq = frame.seq;
+    ns.replay_len = written;
+    for (size_t i = 0; i < written; ++i)
+        ns.replay_frame[i] = buf[i];
+
     enqueue_frame(buf, written, start_us);
 }
 
@@ -555,6 +581,22 @@ uint64_t MockL3Node::transmit(const uint8_t* bytes, size_t n, uint64_t now_us) {
         }
 
         ++requests_seen_;
+
+        // trunk §7: "A node receiving a retry of a sequence it already answered re-sends its
+        // previous response (single-frame replay buffer per node)." Replaying rather than
+        // re-running the script is what makes the double obey CLAUDE.md rule 2 — a
+        // retransmission at L2 is safe — instead of handing the retry the script's NEXT step and
+        // so answering one request two different ways.
+        NodeState& ns = nodes_[view.f.dst];
+        if (view.f.retry && ns.replay_valid && ns.replay_seq == view.f.seq) {
+            const uint64_t replay_at = frame_tx_end + omgp::TRUNK_T_turn_min_us; // trunk §9
+            enqueue_frame(ns.replay_frame, ns.replay_len, replay_at);
+            continue;
+        }
+        // Anything else is a new transaction, which supersedes the buffer: a node that has since
+        // gone quiet (a SilenceStep's steady state) must not replay an answer from an older
+        // transaction that happened to reuse this seq.
+        ns.replay_valid = false;
         answer(view.f.dst, hdr, payload, view.f, frame_tx_end);
     }
     return tx_end;
@@ -589,19 +631,25 @@ void MockL3Node::enqueue(uint8_t byte, uint64_t start_us) {
         record_fault("MockL3Node: RX queue capacity exceeded (4 * kMaxWire)");
         return;
     }
-    // Insertion-sort by start_us (stable), so receive() can always take index 0 even when a
-    // later transmit() schedules an earlier-firing answer.
-    size_t pos = rx_count_;
-    while (pos > 0 && rx_queue_[pos - 1].start_us > start_us) {
-        rx_queue_[pos] = rx_queue_[pos - 1];
-        --pos;
-    }
-    rx_queue_[pos] = QueuedByte{byte, start_us};
+    // A plain append: the queue is ascending in start_us by construction (enqueue_frame() lays
+    // one answer's bytes out at increasing instants and refuses an answer that would overlap the
+    // bytes already queued), which is what lets receive() always take index 0.
+    rx_queue_[rx_count_] = QueuedByte{byte, start_us};
     ++rx_count_;
     ++bytes_scheduled_;
 }
 
 void MockL3Node::enqueue_frame(const uint8_t* buf, size_t written, uint64_t t0) {
+    // Two answers in flight at once would otherwise be merged byte-by-byte in time order into a
+    // stream no Deframer can read, with nothing raised. That is not a node behaviour to model:
+    // trunk §3 has the host run one transaction at a time, so a second answer opening inside the
+    // first one's bytes is a RIG bug, and this double's idiom for a rig bug is a named refusal
+    // (as for kRxCapacity, a dst that is not a node, or an undecodable request).
+    if (written > 0 && rx_count_ > 0 && rx_queue_[rx_count_ - 1].start_us >= t0) {
+        record_fault("MockL3Node: an answer would overlap one still on the wire (two requests in "
+                     "flight at once)");
+        return;
+    }
     for (size_t i = 0; i < written; ++i)
         enqueue(buf[i], t0 + static_cast<uint64_t>(i) * omgp::link::byte_time_us(bit_rate_));
 }

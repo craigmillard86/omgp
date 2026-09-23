@@ -175,8 +175,12 @@ class MockL3Node : public omgp::link::ByteWire {
     //     state, not silence-by-default);
     //   * GET_EVENT is served by the node's event queue, not by a cursor: EventSteps are queued
     //     when the script is installed, and an empty queue answers NONE (§3.4);
-    //   * a class with NO step of its kind ever scripted answers ERROR/ERR_UNKNOWN_OPCODE —
-    //     silence stays reserved for SilenceStep.
+    //   * a class with NO step of its own kind ever scripted falls back to the last wildcard
+    //     this node consumed, if any: a wildcard names no opcode, so it is the NODE's
+    //     disposition, not one class's — {SilenceStep} is a node that "does not answer at all"
+    //     (the contract's own words) rather than a node mute to exactly one class;
+    //   * failing that (no wildcard ever consumed either) it answers ERROR/ERR_UNKNOWN_OPCODE —
+    //     silence stays reserved for a script that asked for it.
     void set_script(uint8_t node, const L3Step* steps, size_t count);
 
     // omgp::link::ByteWire
@@ -243,8 +247,18 @@ class MockL3Node : public omgp::link::ByteWire {
         // Index of the last step each class consumed, or -1 — the steady state an exhausted
         // class answers with.
         int last[static_cast<size_t>(OpClass::COUNT)] = {};
+        // Index of the last WILDCARD step (SilenceStep/ErrorStep) any class consumed, or -1 —
+        // the fallback for a class with no step of its own kind (see set_script()).
+        int last_wildcard = -1;
         QueuedEvent events[kEventQueueCapacity] = {};
         size_t event_count = 0;
+        // trunk §7's single-frame replay buffer: the wire bytes of the last answer this node
+        // scheduled, and the L2 seq it answered. A retry of that seq re-sends these bytes
+        // unchanged and consumes no step (CLAUDE.md rule 2 — a retransmission must be safe).
+        bool replay_valid = false;
+        uint8_t replay_seq = 0;
+        size_t replay_len = 0;
+        uint8_t replay_frame[omgp::link::kMaxWire] = {};
     };
 
     // The next step for `cls`: the first unconsumed step in script order that is either of that
@@ -301,8 +315,12 @@ class MockL3Node : public omgp::link::ByteWire {
 
     NodeState nodes_[omgp::link::kAddrCount];
 
-    // Sorted by start_us ascending (not a FIFO): byte-wire-and-clock.md requires receive() to
-    // release the earliest-start-instant byte first.
+    // Ascending in start_us, which byte-wire-and-clock.md requires of receive()'s release order.
+    // That holds by construction of enqueue_frame(): one answer's bytes are laid out at
+    // increasing instants, and an answer whose first byte would land at or before the last byte
+    // already queued is refused BY NAME instead of appended — that is two requests in flight at
+    // once, which trunk §3 does not permit and which merging would turn into a stream no
+    // Deframer can read.
     QueuedByte rx_queue_[kRxCapacity] = {};
     size_t rx_count_ = 0;
 
