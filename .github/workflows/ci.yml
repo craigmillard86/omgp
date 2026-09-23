@@ -152,7 +152,14 @@ jobs:
 
       - name: Pipeline — bootstrap g++ path, all local stages
         # Tee'd so the next step greps THIS run's own output rather than assuming which build
-        # branch pipeline.sh took.
+        # branch pipeline.sh took. `shell: bash` is required, not decorative: GitHub Actions'
+        # implicit default shell runs `bash -e` with no `pipefail`, so `pipeline.sh | tee ...`
+        # reported this step's exit status as `tee`'s (always 0), not `pipeline.sh`'s — this
+        # job stayed green over a failing pipeline (#742/#746, confirmed against a real run:
+        # `stage_refimpl` printed `3 failed, 488 passed`, the run never reached `diffcheck`,
+        # and the job still concluded `success`). Declaring `shell: bash` switches GitHub to
+        # `bash -eo pipefail`, so a non-zero `pipeline.sh` now fails this step.
+        shell: bash
         run: ./pipeline.sh codegen quality build unit refimpl diffcheck scenarios 2>&1 | tee /tmp/pipeline.log
 
       - name: Confirm the bootstrap branch actually ran, not just that the pipeline passed

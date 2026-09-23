@@ -33,12 +33,14 @@ establish. Two constraints, neither negotiable here:
 What this does NOT establish: that the real bootstrap path is green end to end.
 ci.yml's `bootstrap` job (ruled 2026-09-16, docs/OPEN-QUESTIONS.md "#62 (T044)
 AC2" option B) removes every cmake it can find, asserts none is reachable, runs
-all local stages and greps its own log for the branch's tell — but read its LOG,
-not its pass/fail: its pipeline step pipes into `tee` without `shell: bash`, so
-the step's status is `tee`'s and the job is green whatever `pipeline.sh` exits
-(ci.yml:156; reported by review round 2, not to be repaired from this PR — T3).
-So these tests are the fast, targeted half; that job's log lines are the
-end-to-end half, and its green tick on its own is not evidence.
+all local stages and greps its own log for the branch's tell. Its pipeline step
+now carries `shell: bash` (#742/#746, fixed) so the step's status is
+`pipeline.sh`'s own, not `tee`'s — the job can no longer be green over a failing
+pipeline. Still worth reading the log, not just the tick, for the reason these
+tests exist at all: a green job proves the pipeline ran to completion, not that
+every stage exercised the branch this job exists to gate (that's what "Confirm
+the bootstrap branch actually ran" greps for separately). So these tests are the
+fast, targeted half; that job's log lines are the end-to-end half.
 """
 from __future__ import annotations
 
