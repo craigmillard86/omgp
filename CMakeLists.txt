@@ -32,11 +32,14 @@ target_compile_options(catch2_amalgamated PRIVATE -Wno-error) # third-party warn
 
 # tests/support: linked into every Catch2 test, never a test itself. OBJECT library so the
 # listener's static registrar and the --wrap symbols are always pulled into the link.
-# mock_wire.cpp needs omgp_link (Deframer/encode_frame/link_types) — T010.
+# mock_wire.cpp needs omgp_link (Deframer/encode_frame/link_types) — T010; mock_l3_node.cpp also
+# needs omgp_l3 (it answers with typed L3 responses through the real payload/header codecs) —
+# spec 003 T012, the one target that legitimately links both (L2 stays opaque to L3: the
+# dependency is this host-only object library's, never omgp_link's).
 add_library(omgp_test_support OBJECT tests/support/catch_listener.cpp tests/support/heap_guard.cpp
-                                      tests/support/mock_wire.cpp)
+                                      tests/support/mock_wire.cpp tests/support/mock_l3_node.cpp)
 target_include_directories(omgp_test_support PUBLIC tests/support)
-target_link_libraries(omgp_test_support PUBLIC catch2_amalgamated omgp_link)
+target_link_libraries(omgp_test_support PUBLIC catch2_amalgamated omgp_link omgp_l3)
 
 # Counting heap guard (tests/support/heap_guard.hpp): wrap the allocators our objects call.
 set(OMGP_WRAP_LDFLAGS -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc
@@ -90,6 +93,7 @@ target_link_libraries(test_l3_helper_dispatch PRIVATE omgp_l3_helper)
 omgp_add_catch_test(test_link_stuffing tests/property/test_link_stuffing.cpp)
 omgp_add_catch_test(test_link_resync tests/property/test_link_resync.cpp)
 omgp_add_catch_test(test_mock_wire tests/unit/test_mock_wire.cpp)
+omgp_add_catch_test(test_mock_l3_node tests/unit/test_mock_l3_node.cpp)
 omgp_add_catch_test(test_link_health tests/unit/test_link_health.cpp)
 omgp_add_catch_test(test_link_busfault tests/unit/test_link_busfault.cpp)
 omgp_add_catch_test(test_link_master tests/unit/test_link_master.cpp)

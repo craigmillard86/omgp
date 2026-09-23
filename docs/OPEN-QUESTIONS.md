@@ -4999,3 +4999,153 @@ new, not previously filed as their own entries). F12, 2026-09-21 "#110 rulings".
 
 **Amends:** none (append-only; item 1 corrects a claim in the entry above by addition here, not
 by editing it). **Supersedes:** none.
+
+---
+
+## 2026-09-23 — MockL3Node: an opcode class with no step ever scripted, and how SilenceStep/ErrorStep are targeted
+
+**Context:** T012/T013 (#683/#684), one dispatch unit.
+`specs/003-host-core-engine/contracts/mock-l3-node.md` gives nine step structs and one
+consumption rule — "steps consumed in order per opcode class ... An exhausted script answers the
+next request with whatever the last step of its kind specified (steady-state, not
+silence-by-default)". Two things it does not say, both of which the double must decide before a
+single line of it runs:
+
+**(a) An opcode class with NO step of its kind ever scripted.** The contract covers an
+*exhausted* class (steady state) but not an empty one — there is no "last step of its kind" to
+repeat. F2's own `contracts/mock-wire.md` does state its equivalent ("an exhausted **or unset**
+script behaves as `Respond` with `delay_us == TRUNK_T_turn_min_us`"), so the gap is specific to
+this contract rather than a shared convention a reader could carry across. It is reachable by any
+`CoreEngine` test whose script covers some opcodes and not others — e.g. a discovery script with
+an `IdentifyStep` and a `DescChunkStep`, polled `GET_STATUS` by the superframe scheduler.
+
+**(b) `SilenceStep` and `ErrorStep` name no opcode.** The other seven kinds map 1:1 onto an
+opcode class (`IdentifyStep` → `IDENTIFY`, `StatusStep` → `GET_STATUS`, …), so "per opcode class"
+locates them exactly. These two answer *any* opcode, so per-class cursors alone do not say which
+class consumes one, nor whether a consumed one becomes that class's steady state. Four opcodes
+(`PING`, `SET_BYPASS`, `BP_POWER`, `BP_ROUTE`) have no step kind at all, so they can only ever be
+answered by one of these two or by (a)'s default.
+
+**Options — (a):** (i) `ErrorResp` with `ERR_UNKNOWN_OPCODE` (0x01); (ii) silence, i.e. let the
+driving `Master` time out; (iii) a named fault, refusing the request as a script bug; (iv) some
+per-class "empty" answer (an all-zero `StatusBlock`, an empty `ReadDescResp`, …).
+**Options — (b):** (1) wildcards: the first request of ANY class that reaches the step in script
+order consumes it, exclusively, and it becomes that class's steady state; (2) a separate global
+"fault queue" consulted before every class's own cursor; (3) refuse them unless the script's
+remaining steps are all of one class, i.e. make the author disambiguate.
+
+**Recommended:** (a)(i) and (b)(1).
+
+(a)(i): silence is the one behaviour `SilenceStep` exists to express, and (ii) would make an
+*unscripted* class indistinguishable on the wire from a deliberately mute node — a test whose
+script forgot a kind would then read as a timeout test that passes for the wrong reason. (iii) is
+wrong because an unscripted opcode is not necessarily an error in the *test*: `CoreEngine`
+legitimately polls opcodes a focused script does not care about, and a fault would make every
+such case unwritable. (iv) invents wire content no artefact names. `ERR_UNKNOWN_OPCODE` is also
+what a real node answers for an opcode it does not implement (`docs/protocol-l3.md` §3.1), so a
+`CoreEngine` reading it is exercising a path it must handle anyway. **One exception, on the
+protocol's own terms:** `GET_EVENT` is *not* given this default — §3.1/§3.4 define `NONE` (0x00)
+as the answer to a `GET_EVENT` on an empty queue, so it is the one opcode with a protocol-stated
+"nothing to report" response, and an unscripted event queue is simply empty. (This also makes
+`EventStep`'s own steady state fall out of the queue being drained, which is the contract's
+stated exception to the last-step-repeats rule.)
+
+(b)(1): it is the reading that keeps "in order" meaning what it says — `{StatusStep S,
+SilenceStep}` answers `S` and then goes quiet, which is how a fault is written into a sequence.
+(2) inverts that: a wildcard anywhere in the script would pre-empt the first request whatever its
+position, so the same script would answer silence *first*. (3) costs expressiveness for no
+safety: the contract's own step table is a flat per-address array, not a per-class one. Making a
+consumed wildcard the steady state of the class that took it is the contract's exhaustion rule
+applied unchanged — and applying that rule PER CLASS (rather than once for the whole script) is
+what stops one class going quiet from silencing every other class's answers too.
+
+**Implemented as recommended in T012** (`tests/support/mock_l3_node.cpp`: `take_step()` for (b),
+`answer()`'s `step == nullptr && cls != OpClass::Event` arm for (a), `build_event()` for the
+`GET_EVENT` exception). Pinned by `tests/unit/test_mock_l3_node.cpp`: "an opcode class with no
+step ever scripted answers ERROR/ERR_UNKNOWN_OPCODE, never silence" (three sections: a class the
+script never mentions, an opcode no step kind can answer at all, a node with no script), "steps
+are consumed in order PER OPCODE CLASS…" (both interrogation orders) and "EventStep's steady
+state is no event…". A ruling for (a)(ii)/(iii) replaces that first case and the `answer()` arm;
+a ruling for (b)(2)/(3) replaces `take_step()`. `contracts/mock-l3-node.md` is a human-ruling
+artefact and is **not** edited here.
+
+**Also implemented, as the safe default #683's own acceptance criterion names** (not a separate
+question, recorded here so a reader finds both in one place): a `READ_DESC` whose `offset` is at
+or past `DescChunkStep::blob_len` is answered with a **zero-length chunk**, never an invented
+error response — the contract says `DescChunkStep` "answers every READ_DESC against this blob,
+honouring the request's own offset/max_len" and stops there. **Ruling: pending** on this too.
+Pinned by "an offset at the end of the blob answers a zero-length chunk, never an over-read".
+
+**Ruling:** PENDING — human (contract text;
+`specs/003-host-core-engine/contracts/mock-l3-node.md`, its step table against "steps consumed in
+order per opcode class" and the exhausted-script sentence).
+
+**Amends:** none. **Supersedes:** none. **Related:** the 2026-09-01 "MockWire (T010) design
+choices…" entry, item (2) (F2's own wildcard-ordering question, ruled 2026-09-03 — the closest
+precedent, for a byte-level double with a different script shape), and the 2026-09-15 "A
+`Kind::Babble` step in the 0xFF wildcard script" entry (the same class of question: a step kind
+whose scope the contract leaves unstated).
+
+## 2026-09-23 — MockL3Node: a consumed wildcard is the whole NODE's disposition, not one class's
+
+**Context:** the same dispatch unit (T012/T013, #683/#684), correcting the entry immediately
+above after the red-team pass on PR #793 exhibited the cost its own reasoning did not weigh.
+
+That entry recommends (a)(i) — a class with no step of its kind answers `ERR_UNKNOWN_OPCODE` —
+and (b)(1) — `SilenceStep`/`ErrorStep` are wildcards, consumed exclusively by the first class
+that reaches them. **Taken together those two produce a node scripted `{SilenceStep}` that
+answers a real `ERROR` frame to seven of the eight opcode classes**, because the wildcard is
+consumed by whichever class arrives first and every other class then falls to (a)(i). The entry
+argues one direction of the error only ("(ii) would make an *unscripted* class indistinguishable
+on the wire from a deliberately mute node"); the reverse — a *deliberately mute* node
+indistinguishable from a live one — is the same confusion pointing the other way, and it lands on
+the one thing the double exists to measure. `contracts/mock-l3-node.md` gives `SilenceStep` as
+"node/backplane does not answer at all (timeout)", with no opcode named, so the implemented
+reading also diverged from the contract's plain words.
+
+**Options:** (A) keep (a)(i) unchanged and document the `{SilenceStep × 8}` idiom — one wildcard
+per `OpClass` — as the way to write a mute node; (B) take (a)(ii), silence, for every unset
+class; (C) a class with no step of its **own kind** falls back to the last wildcard this node has
+consumed, if any, and only a class with neither answers `ERR_UNKNOWN_OPCODE`.
+
+**Recommended and implemented: (C).** (A) leaves the natural script reading a trap, and pins a
+workaround no artefact names. (B) is what the entry above rejects, for the reason it gives: a
+script that simply forgot a kind would read as a timeout test passing for the wrong reason. (C)
+keeps that rejection intact — with no wildcard anywhere in the script, an unscripted class still
+answers `ERR_UNKNOWN_OPCODE`, loudly — while making the two class-less kinds mean what their own
+contract text says: a wildcard names no opcode, so consuming one is a statement about the node.
+The consumption rule of (b)(1) is **unchanged**: a wildcard is still taken, in script order, by
+the first class that reaches it, so `{StatusStep S, SilenceStep}` still answers `S` and then goes
+quiet. A class **with** steps of its own kind never reaches the fallback, so this is a default for
+the unscripted, never an override of the scripted — the property the entry above calls "what
+stops one class going quiet from silencing every other class's answers too" still holds for every
+class the script mentions. `GET_EVENT`'s §3.4 `NONE` default is unchanged for a node that has
+consumed no wildcard, and a mute node is now mute to `GET_EVENT` as well, which is what a node
+that "does not answer at all" does.
+
+**Implemented in T012** (`tests/support/mock_l3_node.cpp`: `NodeState::last_wildcard`, set in
+`take_step()` and consulted in `answer()` before the `ERR_UNKNOWN_OPCODE` arm). Pinned by three
+cases in `tests/unit/test_mock_l3_node.cpp`: "a node scripted with one SilenceStep is mute to
+EVERY opcode class…" (four classes through a real `Master`, `bytes_scheduled() == 0`), "an
+ErrorStep node answers EVERY opcode class with the step's own code…" and "a consumed wildcard
+never hijacks a class that has a step of its own kind…". The existing case "an opcode class with
+no step ever scripted answers ERROR/ERR_UNKNOWN_OPCODE, never silence" is unchanged and still
+passes — none of its three scripts contains a wildcard.
+
+**Also implemented, not a ruling question** (recorded so a reader finds the double's behaviour in
+one place): two answers whose wire windows overlap — two requests in flight at once, which trunk
+§3 does not permit — are a **named refusal** (`enqueue_frame()`), not two frames merged
+byte-by-byte into a stream no `Deframer` can read. And a retry (same L2 seq, `ctrl.retry` set) is
+answered from a per-node single-frame replay buffer and consumes no step: that one is not an
+ambiguity at all but `docs/trunk-link-layer.md` §7 stated outright, and the first implementation
+simply missed it.
+
+**Ruling:** PENDING — human, together with the entry above (same contract text;
+`specs/003-host-core-engine/contracts/mock-l3-node.md`). A ruling for (A) or (B) replaces
+`answer()`'s fallback arm and the three cases above, nothing else.
+
+**Amends:** none. **Supersedes:** the (a) half of the 2026-09-23 "MockL3Node: an opcode class
+with no step ever scripted, and how SilenceStep/ErrorStep are targeted" entry immediately above —
+its (b) half (wildcard consumption order) stands unchanged, as does its `READ_DESC`
+zero-length-chunk note. **Related:** the 2026-09-01 "MockWire (T010) design choices…" entry,
+item (2).
