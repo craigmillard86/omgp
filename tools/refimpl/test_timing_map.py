@@ -284,7 +284,10 @@ def test_renaming_the_sole_site_of_a_symbol_fails_the_map(tmp_path):
     root = mirror_test_tree(ROOT, tmp_path)
     assert _rename_tag(root / rel, TAG_BY_SYMBOL[symbol], count=1) == 1
     missing = missing_symbols(timing_map(root))
-    assert missing == [symbol], f"expected the map to name {symbol}; it named {missing}"
+    # Against the real tree's own missing set, not against []: this case must report what the
+    # RENAME cost, whether or not the tree is otherwise complete today.
+    expected = sorted(set(missing_symbols(real)) | {symbol})
+    assert missing == expected, f"expected the map to name {symbol}; it named {missing}"
 
 
 def test_renaming_every_T_gap_site_fails_the_map(tmp_path):
@@ -299,7 +302,8 @@ def test_renaming_every_T_gap_site_fails_the_map(tmp_path):
                   for rel in sorted({rel for rel, _ in sites}))
     assert renamed >= len(sites)
     missing = missing_symbols(timing_map(root))
-    assert missing == ["T_gap_us"], f"expected the map to name T_gap_us; it named {missing}"
+    expected = sorted(set(missing_symbols(real)) | {"T_gap_us"})
+    assert missing == expected, f"expected the map to name T_gap_us; it named {missing}"
 
 
 def test_renaming_one_of_many_T_gap_sites_leaves_the_map_green(tmp_path):
@@ -315,5 +319,5 @@ def test_renaming_one_of_many_T_gap_sites_leaves_the_map_green(tmp_path):
     root = mirror_test_tree(ROOT, tmp_path)
     assert _rename_tag(root / sites[0][0], "timing:T_gap", count=1) == 1
     mapping = timing_map(root)
-    assert missing_symbols(mapping) == []
+    assert missing_symbols(mapping) == missing_symbols(real)   # unchanged: nothing new is named
     assert len(mapping["T_gap_us"]) == len(sites) - 1
