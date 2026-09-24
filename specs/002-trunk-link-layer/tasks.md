@@ -325,7 +325,38 @@ enrolment rotation and one notification per transition.
 - [ ] T045 Write `tools/refimpl/test_timing_map.py` (contracts/tooling.md): every `link_trunk` symbol and `limits.max_l3_message` maps to a `[timing:…]` tag found in `tests/unit/test_link_*.cpp` or `tests/property/test_link_*.cpp`; prints the symbol → `TEST_CASE` map (SC-001); confirm renaming one tag fails it
 - [ ] T046 [P] Write `link/README.md`: purpose, the portable-subset constraints and their enforcement, the timing model in one paragraph, API pointer to `specs/002-trunk-link-layer/contracts/link-cpp.md` and `byte-wire-and-clock.md`, and the F3/F4 interface note summary (SC-010)
 - [ ] T047 [P] Complete `esp32-host/main/link_smoke.cpp`: trivial in-memory `ByteWire`/`Clock`, references `encode_frame`, `Deframer`, `Master`, `Responder`, `HealthTracker` so every translation unit of `omgp_link` links on Xtensa; `./pipeline.sh esp32` green
-- [ ] T048 [P] Run `clang-format -i` over `link/ tests/ tools/*.cpp`; `./pipeline.sh quality` clean including clang-tidy over `link/`
+- [x] T048 [P] Run `clang-format -i` over `link/ tests/ tools/*.cpp`; `./pipeline.sh quality` clean including clang-tidy over `link/`
+  - **Zero-diff outcome (#66).** The sweep changes no file. `./pipeline.sh quality` reports
+    `clang-format 23.1.1 clean (63 files)` — that is `--dry-run --Werror` over `stage_quality`'s
+    own find set, a **superset** of this task's scope (`link/` + `tests/` is 48 `*.cpp`/`*.hpp`,
+    plus 4 `tools/*.cpp`). *Demonstrated by execution* on `task/66` at `072be3a`. That an exit-0
+    dry-run means `clang-format -i` leaves no residual diff is *proved by construction* from
+    `--dry-run`'s semantics: it reports exactly the edits `-i` would apply, so zero reported
+    edits is zero written bytes. Nothing outside the stated trees was touched, because nothing
+    was touched at all.
+  - **clang-tidy over `link/`: zero findings — established by the maintainer's run, not by the
+    dispatch job.** `find core link l3 -name '*.cpp' | xargs clang-tidy -p build/native
+    --warnings-as-errors='*'` over the 9 sources (5 in `link/`, 4 in `l3/`) exits 0 with no
+    output; run interactively at `072be3a` and pasted on #66 — *demonstrated by execution*
+    there, and carried to this branch by the fact that its tree is byte-identical to that
+    commit (*proved by construction* from the empty diff, **assuming** the same clang-tidy
+    build; this job never ran the binary, so its version here is unverified). AC3 is therefore
+    vacuous: no finding exists to fix or `NOLINT`. The dispatch job could not reproduce the run
+    — `OMGP_CLANG_TIDY=1 ./pipeline.sh quality` and its `env`-prefixed form are both refused by
+    the allow-list (`Bash(./pipeline.sh*)`, `Bash(PATH=/usr/bin:/bin ./pipeline.sh*)`, and no
+    other prefix; *demonstrated by the two denials in this run*), and with `CI`/`GITHUB_ACTIONS`
+    set `stage_quality` skips clang-tidy without that opt-in (`pipeline.sh:204`), so the job's
+    own run printed `quality: clang-tidy not run on CI (opt-in: …)` — the `tidy_ready=1` branch,
+    i.e. clang-tidy **is** on PATH here and the build tree **does** exist. Recorded as
+    `docs/OPEN-QUESTIONS.md` 2026-09-24 "#66 (T048) AC2: `stage_quality`'s clang-tidy branch is
+    unreachable from a dispatch job, and is gated nowhere in CI".
+  - **No behaviour changed.** `./pipeline.sh unit diffcheck` green (22/22, `unit: executed
+    613543 check(s) (ctest path)`, `diffcheck: 43890 cases, C++ and Python agree`) and
+    `./pipeline.sh esp32` green (pinned `espressif/idf:v5.3`, `omgp-host.bin` 0x34540 bytes) —
+    both *demonstrated by execution* on this branch. Stated plainly: with an empty diff these
+    runs cannot discriminate — they would have printed the same thing had the sweep been
+    skipped entirely. They are the recorded baseline the box asserts, not evidence that a
+    reformat preserved behaviour.
 - [ ] T049 Execute every step of `specs/002-trunk-link-layer/quickstart.md` on the cmake path and, with `cmake` masked from PATH, the bootstrap path; record the actual outputs of the three discriminating checks (fuzz `TooLong`, mutation `attempt <= retries`, timing-map rename) in `tests/fuzz/README.md` and the PR body
 - [ ] T050 Final `UNIT_TEST_FLOOR` raise; confirm `tests/vectors/` shows only the T020 creating commit for `frame_*` (`git log --oneline -- tests/vectors`)
 - [ ] T051 Append to `docs/OPEN-QUESTIONS.md` any assumption that implementation turned into a question (append-only; e.g. the integer `byte_time_us` at the fallback rate, the clock-based reading of "once per 10 superframes") with recommendation + "Ruling: pending" for the human reviewer
