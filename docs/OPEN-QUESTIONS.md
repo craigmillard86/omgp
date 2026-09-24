@@ -5149,3 +5149,86 @@ with no step ever scripted, and how SilenceStep/ErrorStep are targeted" entry im
 its (b) half (wildcard consumption order) stands unchanged, as does its `READ_DESC`
 zero-length-chunk note. **Related:** the 2026-09-01 "MockWire (T010) design choices…" entry,
 item (2).
+
+---
+
+## 2026-09-24 — #66 (T048) AC2: `stage_quality`'s clang-tidy branch is unreachable from a dispatch job, and is gated nowhere in CI
+
+**Context:** #66 (T048) AC2 asks that `./pipeline.sh quality` pass "on a machine with
+`clang-format` and `clang-tidy` present and `build/native/compile_commands.json` generated —
+neither the clang-format nor the clang-tidy branch in `stage_quality` is silently skipped". The
+dispatch job satisfies the *preconditions* but cannot reach the *branch*, and neither can CI.
+This is a recurring-process question, **not** a blocker on T048: the clang-tidy run itself was
+done interactively by the maintainer at `072be3a` and pasted on #66 (9 sources, exit 0, no
+output), and that is the same tree this task's branch carries. What follows is about who can
+produce that evidence next time, and whether anything gates it.
+
+**Measured this run, on `task/66` at `072be3a` (tree identical to `main`):**
+
+1. **The preconditions hold here.** With `build/native` present, `./pipeline.sh quality` printed
+   `quality: clang-tidy not run on CI (opt-in: OMGP_CLANG_TIDY=1; unpinned, cache-dependent
+   build tree)`. That is the `tidy_ready == 1` arm of `pipeline.sh:207` — it is printed **only**
+   when `command -v clang-tidy` succeeds *and* `build/native/compile_commands.json` exists
+   (`pipeline.sh:199`). *Demonstrated by execution*, and discriminating: the other arm
+   (`pipeline.sh:210`, "needs clang-tidy on PATH and a cmake build tree") is what a missing
+   binary or missing build tree prints, and it is what this same command printed **before** the
+   `build` stage ran. So clang-tidy is installed on the dispatch runner; only the opt-in is
+   missing.
+2. **The opt-in is refused by the allow-list.** `OMGP_CLANG_TIDY=1 ./pipeline.sh quality` and
+   `env OMGP_CLANG_TIDY=1 ./pipeline.sh quality` were both denied — *demonstrated by the two
+   denials in this run*. `agent-dispatch.yml:178` grants exactly `Bash(./pipeline.sh*)` and
+   `Bash(PATH=/usr/bin:/bin ./pipeline.sh*)`; a bare `./pipeline.sh*` prefix does not admit any
+   `VAR=`- or `env`-prefixed invocation, which is the same wall #62 hit for `PATH=` on
+   2026-09-15 and #58 hit for `tools/mutate.sh` on 2026-09-12. The bare binary is not granted
+   either, so `clang-tidy` cannot be invoked directly, and `find … -exec clang-tidy` is refused
+   as an executing `find`.
+3. **Nothing in CI sets `OMGP_CLANG_TIDY`.** `grep -rn OMGP_CLANG_TIDY .github/ tools/ docs/
+   specs/` matches only `tools/refimpl/test_quality_stage.py` (lines 88, 242, 245–246), which
+   *tests* the flag's two behaviours in a fake tree — it does not run clang-tidy over this
+   repo's sources. *Demonstrated by that grep over the current tree*; this is a statement about
+   the repo's present contents, a control, not a guarantee. Consequence, *proved by
+   construction* from `pipeline.sh:204`: on every CI job (`GITHUB_ACTIONS` set, flag unset) the
+   clang-tidy branch is skipped, so **no automated run anywhere — CI or dispatch — has ever
+   analysed `core/ link/ l3/` with clang-tidy.** Every clang-tidy result this repo holds is a
+   human's local transcript. `pipeline.sh:197` already says as much for the pre-#135 state
+   ("Pinning it and making it a CI gate is a separate decision"); this entry is that decision
+   coming due, now that a task's acceptance criterion depends on it.
+
+**Why the workaround used here does not generalise.** T048 closed because the maintainer ran the
+command by hand and pasted it. That works when the task's diff is empty and a human is already
+in the loop. It does not work for the next `link/`- or `core/`-touching PR, where a clang-tidy
+finding would be introduced by the diff and nothing would notice: the criterion would be
+discharged, if at all, by a transcript nobody is obliged to produce.
+
+**Options.**
+
+- **A. Grant the literal prefix** `Bash(OMGP_CLANG_TIDY=1 ./pipeline.sh*)` in
+  `agent-dispatch.yml`, alongside the `PATH=` grant #617 added for #62. Cheapest; an exact
+  literal, not a pattern over the env value (the `gh pr edit*` lesson). Lets a dispatch job
+  produce the transcript itself. Yields a **transcript, not a gate** — the same trade the #62
+  entry weighed for its option D.
+- **B. Run it as a CI gate:** set `OMGP_CLANG_TIDY=1` on the native job's `pipeline.sh`
+  invocation, after `build` has produced `compile_commands.json` in the same job. This is the
+  durable answer, and it is what makes AC2-shaped criteria self-discharging in future. It
+  requires **pinning clang-tidy** the way `tools/requirements.txt` pins `clang-format==23.1.1`
+  — without a pin the gate reds whenever the runner image's analyser moves, which is exactly
+  the failure mode the `clang-format` pin exists to prevent. A pin is a toolchain decision,
+  GOVERNANCE §1, human ruling.
+- **C. Status quo** — a human pastes the run per task, as on #66. No artefact change; the gap
+  in (3) stays open and unlabelled.
+
+**Recommendation: B, with A as the cheap unblocker in the meantime** — the same shape as the
+#62 entry's "B over D" reasoning: A yields a transcript per dispatch, B yields a standing gate.
+They are not exclusive; A alone does not close (3). If only one is taken, take B. Not
+implemented here: both are workflow/toolchain edits, which `agents MUST NOT` make unattended
+(`docs/OPERATING-POLICY.md` §2) and which #66 puts explicitly out of scope.
+
+**Ruling:** PENDING — human (workflow allow-list edit and/or a clang-tidy pin; GOVERNANCE §1,
+"New dependency / toolchain bump").
+
+**Amends:** none. **Supersedes:** none. **Related:** the 2026-09-15 "#62 (T044) AC2,
+corroborated by execution…" entry (same allow-list wall, `PATH=` instead of `OMGP_CLANG_TIDY=`;
+its option D is this entry's option A in another guise) and the 2026-09-12 entry "T040's 'local
+mutation run': an empty diff scope discharges it, and the criterion is the defect" (#58 — the
+same shape again: an acceptance criterion whose tool, `tools/mutate.sh`, is outside the dispatch
+allow-list).
