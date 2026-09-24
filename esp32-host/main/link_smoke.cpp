@@ -217,15 +217,22 @@ extern "C" uint16_t omgp_link_smoke(void) {
                                 g_master.bus_stats().rate_changes);
 
     // trunk §3 — Responder engine (link/responder.cpp): the request encoded above, staged on
-    // this node's wire, is decoded, answered by the handler and scheduled inside the
-    // turnaround window. Staged at instant 0 with the clock already well past one worst-case
-    // frame, so every byte is due on the first poll (see SmokeWire).
+    // this node's wire, is decoded, answered by the handler and transmitted on FR-014's LATE
+    // path — not inside the turnaround window. Staged at instant 0 with the clock already well
+    // past one worst-case frame, so every byte is due on the first poll (see SmokeWire); but
+    // the master block above has already advanced the clock by at least one TRUNK_T_poll_us,
+    // while past_window() turns true one TRUNK_T_turn_max_us after the staged frame's last
+    // byte (link/responder.cpp, past_window/transmit_if_due). So the first poll here is
+    // already outside the window and stats().late_responses — accumulated below — is what
+    // records the transmit. Which branch runs is immaterial to what this file is for: either
+    // way responder.cpp is linked and driven.
     g_node_wire.preload(g_wire_bytes, written, 0);
     for (uint8_t i = 0; i < kSteps; ++i) {
         g_clock.advance(omgp::TRUNK_T_turn_max_us);
         g_responder.poll(g_clock.now_us());
     }
     acc = static_cast<uint16_t>(acc + g_responder.stats().transactions +
+                                g_responder.stats().late_responses +
                                 g_responder.stats().replays_served);
 
     // trunk §6/§7 — node health (link/health.cpp): one enrolment-rotation probe, its

@@ -28,6 +28,7 @@ stripper), so a symbol named only in a comment does not satisfy a reference.
 from __future__ import annotations
 
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -70,11 +71,32 @@ def test_smoke_references_each_engine_translation_unit(smoke, unit, symbols):
     assert not missing, f"link_smoke.cpp references nothing from link/{unit}: {missing}"
 
 
+def declares(source: str, member: str) -> bool:
+    """True if `source` names `member` as a call/definition, at a word boundary.
+
+    Word boundary, not a plain substring: `bit_rate(` is contained in `set_bit_rate(`, so the
+    substring form was satisfied on a file that had dropped `bit_rate()` and kept only
+    `set_bit_rate()` — one of the five guards below checked nothing of its own (review
+    @16fe857). `_` is a word character, so `\\bbit_rate` cannot match inside `set_bit_rate`;
+    the negative control below is what demonstrates that rather than asserting it.
+    """
+    return re.search(rf"\b{re.escape(member)}\s*\(", source) is not None
+
+
+def test_the_member_matcher_is_not_satisfied_by_a_longer_name():
+    # Discriminating check for the guard below: on a source with only the setter, `bit_rate`
+    # must come back missing. Under the old substring form this assertion fails — which is
+    # the whole point of it being here.
+    setter_only = "uint32_t rate_;\nvoid set_bit_rate(uint32_t bps) override { rate_ = bps; }"
+    assert declares(setter_only, "set_bit_rate")
+    assert not declares(setter_only, "bit_rate")
+
+
 # The trivial in-memory Clock/ByteWire the engines are driven against
 # (contracts/byte-wire-and-clock.md). No UART, no device: spec.md Assumptions.
 @pytest.mark.parametrize("member", ["now_us", "transmit", "receive", "bit_rate", "set_bit_rate"])
 def test_smoke_implements_the_wire_and_clock_interfaces(smoke, member):
-    assert f"{member}(" in smoke, f"link_smoke.cpp implements no {member}() override"
+    assert declares(smoke, member), f"link_smoke.cpp implements no {member}() override"
 
 
 @pytest.mark.parametrize("call", ["begin(", "poll(", "next_probe("])
