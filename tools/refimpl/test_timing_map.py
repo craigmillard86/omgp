@@ -83,21 +83,117 @@ TAG_BY_SYMBOL = {**LINK_TRUNK_TAGS, **LIMIT_TAGS}
 # matched by a regex: the names in this tree run over several lines and contain commas,
 # semicolons, parentheses and braces ("after a terminal Failed{Timeout}, …"), so every
 # delimiter-excluding shortcut silently drops real declarations.
+_TEST_CASE_RE = re.compile(r"\b(?:TEST_CASE|TEST_CASE_METHOD|TEMPLATE_TEST_CASE|SCENARIO)\s*\(")
+_TAG_RE = re.compile(r"\[([^\[\]]+)\]")
+# Catch2's tag argument is exactly a run of `[...]` groups and nothing else — the test that
+# recognises it, so that a name happening to contain brackets is never read as tags.
+_TAG_LITERAL_RE = re.compile(r"^\s*(?:\[[^\[\]]+\]\s*)+$")
 _ANY_TIMING_TAG_RE = re.compile(r"\[timing:[^\[\]]*\]")
 
 
-# --- the mapping machinery: NOT WRITTEN YET (this commit is the RED half) --------------------
-# CLAUDE.md rule 8 / tasks.md Phase 8 "Tests": the assertions land first and fail, then the
-# mapping that satisfies them. Everything below this line exists in the next commit; until
-# then every test that reaches the map fails here, naming what is missing.
+def _string_literals(text: str, open_paren: int):
+    """The string literals of the argument list opening at `text[open_paren] == '('`.
+
+    Walks to the matching `)`, skipping comments and character literals so that a `"`, `(`
+    or `)` inside them cannot end the list early.
+    """
+    literals, depth, i, n = [], 1, open_paren + 1, len(text)
+    while i < n and depth:
+        c = text[i]
+        if c == '"':
+            buf, i = [], i + 1
+            while i < n and text[i] != '"':
+                if text[i] == "\\":
+                    buf.append(text[i:i + 2])
+                    i += 2
+                    continue
+                buf.append(text[i])
+                i += 1
+            literals.append("".join(buf))
+            i += 1
+            continue
+        if c == "'":                                  # char literal: '(', '"', '\\' …
+            i += 1
+            while i < n and text[i] != "'":
+                i += 2 if text[i] == "\\" else 1
+            i += 1
+            continue
+        if text.startswith("//", i):
+            nl = text.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if text.startswith("/*", i):
+            end = text.find("*/", i)
+            i = n if end < 0 else end + 2
+            continue
+        depth += (c == "(") - (c == ")")
+        i += 1
+    return literals
 
 
-def _unwritten(*_args, **_kwargs):
-    raise NotImplementedError("T045: the trunk §9 timing map is written in the next commit")
+def yaml_doc():
+    return yaml.safe_load(YAML_PATH.read_text())
 
 
-yaml_doc = searched_files = parse_test_cases = timing_map = missing_symbols = \
-    format_map = mirror_test_tree = _unwritten
+def searched_files(root: pathlib.Path):
+    """Every file the tags may live in, sorted, relative paths resolved against `root`."""
+    return sorted(p for g in TEST_GLOBS for p in root.glob(g))
+
+
+def parse_test_cases(path: pathlib.Path):
+    """[(test name, [tag, ...]), ...] for one Catch2 source file.
+
+    Catch2 concatenates adjacent literals, so a name split over lines arrives as several
+    literals; the tag literal is the one made only of `[...]` groups.
+    """
+    out, text = [], path.read_text()
+    for m in _TEST_CASE_RE.finditer(text):
+        literals = _string_literals(text, m.end() - 1)
+        if not literals:
+            continue
+        name = "".join(lit for lit in literals if not _TAG_LITERAL_RE.match(lit)).strip()
+        tags = [t for lit in literals if _TAG_LITERAL_RE.match(lit) for t in _TAG_RE.findall(lit)]
+        out.append((name or literals[0], tags))
+    return out
+
+
+def timing_map(root: pathlib.Path = ROOT):
+    """symbol -> [(file relative to root, TEST_CASE name), ...] for all nine §9 symbols."""
+    found = {symbol: [] for symbol in TAG_BY_SYMBOL}
+    by_tag = {tag: symbol for symbol, tag in TAG_BY_SYMBOL.items()}
+    for path in searched_files(root):
+        rel = path.relative_to(root).as_posix()
+        for name, tags in parse_test_cases(path):
+            for tag in tags:
+                if tag in by_tag:
+                    found[by_tag[tag]].append((rel, name))
+    return found
+
+
+def missing_symbols(mapping):
+    return sorted(symbol for symbol, hits in mapping.items() if not hits)
+
+
+def format_map(mapping) -> str:
+    """SC-001's listing: every symbol, its tag, and the tests that carry it."""
+    lines = []
+    for symbol in sorted(TAG_BY_SYMBOL, key=str.lower):
+        hits = mapping[symbol]
+        lines.append(f"{symbol} -> [{TAG_BY_SYMBOL[symbol]}]  ({len(hits)} test case(s))")
+        for rel, name in hits:
+            lines.append(f'    {rel}: "{name}"')
+        if not hits:
+            lines.append("    *** NO TEST CARRIES THIS TAG ***")
+    return "\n".join(lines)
+
+
+def mirror_test_tree(root: pathlib.Path, dest: pathlib.Path) -> pathlib.Path:
+    """Copy just the searched file set into `dest`, keeping relative paths, and return it."""
+    for src in searched_files(root):
+        out = dest / src.relative_to(root)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, out)
+    return dest
 
 
 # --- the map itself -------------------------------------------------------------------------
