@@ -5555,8 +5555,10 @@ define; both are also still `Ruling: pending`.
 
 ## 2026-09-27 — T051: reduced-rate polling reads "once per ten superframe periods" as 10 × `T_poll` of wall clock since the node's own last poll
 
-**Context:** trunk §7 (FR-020) says a SUSPECT node is due for polling "only once per ten
-superframe periods". The link layer has no superframe — superframe composition belongs to F3
+**Context:** trunk §7 says a SUSPECT node is "polled once per 10 superframes"; FR-020 renders
+that as due for polling "only once per ten superframe periods" (`10 × T_poll`, from the generated
+symbol) — the quoted wording is FR-020's, not §7's. The link layer has no superframe — superframe
+composition belongs to F3
 (`spec.md` "Assumptions", *Scope boundary*) — so `HealthTracker::poll_due` implements the sentence
 as a wall-clock period: `link/link_types.hpp` defines
 `kSuspectPollPeriod_us = 10ull * TRUNK_T_poll_us` (20 000 µs) and `link/health.cpp` returns
@@ -5612,8 +5614,9 @@ because every enrolled node went silent) — the two readings diverge:
 
 At the fallback rate the tracker therefore offers a SUSPECT node roughly once per 1.15 superframes
 where trunk §7 asks for once per ten: the reduced-rate reduction is not 10×, it is ~1.15×, and it
-is nearly absent in the case §7's "reduced rate" wording most plausibly exists for — a degraded
-bus. **Labelled (CLAUDE.md rule 11):** *derived by arithmetic* from `kSuspectPollPeriod_us`,
+is nearly absent in the case §7's rule — "polled once per 10 superframes", its own words;
+"reduced-rate" is this repo's term (`link/health.cpp`), not the spec's — most plausibly exists
+for: a degraded bus. **Labelled (CLAUDE.md rule 11):** *derived by arithmetic* from `kSuspectPollPeriod_us`,
 `TRUNK_T_poll_us` and data-model §7's stretch factor. **Not** demonstrated by a test, and not
 demonstrable at this layer: `poll_due` takes a wall-clock `now_us` and `HealthTracker` has no
 notion of a superframe at all, so the divergence can only be observed in an F3 scheduler that
