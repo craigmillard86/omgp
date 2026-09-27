@@ -5613,10 +5613,16 @@ because every enrolled node went silent) — the two readings diverge:
 - `poll_due` returns true at 20 000 µs, which falls inside the **second** stretched superframe.
 
 At the fallback rate the tracker therefore offers a SUSPECT node roughly once per 1.15 superframes
-where trunk §7 asks for once per ten: the reduced-rate reduction is not 10×, it is ~1.15×, and it
-is nearly absent in the case §7's rule — "polled once per 10 superframes", its own words;
-"reduced-rate" is this repo's term (`link/health.cpp`), not the spec's — most plausibly exists
-for: a degraded bus. **Labelled (CLAUDE.md rule 11):** *derived by arithmetic* from `kSuspectPollPeriod_us`,
+where trunk §7 asks for once per ten: the reduction is not 10×, it is ~1.15×, and it is nearly
+absent in the degraded-bus case that §7's rule — "polled once per 10 superframes", its own words
+(`docs/trunk-link-layer.md:71`) — most plausibly exists for. The term "reduced-rate" used in this
+entry is this feature's, not `docs/trunk-link-layer.md`'s: it is
+`specs/002-trunk-link-layer/spec.md:679`'s ("Reduced-rate polling counts superframe periods from
+the node's last poll") and the pinning test's (`tests/unit/test_link_health.cpp:346`), while
+`docs/trunk-link-layer.md` does not use it at all (`grep -in reduc docs/trunk-link-layer.md`
+returns no hit; the three hits of `grep -rniE reduc link/` are the verb *reduces*, about
+collapsing a bit rate to one bit, not this term).
+**Labelled (CLAUDE.md rule 11):** *derived by arithmetic* from `kSuspectPollPeriod_us`,
 `TRUNK_T_poll_us` and data-model §7's stretch factor. **Not** demonstrated by a test, and not
 demonstrable at this layer: `poll_due` takes a wall-clock `now_us` and `HealthTracker` has no
 notion of a superframe at all, so the divergence can only be observed in an F3 scheduler that
