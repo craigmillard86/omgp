@@ -9,10 +9,15 @@
 // issue #682: T011 carries its own Ring test; CoreEngine-level queue behaviour stays T014).
 //
 // This translation unit's only project include under test is core/core_types.hpp, and it comes
-// FIRST in its own include block — clang-format never reorders across a blank line — so nothing
-// else has declared <cstdint>/<cstddef> or the generated header on its behalf. Compiling this file
-// is therefore the committed standalone-include evidence that the header is self-contained under
-// the native preset's -Wall -Wextra -Werror.
+// FIRST in its own include block — clang-format never reorders across a blank line — so no other
+// project header is included on its behalf. Compiling this file therefore demonstrates exactly
+// one thing about includes: core_types.hpp needs no l3/, link/ or Catch2 header included first,
+// under the native preset's -Wall -Wextra -Werror.
+// It is NOT an oracle for the header's own <cstddef>/<cstdint> lines. core_types.hpp:15 includes
+// the generated omgp_protocol.h first, and that header includes both itself
+// (build/gen/omgp_protocol.h:6-7), so deleting either line from core_types.hpp would compile this
+// TU identically — and per CLAUDE.md's working agreements, evidence whose output is unchanged when
+// the claim is false supports nothing and must not be cited for it.
 #include "core/core_types.hpp"
 
 #include "catch_amalgamated.hpp"
