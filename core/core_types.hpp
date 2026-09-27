@@ -36,12 +36,34 @@ static_assert(static_cast<size_t>(ADDR_module_max) - static_cast<size_t>(ADDR_mo
               "LIMIT_max_nodes must cover ADDR_module_min..ADDR_module_max: the node table is "
               "indexed by node_id - ADDR_module_min (data-model.md §3, R-05)");
 
+// data-model.md §8/§8a: ParamRequestId is a uint8_t (§8) whose id space is scoped to the
+// parameter FIFO's own fixed capacity, and §8a fixes that capacity at LIMIT_max_nodes. Raising
+// max_nodes past what a uint8_t can express in the YAML would alias request ids across FIFO
+// slots — a ParamResult delivered against the wrong outstanding request — with no out-of-range
+// access anywhere to catch it. It must fail here instead.
+static_assert(LIMIT_max_nodes <= UINT8_MAX,
+              "ParamRequestId is uint8_t and its id space is the parameter FIFO's capacity: "
+              "LIMIT_max_nodes must fit a uint8_t or request ids alias (data-model.md §8, §8a; "
+              "research.md R-10)");
+
 // data-model.md §4: BackplaneRecord tables are sized
 // `ADDR_backplane_max - ADDR_backplane_min + 1` and indexed by `addr - ADDR_backplane_min`.
 // An inverted range would wrap that subtraction into a huge size_t table size.
 static_assert(ADDR_backplane_max >= ADDR_backplane_min,
               "ADDR_backplane_min..ADDR_backplane_max must not be inverted or the backplane "
               "table size wraps (data-model.md §4)");
+
+// data-model.md §3 / §4: two tables reserve 0 as their "empty" sentinel — NodeRecord's
+// `backplane_addr` (0 = none) and BackplaneRecord's `node_id_by_slot` (0 = unassigned). That is
+// sound only while no reachable address is 0. Lowering either YAML minimum to 0x00 would make a
+// real address indistinguishable from "empty" while every other assert here still passed, so
+// the sentinel's precondition is pinned rather than left as a property of the current YAML.
+static_assert(ADDR_backplane_min > 0,
+              "NodeRecord::backplane_addr uses 0 as its 'no owning backplane' sentinel: "
+              "ADDR_backplane_min must stay nonzero (data-model.md §3)");
+static_assert(ADDR_module_min > 0,
+              "BackplaneRecord::node_id_by_slot uses 0 as its 'unassigned slot' sentinel: "
+              "ADDR_module_min must stay nonzero (data-model.md §4)");
 
 // data-model.md §4: node_id_by_slot is sized LIMIT_bp_slot_map_max_slots and indexed by a slot
 // number carried in BP_SLOT_MAP's own uint8_t slot_count field (§10). Raising the YAML cap
@@ -251,11 +273,29 @@ enum class LifecycleKind : uint8_t {
     DemotionCleared,
 };
 
+// LIFETIME of module_event_detail (ASSUMED here, not established by this header — this file
+// declares the shape data-model.md §7 fixes and owns no bytes). The field is a NON-OWNING view,
+// the same shape as l3::Bytes (l3/l3_types.hpp:47), which is what l3::GetEventResp::detail is:
+// a view into the transaction's receive buffer. §8a queues LifecycleEvent and delivers it only
+// from drain_callbacks(), arbitrarily later (FR-021) — so an event enqueued with the decoder's
+// view still in this field would be drained after that buffer had been reused. The contract
+// whoever enqueues (CoreEngine, T015) must therefore meet is:
+//   * on enqueue, module_event_detail must already point into storage the ENGINE owns and keeps
+//     valid until drain_callbacks() has delivered this event — never into the receive buffer the
+//     l3 decoder handed back;
+//   * on delivery, the pointer is valid for the duration of the on_lifecycle call only; a
+//     callback that needs the bytes afterwards copies them.
+// Where that engine-owned storage lives is not settled by §7 or §8a and is not decided here —
+// docs/OPEN-QUESTIONS.md, 2026-09-27 entry, recommends an owned detail arena alongside the §8a
+// rings, for ruling with T015 (#684). Until then this is an unproved precondition on T015, NOT
+// a property of the current repo: nothing in core/ copies detail bytes today, and nothing here
+// can make the compiler check it.
 struct LifecycleEvent {
     LifecycleKind kind = LifecycleKind::NodeDiscovered;
     uint8_t node_id = 0; // module or backplane trunk address; 0 for BusFault/BusRecovered
     // Payload, meaningful only for the matching kind:
     uint8_t module_event_type = 0, module_event_remaining = 0; // ModuleEvent
+    // Non-owning view; see the LIFETIME block above this struct.
     const uint8_t* module_event_detail = nullptr;
     uint8_t module_event_detail_len = 0;
     uint8_t failed_param_id = 0, failed_reason = 0; // ParamSetFailed
@@ -285,8 +325,13 @@ struct ParamResultDelivery {
 // (CoreEngine::dropped_deliveries_) belongs to CoreEngine, not here: this container reports the
 // refusal to its caller and keeps no statistics of its own.
 //
-// Behaviour is exercised first by tests/unit/test_core_callback_queue.cpp (T014); this header
-// establishes only the structural facts (capacity, storage, no allocation) at compile time.
+// Behaviour is exercised by tests/unit/test_core_types.cpp, which is also core/'s mutation
+// oracle (T011, ruling 2026-09-27 on issue #682): FIFO order, drop-newest on a full ring, pop on
+// empty, the size/empty/full/capacity accessors, wraparound, and — at run time, via
+// HEAP_FREE_SCOPE (tests/support/heap_guard.hpp) — that no operation reaches the allocator.
+// Only `capacity()` and the nonzero-N precondition below are compile-time facts. T014's
+// tests/unit/test_core_callback_queue.cpp exercises CoreEngine::drain_callbacks() and
+// dropped_deliveries_ on top of this container, not the container itself.
 template <typename T, size_t N> class Ring {
   public:
     static_assert(N > 0, "Ring capacity must be nonzero: a zero-length ring can never accept "
