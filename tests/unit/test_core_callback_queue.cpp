@@ -47,7 +47,8 @@ static constexpr size_t kCap = omgp::LIMIT_max_nodes;
 // and cannot be reached by an application that has not itself defined this type, which a public
 // enqueue method could not claim. Deliberately just the two enqueue points: no ring accessor, no
 // drop-counter setter, nothing that would let a test reach past the public API for anything the
-// public API already exposes (dropped_deliveries()).
+// public API already exposes (dropped_deliveries()) — plus the one node-table writer justified
+// beside it below.
 namespace omgp {
 namespace core {
 struct CoreEngineTestSeam {
@@ -57,6 +58,19 @@ struct CoreEngineTestSeam {
     static bool enqueue_param_result(CoreEngine& engine, ParamRequestId id,
                                      const ParamResult& result) {
         return engine.enqueue_param_result(id, result);
+    }
+    // data-model.md §3 / R-05: `index = node_id - ADDR_module_min` is real logic behind the two
+    // public readers, and at T015 nothing WRITES a NodeRecord (T017/T018 are the enrolment and
+    // slot-map producers). While every record holds its defaults the mapping is unobservable —
+    // an in-range id and an out-of-range one both read as "Undiscovered, not in use", so an
+    // off-by-a-constant, collapsed or inverted mapping reads exactly like the correct one. This
+    // writer is the smallest thing that makes it observable: two fields of one record, addressed
+    // by TABLE INDEX so the test states the index it expects instead of re-deriving it from the
+    // id under test with the same arithmetic it is checking. It is not a node-state API and must
+    // not grow into one — T017/T018's own tests drive the real writers.
+    static void set_node(CoreEngine& engine, size_t index, DiscoveryState discovery, bool in_use) {
+        engine.nodes_[index].discovery = discovery;
+        engine.nodes_[index].in_use = in_use;
     }
 };
 } // namespace core
@@ -77,10 +91,14 @@ struct Recorder {
     uint8_t node_ids[kSlots]{};
     ParamRequestId ids[kSlots]{};
     uint16_t values[kSlots]{};
-    // Re-entrancy probe (only the "a callback that enqueues" case sets these): the event a
-    // callback pushes back onto the ring from inside its own delivery.
+    // Re-entrancy probe (only the "a callback that enqueues" cases set these): the item a
+    // callback pushes back onto its own ring from inside its own delivery. One counter per ring,
+    // because the at-entry snapshot is taken per ring (lifecycle_budget / param_budget) even
+    // though `max_deliveries` is one budget across both — so each ring's snapshot is asserted on
+    // its own.
     CoreEngine* engine = nullptr;
     unsigned reentrant_enqueues_left = 0;
+    unsigned reentrant_param_enqueues_left = 0;
     // Re-entrant-DRAIN probe (only the "a callback that calls drain_callbacks()" case sets
     // reentrant_drain): nesting depth measured on the callback itself, so a drain that recursed
     // once per queued item is visible as a depth, not only as a count.
@@ -121,6 +139,15 @@ void on_param_cb(void* ctx, ParamRequestId id, ParamResult result) {
         r->values[r->param_calls] = result.value;
     }
     ++r->param_calls;
+    if (r->reentrant_param_enqueues_left > 0 && r->engine != nullptr) {
+        --r->reentrant_param_enqueues_left;
+        // Identity tag (id 0xEE, value 0xBEEF): this result must not be delivered by the drain in
+        // progress — it was not pending when that drain was entered.
+        ParamResult late{};
+        late.ok = true;
+        late.value = 0xBEEF;
+        Seam::enqueue_param_result(*r->engine, 0xEE, late);
+    }
 }
 
 // One engine over the repo's existing test doubles: tests/support/mock_wire.hpp's ByteWire and
@@ -150,6 +177,19 @@ ParamResult ok_result(uint16_t value) {
     r.ok = true;
     r.value = value;
     return r;
+}
+
+// The three nodes_ indices the node-table case populates, and the module ids that must map to
+// them (data-model.md §3 / R-05). Both ends of the module address range plus one interior index,
+// so a mapping that is off by a constant, collapsed onto a single index, or inverted at either
+// boundary fails on identity. Written as index -> id, which is the direction the seam and the
+// public readers do NOT share: the seam addresses the table, the readers take an id.
+constexpr size_t kFirstIdx = 0;
+constexpr size_t kMidIdx = 5;
+constexpr size_t kLastIdx = omgp::ADDR_module_max - omgp::ADDR_module_min;
+
+constexpr uint8_t id_of(size_t index) {
+    return static_cast<uint8_t>(omgp::ADDR_module_min + index);
 }
 
 } // namespace
@@ -531,6 +571,84 @@ TEST_CASE("a default drain delivers what was pending when it was called, not wha
     REQUIRE(rig.rec.lifecycle_calls == 3);
     REQUIRE(rig.rec.node_ids[2] == 0xEE);
     REQUIRE(rig.rec.kinds[2] == LifecycleKind::BusFault);
+}
+
+TEST_CASE("a default drain delivers the param results pending when it was called, not what a "
+          "param-result callback enqueues during it",
+          "[core][callbacks]") {
+    // The param-result ring's half of the case above. Asserted separately rather than folded into
+    // it because the at-entry snapshot is taken PER RING (lifecycle_budget and param_budget are
+    // two counters, even though `max_deliveries` is one budget across both): a drain bounded
+    // correctly for lifecycle events and unbounded for param results delivers the right count on
+    // whichever ring a combined case happened to load, and nothing would fail.
+    Rig rig;
+    rig.rec.engine = &rig.engine;
+    rig.rec.reentrant_param_enqueues_left = 1; // the first delivery pushes one more result on
+
+    REQUIRE(Seam::enqueue_param_result(rig.engine, 1, ok_result(0x0101)));
+    REQUIRE(Seam::enqueue_param_result(rig.engine, 2, ok_result(0x0202)));
+
+    rig.engine.drain_callbacks();
+
+    // Two, not three: param_budget is the ring's size AT ENTRY, so a result enqueued by a callback
+    // waits for the next drain. Without that bound the drain would run until the ring emptied —
+    // and never return at all for a callback that always re-enqueues.
+    REQUIRE(rig.rec.param_calls == 2);
+    REQUIRE(rig.rec.ids[0] == 1);
+    REQUIRE(rig.rec.values[0] == 0x0101);
+    REQUIRE(rig.rec.ids[1] == 2);
+    REQUIRE(rig.rec.values[1] == 0x0202);
+
+    // Queued, not lost.
+    rig.engine.drain_callbacks();
+    REQUIRE(rig.rec.param_calls == 3);
+    REQUIRE(rig.rec.ids[2] == 0xEE);
+    REQUIRE(rig.rec.values[2] == 0xBEEF);
+    REQUIRE(rig.engine.dropped_deliveries() == 0);
+}
+
+TEST_CASE("the node table is indexed by node_id - ADDR_module_min, and only inside the module "
+          "address range",
+          "[core][callbacks]") {
+    // data-model.md §3 / R-05, the claim the two public readers rest on. Asserted here through
+    // three records with DISTINCT discovery states and distinct in_use, because a table of
+    // identical defaults cannot tell a correct mapping from a wrong one.
+    Rig rig;
+    Seam::set_node(rig.engine, kFirstIdx, DiscoveryState::Discovered, true);
+    Seam::set_node(rig.engine, kMidIdx, DiscoveryState::Identifying, false);
+    Seam::set_node(rig.engine, kLastIdx, DiscoveryState::ReadingDescriptor, true);
+
+    SECTION("both ends of the range and one interior id read their own record") {
+        REQUIRE(rig.engine.discovery_state(id_of(kFirstIdx)) == DiscoveryState::Discovered);
+        REQUIRE(rig.engine.node_in_use(id_of(kFirstIdx)));
+        REQUIRE(rig.engine.discovery_state(id_of(kMidIdx)) == DiscoveryState::Identifying);
+        REQUIRE_FALSE(rig.engine.node_in_use(id_of(kMidIdx)));
+        REQUIRE(rig.engine.discovery_state(id_of(kLastIdx)) == DiscoveryState::ReadingDescriptor);
+        REQUIRE(rig.engine.node_in_use(id_of(kLastIdx)));
+    }
+
+    SECTION("every other module id reads its own untouched record, not a neighbour's") {
+        for (size_t idx = 0; idx <= kLastIdx; ++idx) {
+            if (idx == kFirstIdx || idx == kMidIdx || idx == kLastIdx) {
+                continue;
+            }
+            REQUIRE(rig.engine.discovery_state(id_of(idx)) == DiscoveryState::Undiscovered);
+            REQUIRE_FALSE(rig.engine.node_in_use(id_of(idx)));
+        }
+    }
+
+    SECTION("an id just outside either boundary names no record at all") {
+        // The two ids one step past each end, plus the extremes: with a populated table these are
+        // the reads that would return a neighbour's record — or index past the table — if either
+        // half of the range guard were off by one (contracts/core-cpp.md §Engine: bounds-safe for
+        // ANY uint8_t; under the native preset's ASan an out-of-range read aborts the case).
+        const uint8_t outside[] = {0x00, static_cast<uint8_t>(omgp::ADDR_module_min - 1),
+                                   static_cast<uint8_t>(omgp::ADDR_module_max + 1), 0xFF};
+        for (const uint8_t id : outside) {
+            REQUIRE(rig.engine.discovery_state(id) == DiscoveryState::Undiscovered);
+            REQUIRE_FALSE(rig.engine.node_in_use(id));
+        }
+    }
 }
 
 TEST_CASE("an engine whose CoreCallbacks pointers are null consumes its pending deliveries "
