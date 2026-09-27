@@ -36,6 +36,18 @@ frame dst=0x01 src=0x00 flags=0x00 seq=3 payload=0101000000
 
 ## Vectors (created once by `genvectors.py`, then immutable)
 
+Immutability (CLAUDE.md rule 9) binds the **wire evidence** — `bytes`, `fields`, `canonical`
+— not `spec_ref`. That field is generator-derived prose citing a limit *symbol name*
+(`"trunk §4 payload at LIMIT_max_l3_payload"`), not wire content; when a limit symbol is
+renamed (e.g. F10's `max_l3_payload` → `max_l3_message` split, 2026-09-21), a commit that
+regenerates only the `spec_ref` string to track the rename — reproducing byte-identically
+from the reference implementation (`genvectors --check`), with the reason disclosed in the
+commit message — is the rule-9 regeneration path, not a violation of it. *(Ratified
+2026-09-27, human ruling on #68/T050, against `a4522a1`'s `frame_max_payload.json` change:
+`spec_ref` text only, `bytes` unchanged, `genvectors --check` reported 0 drift both before
+and after.)* A change to `bytes`, `fields` or `canonical` remains immutable-after-creation
+with no such carve-out.
+
 | name | content | why |
 |---|---|---|
 | `frame_ping_req` | dst 0x01, src 0x00, seq 0, payload = the L3 PING request bytes | minimal real frame; the vector feature 001 named `msg_ping_req` travels inside it |
