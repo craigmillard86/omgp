@@ -119,13 +119,13 @@ behaviour, in its own file. The harness's own negative fixtures were moved off `
       silence-by-default); a `SilenceStep` produces a genuine `Master` timeout over a real wire
       — make it pass by completing T012 (mirrors F2's own `test_mock_wire.cpp`, verifying the
       test double itself before anything is built on top of it)
-- [ ] T014 [P] Write `tests/unit/test_core_callback_queue.cpp` (write first, RED; `/speckit-analyze`
+- [x] T014 [P] Write `tests/unit/test_core_callback_queue.cpp` (write first, RED; `/speckit-analyze`
       finding I1): pending `LifecycleEvent`/`ParamResultDelivery` rings (data-model.md §8a) —
       enqueueing does not invoke either `CoreCallbacks` function; `drain_callbacks()` is the
       only thing that does; a full ring refuses the newest enqueue and increments
       `dropped_deliveries_` rather than evicting an older entry; `drain_callbacks(n)` invokes at
       most `n` callbacks and leaves the rest pending for the next call
-- [ ] T015 Write `core/core_engine.hpp`/`.cpp`: `CoreEngine` skeleton — constructor owning a
+- [x] T015 Write `core/core_engine.hpp`/`.cpp`: `CoreEngine` skeleton — constructor owning a
       `link::Master` and `link::HealthTracker` (R-02), the fixed node/backplane/descriptor
       tables from T011 zero-initialised (`descriptors_[32]`, R-12), the pending-delivery rings
       and `drain_callbacks()` (data-model.md §8a — make T014 pass), `discovery_state()`/
@@ -133,6 +133,22 @@ behaviour, in its own file. The harness's own negative fixtures were moved off `
       in US5, T042) so `CoreEngine` satisfies `link::HealthListener` from its first commit, and
       an empty `run_superframe()` that only drains `Master`'s receive path — add to
       `core/CMakeLists.txt` (converts it from `INTERFACE` to `STATIC`, mirroring T001's own note)
+**Note (2026-09-27, #685/#686).** T014 and T015 were delivered as ONE dispatch unit (ruling
+2026-08-30, `docs/DEFINITION-OF-READY.md`): T015's `core/core_engine.hpp` is what makes T014's
+test compile at all, so the test commit alone would red the native build stage. Two points the
+artefacts left open were decided in that PR and are recorded here so no later task re-opens them.
+(1) `dropped_deliveries_` had no reader in `contracts/core-cpp.md` §Engine while T014 must assert
+it increments, so a `uint32_t dropped_deliveries() const` accessor joined the existing read-only
+introspection group (`discovery_state()`/`node_in_use()`). (2) No production path enqueues onto
+the §8a rings until T018/T020-T022/T027/T042, so the test loads them through a declared-never-
+defined `struct CoreEngineTestSeam` that `CoreEngine` befriends and the test file defines — a
+friend declaration emits no code, which is T023's "gated so it costs nothing when unused" by
+construction. It is not a public enqueue API and must not become one. Also recorded: `omgp_core`
+ships `-fno-exceptions` but NOT the `-fno-rtti` T001's note predicted — that flag and the native
+preset's UBSan `vptr` check cannot coexist now that `core/` has a polymorphic class
+(`docs/OPEN-QUESTIONS.md`, 2026-09-27, PENDING human ruling; T003/#674 is where a real toolchain
+guarantee would come from).
+
 - [ ] T016 Add `core` to `CMakeLists.txt` (root)'s existing `omgp_add_catch_test` link set if
       T001 did not already cover every consumer; confirm `./pipeline.sh codegen quality build`
       is green with `omgp_core` compiled but empty of behaviour

@@ -23,7 +23,7 @@ enable_testing()
 # --- portable libraries (embedded path: CLAUDE.md rule 5 enforced per target) ---
 add_subdirectory(l3)
 add_subdirectory(link)
-add_subdirectory(core) # INTERFACE until T015 gives it sources — rule 5 is documented, not yet enforced
+add_subdirectory(core) # STATIC since T015 (core_engine.cpp) — rule 5's -fno-exceptions/-fno-rtti enforced there
 
 # --- test framework: vendored Catch2 v3 (third_party/catch2/VERSION records tag + sha256) ---
 add_library(catch2_amalgamated STATIC third_party/catch2/catch_amalgamated.cpp)
