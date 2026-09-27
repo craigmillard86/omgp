@@ -49,6 +49,12 @@ target_link_libraries(omgp_test_support PUBLIC catch2_amalgamated omgp_link omgp
 set(OMGP_WRAP_LDFLAGS -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc
                       -Wl,--wrap=_Znwm -Wl,--wrap=_Znam)
 
+# omgp_core is on this line (T001) and on no other, which is spec 003 T016's audited result:
+# the only sources in the tree that include a core/ header are tests/unit/test_core_*.cpp, and
+# every Catch2 binary is built here. omgp_test_support, omgp_canon, omgp_l3_helper, the fuzz
+# targets, test_smoke, crc_helper and l3_helper were each checked and need no change — T016
+# forbids adding omgp_core to a target that does not reference it. tools/refimpl/
+# test_core_link_sets.py re-runs that audit in both directions on every `refimpl` stage.
 function(omgp_add_catch_test name)
   add_executable(${name} ${ARGN})
   target_link_libraries(${name} PRIVATE omgp_l3 omgp_link omgp_core omgp_test_support
