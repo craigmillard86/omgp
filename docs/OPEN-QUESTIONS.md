@@ -5485,3 +5485,156 @@ clause only ("does not exist yet"). **Supersedes:** none — that entry's option
 pending ruling are untouched. **Related:** `core/CMakeLists.txt`'s `target_compile_options` note,
 which still reads "T003 (#674), still open, so today (a) is the whole of it"; a task touching that
 file should bring it into line with this entry.
+
+## 2026-09-27 — T051: the integer `byte_time_us()` model — 86 µs against a true 86.8 µs at the fallback rate
+
+**Context:** `link/link_types.hpp` computes byte time as `10000000u / bit_rate` in whole
+microseconds. Trunk §9 gives the two bit rates (1 000 000 and 115 200) and §4 gives the
+"≤ ~1.4 ms" frame bound, but neither a byte-time value nor an arithmetic type — the integer model
+is this feature's own choice (`specs/002-trunk-link-layer/spec.md` "Assumptions", *Frame
+transmission time model*; FR-012). At the reference rate it is exact (10 µs). At the fallback rate
+it truncates 86.8055… µs to 86 µs, 0.93 % short, and that shortfall appears in two different
+shapes:
+
+- **Single-byte terms, where it does not compound.** `Master::frame_arriving`'s cadence hold and
+  the drain loops' `byte_end_us = start_us + byte_time_us(...)` (`link/master.cpp`,
+  `link/responder.cpp`) take each byte's START from the wire and only its END from the model, so
+  the error is 0.8 µs per byte and never accumulates. Against `T_gap` (50 µs) — the idle the gap
+  rule requires after that recorded end — 0.8 µs is not material.
+- **Multiplied terms, where it compounds by `kMaxWire`.** `max_frame_us()` is
+  142 × 86 = 12 212 µs against a true 12 326.4 µs (`link/master.cpp`, `link/responder.cpp`), and
+  `kOutcomeWindowUs` is 2 × 142 × 86 + `T_resp` = 24 624 µs against a true 24 852.8 µs
+  (`link/health.cpp`) — 114.4 µs short per worst-case frame the term bounds.
+
+spec.md's justification for the model is "about 1 % short over a worst-case frame, well inside the
+`T_turn`/`T_resp` margins". The percentage is right; **"well inside the margins" is the clause that
+does not survive the multiply** — 114.4 µs exceeds `T_turn_max` (100 µs) and is 57 % of `T_resp`
+(200 µs). Whether that matters is a question about what each term guards rather than about the
+margins, and neither term is a `T_turn` or `T_resp` deadline:
+
+- `max_frame_us()` is a *cap* on a courtesy hold, and `master.cpp`'s argument for it is that "no
+  legitimate response can outlast the cap … it closes ≥ 2 byte times before it (SC-008's
+  achievable maximum is 140 wire bytes)". That argument survives the truncation, with a much
+  thinner margin than the comment's "2 byte times" suggests: 140 true byte times is 12 152.8 µs
+  against a modelled cap of 12 212 µs, so the real slack is **59 µs, not 172 µs** — the integer
+  model spends two thirds of it. A 142-byte frame does exceed the cap in true time, but only a
+  station transmitting one can produce that, which is exactly the case the cap exists to cut
+  short, so firing early there is the safe direction.
+- `kOutcomeWindowUs` is a write-off window whose own comment records that erring long is the
+  harmless direction; being 229 µs short of a 24.9 ms bound is inside its own stated tolerance.
+
+So nothing here says the model is wrong. It says the *justification* recorded in spec.md is
+narrower than the sentence claims, that the 59 µs figure is the one the cap's safety actually rests
+on, and that both are what an implementer should read rather than "well inside the margins".
+
+**What no test in this repository can tell you** (CLAUDE.md rule 11): the engines and the test
+wires call the *same* `byte_time_us`. `MockWire`, `MockL3Node` and the `test_link_*` suites
+schedule byte arrivals from it (`tests/support/mock_wire.cpp`, `tests/support/mock_l3_node.cpp`),
+so the model is self-consistent and the 0.93 % divergence is invisible **by construction**, not
+merely untested. It is observable only against a real UART — Rev A hardware, or a wire model that
+keeps sub-microsecond time. Every timing property this feature's tests establish is therefore a
+property of the model, not of 8N1 at 115 200 baud.
+
+**Recommendation:** keep the integer model, and keep it as the single place to refine — one
+`constexpr` function that every producer and consumer of a byte time calls, with no byte-time
+literal anywhere else (*demonstrated*: no occurrence of `86` as a value in `link/` or
+`tests/support/`; `tasks.md` Notes already lists 86 among the derived constants review must
+catch). If Rev A measurements call for sub-microsecond accuracy, the change is that one function's
+unit and return type — tenths of a microsecond, or a fixed-point µs — and the `≈ 24.6 ms` /
+`142 × byte time` expressions follow automatically; it is not a new constant and not a second
+model. Explicitly **not** recommended under this task: amending spec.md's margin sentence. That is
+a Spec Kit artefact and the correction is a human's to make; this entry is the record.
+
+**Ruling:** pending — human. Two decisions are owed: whether the integer model stands for Rev A,
+and whether spec.md's "well inside the `T_turn`/`T_resp` margins" clause is amended to the
+narrower claim above.
+**Supersedes:** none. **Related:** the two 2026-09-06 entries on `Master::set_bit_rate`
+(`bps == 0`, then `byte_time_us(bps) == 0`) — those govern the model's *precondition*, that a byte
+must take at least 1 µs, which is a different question from its accuracy at a rate trunk §9 does
+define; both are also still `Ruling: pending`.
+
+## 2026-09-27 — T051: reduced-rate polling reads "once per ten superframe periods" as 10 × `T_poll` of wall clock since the node's own last poll
+
+**Context:** trunk §7 (FR-020) says a SUSPECT node is due for polling "only once per ten
+superframe periods". The link layer has no superframe — superframe composition belongs to F3
+(`spec.md` "Assumptions", *Scope boundary*) — so `HealthTracker::poll_due` implements the sentence
+as a wall-clock period: `link/link_types.hpp` defines
+`kSuspectPollPeriod_us = 10ull * TRUNK_T_poll_us` (20 000 µs) and `link/health.cpp` returns
+`elapsed_us(now_us, r.last_poll_us) >= kSuspectPollPeriod_us`. Three consequences of that reading,
+none of them stated by trunk §7:
+
+1. The period runs from **that node's own last poll**, not from a superframe boundary.
+   `mark_polled` is the sole writer of `HealthRecord::last_poll_us` (`link/health.cpp`), so "ten
+   superframe periods" is measured between two polls of the one address. Pinned by
+   `tests/unit/test_link_health.cpp` "an aliasing non-node address never reads or writes a live
+   record" (a `mark_polled` for another address does not move this one's stamp).
+2. It is a **period, not a count**. The ratio is ten only for a scheduler whose superframes are
+   exactly `T_poll` apart. One that skips superframes, runs them closer together than `T_poll`, or
+   stretches them yields some other ratio — see the next entry, where at the fallback rate it
+   becomes ≈ 1.15.
+3. A record that reaches SUSPECT having never been marked polled carries `last_poll_us = 0`
+   (`link/health.hpp`), and `elapsed_us(now_us, 0) == now_us`, so its first reduced-rate poll is
+   due immediately rather than one period in. *Derived by inspection, not demonstrated by a test.*
+   Not reachable for a node that reached SUSPECT the ordinary way (three failed polls means it was
+   polled), which is why F3 calling `mark_polled` for every poll it issues is load-bearing rather
+   than bookkeeping — an obligation the interface note's "What F3/F4 need" lists the call under but
+   does not spell out as a precondition.
+
+**Recommendation:** keep the clock rule for this feature — `poll_due` receives `now_us` and the
+tracker owns no schedule, so a true superframe count is not expressible at this layer — and leave
+F3 free to replace it with an actual count if that proves more faithful to §7, exactly as
+`spec.md` "Assumptions" reserves. Whichever survives, the threshold **10** stays a single symbol:
+today `kSuspectPollPeriod_us`, derived from `TRUNK_T_poll_us` and never a typed 20 000; under a
+count, one named superframe-count constant and not a literal in the scheduler.
+
+**Ruling:** pending — human (including whether the answer is "F3's choice", in which case this
+entry is what F3 inherits). Nothing in this feature depends on the outcome beyond that constant's
+definition site.
+**Supersedes:** none. **Related:** the next entry (the same constant at the fallback rate), and the
+2026-09-13 F4 ruling's "Recorded, not ruled" note that on a fault clear every frozen address falls
+due at once — the same "period from the node's last poll" reading seen from the other side.
+
+## 2026-09-27 — T051: `kSuspectPollPeriod_us` does not scale with the rate in use, while data-model §7 says the superframe does
+
+**Context:** `kSuspectPollPeriod_us` is `constexpr` — 10 × `TRUNK_T_poll_us` = 20 000 µs at every
+bit rate (`link/link_types.hpp`). `data-model.md` §7, carrying the F4 ruling of 2026-09-06
+("`T_poll` and the §6 budget derive from the rate in use") and its 2026-09-13/14 refinements, says
+a transaction issued at the fallback rate takes ≈ 8.7× as long and "the superframe that issues it
+is stretched accordingly", and places that stretch outside this layer: "implemented where the
+scheduler consumes the probe's `bit_rate` and `bit_rate()` (F3), not in this tracker". The SUSPECT
+period was not carried along. After a fallback-rate clear — `bit_rate` = 115 200, `fault` false,
+so `poll_due` is live again and SUSPECT addresses exist by construction (the fault was declared
+because every enrolled node went silent) — the two readings diverge:
+
+- a stretched superframe is ≈ (1 000 000 / 115 200) × 2 000 µs ≈ 17 361 µs, so ten of them are
+  ≈ 173.6 ms;
+- `poll_due` returns true at 20 000 µs, which falls inside the **second** stretched superframe.
+
+At the fallback rate the tracker therefore offers a SUSPECT node roughly once per 1.15 superframes
+where trunk §7 asks for once per ten: the reduced-rate reduction is not 10×, it is ~1.15×, and it
+is nearly absent in the case §7's "reduced rate" wording most plausibly exists for — a degraded
+bus. **Labelled (CLAUDE.md rule 11):** *derived by arithmetic* from `kSuspectPollPeriod_us`,
+`TRUNK_T_poll_us` and data-model §7's stretch factor. **Not** demonstrated by a test, and not
+demonstrable at this layer: `poll_due` takes a wall-clock `now_us` and `HealthTracker` has no
+notion of a superframe at all, so the divergence can only be observed in an F3 scheduler that
+actually stretches. The existing pins (`tests/unit/test_link_health.cpp` "poll_due for a SUSPECT
+node follows the 10x T_poll reduced-rate rule" and "an aliasing non-node address never reads or
+writes a live record"; `tests/unit/test_link_busfault.cpp`) assert the constant against
+`10ull * TRUNK_T_poll_us`
+computed independently — that is the behaviour described here, not a contradiction of it, and
+nothing in this entry asks for any of them to change.
+
+**Recommendation:** resolve it in F3, not here. (a) The scheduler already holds `bit_rate()` and is
+where data-model §7 places §7's stretch, so it should express the SUSPECT period in the same units
+as the rest of its schedule — a count of its own superframes — which makes this divergence
+structurally impossible and folds into the previous entry's "actual superframe count" option.
+Rejected alternative (b): make the period a function of `bit_rate()` inside `HealthTracker`. It
+would put a second, partial copy of the superframe model in the layer data-model §7 says does not
+hold it, and it would still be wrong for any scheduler whose period is not `T_poll` — the same
+defect one rate over. Either way the threshold 10 stays one symbol.
+
+**Ruling:** pending — human. Until it is ruled, the behaviour to assume at the fallback rate is
+the constant's, 20 ms, and not ten superframes; no code changes under this entry.
+**Supersedes:** none. **Related:** the previous entry (the clock-based reading this is a
+consequence of), and the 2026-09-13 F4 ruling, whose refinements carried the rate-scaled
+superframe into trunk §7 and data-model §7 without reaching this constant.
