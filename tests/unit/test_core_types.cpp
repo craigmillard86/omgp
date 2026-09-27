@@ -9,7 +9,11 @@
 // issue #682: T011 carries its own Ring test; CoreEngine-level queue behaviour stays T014).
 //
 // This translation unit's only project include under test is core/core_types.hpp, and it comes
-// FIRST in its own include block — clang-format never reorders across a blank line — so no other
+// FIRST in its own include block, which the repo's formatter preserves rather than merges: the
+// blank line stays a block boundary only because .clang-format sets no IncludeBlocks key and so
+// inherits LLVM's `Preserve`. That is a CONTROL (the current contents of .clang-format), not a
+// language guarantee — adding `IncludeBlocks: Merge`/`Regroup` there would merge the blocks and
+// void this evidence with nothing failing. While it holds, no other
 // project header is included on its behalf. Compiling this file therefore demonstrates exactly
 // one thing about includes: core_types.hpp needs no l3/, link/ or Catch2 header included first,
 // under the native preset's -Wall -Wextra -Werror.

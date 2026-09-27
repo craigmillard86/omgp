@@ -66,9 +66,15 @@ static_assert(ADDR_module_min > 0,
               "ADDR_module_min must stay nonzero (data-model.md §4)");
 
 // data-model.md §4: node_id_by_slot is sized LIMIT_bp_slot_map_max_slots and indexed by a slot
-// number carried in BP_SLOT_MAP's own uint8_t slot_count field (§10). Raising the YAML cap
-// past what that field can express would make the upper slots unaddressable — and the bound
-// that stops a lying slot_count from overrunning the table silently useless.
+// number that can only reach the host inside BP_SLOT_MAP's own uint8_t slot_count field (§10,
+// research.md R-01). This assert guards ADDRESSABILITY, not overrun: raising the YAML cap past
+// what a uint8_t can express would leave the table's upper entries unnameable by any slot_count
+// the wire can carry, and would make l3's own `slot_count > LIMIT_bp_slot_map_max_slots` cap
+// check (l3/l3_payload.hpp, R-01) vacuous — every slot_count would pass it.
+// Overrun is the OTHER direction, and this assert does not address it: a slot_count ABOVE the
+// cap is reachable whenever the cap is below UINT8_MAX, as it is today. What stops that write is
+// the decode-side cap check above plus the per-write bound on node_id_by_slot below — not this
+// header, which only fixes the size.
 static_assert(LIMIT_bp_slot_map_max_slots > 0 && LIMIT_bp_slot_map_max_slots <= UINT8_MAX,
               "LIMIT_bp_slot_map_max_slots must be a nonzero value a uint8_t slot_count can "
               "express (data-model.md §4, §10; research.md R-01)");
