@@ -103,6 +103,8 @@ omgp_add_catch_test(test_link_loop tests/unit/test_link_loop.cpp)
 # in scope_dirs, and the harness fails closed on a scope dir with sources and no test_<dir>_*
 # binary (tests/refimpl/test_tooling.py) — core/core_types.hpp is core/'s first source file.
 omgp_add_catch_test(test_core_types tests/unit/test_core_types.cpp)
+# CoreEngine's §8a pending-delivery rings and drain_callbacks() (spec 003 T014/T015).
+omgp_add_catch_test(test_core_callback_queue tests/unit/test_core_callback_queue.cpp)
 
 # --- host-only tools ---
 add_executable(crc_helper tools/crc_helper.cpp)
