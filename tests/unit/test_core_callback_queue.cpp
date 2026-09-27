@@ -81,10 +81,20 @@ struct Recorder {
     // callback pushes back onto the ring from inside its own delivery.
     CoreEngine* engine = nullptr;
     unsigned reentrant_enqueues_left = 0;
+    // Re-entrant-DRAIN probe (only the "a callback that calls drain_callbacks()" case sets
+    // reentrant_drain): nesting depth measured on the callback itself, so a drain that recursed
+    // once per queued item is visible as a depth, not only as a count.
+    bool reentrant_drain = false;
+    unsigned depth = 0;
+    unsigned max_depth = 0;
 };
 
 void on_lifecycle_cb(void* ctx, LifecycleEvent ev) {
     auto* r = static_cast<Recorder*>(ctx);
+    ++r->depth;
+    if (r->depth > r->max_depth) {
+        r->max_depth = r->depth;
+    }
     if (r->lifecycle_calls < Recorder::kSlots) {
         r->kinds[r->lifecycle_calls] = ev.kind;
         r->node_ids[r->lifecycle_calls] = ev.node_id;
@@ -98,6 +108,10 @@ void on_lifecycle_cb(void* ctx, LifecycleEvent ev) {
                              // progress (see the re-entrancy case)
         Seam::enqueue_lifecycle(*r->engine, late);
     }
+    if (r->reentrant_drain && r->engine != nullptr) {
+        r->engine->drain_callbacks(); // must not recurse — see the re-entrant-drain case
+    }
+    --r->depth;
 }
 
 void on_param_cb(void* ctx, ParamRequestId id, ParamResult result) {
@@ -312,6 +326,104 @@ TEST_CASE("drain_callbacks(0) delivers nothing and leaves everything pending",
     REQUIRE(rig.rec.param_calls == 1);
 }
 
+TEST_CASE("drain_callbacks(n)'s bound is ONE budget spent across both rings, not n per ring",
+          "[core][callbacks]") {
+    Rig rig;
+    constexpr unsigned kEach = 3;
+    for (unsigned i = 0; i < kEach; ++i) {
+        REQUIRE(Seam::enqueue_lifecycle(
+            rig.engine, lifecycle(LifecycleKind::NodeDiscovered, static_cast<uint8_t>(10 + i))));
+        REQUIRE(Seam::enqueue_param_result(rig.engine, static_cast<ParamRequestId>(i),
+                                           ok_result(static_cast<uint16_t>(0x200 + i))));
+    }
+
+    // T014's acceptance criterion and contracts/core-cpp.md §Engine: "at most `max_deliveries`
+    // queued CoreCallbacks calls" — ONE bound over both rings. The only case that can observe it
+    // is a bounded drain with BOTH rings loaded: with either ring empty, a per-ring bound and a
+    // shared bound are indistinguishable.
+    rig.engine.drain_callbacks(4);
+    REQUIRE(rig.rec.lifecycle_calls + rig.rec.param_calls == 4);
+
+    // The remaining two are pending, not dropped: the totals close on the next drain.
+    rig.engine.drain_callbacks();
+    REQUIRE(rig.rec.lifecycle_calls == kEach);
+    REQUIRE(rig.rec.param_calls == kEach);
+    REQUIRE(rig.engine.dropped_deliveries() == 0);
+
+    // FIFO within each ring is untouched by whatever interleaving the drain chose (data-model.md
+    // §8a guarantees per-ring order and nothing across the two).
+    for (unsigned i = 0; i < kEach; ++i) {
+        REQUIRE(rig.rec.node_ids[i] == static_cast<uint8_t>(10 + i));
+        REQUIRE(rig.rec.ids[i] == static_cast<ParamRequestId>(i));
+        REQUIRE(rig.rec.values[i] == static_cast<uint16_t>(0x200 + i));
+    }
+}
+
+TEST_CASE("a bounded drain serves both rings, so neither stream starves under a steady arrival "
+          "rate",
+          "[core][callbacks]") {
+    Rig rig;
+    constexpr unsigned kTicks = 16;
+
+    // A host that bounds per-tick callback latency by draining one delivery per superframe, while
+    // both streams produce one item per superframe. A drain that always empties one ring before
+    // looking at the other delivers that ring 16 times and the other NEVER — and the starved
+    // ring's items are then destroyed by the drop-newest rule once it fills (data-model.md §8a),
+    // which is silent because dropped_deliveries() is one counter for both rings.
+    for (unsigned i = 0; i < kTicks; ++i) {
+        REQUIRE(Seam::enqueue_lifecycle(
+            rig.engine, lifecycle(LifecycleKind::ModuleEvent, static_cast<uint8_t>(i))));
+        REQUIRE(Seam::enqueue_param_result(rig.engine, static_cast<ParamRequestId>(i),
+                                           ok_result(static_cast<uint16_t>(i))));
+        rig.engine.drain_callbacks(1);
+    }
+
+    REQUIRE(rig.rec.lifecycle_calls + rig.rec.param_calls == kTicks); // the bound still holds
+    // Fairness, not a fixed cross-ring order: whichever ring a drain starts with, the two streams
+    // stay within one delivery of each other, so both make progress at half the drain rate.
+    const unsigned lo = rig.rec.lifecycle_calls < rig.rec.param_calls ? rig.rec.lifecycle_calls
+                                                                      : rig.rec.param_calls;
+    const unsigned hi = rig.rec.lifecycle_calls < rig.rec.param_calls ? rig.rec.param_calls
+                                                                      : rig.rec.lifecycle_calls;
+    REQUIRE(lo > 0);
+    REQUIRE(hi - lo <= 1);
+    REQUIRE(rig.engine.dropped_deliveries() == 0); // 16 arrivals per ring, capacity kCap
+}
+
+TEST_CASE("drain_callbacks() called from inside a callback delivers nothing and does not recurse",
+          "[core][callbacks]") {
+    Rig rig;
+    rig.rec.engine = &rig.engine;
+    rig.rec.reentrant_drain = true; // every delivery calls drain_callbacks() again
+    constexpr unsigned kQueued = 64;
+
+    for (unsigned i = 0; i < kQueued; ++i) {
+        REQUIRE(Seam::enqueue_lifecycle(
+            rig.engine, lifecycle(LifecycleKind::NodeSuspect, static_cast<uint8_t>(i))));
+    }
+
+    rig.engine.drain_callbacks();
+
+    // CLAUDE.md rule 5 territory: a drain that re-enters delivers one more item per nested call
+    // and so recurses once per queued item — ~kCap frames on a target with a fixed task stack.
+    // The nested call is a no-op instead, so the depth is 1 whatever the queue holds.
+    REQUIRE(rig.rec.max_depth == 1);
+    // Exactly-once, and in order: the outer drain still delivers everything that was pending.
+    REQUIRE(rig.rec.lifecycle_calls == kQueued);
+    for (unsigned i = 0; i < kQueued; ++i) {
+        REQUIRE(rig.rec.node_ids[i] == static_cast<uint8_t>(i));
+    }
+    REQUIRE(rig.engine.dropped_deliveries() == 0);
+
+    // Nothing was left behind by the suppressed nested calls, and re-entry left no latch set: a
+    // later top-level drain still works.
+    rig.rec.reentrant_drain = false;
+    REQUIRE(Seam::enqueue_lifecycle(rig.engine, lifecycle(LifecycleKind::NodeRemoved, 0xAB)));
+    rig.engine.drain_callbacks();
+    REQUIRE(rig.rec.lifecycle_calls == kQueued + 1);
+    REQUIRE(rig.rec.node_ids[kQueued] == 0xAB);
+}
+
 TEST_CASE("the lifecycle ring refuses the NEWEST enqueue when full, counts it, and keeps the "
           "oldest LIMIT_max_nodes",
           "[core][callbacks]") {
@@ -446,6 +558,31 @@ TEST_CASE("an engine whose CoreCallbacks pointers are null consumes its pending 
         REQUIRE(Seam::enqueue_param_result(engine, static_cast<ParamRequestId>(i), ok_result(0)));
     }
     REQUIRE(engine.dropped_deliveries() == 0);
+}
+
+TEST_CASE("a bounded drain with null CoreCallbacks consumes exactly max_deliveries, no more",
+          "[core][callbacks]") {
+    omgp_test::FakeClock clock;
+    omgp_test::MockWire wire{clock};
+    CoreEngine engine{wire, clock, omgp::ADDR_host, CoreCallbacks{}};
+
+    // A full ring is the oracle here: with no callback to count, the only way to observe how many
+    // deliveries a drain consumed is how much room it freed. An implementation that charged
+    // `max_deliveries` only when a callback is non-null would empty the whole ring below.
+    for (size_t i = 0; i < kCap; ++i) {
+        REQUIRE(Seam::enqueue_lifecycle(
+            engine, lifecycle(LifecycleKind::NodeDiscovered, static_cast<uint8_t>(i))));
+    }
+    REQUIRE(engine.dropped_deliveries() == 0);
+
+    engine.drain_callbacks(2);
+
+    // Exactly two slots free: two enqueues fit, the third is refused and counted (§8a).
+    REQUIRE(Seam::enqueue_lifecycle(engine, lifecycle(LifecycleKind::BusFault, 0xE1)));
+    REQUIRE(Seam::enqueue_lifecycle(engine, lifecycle(LifecycleKind::BusFault, 0xE2)));
+    REQUIRE(engine.dropped_deliveries() == 0);
+    REQUIRE_FALSE(Seam::enqueue_lifecycle(engine, lifecycle(LifecycleKind::BusFault, 0xE3)));
+    REQUIRE(engine.dropped_deliveries() == 1);
 }
 
 TEST_CASE("neither enqueue nor drain_callbacks() reaches the allocator", "[core][callbacks]") {
