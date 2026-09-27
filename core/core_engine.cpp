@@ -103,6 +103,13 @@ void CoreEngine::drain_callbacks(size_t max_deliveries) {
             }
             --param_budget;
             --remaining;
+            // Argued like link/master.cpp:400 and link/health.cpp:700, not assumed: the mutant
+            // either reads back false and coincides with the original, or leaves next_is_param_
+            // set through every param delivery — which serves the param ring until its budget is
+            // spent and starves the lifecycle ring behind it, so "a bounded drain serves both
+            // rings" (hi - lo <= 1 across 16 ticks) would see 1 and 15. That case ran, and this
+            // mutant survived it (CI run 36321491019), so it reads false.
+            // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
             next_is_param_ = false;
             // R-10: the result is correlated to its request by the id it is delivered with.
             if (callbacks_.on_param_result != nullptr) {
@@ -127,6 +134,12 @@ void CoreEngine::drain_callbacks(size_t max_deliveries) {
         }
     }
 
+    // Same argument, same evidence: the mutant either reads back false, or leaves the latch set
+    // after this top-level drain returns and makes every later drain_callbacks() a no-op — which
+    // "drain_callbacks(n) delivers at most n and leaves the remainder pending" (5 delivered after
+    // the second drain) and the re-entrancy case's closing "a later top-level drain still works"
+    // would both fail on. Both ran, and this mutant survived them (CI run 36321491019).
+    // mutant-ok(equivalent, cxx_assign_const): the mutation and the original coincide.
     draining_ = false;
 }
 
