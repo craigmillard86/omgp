@@ -332,10 +332,16 @@ def test_mutate_oracle_ignores_commented_out_registrations(tmp_path):
 def test_mutate_diff_with_no_unit_oracle_fails_closed(tmp_path):
     # A scope dir that has no test_<dir>_* unit binary at all can never kill a mutant; that
     # must fail before any build, with the blind spot named, not run and report 0 mutants.
-    clone = shared_clone(tmp_path, "core/zz_probe.cpp", "int zz_probe() { return 1; }\n")
+    # `zz_noracle/` is a synthetic scope dir added only to this clone's mutate.cfg, not `core/`:
+    # feature 003 gives `core/` real sources (and eventually its own oracle), so a fixture
+    # asserting "no oracle exists for this dir" must not depend on a real dir staying
+    # permanently empty — that was always an accident of sequencing (#682 review, 2026-09-24).
+    clone = shared_clone(tmp_path, "zz_noracle/zz_probe.cpp", "int zz_probe() { return 1; }\n")
+    cfg = clone / "tools" / "mutate.cfg"
+    cfg.write_text(cfg.read_text().replace("scope_dirs = l3 link core", "scope_dirs = l3 link core zz_noracle"))
     rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
     assert rc == 1, out
-    assert "blind spot" in out and "core" in out and "no unit-test oracle" in out, out
+    assert "blind spot" in out and "zz_noracle" in out and "no unit-test oracle" in out, out
 
 
 # --- tools/mutate.sh: a test-only change is ATTESTED, never gated (#146) ------------------------
@@ -490,12 +496,20 @@ def test_mutate_test_only_scope_without_oracle_fails_closed(tmp_path):
     """The attested dir's oracle is the same test_<dir>_* set the source path computes, and
     fails closed the same way: a test file naming a dir with no registered unit binary can
     never kill a mutant, so the run fails before any build, with the blind spot named — it
-    does not fall back to the fast path and call that an attestation."""
-    clone = shared_clone(tmp_path, "tests/unit/test_core_health.cpp",
+    does not fall back to the fast path and call that an attestation. `zz_noracle/` is a
+    synthetic scope dir added only to this clone's mutate.cfg — see the sibling source-scope
+    test above for why not `core/` (#682 review, 2026-09-24)."""
+    clone = shared_clone(tmp_path, "tests/unit/test_zz_noracle_health.cpp",
                          "// a unit test for a dir with no registered unit binary\n")
+    cfg = clone / "tools" / "mutate.cfg"
+    cfg.write_text(cfg.read_text().replace("scope_dirs = l3 link core", "scope_dirs = l3 link core zz_noracle"))
+    # Attest mode's `find $ATTEST_DIRS` (mutate.sh) needs the dir to physically exist, unlike
+    # `core/` (always present, if only for CMakeLists.txt) — this test names no source file
+    # under it, so nothing else creates it.
+    (clone / "zz_noracle").mkdir()
     rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
     assert rc == 1, out
-    assert "no unit-test oracle for changed dir 'core/'" in out and "blind spot" in out, out
+    assert "no unit-test oracle for changed dir 'zz_noracle/'" in out and "blind spot" in out, out
     assert "nothing in scope" not in out, out
 
 
