@@ -99,6 +99,10 @@ omgp_add_catch_test(test_link_busfault tests/unit/test_link_busfault.cpp)
 omgp_add_catch_test(test_link_master tests/unit/test_link_master.cpp)
 omgp_add_catch_test(test_link_responder tests/unit/test_link_responder.cpp)
 omgp_add_catch_test(test_link_loop tests/unit/test_link_loop.cpp)
+# core/ (spec 003). test_core_types is also core/'s mutation oracle: tools/mutate.cfg lists `core`
+# in scope_dirs, and the harness fails closed on a scope dir with sources and no test_<dir>_*
+# binary (tests/refimpl/test_tooling.py) — core/core_types.hpp is core/'s first source file.
+omgp_add_catch_test(test_core_types tests/unit/test_core_types.cpp)
 
 # --- host-only tools ---
 add_executable(crc_helper tools/crc_helper.cpp)

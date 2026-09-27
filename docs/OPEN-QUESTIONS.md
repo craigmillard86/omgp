@@ -5232,3 +5232,71 @@ its option D is this entry's option A in another guise) and the 2026-09-12 entry
 mutation run': an empty diff scope discharges it, and the criterion is the defect" (#58 — the
 same shape again: an acceptance criterion whose tool, `tools/mutate.sh`, is outside the dispatch
 allow-list).
+
+---
+
+## 2026-09-27 — `LifecycleEvent::module_event_detail` (data-model.md §7) is a borrow that §8a's deferred delivery outlives; where do the detail bytes live?
+
+**Context:** `specs/003-host-core-engine/data-model.md` §7 fixes
+`LifecycleEvent::module_event_detail` as `const uint8_t*` + `uint8_t len` — the shape of
+`l3::Bytes` (`l3/l3_types.hpp:47-50`), which is what `l3::GetEventResp::detail`
+(`l3/l3_types.hpp:101-105`) is: a non-owning view into the transaction's receive buffer. §8a then
+makes `LifecycleEvent` a queued value: `run_superframe()` pushes onto
+`Ring<LifecycleEvent, LIMIT_max_nodes>` and only `CoreEngine::drain_callbacks()` delivers it,
+arbitrarily later — that deferral is exactly what makes spec FR-021 ("the scheduler proceeds
+regardless of how long the application takes") true by construction. The two sections are not
+jointly satisfiable for `ModuleEvent` as written: an event enqueued holding the decoder's view is
+drained after later superframes have reused that buffer. Demonstrated adversarially on PR #821
+(red-team round 1 at `eb396a8`) with a reproducer built from the shipped `LifecycleEvent` and
+`Ring` alone: ASan reported `heap-use-after-free` on the drained `module_event_detail`. No
+protocol violation is needed — a module that reports a `GET_EVENT` detail payload every superframe
+is the whole trigger. Neither section says who owns the bytes, so `core/` cannot settle it: T011
+(#682) declares types only and has no engine, and §7's field shape is normative.
+
+**Not implemented here.** T011 ships the §7 shape unchanged; PR #821 adds the labelled lifetime
+precondition to `core/core_types.hpp` (the `LIFETIME of module_event_detail` block above
+`struct LifecycleEvent`) stating that the enqueuer must already own the bytes past drain, and that
+the pointer is valid only for the duration of the `on_lifecycle` call. That is an **assumed**
+precondition on T015, not a property the compiler or any test checks: nothing in `core/` copies
+detail bytes today.
+
+**Options.**
+
+- **A. An engine-owned detail arena alongside the §8a rings.** `CoreEngine` keeps a
+  fixed-capacity byte arena (no allocation, CLAUDE.md rule 5); enqueue copies the decoded detail
+  into it and rewrites `module_event_detail` to point there; `drain_callbacks()` releases the span
+  after the callback returns. Keeps §7's field shape and `sizeof(LifecycleEvent)` exactly as the
+  normative artefact has it; costs one copy per drained event and one arena-full policy (drop the
+  detail, or drop the event — itself a sub-question, and the drop wants counting the way §8a
+  counts `dropped_deliveries_`).
+- **B. An inline fixed detail array in `LifecycleEvent`.** `uint8_t module_event_detail[K]` with
+  `K` a generated bound. Self-contained, no arena and no release step, safe by construction rather
+  than by precondition — but it amends §7, and it inflates every queued event by `K` bytes across
+  a `LIMIT_max_nodes`-entry ring whether or not that event is a `ModuleEvent`. There is no
+  `detail`-specific limit symbol in `protocol/omgp-protocol.yaml` today, so `K` is itself a
+  protocol edit or an unpinned literal — the latter against CLAUDE.md rule 4's spirit.
+- **C. Deliver `ModuleEvent` details out of band.** Keep the queued event metadata-only
+  (`event_type`, `remaining`, `len`) and let the application re-read the detail. Cheapest struct,
+  but the bytes are gone by then — `GET_EVENT` is consuming, so this loses data and breaks spec
+  FR-022's report content. Recorded to be rejected explicitly, not because it is close.
+- **D. Status quo + precondition only** (what #821 ships): the header states the obligation and
+  T015 is trusted to meet it. The hole is then one review away from real code, with no mechanism
+  behind it.
+
+**Recommendation: A**, with the arena-full policy ruled at the same time (recommend: deliver the
+event with `module_event_detail = nullptr`, `len = 0`, and count the truncation separately from
+`dropped_deliveries_` — a dropped detail is not a dropped notice). A keeps the normative §7 shape,
+keeps the ring element small, and turns the precondition #821 documents into something
+`tests/unit/test_core_callback_queue.cpp` (T014) can actually assert: enqueue a detail, overwrite
+the receive buffer, drain, compare bytes. B is the only option that is safe with no precondition
+at all, and is the right answer if a `detail` limit symbol is added to the YAML for other reasons;
+it should not be adopted just to close this.
+
+**Ruling:** PENDING — human, with T015 (#684): this is a `data-model.md` §7/§8a amendment plus,
+under option B, a `protocol/omgp-protocol.yaml` limit — both human-ruling artefacts
+(`docs/OPERATING-POLICY.md` §2, §3). T011 is unblocked meanwhile because no code reads the field
+yet and the safe default (the labelled precondition) costs nothing to replace.
+
+**Amends:** none. **Supersedes:** none. **Related:** the 2026-09-21 "`BP_SLOT_MAP` wire format
+(R-01): reconciling the cap with F10's `max_l3_payload` split" entry (same pattern — a data-model
+shape whose bound lives in the YAML, not in `core/`).
