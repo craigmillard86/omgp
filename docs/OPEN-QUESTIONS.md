@@ -5300,3 +5300,137 @@ yet and the safe default (the labelled precondition) costs nothing to replace.
 **Amends:** none. **Supersedes:** none. **Related:** the 2026-09-21 "`BP_SLOT_MAP` wire format
 (R-01): reconciling the cap with F10's `max_l3_payload` split" entry (same pattern — a data-model
 shape whose bound lives in the YAML, not in `core/`).
+
+---
+
+## 2026-09-27 — `core/`'s `-fno-rtti` (CLAUDE.md rule 5) and the native preset's UBSan `vptr` check are mutually exclusive once `core/` has a polymorphic class
+
+**Context:** `core/CMakeLists.txt`'s T001 note (#672) planned for T015 to attach
+`-fno-exceptions -fno-rtti` to `omgp_core` when its first source landed, "the same
+INTERFACE-then-STATIC path `link/CMakeLists.txt` took", making CLAUDE.md rule 5's "no exceptions,
+no RTTI" compiler-enforced for `core/`. That works for `link/` because none of its `-fno-rtti`
+translation units defines the key function of a class a *test* TU instantiates. `core/`'s first
+class breaks it: `CoreEngine` derives from `link::HealthListener` (`research.md` R-03 —
+"`CoreEngine` *is* the `link::HealthListener`"), so it is polymorphic, and its key function
+`on_notice()` is defined in `core/core_engine.cpp`. Under `-fno-rtti` that TU emits no typeinfo,
+while the native preset compiles every test TU with RTTI on **and** with `-fsanitize=undefined`,
+which includes `-fsanitize=vptr` — a check that needs the dynamic type's typeinfo. Every test
+binary that constructs a `CoreEngine` therefore fails to link:
+
+```
+/usr/bin/ld: CMakeFiles/test_core_callback_queue.dir/tests/unit/test_core_callback_queue.cpp.o:
+  (.data.rel+0x1f8): undefined reference to `typeinfo for omgp::core::CoreEngine'
+```
+
+Attribution is **demonstrated**, not inferred: with `-fno-rtti` kept on `omgp_core`, adding
+`-fno-sanitize=vptr` to the `test_core_callback_queue` target alone made the identical build link
+(measured on the PR for #685/#686, then reverted — that flag is not in the tree). Nothing else
+changed between the red and the green build.
+
+**Not implemented here.** T015 ships `-fno-exceptions` only, and `core/CMakeLists.txt` carries the
+finding at its `target_compile_options` line. What enforces the no-RTTI half today is
+`tools/check_embedded.py`'s `dynamic_cast`/`typeid` findings over `core/` — a source-level grep,
+run on every path including the bootstrap one. Labelled per CLAUDE.md rule 11: no-RTTI in `core/`
+is a **control over the repo's current contents, not a compiler guarantee**. The second leg the
+T001 note assumes — the ESP-IDF component's own `-fno-rtti` on the Xtensa build — does not exist
+yet either: `esp32-host/components/omgp_core/CMakeLists.txt` is T003 (#674), still open, so
+`core/` is compiled by no `-fno-rtti` toolchain at all at this head.
+
+**Options.**
+
+- **A. Status quo (what this task ships): `-fno-exceptions` only, no-RTTI by static check.** Keeps
+  UBSan's `vptr` check intact on the one binary that exercises the polymorphic class it exists to
+  check, and keeps every future `core/` test binary flag-free. Costs the compiler-level guarantee,
+  leaving a grep.
+- **B. Keep `-fno-rtti`; disable `vptr` per test binary.** One `-fno-sanitize=vptr` on every test
+  target that touches `core/`. Restores the compile-time guarantee for `core/` and loses a real
+  sanitizer check on `CoreEngine` — and the exception spreads to every later `core/` test, each of
+  which must remember it or go red. Rejected here: a sanitizer check on new portable code is worth
+  more than a flag whose clause is already grep-enforced, and CLAUDE.md rule 10's "no new
+  sanitizer findings" reads oddly next to switching a sanitizer off to keep a flag.
+- **C. Close it on the target build instead.** Land T003 (#674) so
+  `esp32-host/components/omgp_core` compiles `core/` with `-fno-exceptions -fno-rtti` under the
+  pinned `espressif/idf:v5.3` toolchain, where nothing is RTTI-enabled and no sanitizer runs, and
+  treat the target build as where rule 5's no-RTTI clause is *compiled*. Orthogonal to A/B and
+  compatible with either; the only option that gives a real toolchain guarantee without touching
+  the native preset. Not this task's file (out of scope in #686).
+- **D. Make `CoreEngine` non-polymorphic** — hold a small adapter that implements
+  `link::HealthListener` and forwards. Removes the tension at its root, and contradicts
+  `research.md` R-03 outright; recorded to be rejected explicitly, not because it is close.
+
+**Recommendation: A now, plus C as soon as #674 lands** — after which the claim becomes "enforced
+by the toolchain that ships, checked statically everywhere else", which is what rule 5 is actually
+about. B stays available if a human would rather have the native flag; it should be a deliberate
+ruling, not a default, because it is a sanitizer-coverage decision.
+
+**Ruling:** PENDING — human. A is a build-definition choice (`docs/GOVERNANCE.md` §3 rates
+`core/CMakeLists.txt` T2) and B would narrow a sanitizer, which `docs/OPERATING-POLICY.md` §2 puts
+outside what an agent may do unattended. Work is unblocked meanwhile: A is green end to end and
+gives up no check that exists at this head.
+
+**Amends:** none. **Supersedes:** none. **Related:** the 2026-09-24 "#66 (T048) AC2:
+`stage_quality`'s clang-tidy branch is unreachable from a dispatch job" entry (same shape — a rule
+whose only enforcement turns out to be a static check, with the compiler-level half missing) and
+the 2026-09-27 "`LifecycleEvent::module_event_detail` … where do the detail bytes live?" entry
+above (the other `core/` precondition this dispatch unit leaves labelled rather than mechanised).
+
+## 2026-09-27 — `drain_callbacks()`: data-model.md §8a fixes FIFO *within* each pending ring and nothing across the two, and says nothing about re-entry
+
+**Context:** `specs/003-host-core-engine/data-model.md` §8a defines two pending-delivery rings and
+`contracts/core-cpp.md` §Engine defines `drain_callbacks(max_deliveries)` as "at most
+`max_deliveries` queued CoreCallbacks calls". Neither artefact answers two questions a bounded
+drain forces:
+
+1. **Cross-ring order.** T015's first implementation drained the whole lifecycle ring before
+   looking at the param-result ring. Demonstrated adversarially on PR #835 (red-team round 1 at
+   `daaca86`) and now reproduced as a committed unit case ("a bounded drain serves both rings, so
+   neither stream starves under a steady arrival rate",
+   `tests/unit/test_core_callback_queue.cpp`): with one arrival per ring per superframe and a host
+   calling `drain_callbacks(1)` per superframe to bound its own callback latency, the param-result
+   ring is reached **never** — the red-team's 400-tick run measured `lifecycle=400 param=0
+   dropped=272`. The loss is then invisible, because §8a specifies ONE `dropped_deliveries_`
+   counter for both rings; and per research.md R-10 a `ParamRequestId` is released only when its
+   result is delivered, so a permanently starved result ring is the mechanism by which T027's
+   `get_param` id pool would wedge.
+2. **Re-entry.** Nothing forbids an application calling `drain_callbacks()` from inside a
+   callback. As first written each nested call delivered one more item and recursed again:
+   measured depth 64 for 64 queued items, ~63 bytes of stack per level on the native ASan build,
+   i.e. ~8 KB at the rings' real `LIMIT_max_nodes` capacity — survivable on the host, larger than
+   a default IDF task stack on the ESP32-S3 (that target consequence is **inferred**, not
+   measured: `core/` is not compiled in the esp32 build yet, T003/#674).
+
+**Implemented here (safe defaults, per CLAUDE.md's "proceed only if a safe default exists"):** the
+two rings are served in **alternation**, with the next ring carried across calls, so each stream
+stays within one delivery of the other and neither starves; and `drain_callbacks()` carries a
+**re-entrancy latch** — a nested call delivers nothing and returns, leaving the items queued for
+the drain in progress or the next top-level call, which bounds stack depth by construction. Both
+are documented at the call site and in `core/core_engine.hpp`, and both are demonstrated by named
+cases in `tests/unit/test_core_callback_queue.cpp`.
+
+**Options a human may prefer instead.**
+
+- **A. Alternation (shipped).** Neither stream starves; the cost is that the cross-ring
+  interleaving is now a fairness property, not a priority — a node going OFFLINE can be delivered
+  one slot later than under strict lifecycle-first.
+- **B. Strict lifecycle priority with a separate drop counter per ring.** Keeps urgency ordering
+  and makes the starvation *observable* instead of preventing it. Not taken unattended: §8a states
+  a single counter, and widening it is a data-model change, which `docs/OPERATING-POLICY.md` §3
+  puts behind a human ruling.
+- **C. A per-ring share of `max_deliveries`** (e.g. half each). Equivalent fairness, but it breaks
+  the "at most `max_deliveries`" arithmetic T014 asserts whenever one ring is short. Rejected as
+  the more complex form of A.
+- **D. Re-entry allowed with a depth cap** instead of the latch. A cap is another constant with no
+  spec symbol behind it; the latch needs none and loses nothing (no delivery is dropped, only
+  deferred).
+
+**Recommendation: A plus the latch (as shipped), ratified or replaced by a human when §8a is next
+touched.** If B is preferred it should land as a data-model.md edit first (the counter split), not
+as an implementation choice.
+
+**Ruling:** PENDING — human. Nothing is blocked meanwhile: A is green end to end, and the cases
+that pin both behaviours are committed, so a later reversal is visible as a test change rather
+than a silent drift.
+
+**Amends:** none. **Supersedes:** none. **Related:** the 2026-09-27
+"`LifecycleEvent::module_event_detail` …" entry above (the other §8a question this dispatch unit
+leaves to a human).
