@@ -147,9 +147,29 @@ unit_sources_plain() {
 # (test_link_interfaces, 6 checks) leaves 609579, below the floor — demonstrated by that
 # arithmetic over this run's per-binary EXECUTED lines, and only while no binary shrinks to
 # 5 checks or fewer, which is a property of the repo's current contents, not a guarantee.
+# 616794 = 616799 executed (24 binaries) minus 5 slack — raised 2026-09-27 at the T050/#68
+# final polish checkpoint of feature 002 (contracts/tooling.md "pipeline.sh": "raised to the
+# new total minus 5, never lowered"). Was 609580. Measured on the ctest path at this commit.
+# Where the +7214 since the entry above's 609585 comes from, and what it is NOT (rule 11):
+# 20 binaries became 24, and all four additions are feature 003 (host-core-engine) work, not
+# this feature's — `git diff --name-status --diff-filter=A 7f51da1..HEAD -- tests/unit
+# tests/property` (7f51da1 is the commit that set 609580) names exactly
+# test_core_callback_queue (2411 checks here, added by b49da5d/#685), test_core_types (845,
+# d883b19/#682), test_mock_l3_node (3168, 207ab50, spec 003 T013) and test_l3_bp_slot_map
+# (465, c6f513b/#676) = 6889 of the 7214. The remaining +325 is growth inside binaries that
+# already existed: test_link_busfault is 833 here against the 587 that entry recorded (+246),
+# and the last +79 is measured but NOT attributed, because the per-binary figures for the rest
+# were never recorded at that raise. So this final F2 checkpoint raise is the ratchet catching
+# up to F003 binaries landing on main, NOT T001-T049 checks arriving — those were already
+# inside 609580, which is the opposite of what a "sum of what this feature added" reading of
+# SC-009 would predict, and is recorded here rather than smoothed over.
+# At total-5 the gate still fires if ANY ONE of the 24 binaries stops reporting: the smallest
+# (test_link_interfaces, 6 checks) leaves 616793, below the floor — demonstrated by that
+# arithmetic over this run's per-binary EXECUTED lines, and only while no binary shrinks to
+# 5 checks or fewer, which is a property of the repo's current contents, not a guarantee.
 # The floor is the COUNT gate. The SET gate — every tests/{unit,property}/test_*.cpp compiled,
 # registered and executed, by name — is tools/check_test_set.py in stage_unit (#133).
-UNIT_TEST_FLOOR=609580
+UNIT_TEST_FLOOR=616794
 
 stage_codegen() {
   # Constants + vectors header from the YAML, then prove the human-authored docs tables
