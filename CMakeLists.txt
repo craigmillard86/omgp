@@ -23,7 +23,11 @@ enable_testing()
 # --- portable libraries (embedded path: CLAUDE.md rule 5 enforced per target) ---
 add_subdirectory(l3)
 add_subdirectory(link)
-add_subdirectory(core) # STATIC since T015 (core_engine.cpp) — rule 5's -fno-exceptions/-fno-rtti enforced there
+# core/ is STATIC since T015 (core_engine.cpp). Rule 5's no-exceptions half is compiler-enforced
+# there (-fno-exceptions on omgp_core); its no-RTTI half is NOT — it is a tools/check_embedded.py
+# source-level control, for the reason core/CMakeLists.txt states on its target_compile_options
+# line (docs/OPEN-QUESTIONS.md, 2026-09-27, PENDING).
+add_subdirectory(core)
 
 # --- test framework: vendored Catch2 v3 (third_party/catch2/VERSION records tag + sha256) ---
 add_library(catch2_amalgamated STATIC third_party/catch2/catch_amalgamated.cpp)
