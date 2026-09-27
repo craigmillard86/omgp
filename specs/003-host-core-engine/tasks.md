@@ -90,12 +90,25 @@ golden vector and differential coverage — discovery (US1) can now be built.
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T011 [P] Write `core/core_types.hpp` per `data-model.md` §1-9 and §8a: `CoreStatus`,
+- [x] T011 [P] Write `core/core_types.hpp` per `data-model.md` §1-9 and §8a: `CoreStatus`,
       `DiscoveryState`, `NodeRecord`, `BackplaneRecord`, `DescriptorCacheEntry`,
       `LifecycleKind`/`LifecycleEvent`, `ParamRequestId`/`ParamResult`, the three demand-item
       structs (`EventDrainItem`/`DescChunkItem`/`ParamOpItem`), `ParamResultDelivery` (§8a, the
       pending-delivery ring element T014's test needs), a fixed-capacity `Ring<T, N>` helper,
       `SuperframeBudget`, `CoreCallbacks` — no logic, POD types and one small ring template only
+      — plus `tests/unit/test_core_types.cpp` covering `Ring<T, N>` only (see the note below)
+
+**Note (2026-09-27, #682).** T011 was scheduled with no write-first test task of its own, which
+left `Ring<T, N>`'s runtime behaviour untested until T014. Two things forced a ruling: CLAUDE.md
+rule 8, and `tools/mutate.cfg`'s `scope_dirs` listing `core` — the mutation harness fails closed
+on a scope dir that has sources and no `test_<dir>_*` binary, and `core/core_types.hpp` is
+`core/`'s first source file. The human ruling on #682 was to let T011 carry a small write-first
+`tests/unit/test_core_types.cpp` for `Ring<T, N>` alone (FIFO order, drop-newest on a full ring,
+`pop` on empty, `size`/`empty`/`full`/`capacity`, allocation-free). It does not overlap T014,
+which exercises `CoreEngine::drain_callbacks()` and `dropped_deliveries_` — engine-level
+behaviour, in its own file. The harness's own negative fixtures were moved off `core/` first
+(PR #820), so neither change weakens the other.
+
 - [ ] T012 [P] Write `tests/support/mock_l3_node.hpp`/`.cpp` per `contracts/mock-l3-node.md`
       (R-08): the step tables (`IdentifyStep`, `DescChunkStep`, `StatusStep`, `EventStep`,
       `ChannelStep`, `ParamStep`, `SlotMapStep`, `SilenceStep`, `ErrorStep`), a trivial
