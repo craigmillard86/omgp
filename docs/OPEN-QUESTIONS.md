@@ -5373,3 +5373,64 @@ gives up no check that exists at this head.
 whose only enforcement turns out to be a static check, with the compiler-level half missing) and
 the 2026-09-27 "`LifecycleEvent::module_event_detail` … where do the detail bytes live?" entry
 above (the other `core/` precondition this dispatch unit leaves labelled rather than mechanised).
+
+## 2026-09-27 — `drain_callbacks()`: data-model.md §8a fixes FIFO *within* each pending ring and nothing across the two, and says nothing about re-entry
+
+**Context:** `specs/003-host-core-engine/data-model.md` §8a defines two pending-delivery rings and
+`contracts/core-cpp.md` §Engine defines `drain_callbacks(max_deliveries)` as "at most
+`max_deliveries` queued CoreCallbacks calls". Neither artefact answers two questions a bounded
+drain forces:
+
+1. **Cross-ring order.** T015's first implementation drained the whole lifecycle ring before
+   looking at the param-result ring. Demonstrated adversarially on PR #835 (red-team round 1 at
+   `daaca86`) and now reproduced as a committed unit case ("a bounded drain serves both rings, so
+   neither stream starves under a steady arrival rate",
+   `tests/unit/test_core_callback_queue.cpp`): with one arrival per ring per superframe and a host
+   calling `drain_callbacks(1)` per superframe to bound its own callback latency, the param-result
+   ring is reached **never** — the red-team's 400-tick run measured `lifecycle=400 param=0
+   dropped=272`. The loss is then invisible, because §8a specifies ONE `dropped_deliveries_`
+   counter for both rings; and per research.md R-10 a `ParamRequestId` is released only when its
+   result is delivered, so a permanently starved result ring is the mechanism by which T027's
+   `get_param` id pool would wedge.
+2. **Re-entry.** Nothing forbids an application calling `drain_callbacks()` from inside a
+   callback. As first written each nested call delivered one more item and recursed again:
+   measured depth 64 for 64 queued items, ~63 bytes of stack per level on the native ASan build,
+   i.e. ~8 KB at the rings' real `LIMIT_max_nodes` capacity — survivable on the host, larger than
+   a default IDF task stack on the ESP32-S3 (that target consequence is **inferred**, not
+   measured: `core/` is not compiled in the esp32 build yet, T003/#674).
+
+**Implemented here (safe defaults, per CLAUDE.md's "proceed only if a safe default exists"):** the
+two rings are served in **alternation**, with the next ring carried across calls, so each stream
+stays within one delivery of the other and neither starves; and `drain_callbacks()` carries a
+**re-entrancy latch** — a nested call delivers nothing and returns, leaving the items queued for
+the drain in progress or the next top-level call, which bounds stack depth by construction. Both
+are documented at the call site and in `core/core_engine.hpp`, and both are demonstrated by named
+cases in `tests/unit/test_core_callback_queue.cpp`.
+
+**Options a human may prefer instead.**
+
+- **A. Alternation (shipped).** Neither stream starves; the cost is that the cross-ring
+  interleaving is now a fairness property, not a priority — a node going OFFLINE can be delivered
+  one slot later than under strict lifecycle-first.
+- **B. Strict lifecycle priority with a separate drop counter per ring.** Keeps urgency ordering
+  and makes the starvation *observable* instead of preventing it. Not taken unattended: §8a states
+  a single counter, and widening it is a data-model change, which `docs/OPERATING-POLICY.md` §3
+  puts behind a human ruling.
+- **C. A per-ring share of `max_deliveries`** (e.g. half each). Equivalent fairness, but it breaks
+  the "at most `max_deliveries`" arithmetic T014 asserts whenever one ring is short. Rejected as
+  the more complex form of A.
+- **D. Re-entry allowed with a depth cap** instead of the latch. A cap is another constant with no
+  spec symbol behind it; the latch needs none and loses nothing (no delivery is dropped, only
+  deferred).
+
+**Recommendation: A plus the latch (as shipped), ratified or replaced by a human when §8a is next
+touched.** If B is preferred it should land as a data-model.md edit first (the counter split), not
+as an implementation choice.
+
+**Ruling:** PENDING — human. Nothing is blocked meanwhile: A is green end to end, and the cases
+that pin both behaviours are committed, so a later reversal is visible as a test change rather
+than a silent drift.
+
+**Amends:** none. **Supersedes:** none. **Related:** the 2026-09-27
+"`LifecycleEvent::module_event_detail` …" entry above (the other §8a question this dispatch unit
+leaves to a human).

@@ -84,6 +84,18 @@ class CoreEngine : public link::HealthListener { // R-03: this engine IS the hea
     // application wants delivery latency to be low; skipping it for several superframes just
     // lets the pending rings fill (and, once full, refuse the newest arrival and count it —
     // never silently evict an older notice).
+    //
+    // `max_deliveries` is ONE budget spent across both pending rings, which are served in
+    // alternation: a bounded drain never empties one ring before looking at the other, so neither
+    // the lifecycle stream nor the parameter-result stream can starve while the other is served
+    // (§8a fixes FIFO within each ring and nothing across the two — do not build on which ring a
+    // given call starts with). A delivery whose CoreCallbacks pointer is null is consumed and
+    // charged to the budget like any other.
+    //
+    // NOT re-entrant: called from inside a callback it delivers nothing and returns immediately —
+    // the items stay queued for the drain already in progress, or for the next top-level call.
+    // That is a bound on stack depth, not a convenience: recursing once per queued item would
+    // cost up to LIMIT_max_nodes frames in one call on a target with a fixed task stack.
     void drain_callbacks(size_t max_deliveries = SIZE_MAX);
 
     // Read-only introspection for tests and for a host application that wants a snapshot beyond
@@ -145,6 +157,12 @@ class CoreEngine : public link::HealthListener { // R-03: this engine IS the hea
     Ring<LifecycleEvent, LIMIT_max_nodes> pending_lifecycle_;
     Ring<ParamResultDelivery, LIMIT_max_nodes> pending_param_results_;
     uint32_t dropped_deliveries_ = 0;
+    // drain_callbacks() state, both of them flags rather than anything the application sets:
+    // which ring the NEXT delivery comes from (carried across calls — a per-call reset would
+    // re-starve the second ring whenever the budget is one), and whether a drain is already in
+    // progress on this stack (the re-entrancy latch). Not part of §8a's queue state.
+    bool next_is_param_ = false;
+    bool draining_ = false;
 
     SuperframeBudget budget_;
 };

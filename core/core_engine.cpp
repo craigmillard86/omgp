@@ -58,43 +58,76 @@ void CoreEngine::run_superframe(uint64_t now_us) {
 void CoreEngine::drain_callbacks(size_t max_deliveries) {
     // contracts/core-cpp.md §Engine: the ONLY site that invokes either CoreCallbacks pointer.
     //
-    // The bound is min(max_deliveries, what was pending AT ENTRY). Snapshotting the two sizes is
-    // what makes "everything currently pending" literal: a callback that enqueues (only an
-    // engine-internal producer or T014's seam can, since the rings are private) has its item
-    // delivered by the NEXT call, not this one, so this loop cannot be extended by its own
-    // deliveries. True by construction — the counters are read once, before any callback runs.
+    // Not re-entrant, BY CONSTRUCTION rather than by precondition: a call made from inside a
+    // callback delivers nothing and returns at once. Without this latch each nested call would
+    // deliver one more item and recurse again, so the stack would grow with the queue depth — up
+    // to LIMIT_max_nodes frames in one top-level call, which on the target's fixed task stack is
+    // an overflow rather than a deep-but-survivable call (CLAUDE.md rule 5's "fixed-size" reading
+    // of the same rule that bans the heap). Nothing is lost: the item a suppressed nested call
+    // would have delivered is still queued, and the drain already in progress or the next
+    // top-level one delivers it. Recorded, with the alternatives, in docs/OPEN-QUESTIONS.md
+    // (2026-09-27).
+    if (draining_) {
+        return;
+    }
+    draining_ = true;
+
+    // The bound is min(max_deliveries, what was pending AT ENTRY) — ONE budget spent across both
+    // rings, not one per ring (contracts/core-cpp.md §Engine: "at most `max_deliveries` queued
+    // CoreCallbacks calls"). Snapshotting the two sizes is what makes "everything currently
+    // pending" literal: a callback that enqueues (only an engine-internal producer or T014's seam
+    // can, since the rings are private) has its item delivered by the NEXT call, not this one, so
+    // this loop cannot be extended by its own deliveries. True by construction — the counters are
+    // read once, before any callback runs.
     size_t remaining = max_deliveries;
     size_t lifecycle_budget = pending_lifecycle_.size();
     size_t param_budget = pending_param_results_.size();
 
-    // Lifecycle events first, then parameter results. The order BETWEEN the two rings is not
-    // fixed by data-model.md §8a — only FIFO within each ring is — so this is a local choice,
-    // stated here rather than left implicit: a lifecycle notice (a node going OFFLINE, a bus
-    // fault) is the more urgent of the two when a bounded drain can only deliver some of both.
-    // Nothing should be built on the cross-ring order; §8a's guarantee is per-ring.
+    // The two rings are served in ALTERNATION, with the starting ring carried across calls in
+    // next_is_param_. data-model.md §8a fixes FIFO within each ring and says nothing across the
+    // two, so the cross-ring order is this engine's choice — but "all of one ring, then the
+    // other" is not a free choice: under a bounded drain whose budget is at or below one ring's
+    // arrival rate, the second ring is reached NEVER, and its deliveries are then destroyed by
+    // the drop-newest rule (per R-10 a ParamRequestId is only released when its result is
+    // delivered, so a permanently starved result ring is how the get_param id pool would wedge).
+    // Alternating bounds each stream's starvation at one delivery behind the other instead.
+    // Nothing should be built on WHICH ring a given drain starts with; the guarantee here is
+    // per-ring FIFO plus this fairness, not a fixed interleaving.
     LifecycleEvent ev{};
-    while (remaining > 0 && lifecycle_budget > 0 && pending_lifecycle_.pop(ev)) {
-        --lifecycle_budget;
-        --remaining;
-        // A null pointer is a host that wants the polling loop without this stream (R-04:
-        // CoreCallbacks' members default to nullptr). The delivery is still CONSUMED — calling
-        // through the null pointer would be undefined behaviour, and leaving the item queued
-        // would fill the ring and start counting drops against an application that asked for
-        // nothing.
-        if (callbacks_.on_lifecycle != nullptr) {
-            callbacks_.on_lifecycle(callbacks_.ctx, ev);
+    ParamResultDelivery delivery{};
+    while (remaining > 0 && (lifecycle_budget > 0 || param_budget > 0)) {
+        const bool take_param = param_budget > 0 && (next_is_param_ || lifecycle_budget == 0);
+        if (take_param) {
+            if (!pending_param_results_.pop(delivery)) {
+                break; // unreachable while param_budget <= size(): defensive, not a known path
+            }
+            --param_budget;
+            --remaining;
+            next_is_param_ = false;
+            // R-10: the result is correlated to its request by the id it is delivered with.
+            if (callbacks_.on_param_result != nullptr) {
+                callbacks_.on_param_result(callbacks_.ctx, delivery.id, delivery.result);
+            }
+        } else {
+            if (!pending_lifecycle_.pop(ev)) {
+                break; // likewise
+            }
+            --lifecycle_budget;
+            --remaining;
+            next_is_param_ = true;
+            // A null pointer is a host that wants the polling loop without this stream (R-04:
+            // CoreCallbacks' members default to nullptr). The delivery is still CONSUMED —
+            // calling through the null pointer would be undefined behaviour, and leaving the item
+            // queued would fill the ring and start counting drops against an application that
+            // asked for nothing. The budget is charged either way: `max_deliveries` bounds the
+            // deliveries a call consumes, not only the ones that reach a function pointer.
+            if (callbacks_.on_lifecycle != nullptr) {
+                callbacks_.on_lifecycle(callbacks_.ctx, ev);
+            }
         }
     }
 
-    ParamResultDelivery delivery{};
-    while (remaining > 0 && param_budget > 0 && pending_param_results_.pop(delivery)) {
-        --param_budget;
-        --remaining;
-        // R-10: the result is correlated to its request by the id it is delivered with.
-        if (callbacks_.on_param_result != nullptr) {
-            callbacks_.on_param_result(callbacks_.ctx, delivery.id, delivery.result);
-        }
-    }
+    draining_ = false;
 }
 
 bool CoreEngine::enqueue_lifecycle(const LifecycleEvent& ev) {

@@ -136,7 +136,9 @@ behaviour, in its own file. The harness's own negative fixtures were moved off `
 **Note (2026-09-27, #685/#686).** T014 and T015 were delivered as ONE dispatch unit (ruling
 2026-08-30, `docs/DEFINITION-OF-READY.md`): T015's `core/core_engine.hpp` is what makes T014's
 test compile at all, so the test commit alone would red the native build stage. Two points the
-artefacts left open were decided in that PR and are recorded here so no later task re-opens them.
+artefacts left open were decided in that PR and are recorded here so no later task re-opens them
+(a third, `drain_callbacks()`'s cross-ring order and re-entry, was decided in its review-fix round
+— see the end of this note).
 (1) `dropped_deliveries_` had no reader in `contracts/core-cpp.md` §Engine while T014 must assert
 it increments, so a `uint32_t dropped_deliveries() const` accessor joined the existing read-only
 introspection group (`discovery_state()`/`node_in_use()`). (2) No production path enqueues onto
@@ -147,7 +149,13 @@ construction. It is not a public enqueue API and must not become one. Also recor
 ships `-fno-exceptions` but NOT the `-fno-rtti` T001's note predicted — that flag and the native
 preset's UBSan `vptr` check cannot coexist now that `core/` has a polymorphic class
 (`docs/OPEN-QUESTIONS.md`, 2026-09-27, PENDING human ruling; T003/#674 is where a real toolchain
-guarantee would come from).
+guarantee would come from). (3) `drain_callbacks()` serves the two §8a rings in ALTERNATION, with
+the next ring carried across calls, and is NOT re-entrant (a call from inside a callback delivers
+nothing and returns). §8a fixes FIFO within each ring and nothing across the two, so both were
+open; strict lifecycle-first starved the param-result ring outright under a bounded drain, and
+unguarded re-entry recursed once per queued item. Both defaults are pinned by named cases in
+`tests/unit/test_core_callback_queue.cpp` and recorded for a human ruling
+(`docs/OPEN-QUESTIONS.md`, 2026-09-27, PENDING) — a later task must not quietly restore either.
 
 - [ ] T016 Add `core` to `CMakeLists.txt` (root)'s existing `omgp_add_catch_test` link set if
       T001 did not already cover every consumer; confirm `./pipeline.sh codegen quality build`
