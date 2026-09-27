@@ -5434,3 +5434,54 @@ than a silent drift.
 **Amends:** none. **Supersedes:** none. **Related:** the 2026-09-27
 "`LifecycleEvent::module_event_detail` …" entry above (the other §8a question this dispatch unit
 leaves to a human).
+
+---
+
+## 2026-09-27 — `core/`'s `-fno-rtti`: option C's leg now exists (T003/#674), so what enforces CLAUDE.md rule 5 for `core/` has changed
+
+**Context:** the 2026-09-27 entry "`core/`'s `-fno-rtti` … and the native preset's UBSan `vptr`
+check are mutually exclusive" above records that the second leg of its recommendation —
+"the ESP-IDF component's own `-fno-rtti` on the Xtensa build" — "does not exist yet:
+`esp32-host/components/omgp_core/CMakeLists.txt` is T003 (#674), still open, so `core/` is
+compiled by no `-fno-rtti` toolchain at all at this head." That clause is now out of date: T003
+landed and `esp32-host/components/omgp_core/CMakeLists.txt` compiles `core/` under the pinned
+`espressif/idf:v5.3` toolchain. Recorded here rather than by editing that entry, per this file's
+append-only rule.
+
+**What changed, labelled (CLAUDE.md rule 11).** `core/core_engine.cpp` is now compiled
+`-fno-exceptions -fno-rtti` by `xtensa-esp32s3-elf-g++` — *demonstrated*, by that compile line in
+`esp32-host/build/compile_commands.json` on a green `./pipeline.sh esp32`, and by the negative
+control (component renamed aside → configure fails with "Failed to resolve component
+'omgp_core'"). Two things it is *not*:
+
+- It is not this one `target_compile_options` line's doing. ESP-IDF v5.3 already carries
+  `-fno-exceptions -fno-rtti` in its global C++ flags (`CONFIG_COMPILER_CXX_EXCEPTIONS` /
+  `_CXX_RTTI` default off) and CMake deduplicates the component's identical copies away. What the
+  explicit flags buy is that `core/` keeps them if that project-wide default ever changes, since
+  target options are appended after the global block — *demonstrated* for the ordering (a probe
+  `-fno-threadsafe-statics` landed after them, then reverted), *inferred* for the consequence.
+- It is not a link-time guarantee. Nothing in `app_main()` references a `core/` symbol, so every
+  member of `libomgp_core.a` is dropped: `omgp-host.map` mentions `omgp_core` exactly twice, both
+  `LOAD esp-idf/omgp_core/libomgp_core.a` — the state `tools/refimpl/test_esp32_link_smoke.py`
+  measured for `omgp_link`'s own T003 stub. T045 (#716)'s `core_smoke.cpp` closes that; `-fno-rtti`
+  acts at compile time, so the flag claim above does not wait on it.
+
+The claim about `core/` and rule 5 therefore becomes: **compiled `-fno-exceptions -fno-rtti` by the
+toolchain that ships to hardware; checked statically everywhere else** by
+`tools/check_embedded.py`'s `dynamic_cast`/`typeid` findings over `core/`. The native preset still
+compiles `core/` with RTTI on (`-fno-exceptions` only), which is what the prior entry's option A
+shipped.
+
+**Recommendation:** none new — this is the "plus C as soon as #674 lands" half of the prior entry's
+recommendation, now done. A human ruling is still owed there, and it is now narrower: only whether
+the *native* preset should also carry `-fno-rtti` at the cost of UBSan's `vptr` check on
+`CoreEngine` (option B). Nothing here argues for it.
+
+**Ruling:** n/a — this entry records an implementation fact, not a decision. The prior entry's
+**Ruling: PENDING — human** stands unchanged.
+
+**Amends:** the 2026-09-27 "`core/`'s `-fno-rtti` … mutually exclusive" entry above, in its factual
+clause only ("does not exist yet"). **Supersedes:** none — that entry's options, recommendation and
+pending ruling are untouched. **Related:** `core/CMakeLists.txt`'s `target_compile_options` note,
+which still reads "T003 (#674), still open, so today (a) is the whole of it"; a task touching that
+file should bring it into line with this entry.
