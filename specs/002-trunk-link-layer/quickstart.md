@@ -11,9 +11,11 @@ PyYAML, pytest; CMake ≥ 3.22; clang for fuzzing; Docker for the ESP32 stage.
 ./pipeline.sh codegen quality build unit
 ```
 Expected: `unit: executed <n> check(s)` with `<n>` above the raised `UNIT_TEST_FLOOR`, the
-six `test_link_*` and two property binaries listed by ctest, `==> pipeline green`. If the
+ten `test_link_*` and three property binaries listed by ctest, `==> pipeline green`. If the
 `link/` sources were not part of the build, the `test_link_*` binaries would be absent
-from the ctest list and the floor would fail.
+from the ctest list and the floor would fail. *(Corrected 2026-09-27, T049: the original
+"six … and two" undercounted once US3-US5 and the property tests landed —
+`tests/fuzz/README.md` "Quickstart walkthrough evidence" records the as-built ten/three.)*
 
 ## 2. Frames survive a hostile wire (US1)
 
@@ -82,8 +84,10 @@ one stays ENROLLED, nothing is declared.
 ./tools/fuzz-smoke.sh 60
 ```
 Expected: `fuzz: fuzz_frame runs=<n> cov=<c> findings=0 exit=0`. **Discriminating check**
-(do not commit): remove the `TooLong` guard in `Deframer::feed` → ASan
-`stack-buffer-overflow` at `frame.cpp:<line>`, `findings=1`, exit 1; restore → 0.
+(do not commit): remove the `TooLong` guard in `Deframer::append` (called from `feed`) →
+ASan `stack-buffer-overflow` at `frame.cpp:<line>`, `findings=1`, exit 1; restore → 0.
+*(Corrected 2026-09-27, T049: the guard is in `append`, which `feed` calls — not in `feed`
+itself; `tests/fuzz/README.md`'s 2026-09-04 entry already had this right.)*
 
 ## 8. Mutation triage gate bites (FR-035)
 
@@ -91,9 +95,11 @@ Expected: `fuzz: fuzz_frame runs=<n> cov=<c> findings=0 exit=0`. **Discriminatin
 ./tools/mutate.sh --diff origin/main --require       # CI form (Mull needed; local: MULL_RUNNER/MULL_PLUGIN)
 ```
 Expected: `mutation: mode=diff … unlabelled=0`, `mutation: PASS`. **Discriminating check**:
-change `attempt < TRUNK_retries` to `<=` in `link/master.cpp` and delete the "exactly two
-retries" assertion → `UNLABELLED survivor: link/master.cpp:<line>:<col> cxx_lt_to_le`,
-`mutation: FAIL`, exit 1; restore → PASS.
+change `attempt_count_ < 1u + TRUNK_retries` to `<=` in `link/master.cpp` and delete the
+"exactly two retries" assertion → `UNLABELLED survivor: link/master.cpp:<line>:<col>
+cxx_lt_to_le`, `mutation: FAIL`, exit 1; restore → PASS. *(Corrected 2026-09-27, T049: the
+original `attempt < TRUNK_retries` predates the guard's current shape at
+`link/master.cpp:358`; `cxx_lt_to_le` still applies to its `<`.)*
 
 ## 9. Both builds green (rule 10)
 
