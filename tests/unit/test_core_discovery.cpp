@@ -1127,14 +1127,35 @@ TEST_CASE("R-06: a standing node-id shortage is reported once per slot, and the 
     REQUIRE(rig.engine().dropped_deliveries() == 0u);
 
     // A second over-full backplane: 232 more slots, all unassignable, each its own first
-    // transition — so more notices arrive, and a repeat sweep of THAT map adds none either.
+    // transition. 232 is MORE than §8a's ring holds (LIMIT_max_nodes == 128), so this one sweep
+    // cannot deliver them all — the drop-newest ring refuses the tail of them.
+    //
+    // What must NOT happen then: a slot whose notice the ring REFUSED counting as reported. The
+    // dedupe bit records "the application has been told", so it may only be set when the enqueue
+    // actually succeeded; set unconditionally, the refused slots are silent for ever, even while
+    // the shortage stands and the application drains every superframe. Edge-triggering dedupes
+    // what was DELIVERED, never what was dropped.
     rig.engine().reconcile_slot_map(0x02, full, 3);
     rig.engine().drain_callbacks();
     const size_t reported_after_second = rig.recorder().count(LifecycleKind::NodeIdPoolExhausted);
     REQUIRE(reported_after_second > unassignable);
-    rig.engine().reconcile_slot_map(0x02, full, 4);
+    REQUIRE(reported_after_second < unassignable + omgp::LIMIT_bp_slot_map_max_slots);
+    REQUIRE(rig.engine().dropped_deliveries() > 0u); // the ring turned the rest away
+
+    // Repeat sweeps of the SAME map, each followed by a drain, re-offer exactly the refused
+    // slots — so an application that keeps draining learns about every one of the 232 — and then
+    // go quiet: once every slot has actually been reported, no later sweep of the unchanged map
+    // adds anything. Both halves matter; the second is the one that keeps a standing shortage
+    // from re-flooding the ring sweep after sweep.
+    for (uint64_t now = 4; now <= 8; ++now) {
+        rig.engine().reconcile_slot_map(0x02, full, now);
+        rig.engine().drain_callbacks();
+    }
+    const size_t all_reported = rig.recorder().count(LifecycleKind::NodeIdPoolExhausted);
+    REQUIRE(all_reported == unassignable + omgp::LIMIT_bp_slot_map_max_slots);
+    rig.engine().reconcile_slot_map(0x02, full, 9);
     rig.engine().drain_callbacks();
-    REQUIRE(rig.recorder().count(LifecycleKind::NodeIdPoolExhausted) == reported_after_second);
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeIdPoolExhausted) == all_reported);
 
     // The presence half still works on an over-full rig: slot 0 of 0x01 empties, and its
     // NodeRemoved is delivered rather than lost behind a re-flood of exhaustion notices.
@@ -1146,7 +1167,7 @@ TEST_CASE("R-06: a standing node-id shortage is reported once per slot, and the 
     const omgp::l3::BpSlotMapResp gone =
         raw_slot_map(static_cast<uint8_t>(omgp::LIMIT_bp_slot_map_max_slots), minus_slot0,
                      minus_slot0, static_cast<uint8_t>(sizeof minus_slot0));
-    rig.engine().reconcile_slot_map(0x01, gone, 5);
+    rig.engine().reconcile_slot_map(0x01, gone, 10);
     rig.engine().drain_callbacks();
     REQUIRE(rig.recorder().count(LifecycleKind::NodeRemoved) == 1u);
     REQUIRE(rig.engine().dropped_deliveries() == dropped_before);
@@ -1157,7 +1178,7 @@ TEST_CASE("R-06: a standing node-id shortage is reported once per slot, and the 
     // Edge-triggered, not one-shot: slot 0 is re-occupied while the rig is still over-full, which
     // is a NEW transition into the shortage and is reported again.
     const size_t before_reoccupy = rig.recorder().count(LifecycleKind::NodeIdPoolExhausted);
-    rig.engine().reconcile_slot_map(0x01, full, 6);
+    rig.engine().reconcile_slot_map(0x01, full, 11);
     rig.engine().drain_callbacks();
     REQUIRE(rig.recorder().count(LifecycleKind::NodeIdPoolExhausted) == before_reoccupy + 1u);
 }
@@ -1215,13 +1236,12 @@ TEST_CASE("rule 7: a READ_DESC chunk carrying more bytes than the advertised des
     REQUIRE(advertised % kDescChunkMax != 0u);
     OverServingBackplane liar(advertised, omgp::MODULE_TYPE_CODES[0]);
     // An honest backplane alongside it: a hostile answer must not cost anyone else discovery.
-    // It is backplane 0x01 and the liar 0x02, so the honest modules hold the LOWER node ids —
-    // deliberate, and a limit on what this case shows: issue_demand()'s IDENTIFY scan is
-    // ascending node id with no round-robin cursor, so a node that fails for ever at the lowest
-    // id takes every demand slot and the higher ids never get one (measured: with the liar at
-    // 0x01, 44 IDENTIFY and 88 READ_DESC requests in 90 superframes, all of them the liar's, and
-    // the honest backplane's modules never identified at all). That starvation is NOT what this
-    // case asserts; it is reported as a FOLLOW-UP on PR #871.
+    // It is backplane 0x01 and the liar 0x02, so the honest modules hold the LOWER node ids.
+    // The OPPOSITE arrangement — the liar at the lowest id — is the starvation case, and it is
+    // covered on its own: by issue_demand()'s rotating identify_cursor_ for the IDENTIFY scan and
+    // its per-node desc_stalled_superframe bound for the chunk ring, asserted by the ERR_BUSY
+    // case at the end of this file. This case fixes the ids the other way round so that what it
+    // measures is the refusal itself and not the scheduler's fairness.
     Descriptor honest =
         make_descriptor(0x7002, 1, 1, omgp::MODULE_TYPE_CODES[1], 2u * kDescChunkMax);
     const BackplaneScript bp1{0x01, 2, 0b11u, omgp::MODULE_TYPE_CODES[1], &honest, false, false};
@@ -1314,4 +1334,82 @@ TEST_CASE("protocol-l3 §3.1: a READ_DESC chunk whose offset does not continue t
     REQUIRE(rig.transcript().count(omgp::OP_IDENTIFY) == 1u);
     rig.engine().drain_callbacks();
     REQUIRE(rig.recorder().count(LifecycleKind::NodeDiscovered) == 1u);
+}
+
+// --- trunk §8 / AS3: a REFUSED READ_DESC must not starve the rest of the rig --------------------
+
+namespace {
+
+// A backplane that identifies its one module honestly and then answers ERR_BUSY to every
+// READ_DESC, for ever. This is not a hostile shape: trunk §8 MANDATES that answer ("MUST begin
+// its response within T_turn ... with the module's reply if it is ready, otherwise ERR_BUSY",
+// "MUST NOT stall the trunk") and it is CLAUDE.md rule 6's own prescription for a bridge whose
+// module bus is not ready, while trunk §10.5 records that a persistent busy is unbounded at L2.
+// With no DescChunkStep of its own in the script, the ErrorStep is the wildcard every READ_DESC
+// falls back to once the enrolment PING has consumed it (contracts/mock-l3-node.md).
+struct BusyDescBackplane {
+    Descriptor blob;
+    omgp::l3::IdentifyResp identify{};
+    std::vector<L3Step> steps;
+
+    explicit BusyDescBackplane(uint8_t module_type)
+        : blob(make_descriptor(0x9001, 1, 1, module_type, 2u * kDescChunkMax)) {
+        identify = identify_for(blob, module_type);
+    }
+
+    void install(Rig& rig, uint8_t addr, uint8_t slot_count, uint32_t occupied) {
+        steps.clear();
+        steps.push_back(L3Step::of(SlotMapStep{slot_count, occupied, occupied}));
+        steps.push_back(L3Step::of(StatusStep{ready_status()}));
+        steps.push_back(L3Step::of(IdentifyStep{identify}));
+        steps.push_back(L3Step::of(ErrorStep{omgp::ERR_BUSY}));
+        rig.node().set_script(addr, steps.data(), steps.size());
+    }
+};
+
+} // namespace
+
+TEST_CASE("trunk §8: a backplane answering ERR_BUSY to every READ_DESC blocks no other slot's "
+          "discovery [discovery][us1][robustness]") {
+    // User Story 1 AS3: a slot whose module does not answer "does not block the discovery of any
+    // other slot or backplane". An ERROR answer to a descriptor chunk is RE-QUEUED for the same
+    // offset (READ_DESC is idempotent, CLAUDE.md rule 2) — so without a per-superframe bound on
+    // that retry, one permanently-busy node keeps issue_demand()'s chunk ring non-empty for ever;
+    // the ring is drained BEFORE the IDENTIFY scan, so the scan's own rotation cursor is never
+    // reached at all. Measured before the bound existed: 893 READ_DESC to the busy backplane in
+    // 301 superframes, 0 IDENTIFY to the honest one, 0 of 4 honest modules discovered.
+    //
+    // The busy backplane holds the LOWER trunk address and so the LOWER node id, deliberately:
+    // that is the arrangement in which a head-of-queue monopoly is observable at all.
+    BusyDescBackplane busy(omgp::MODULE_TYPE_CODES[0]);
+    Descriptor honest =
+        make_descriptor(0x9002, 1, 1, omgp::MODULE_TYPE_CODES[1], 2u * kDescChunkMax);
+    const BackplaneScript bp2{0x02, 4, 0b1111u, omgp::MODULE_TYPE_CODES[1], &honest, false, false};
+
+    Rig rig;
+    busy.install(rig, 0x01, 1, 0b1u);
+    rig.install(bp2);
+    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+
+    const std::vector<uint8_t> ids = rig.in_use_ids();
+    REQUIRE(ids.size() == 5u); // one slot on 0x01, four on 0x02
+    // The four honest modules are discovered, and their lifecycle events are delivered.
+    REQUIRE(rig.discovered_count() == 4u);
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeDiscovered) == 4u);
+    REQUIRE(rig.engine().dropped_deliveries() == 0u);
+
+    // The busy node itself is neither discovered nor abandoned: it keeps being asked, which is
+    // AS3's "retried, not abandoned", and the honest backplane's own traffic happened alongside
+    // that retrying rather than behind it.
+    const uint8_t busy_id = ids.front();
+    REQUIRE(rig.engine().discovery_state(busy_id) != DiscoveryState::Discovered);
+    REQUIRE(rig.transcript().count(omgp::OP_READ_DESC) > 2u);
+
+    // And it stays that way: the busy node does not take the whole demand budget of every later
+    // superframe either, so the rig keeps running and nothing already discovered regresses.
+    const size_t lines = rig.transcript().lines.size();
+    rig.run_to_superframe(rig.transcript().last_superframe() + kSettleSuperframes, byte_us());
+    REQUIRE(rig.transcript().lines.size() > lines);
+    REQUIRE(rig.discovered_count() == 4u);
 }

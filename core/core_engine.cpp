@@ -228,6 +228,25 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
             desc_held_ = false;
             continue;
         }
+        if (nodes_[idx].desc_stalled_superframe != 0) {
+            // This node's last chunk made NO progress (NodeRecord::desc_stalled_superframe): an
+            // ERROR answer, an answer for the wrong offset, or a timeout. Such an answer re-queues
+            // the same offset, so a node whose READ_DESC is refused for ever — trunk §8's mandated
+            // ERR_BUSY above all — keeps this ring permanently non-empty; and because the ring is
+            // drained FIRST, it would take the one demand item a busy superframe admits, every
+            // superframe, and no other node would ever be identified at all (User Story 1 AS3: a
+            // slot whose module does not answer "does not block the discovery of any other slot or
+            // backplane"). Measured before this: 893 READ_DESC to one busy backplane in 301
+            // superframes, 0 IDENTIFY to the other, 0 of 4 honest modules discovered.
+            //
+            // So a stalled node loses its PLACE, not its retry: the item is dropped here, and the
+            // last pass below retries the node — after the IDENTIFY scan, at most once per
+            // superframe, from its own rotating cursor. Dropping is safe because the item carries
+            // nothing the entry does not: the node stays in ReadingDescriptor and is resumed at
+            // the bytes already read, and READ_DESC is idempotent (CLAUDE.md rule 2).
+            desc_held_ = false;
+            continue;
+        }
         NodeRecord& node = nodes_[idx];
         if (!admit_demand(cost_estimate(node.last_measured_duration_us))) {
             return false; // FR-005: carries over, keeping its place at the head of the queue
@@ -244,31 +263,25 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
     // chunk item was dropped with it. Without this, every node waiting on that entry — a
     // like-for-like backplane's whole complement — would sit in ReadingDescriptor for ever.
     // It cannot interfere with a healthy read: while one is in progress the ring is non-empty
-    // (each answered chunk queues the next), so this loop is not reached at all.
+    // (each answered chunk queues the next), so this loop is not reached at all. Ascending node
+    // id, with no cursor of its own: every node it can serve is one whose LAST chunk made
+    // progress (a stalled one is skipped here and retried by the last pass instead), so no node
+    // can hold this sweep's head against the others the way a permanently-failing one could.
     for (uint8_t id = ADDR_module_min; id <= ADDR_module_max; ++id) {
         NodeRecord& node = nodes_[node_index(id)];
         if (!node.in_use || node.discovery != DiscoveryState::ReadingDescriptor) {
             continue;
         }
-        DescriptorCacheEntry* entry =
-            find_descriptor(node.module_type, node.desc_len, node.desc_crc);
-        if (entry == nullptr) {
-            node.discovery = DiscoveryState::Identifying; // start again from IDENTIFY
-            continue;
+        if (node.desc_stalled_superframe != 0) {
+            continue; // the last pass's business, not this one's
         }
-        if (entry->complete) {
-            mark_discovered(node, id, *entry);
-            continue;
-        }
-        if (!admit_demand(cost_estimate(node.last_measured_duration_us))) {
-            return false;
-        }
-        // Resumes at what the entry already holds, not from zero: the bytes read so far are
-        // still the right bytes, and READ_DESC is idempotent (CLAUDE.md rule 2).
-        if (begin_desc_chunk(id, entry->received, now_us)) {
+        const Resume outcome = resume_desc_read(id, node, now_us);
+        if (outcome == Resume::Issued) {
             return true;
         }
-        return false;
+        if (outcome == Resume::Refused) {
+            return false;
+        }
     }
     // spec FR-006: a node id whose module has not yet answered IDENTIFY. Ascending node id, but
     // from a ROTATING start (identify_cursor_, advanced past each id this scan actually issues
@@ -312,7 +325,56 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
         }
         return false;
     }
+    // LAST: one retry for a node whose descriptor read is STALLED — its last chunk was refused
+    // (trunk §8's ERR_BUSY), answered for the wrong offset, or timed out. Deliberately after the
+    // IDENTIFY scan and not before it, which is this pass's whole reason for existing: a node that
+    // fails for ever otherwise takes the one demand item a busy superframe admits, every
+    // superframe, because the chunk ring is drained first (see that drain's note). It is a
+    // DIVERGENCE from R-07's fixed ring order, stated: R-07 orders the three RINGS, and this is
+    // not a fourth ring but the same descriptor work deprioritised for one superframe at a time.
+    // At most one such retry per superframe per node (desc_stalled_superframe), from a rotating
+    // cursor so two stalled nodes take turns, and "retried, not abandoned" (AS3) is what the
+    // retry itself is: the node keeps its cache entry and its place, for as long as it keeps
+    // answering that way.
+    for (uint16_t n = 0; n < id_pool; ++n) {
+        const uint16_t offset = static_cast<uint16_t>((desc_retry_cursor_ + n) % id_pool);
+        const uint8_t id = static_cast<uint8_t>(ADDR_module_min + offset);
+        NodeRecord& node = nodes_[node_index(id)];
+        if (!node.in_use || node.discovery != DiscoveryState::ReadingDescriptor) {
+            continue;
+        }
+        if (node.desc_stalled_superframe == 0 || node.desc_stalled_superframe == superframe_) {
+            continue; // not stalled at all, or already had this superframe's one attempt
+        }
+        const Resume outcome = resume_desc_read(id, node, now_us);
+        if (outcome == Resume::Issued) {
+            desc_retry_cursor_ = static_cast<uint8_t>((offset + 1u) % id_pool);
+            return true;
+        }
+        if (outcome == Resume::Refused) {
+            return false;
+        }
+    }
     return false;
+}
+
+CoreEngine::Resume CoreEngine::resume_desc_read(uint8_t node_id, NodeRecord& node,
+                                                uint64_t now_us) {
+    DescriptorCacheEntry* entry = find_descriptor(node.module_type, node.desc_len, node.desc_crc);
+    if (entry == nullptr) {
+        node.discovery = DiscoveryState::Identifying; // start again from IDENTIFY
+        return Resume::Nothing;
+    }
+    if (entry->complete) {
+        mark_discovered(node, node_id, *entry);
+        return Resume::Nothing;
+    }
+    if (!admit_demand(cost_estimate(node.last_measured_duration_us))) {
+        return Resume::Refused;
+    }
+    // Resumes at what the entry already holds, not from zero: the bytes read so far are still the
+    // right bytes, and READ_DESC is idempotent (CLAUDE.md rule 2).
+    return begin_desc_chunk(node_id, entry->received, now_us) ? Resume::Issued : Resume::Refused;
 }
 
 bool CoreEngine::begin_desc_chunk(uint8_t node_id, uint16_t offset, uint64_t now_us) {
@@ -515,6 +577,10 @@ void CoreEngine::complete_request(const link::MasterEvent& ev, uint64_t now_us) 
         // stays in ReadingDescriptor and its leader's entry keeps what it has, so the read
         // resumes rather than restarting. AS3's "retried, not abandoned" is that scan.
         if (kind == TxKind::ReadDesc && node_idx != kNoNodeIndex) {
+            // No progress was made, so this node has spent its one chunk attempt for this
+            // superframe (NodeRecord::desc_stalled_superframe): the re-queued item below must not
+            // be able to hold issue_demand()'s chunk ring against every other node.
+            nodes_[node_idx].desc_stalled_superframe = superframe_;
             DescChunkItem again{};
             again.node_id = tx_node_;
             again.offset = tx_offset_;
@@ -607,6 +673,9 @@ void CoreEngine::on_identify(const link::MasterEvent& ev, uint64_t now_us) {
         return;
     }
     node.discovery = DiscoveryState::ReadingDescriptor;
+    // A fresh read, whatever the last one did: a node that comes back through IDENTIFY starts
+    // un-stalled, so one refused chunk does not deprioritise it for the rest of its life.
+    node.desc_stalled_superframe = 0;
     if (entry != nullptr) {
         // Another node is already reading this exact descriptor. This one waits for that read
         // instead of issuing a second copy of it: attach_descriptor() picks up every waiter
@@ -661,6 +730,12 @@ void CoreEngine::on_desc_chunk(const link::MasterEvent& ev, uint64_t now_us) {
         hdr.opcode != OP_READ_DESC) {
         // An ERROR answer (trunk §8) or an undecodable one: re-ask for the SAME offset. The
         // request is idempotent (CLAUDE.md rule 2) and the entry keeps what it already holds.
+        // No byte was added, so this node has spent its one chunk attempt for this superframe —
+        // trunk §8 MANDATES ERR_BUSY for a bridge whose module bus is not ready (CLAUDE.md rule
+        // 6) and trunk §10.5 leaves a persistent busy unbounded at L2, so an endlessly refused
+        // read is a spec-conformant rig, not a hostile one, and it must not be able to hold the
+        // chunk ring against every other node (NodeRecord::desc_stalled_superframe).
+        node.desc_stalled_superframe = superframe_;
         DescChunkItem again{};
         again.node_id = tx_node_;
         again.offset = tx_offset_;
@@ -669,6 +744,10 @@ void CoreEngine::on_desc_chunk(const link::MasterEvent& ev, uint64_t now_us) {
     }
     l3::ReadDescResp resp{};
     if (l3::decode_read_desc_resp(payload.data, payload.len, resp) != l3::Status::Ok) {
+        // Nothing is re-queued: the recovery sweep picks this node up from what its entry holds.
+        // It is still a superframe's attempt spent, or that sweep — ascending node id — would
+        // re-issue for this same node for the rest of the superframe and starve the others.
+        node.desc_stalled_superframe = superframe_;
         return;
     }
     // protocol-l3 §3.1: the response carries its own offset. A chunk that does not continue the
@@ -676,6 +755,7 @@ void CoreEngine::on_desc_chunk(const link::MasterEvent& ev, uint64_t now_us) {
     // blob — a node answering an offset it was not asked for must not be able to scatter bytes
     // through another module's cached descriptor (CLAUDE.md rule 7).
     if (resp.offset != entry->received) {
+        node.desc_stalled_superframe = superframe_; // no progress: one attempt per superframe
         DescChunkItem again{};
         again.node_id = tx_node_;
         again.offset = entry->received;
@@ -704,6 +784,13 @@ void CoreEngine::on_desc_chunk(const link::MasterEvent& ev, uint64_t now_us) {
         entry->blob[entry->received + i] = resp.bytes.data[i];
     }
     entry->received = static_cast<uint16_t>(entry->received + take);
+    if (take != 0) {
+        // Progress: this node is no longer stalled, so its next chunk goes back in the chunk
+        // ring's own pass rather than issue_demand()'s deprioritised last one. Cleared on the
+        // FIRST good chunk, not on completion — a node recovering from one refused chunk should
+        // not finish its descriptor at one chunk per superframe.
+        node.desc_stalled_superframe = 0;
+    }
     if (entry->received < entry->len) {
         if (take == 0) {
             // A node that answers a zero-length chunk short of its own advertised desc_len
@@ -879,13 +966,20 @@ void CoreEngine::reconcile_slot_map(uint8_t backplane_addr, const l3::BpSlotMapR
                 // occupied-but-unassignable slot per sweep, without bound, and §8a's drop-newest
                 // ring would then refuse the genuine presence events behind the repeats. The
                 // slot is still reconsidered every sweep; only the NOTICE is deduplicated.
+                //
+                // The bit records "the application has been TOLD", so it is set only when the
+                // enqueue succeeded. §8a's ring is drop-newest and holds LIMIT_max_nodes items,
+                // so a rig with more unassignable slots than that has notices REFUSED on a sweep;
+                // setting the bit regardless would make those slots silent for ever, even while
+                // the shortage stands and the application drains every superframe. A refused
+                // notice is therefore re-offered by the next sweep that still observes the
+                // shortage, and the sweeps go quiet once each slot has actually been delivered.
                 if (!exhaustion_reported(bp, slot)) {
-                    set_exhaustion_reported(bp, slot, true);
                     LifecycleEvent exhausted{};
                     exhausted.kind = LifecycleKind::NodeIdPoolExhausted;
                     exhausted.node_id = backplane_addr;
                     exhausted.slot = slot;
-                    (void)enqueue_lifecycle(exhausted);
+                    set_exhaustion_reported(bp, slot, enqueue_lifecycle(exhausted));
                 }
                 continue;
             }

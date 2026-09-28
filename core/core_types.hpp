@@ -150,6 +150,18 @@ struct NodeRecord {
     bool suspect_or_worse = false;    // true once SUSPECT; cleared by a valid answer
     bool offline = false;             // true once TRUNK_offline_after_suspect_ms elapses in
                                       // SUSPECT
+    // The superframe in which this node's last READ_DESC made NO progress — an ERROR answer
+    // (trunk §8's mandated ERR_BUSY, above all), an undecodable one, an answer for an offset that
+    // does not continue the reassembly, or a trunk-level timeout. 0 = never, since superframe
+    // numbering starts at 1. issue_demand() will not issue another chunk for this node within
+    // that same superframe: a failed chunk is RE-QUEUED for the same offset (READ_DESC is
+    // idempotent, CLAUDE.md rule 2), and the chunk ring is drained before the IDENTIFY scan, so
+    // without this bound one node whose descriptor read is refused for ever holds every demand
+    // slot of every superframe and no other node is ever identified (User Story 1 AS3: a slot
+    // whose module does not answer "does not block the discovery of any other slot or
+    // backplane"). The read is not abandoned by the bound — the node stays in ReadingDescriptor
+    // and is resumed at the bytes already held, one attempt per superframe.
+    uint32_t desc_stalled_superframe = 0;
     // Channel-switch (spec User Story 3):
     bool switch_outstanding = false;
     uint8_t switch_channel = 0;
@@ -192,6 +204,9 @@ struct BackplaneRecord {
     // it with repeats of one unchanged condition and then refuses the genuine NodeRemoved /
     // NodeDiscovered behind them. Cleared the moment the slot is assigned an id, reports
     // unoccupied, or falls outside slot_count, so a fresh transition is reported again.
+    // Set only when the enqueue SUCCEEDED: the bit means "the application has been told", and a
+    // rig with more unassignable slots than the ring holds has some notices refused on a sweep —
+    // those are re-offered by the next sweep rather than lost for ever.
     // Sized to LIMIT_bp_slot_map_max_slots like node_id_by_slot above, never to a peer's
     // slot_count. NOT a data-model.md §4 field — added with LifecycleKind::NodeIdPoolExhausted,
     // which cannot be reported at a bounded rate without it (docs/OPEN-QUESTIONS.md 2026-09-28).

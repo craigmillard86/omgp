@@ -142,7 +142,8 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     // sweep would fill §8a's drop-newest ring with one unchanged condition and refuse the
     // presence events behind it). The slot is reconsidered on every sweep either way, and a slot
     // that empties, is assigned an id, or leaves slot_count is reported again if it later
-    // transitions back into the shortage.
+    // transitions back into the shortage. A slot whose notice the ring itself REFUSED does not
+    // count as reported, so it is re-offered on the next sweep rather than lost for ever.
     // Nothing is reported as NodeDiscovered here: that fires on reaching Discovered (T022).
     //
     // TOTAL for any input (spec FR-030's forward-compatibility rule, CLAUDE.md rule 7): a
@@ -234,6 +235,14 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     // Issues the next request this superframe's plan calls for; false when the plan is spent.
     bool issue_next(uint64_t now_us);
     bool issue_demand(uint64_t now_us);
+    // What trying to resume one node's interrupted descriptor read did: nothing that needed the
+    // wire (the entry was reclaimed or had already completed, both settled in place), a request
+    // issued, or the superframe budget / link::Master refusing — which ends the demand phase.
+    enum class Resume { Nothing, Issued, Refused };
+    // Resumes `node`'s read at the bytes its cache entry already holds. Shared by issue_demand()'s
+    // two resumption passes — the recovery sweep and the stalled-node retry — so that a node
+    // resumed by either is resumed identically; the passes differ only in WHICH nodes they offer.
+    Resume resume_desc_read(uint8_t node_id, NodeRecord& node, uint64_t now_us);
     // One READ_DESC for `node_id` at `offset`, at the R-09 chunk size (protocol-l3 §3.1).
     bool begin_desc_chunk(uint8_t node_id, uint16_t offset, uint64_t now_us);
     // Encodes one L3 request (protocol-l3 §3) into request_buf_ and hands it to
@@ -317,6 +326,12 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     // every higher id (see issue_demand()). Persists across superframes deliberately — a per-
     // superframe reset would restore exactly the starvation it exists to prevent.
     uint8_t identify_cursor_ = 0;
+    // The same, for the stalled-node descriptor retry (issue_demand()'s last pass): where that
+    // pass starts looking, as an offset from ADDR_module_min, advanced past each id it issues
+    // for. Two stalled nodes would otherwise share the fate a single cursor gives them — the
+    // lower id taking every retry the budget admits — for the same reason identify_cursor_
+    // exists. Persists across superframes, deliberately.
+    uint8_t desc_retry_cursor_ = 0;
     bool probe_issued_ = false;  // this superframe's one enrolment probe (FR-003)
     bool demand_issued_ = false; // whether the first-item exception has been spent
     // The head of the descriptor-chunk queue, popped but not yet admitted by the budget: held
