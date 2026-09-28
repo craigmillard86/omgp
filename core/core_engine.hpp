@@ -83,7 +83,7 @@ using TranscriptFn = void (*)(void* ctx, const TranscriptEntry& entry);
 // a general enqueue API and must not grow into one.
 struct CoreEngineTestSeam;
 
-class CoreEngine : public link::HealthListener { // R-03: this engine IS the health listener
+class CoreEngine final : public link::HealthListener { // R-03: this engine IS the health listener
   public:
     // wire/host_addr construct the link::Master this engine owns internally (R-02); callbacks is
     // copied by value (R-04) and its ctx must outlive every call below. `clock` is the injected
