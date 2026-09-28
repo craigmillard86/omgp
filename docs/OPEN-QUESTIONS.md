@@ -5923,3 +5923,45 @@ either" in `tests/unit/test_core_discovery.cpp`.
 
 **Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** R-07 (demand
 scheduling order), FR-019.
+
+## 2026-09-28 — T022 (#693): nothing bounds a descriptor read whose chunks are refused for ever, and R-07's order makes it starve everything else
+
+**Context:** `research.md` R-07 fixes the order of the three demand rings (event drains, then
+descriptor chunks, then parameter operations), and `core/`'s IDENTIFY scan sits after the chunk
+ring for the stated reason that finishing a read already in flight releases a node to `Discovered`
+while starting another identity does not. `trunk-link-layer.md` §8 REQUIRES a backplane to answer
+`ERR_BUSY` rather than stall the trunk when its module bus is not ready (CLAUDE.md rule 6), and
+§10.5 records that a persistent busy is unbounded at L2 — so a spec-conformant rig may refuse a
+`READ_DESC` for ever. `protocol-l3.md` and `spec.md` say nothing about how often such a read may be
+retried, and the refusal is not an error the node can be failed on: AS3 requires it to be retried
+rather than abandoned. Measured on the PR #871 branch before the fix: one backplane answering
+`ERR_BUSY` to every `READ_DESC` took 893 of 893 demand items over 301 superframes (a refused chunk
+is re-queued for the same offset, keeping the ring non-empty, and a busy superframe admits only one
+demand item), so 0 of 4 honest modules on another backplane were ever identified — User Story 1
+AS3's "does not block the discovery of any other slot or backplane", violated outright.
+
+**Options:** (a) keep R-07's order exactly and accept that a permanently-refused read starves the
+rig; (b) abandon the read after N refusals, which contradicts AS3's "retried rather than
+abandoned"; (c) keep the read alive but DEPRIORITISE it — a node whose last chunk made no progress
+loses its place in the chunk ring and is retried after the IDENTIFY scan instead, at most once per
+superframe, from a rotating cursor; (d) bound re-pushes per node per superframe without reordering,
+which the measurement above rules out (the one demand item a busy superframe admits still goes to
+the chunk ring first).
+
+**Recommendation:** (c), implemented (`NodeRecord::desc_stalled_superframe`,
+`CoreEngine::desc_retry_cursor_`). It is a stated DIVERGENCE from R-07's fixed order, narrow by
+construction: R-07 orders the three rings and this is not a fourth ring but the same descriptor work
+deprioritised for as long as it is making no progress — the flag is cleared by the first chunk that
+adds a byte and by any return through IDENTIFY, so a healthy read is scheduled exactly as before
+(demonstrated by the unchanged AS1/AS2/SC-001 whole-transcript cases). Idempotence carries the
+retry: the node keeps its cache entry and resumes at `entry->received` (CLAUDE.md rule 2).
+Demonstrated by "trunk §8: a backplane answering `ERR_BUSY` to every `READ_DESC` blocks no other
+slot's discovery" in `tests/unit/test_core_discovery.cpp`, which fails at 0 of 4 modules discovered
+without it. What it does NOT settle, and is the reason this entry exists: whether a rig that refuses
+a descriptor for ever should eventually be REPORTED (a lifecycle notice for a node stuck in
+`ReadingDescriptor`) rather than only retried quietly — there is no `LifecycleKind` for it and this
+change adds none.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** R-07 (demand
+scheduling order), R-09 (chunked READ_DESC), trunk §8/§10.5, User Story 1 AS3, and the 2026-09-28
+IDENTIFY-scan-order entry above (same class of gap, different pass).
