@@ -55,6 +55,7 @@
 #include "catch_amalgamated.hpp"
 #include "fake_clock.hpp"
 #include "l3/l3_descriptor.hpp"
+#include "l3/l3_header.hpp"
 #include "l3/l3_payload.hpp"
 #include "l3/l3_types.hpp"
 #include "link/link_types.hpp"
@@ -78,6 +79,23 @@ struct CoreEngineTestSeam {
     static void set_transcript(CoreEngine& engine, TranscriptFn fn, void* ctx) {
         engine.transcript_ = fn;
         engine.transcript_ctx_ = ctx;
+    }
+    // The one hostile READ_DESC answer MockL3Node cannot express: its build_desc_chunk() echoes
+    // the REQUEST's own offset (tests/support/mock_l3_node.cpp, contracts/mock-l3-node.md), so a
+    // node answering an offset it was not asked for is not scriptable, and protocol-l3 §3.1's
+    // offset-continuity rule — which lives in on_desc_chunk() and nowhere else — would otherwise
+    // be asserted by comment only. `ev` is a real, codec-encoded response: the same input
+    // link::Master hands the engine, built by the same l3/ encoders. What this does NOT exercise,
+    // stated rather than implied: the L2 path that would carry such a frame to the engine.
+    static void deliver_desc_chunk(CoreEngine& engine, const link::MasterEvent& ev,
+                                   uint64_t now_us) {
+        engine.on_desc_chunk(ev, now_us);
+    }
+    // Whether the transaction currently outstanding at link::Master is a READ_DESC (trunk §3:
+    // one at a time), so a case can inject the answer above at the only instant a real one could
+    // arrive, rather than inferring that instant from the transcript.
+    static bool read_desc_outstanding(const CoreEngine& engine) {
+        return engine.tx_kind_ == CoreEngine::TxKind::ReadDesc;
     }
 };
 } // namespace core
@@ -1033,4 +1051,267 @@ TEST_CASE("R-06: the node-id pool is never wrapped onto a live id — exhaustion
     REQUIRE(rig.recorder().calls == 0u);
     rig.engine().drain_callbacks();
     REQUIRE(rig.recorder().count(LifecycleKind::NodeIdPoolExhausted) == 4u * 32u - pool);
+}
+
+// --- AS3, the case the highest-id rig cannot show: the unanswering module holds the LOWEST id ---
+
+TEST_CASE("AS3: an unanswering module at the LOWEST node id blocks no other slot either — the "
+          "IDENTIFY scan does not starve on it [discovery][us1]") {
+    // AS3's own rig above puts the unanswering module on the LAST backplane, so it holds the
+    // highest node id and the scan reaches every other node before it. That arrangement cannot
+    // observe the failure mode this case is for: a node stays in Identifying until it answers
+    // with an identity, so a scan that always restarted at ADDR_module_min would hand every
+    // demand slot of every superframe to the lowest such id and never identify anyone else.
+    // Backplane 0x01 is reconciled first, so its one unanswering slot takes ADDR_module_min and
+    // the four honest modules on 0x02 take the ids above it.
+    Descriptor honest =
+        make_descriptor(0x8001, 1, 1, omgp::MODULE_TYPE_CODES[0], 2u * kDescChunkMax);
+    Rig rig;
+    rig.install(BackplaneScript{0x01, 1, 0b1u, omgp::MODULE_TYPE_CODES[3], nullptr, true, false});
+    rig.install(
+        BackplaneScript{0x02, 4, 0b1111u, omgp::MODULE_TYPE_CODES[0], &honest, false, false});
+    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+
+    REQUIRE(rig.in_use_ids().size() == 5u);
+    REQUIRE(rig.engine().discovery_state(omgp::ADDR_module_min) == DiscoveryState::Identifying);
+    // The four behind it are fully discovered, and each was reported once.
+    REQUIRE(rig.discovered_count() == 4u);
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeDiscovered) == 4u);
+    // The unanswering one is still retried rather than abandoned (AS3's other half).
+    const size_t identifies = rig.transcript().count(omgp::OP_IDENTIFY);
+    rig.run_to_superframe(rig.transcript().last_superframe() + kSettleSuperframes, byte_us());
+    REQUIRE(rig.transcript().count(omgp::OP_IDENTIFY) > identifies);
+    REQUIRE(rig.discovered_count() == 4u); // and nothing regresses while it is retried
+}
+
+// --- R-06: a STANDING id shortage is reported once per transition, not once per sweep ----------
+
+TEST_CASE("R-06: a standing node-id shortage is reported once per slot, and the presence events "
+          "behind it are still delivered [discovery][us1][robustness]") {
+    // The condition R-06's exhaustion outcome reports is a STANDING one: an over-full rig
+    // re-reports the same occupancy on every BP_SLOT_MAP, for as long as it stays over-full. The
+    // notice must therefore be edge-triggered — data-model.md §8a's pending ring holds
+    // LIMIT_max_nodes items and is drop-NEWEST, so one notice per unassignable slot per sweep
+    // would fill it with repeats of one unchanged condition and then refuse the NodeRemoved /
+    // NodeDiscovered behind them (spec FR-017's presence reporting would stop for good).
+    //
+    // Two backplanes at the protocol's own slot cap, reconciled directly (the wire path cannot
+    // carry a 232-slot map — see raw_slot_map's note): 464 occupied slots, a 112-id pool.
+    Rig rig;
+    uint8_t all_occupied[(omgp::LIMIT_bp_slot_map_max_slots + 7) / 8];
+    for (uint8_t& b : all_occupied)
+        b = 0xFF;
+    const omgp::l3::BpSlotMapResp full =
+        raw_slot_map(static_cast<uint8_t>(omgp::LIMIT_bp_slot_map_max_slots), all_occupied,
+                     all_occupied, static_cast<uint8_t>(sizeof all_occupied));
+    const size_t pool = static_cast<size_t>(omgp::ADDR_module_max) -
+                        static_cast<size_t>(omgp::ADDR_module_min) + 1u;
+    const size_t unassignable = omgp::LIMIT_bp_slot_map_max_slots - pool;
+
+    // Sweep 1: the pool is spent on the first `pool` slots; every slot after that transitions
+    // into the shortage, and each is reported exactly once.
+    rig.engine().reconcile_slot_map(0x01, full, 0);
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.in_use_ids().size() == pool);
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeIdPoolExhausted) == unassignable);
+    REQUIRE(rig.engine().dropped_deliveries() == 0u);
+
+    // Sweeps 2 and 3: the SAME occupancy, nothing changed. Not one further notice — and with the
+    // ring no longer re-flooded, nothing is dropped.
+    for (uint64_t now = 1; now <= 2; ++now) {
+        rig.engine().reconcile_slot_map(0x01, full, now);
+    }
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeIdPoolExhausted) == unassignable);
+    REQUIRE(rig.engine().dropped_deliveries() == 0u);
+
+    // A second over-full backplane: 232 more slots, all unassignable, each its own first
+    // transition — so more notices arrive, and a repeat sweep of THAT map adds none either.
+    rig.engine().reconcile_slot_map(0x02, full, 3);
+    rig.engine().drain_callbacks();
+    const size_t reported_after_second = rig.recorder().count(LifecycleKind::NodeIdPoolExhausted);
+    REQUIRE(reported_after_second > unassignable);
+    rig.engine().reconcile_slot_map(0x02, full, 4);
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeIdPoolExhausted) == reported_after_second);
+
+    // The presence half still works on an over-full rig: slot 0 of 0x01 empties, and its
+    // NodeRemoved is delivered rather than lost behind a re-flood of exhaustion notices.
+    const uint32_t dropped_before = rig.engine().dropped_deliveries();
+    uint8_t minus_slot0[sizeof all_occupied];
+    for (size_t i = 0; i < sizeof minus_slot0; ++i)
+        minus_slot0[i] = 0xFF;
+    minus_slot0[0] = 0xFE; // slot 0 leaves; every other slot unchanged
+    const omgp::l3::BpSlotMapResp gone =
+        raw_slot_map(static_cast<uint8_t>(omgp::LIMIT_bp_slot_map_max_slots), minus_slot0,
+                     minus_slot0, static_cast<uint8_t>(sizeof minus_slot0));
+    rig.engine().reconcile_slot_map(0x01, gone, 5);
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeRemoved) == 1u);
+    REQUIRE(rig.engine().dropped_deliveries() == dropped_before);
+    // The freed id went to the lowest still-unassigned occupied slot (R-06 first fit), so the
+    // pool stays fully spent and no id was wrapped onto a live one.
+    REQUIRE(rig.in_use_ids().size() == pool);
+
+    // Edge-triggered, not one-shot: slot 0 is re-occupied while the rig is still over-full, which
+    // is a NEW transition into the shortage and is reported again.
+    const size_t before_reoccupy = rig.recorder().count(LifecycleKind::NodeIdPoolExhausted);
+    rig.engine().reconcile_slot_map(0x01, full, 6);
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeIdPoolExhausted) == before_reoccupy + 1u);
+}
+
+// --- R-09 / rule 7: the two bounds on a hostile READ_DESC answer -------------------------------
+
+namespace {
+
+// A backplane whose IDENTIFY advertises `advertised_len` bytes but whose READ_DESC serves from a
+// LONGER blob: the engine asks for kDescChunkMax every time (begin_desc_chunk), so the final
+// chunk of a descriptor whose length is not a multiple of it comes back carrying more bytes than
+// the advertised length has room for. MockL3Node answers min(max_len, blob_len - offset)
+// (contracts/mock-l3-node.md), which is exactly how a node over-serving its own advertised
+// desc_len behaves on the wire — no change to the double is needed to express it.
+struct OverServingBackplane {
+    Descriptor blob;
+    omgp::l3::IdentifyResp identify{};
+    std::vector<L3Step> steps;
+
+    OverServingBackplane(uint16_t advertised_len, uint8_t module_type)
+        : blob(make_descriptor(0x7001, 1, 1, module_type,
+                               static_cast<size_t>(advertised_len) + kDescChunkMax)) {
+        identify.major = 1;
+        identify.minor = 0;
+        identify.module_type = module_type;
+        identify.desc_len = advertised_len;
+        // The CRC of exactly the bytes the advertised length covers, so the ONLY thing wrong with
+        // this node is the over-long final chunk: a reader that silently truncated it would
+        // compute a matching CRC over those first advertised_len bytes and credit the node with a
+        // descriptor it never promised, which is what makes the bound observable at all.
+        identify.desc_crc = omgp::l3::descriptor_crc(blob.bytes.data(), advertised_len);
+    }
+
+    void install(Rig& rig, uint8_t addr, uint8_t slot_count, uint32_t occupied) {
+        steps.clear();
+        steps.push_back(L3Step::of(SlotMapStep{slot_count, occupied, occupied}));
+        steps.push_back(L3Step::of(StatusStep{ready_status()}));
+        steps.push_back(L3Step::of(IdentifyStep{identify}));
+        const uint16_t served_len = static_cast<uint16_t>(blob.bytes.size());
+        steps.push_back(L3Step::of(DescChunkStep{blob.bytes.data(), served_len}));
+        rig.node().set_script(addr, steps.data(), steps.size());
+    }
+};
+
+} // namespace
+
+TEST_CASE("rule 7: a READ_DESC chunk carrying more bytes than the advertised desc_len has room "
+          "for is refused, and the node retried from IDENTIFY [discovery][us1][robustness]") {
+    // An advertised length that is NOT a multiple of the chunk size: two chunks of kDescChunkMax
+    // are asked for, the second has room for only a fraction of one, and the double serves a full
+    // one from its longer blob. At desc_len == LIMIT_max_descriptor_bytes the same surplus would
+    // land past DescriptorCacheEntry::blob entirely; the length here is small only so the case
+    // converges quickly — the code path is the same one.
+    const uint16_t advertised = static_cast<uint16_t>(kDescChunkMax + kDescChunkMax / 2u);
+    REQUIRE(advertised % kDescChunkMax != 0u);
+    OverServingBackplane liar(advertised, omgp::MODULE_TYPE_CODES[0]);
+    // An honest backplane alongside it: a hostile answer must not cost anyone else discovery.
+    // It is backplane 0x01 and the liar 0x02, so the honest modules hold the LOWER node ids —
+    // deliberate, and a limit on what this case shows: issue_demand()'s IDENTIFY scan is
+    // ascending node id with no round-robin cursor, so a node that fails for ever at the lowest
+    // id takes every demand slot and the higher ids never get one (measured: with the liar at
+    // 0x01, 44 IDENTIFY and 88 READ_DESC requests in 90 superframes, all of them the liar's, and
+    // the honest backplane's modules never identified at all). That starvation is NOT what this
+    // case asserts; it is reported as a FOLLOW-UP on PR #871.
+    Descriptor honest =
+        make_descriptor(0x7002, 1, 1, omgp::MODULE_TYPE_CODES[1], 2u * kDescChunkMax);
+    const BackplaneScript bp1{0x01, 2, 0b11u, omgp::MODULE_TYPE_CODES[1], &honest, false, false};
+
+    Rig rig;
+    rig.install(bp1);
+    liar.install(rig, 0x02, 1, 0b1u);
+    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+
+    // The liar's one module is never credited with a descriptor: it is read, refused, and retried
+    // from IDENTIFY for as long as it keeps over-serving.
+    const std::vector<uint8_t> ids = rig.in_use_ids();
+    REQUIRE(ids.size() == 3u); // two slots on 0x01, one on 0x02
+    const uint8_t liar_id = ids.back();
+    REQUIRE(rig.engine().discovery_state(liar_id) != DiscoveryState::Discovered);
+    REQUIRE(rig.transcript().count(omgp::OP_IDENTIFY) > 3u); // retried, not abandoned
+    REQUIRE(rig.transcript().count(omgp::OP_READ_DESC) > 2u);
+
+    // The honest backplane's two modules are unaffected, and the rig keeps running.
+    REQUIRE(rig.discovered_count() == 2u);
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeDiscovered) == 2u);
+    REQUIRE(rig.engine().dropped_deliveries() == 0u);
+    const size_t lines = rig.transcript().lines.size();
+    rig.run_to_superframe(rig.transcript().last_superframe() + kSettleSuperframes, byte_us());
+    REQUIRE(rig.transcript().lines.size() > lines);
+}
+
+TEST_CASE("protocol-l3 §3.1: a READ_DESC chunk whose offset does not continue the reassembly is "
+          "dropped, not written at the cursor [discovery][us1][robustness]") {
+    // Three chunks, so a forged answer can arrive with a real read genuinely in progress.
+    Descriptor desc = make_descriptor(0x7003, 1, 1, omgp::MODULE_TYPE_CODES[0], 3u * kDescChunkMax);
+    const BackplaneScript bp{0x01, 1, 0b1u, omgp::MODULE_TYPE_CODES[0], &desc, false, false};
+    Rig rig;
+    rig.install(bp);
+
+    // Run until a READ_DESC is outstanding: that is the state in which a lying answer could
+    // arrive, and it fixes which node on_desc_chunk() attributes the forged chunk to.
+    bool outstanding = false;
+    for (uint64_t i = 0; i < 400000u && !outstanding; ++i) {
+        rig.step(byte_us());
+        outstanding = omgp::core::CoreEngineTestSeam::read_desc_outstanding(rig.engine());
+    }
+    REQUIRE(outstanding);
+    REQUIRE(rig.engine().discovery_state(omgp::ADDR_module_min) ==
+            DiscoveryState::ReadingDescriptor);
+
+    // A well-formed READ_DESC response for an offset the engine is NOT at, carrying a full chunk
+    // of bytes that belong nowhere in this descriptor. Encoded by the real l3/ codecs.
+    uint8_t forged_bytes[kDescChunkMax];
+    for (uint8_t& b : forged_bytes)
+        b = 0xAA;
+    omgp::l3::ReadDescResp lying{};
+    lying.offset = static_cast<uint16_t>(2u * kDescChunkMax + 1u); // never a cursor value here
+    lying.bytes.data = forged_bytes;
+    lying.bytes.len = static_cast<uint8_t>(sizeof forged_bytes);
+    uint8_t payload[omgp::LIMIT_max_l3_payload];
+    size_t payload_len = 0;
+    REQUIRE(omgp::l3::encode_read_desc_resp(lying, payload, sizeof payload, payload_len) ==
+            omgp::l3::Status::Ok);
+    // protocol-l3 §3's five-byte header, as a RESPONSE (FLAG_response set), then the payload —
+    // exactly the layout link::Master would have handed up.
+    omgp::l3::Header hdr{};
+    hdr.opcode = omgp::OP_READ_DESC;
+    hdr.node_id = omgp::ADDR_module_min;
+    hdr.seq = 0;
+    hdr.flags = omgp::FLAG_response;
+    hdr.payload_len = static_cast<uint8_t>(payload_len);
+    uint8_t message[omgp::LIMIT_max_l3_message];
+    size_t message_len = 0;
+    REQUIRE(omgp::l3::encode_header(hdr, message, sizeof message, message_len) ==
+            omgp::l3::Status::Ok);
+    for (size_t i = 0; i < payload_len; ++i) {
+        message[message_len + i] = payload[i];
+    }
+    message_len += payload_len;
+    omgp::link::MasterEvent forged{};
+    forged.kind = omgp::link::MasterEvent::Answered;
+    forged.response.payload = message;
+    forged.response.len = static_cast<uint8_t>(message_len);
+    omgp::core::CoreEngineTestSeam::deliver_desc_chunk(rig.engine(), forged, rig.now_us());
+
+    // The forged bytes went nowhere: the read continues from where it was, completes, and the
+    // reassembled blob still matches the desc_crc IDENTIFY advertised — which is the engine's own
+    // oracle for "these are the right bytes in the right order". A chunk written at the cursor
+    // regardless of its own offset would fail that CRC, discard the entry and send this node back
+    // to IDENTIFY, so a SECOND IDENTIFY in the transcript is exactly what this case rules out.
+    rig.run_to_superframe(rig.transcript().last_superframe() + kConvergeSuperframes, byte_us());
+    REQUIRE(rig.engine().discovery_state(omgp::ADDR_module_min) == DiscoveryState::Discovered);
+    REQUIRE(rig.transcript().count(omgp::OP_IDENTIFY) == 1u);
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeDiscovered) == 1u);
 }
