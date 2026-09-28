@@ -152,15 +152,21 @@ struct NodeRecord {
                                       // SUSPECT
     // The superframe in which this node's last READ_DESC made NO progress — an ERROR answer
     // (trunk §8's mandated ERR_BUSY, above all), an undecodable one, an answer for an offset that
-    // does not continue the reassembly, or a trunk-level timeout. 0 = never, since superframe
-    // numbering starts at 1. issue_demand() will not issue another chunk for this node within
-    // that same superframe: a failed chunk is RE-QUEUED for the same offset (READ_DESC is
-    // idempotent, CLAUDE.md rule 2), and the chunk ring is drained before the IDENTIFY scan, so
-    // without this bound one node whose descriptor read is refused for ever holds every demand
-    // slot of every superframe and no other node is ever identified (User Story 1 AS3: a slot
-    // whose module does not answer "does not block the discovery of any other slot or
-    // backplane"). The read is not abandoned by the bound — the node stays in ReadingDescriptor
-    // and is resumed at the bytes already held, one attempt per superframe.
+    // does not continue the reassembly, or a trunk-level timeout. Non-zero means "stalled", and 0
+    // is therefore also "making progress": cleared by the first chunk that adds a byte and by any
+    // return through IDENTIFY. Superframe numbering starts at 1, so 0 is never a real superframe.
+    //
+    // A stalled node loses its PLACE in issue_demand()'s schedule, not its retry: its chunk-ring
+    // item is dropped and it is retried only after the IDENTIFY scan, at most once per superframe.
+    // Load-bearing, not a refinement. A failed chunk is RE-QUEUED for the same offset (READ_DESC
+    // is idempotent, CLAUDE.md rule 2), so a node whose read is refused for ever — trunk §8's
+    // MANDATED ERR_BUSY, which §10.5 leaves unbounded at L2 — keeps that ring permanently
+    // non-empty; and since the ring is drained before the IDENTIFY scan while a busy superframe
+    // admits only one demand item, it would take that item every superframe and no other node
+    // would ever be identified (User Story 1 AS3: a slot whose module does not answer "does not
+    // block the discovery of any other slot or backplane"). Dropping the item abandons nothing:
+    // the node stays in ReadingDescriptor and is resumed at the bytes its cache entry already
+    // holds. A stated divergence from R-07's ring order (docs/OPEN-QUESTIONS.md, 2026-09-28).
     uint32_t desc_stalled_superframe = 0;
     // Channel-switch (spec User Story 3):
     bool switch_outstanding = false;
