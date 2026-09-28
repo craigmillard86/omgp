@@ -157,7 +157,9 @@ struct NodeRecord {
     // return through IDENTIFY. Superframe numbering starts at 1, so 0 is never a real superframe.
     //
     // A stalled node loses its PLACE in issue_demand()'s schedule, not its retry: its chunk-ring
-    // item is dropped and it is retried only after the IDENTIFY scan, at most once per superframe.
+    // item is dropped and it is retried by retry_stalled_desc() instead, at most once per
+    // superframe, in a pass that alternates with the IDENTIFY scan by superframe parity (neither
+    // pass ever empties, so a fixed order between them starves one of them — see issue_demand()).
     // Load-bearing, not a refinement. A failed chunk is RE-QUEUED for the same offset (READ_DESC
     // is idempotent, CLAUDE.md rule 2), so a node whose read is refused for ever — trunk §8's
     // MANDATED ERR_BUSY, which §10.5 leaves unbounded at L2 — keeps that ring permanently

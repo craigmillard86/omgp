@@ -5965,3 +5965,54 @@ change adds none.
 **Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** R-07 (demand
 scheduling order), R-09 (chunked READ_DESC), trunk §8/§10.5, User Story 1 AS3, and the 2026-09-28
 IDENTIFY-scan-order entry above (same class of gap, different pass).
+
+## 2026-09-28 — T022 (#693): deprioritising a stalled `READ_DESC` behind the IDENTIFY scan means never, because that scan never empties
+
+**Context:** the entry above ("nothing bounds a descriptor read whose chunks are refused for ever")
+adopted option (c): a node whose last chunk made no progress loses its place in the chunk ring and is
+"retried after the IDENTIFY scan instead". That description is what this entry supersedes. The
+IDENTIFY scan includes nodes already in `DiscoveryState::Identifying` — deliberately, because
+`spec.md` User Story 1 AS3 requires a module that does not answer to be RETRIED rather than
+abandoned, and `data-model.md` §2 keeps such a node in `Identifying` for ever. So the scan always has
+a candidate whenever any slot answers trunk §8's `ERR_UNKNOWN_TARGET` (or times out), it returns from
+`issue_demand()` on every call, and a pass placed after it is not merely late but unreachable.
+Measured on the PR #871 branch at `5fcbf5a`, with a busy backplane plus one unanswering slot in the
+same rig: `READ_DESC` 3 → 3 over a further 20 superframes while IDENTIFY kept rising, and a module
+that drew a single `ERR_BUSY` chunk stayed in `ReadingDescriptor` for ever. The starvation was not
+fixed, only reversed: before, a refused read starved IDENTIFY; after, an unidentified slot starved
+the refused read. AS3 is the criterion on BOTH sides — "does not block the discovery of any other
+slot or backplane" is symmetric, and each pass can have work for ever, so no fixed order between them
+can satisfy it.
+
+**Options:** (a) keep the fixed order and accept that whichever pass is second starves whenever the
+first has permanent work — ruled out by the measurement, in both directions; (b) bound the IDENTIFY
+scan's attempts per node per superframe the way the retry already bounds itself, which makes the
+retry reachable but leaves the schedule's fairness resting on two independent bounds rather than on
+the order itself, and still gives the scan every demand item of every superframe in which any node
+has not yet had its attempt; (c) ALTERNATE the two passes by superframe parity, so each runs first in
+every second superframe; (d) merge the two into one cursor over a combined candidate set, which
+couples two different retry policies (one per superframe per node, versus one per demand item) into a
+single loop.
+
+**Recommendation:** (c), implemented (`CoreEngine::scan_identify()` and
+`CoreEngine::retry_stalled_desc()`, ordered by `superframe_ & 1`). It bounds the harm by construction
+rather than by a second policy constant: neither pass can be held off for more than one superframe
+however the other behaves, whatever either's internal bound is. The per-node once-per-superframe
+bound on the retry (`NodeRecord::desc_stalled_superframe`) and the rotating cursors of both passes
+are unchanged. Reproducibility is preserved (FR-019/SC-001): the parity is read from `superframe_`,
+which is the plan's own number — no wall clock, no call count. A healthy rig is scheduled exactly as
+before, by construction: with no stalled node `retry_stalled_desc()` returns "nothing to do" without
+touching any state, so swapping its position changes no transcript — demonstrated by the unchanged
+AS1/AS2/SC-001/SC-005 whole-transcript cases. Demonstrated by "AS3: a stalled `READ_DESC` is still
+retried while another slot never answers IDENTIFY" and "AS3: one transient `ERR_BUSY` chunk does not
+lose a module when another slot never answers IDENTIFY" in `tests/unit/test_core_discovery.cpp`, both
+written before the fix and both RED at `5fcbf5a` (`3 > 3` and `2 == 3`). What this entry does NOT
+settle is unchanged from the entry it supersedes: whether a read refused for ever should eventually
+be REPORTED rather than only retried quietly — there is still no `LifecycleKind` for a node stuck in
+`ReadingDescriptor`.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** the 2026-09-28 entry "T022 (#693):
+nothing bounds a descriptor read whose chunks are refused for ever, and R-07's order makes it starve
+everything else" — its option (c) is adopted as before, but "after the IDENTIFY scan" is replaced by
+"alternating with the IDENTIFY scan". **Related:** R-07 (demand scheduling order), R-09 (chunked
+`READ_DESC`), trunk §8/§10.5, User Story 1 AS3, and the 2026-09-28 IDENTIFY-scan-order entry.

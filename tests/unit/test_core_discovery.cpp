@@ -1413,3 +1413,90 @@ TEST_CASE("trunk §8: a backplane answering ERR_BUSY to every READ_DESC blocks n
     REQUIRE(rig.transcript().lines.size() > lines);
     REQUIRE(rig.discovered_count() == 4u);
 }
+
+// --- the same two starvations TOGETHER: a stalled read AND a slot that never answers IDENTIFY ---
+
+namespace {
+
+// Identifies its one module honestly, answers ERR_BUSY to the FIRST READ_DESC only (trunk §8's
+// mandated answer for a bridge whose module bus is not ready), then serves the descriptor
+// honestly for ever. Two ErrorSteps because the enrolment PING — OpClass::Other, with no step of
+// its own — consumes the first wildcard it reaches (contracts/mock-l3-node.md); the second is
+// the one refused chunk, and the DescChunkStep behind it is the Desc class's steady state from
+// then on. A single transient ERR_BUSY is the cheapest possible fault, so a module lost to one
+// is a module lost to nothing at all.
+struct BrieflyBusyBackplane {
+    Descriptor blob;
+    omgp::l3::IdentifyResp identify{};
+    std::vector<L3Step> steps;
+
+    explicit BrieflyBusyBackplane(uint8_t module_type)
+        : blob(make_descriptor(0x9003, 1, 1, module_type, 2u * kDescChunkMax)) {
+        identify = identify_for(blob, module_type);
+    }
+
+    void install(Rig& rig, uint8_t addr, uint8_t slot_count, uint32_t occupied) {
+        steps.clear();
+        steps.push_back(L3Step::of(SlotMapStep{slot_count, occupied, occupied}));
+        steps.push_back(L3Step::of(StatusStep{ready_status()}));
+        steps.push_back(L3Step::of(IdentifyStep{identify}));
+        steps.push_back(L3Step::of(ErrorStep{omgp::ERR_BUSY}));
+        steps.push_back(L3Step::of(ErrorStep{omgp::ERR_BUSY}));
+        steps.push_back(desc_step(blob));
+        rig.node().set_script(addr, steps.data(), steps.size());
+    }
+};
+
+} // namespace
+
+TEST_CASE("AS3: a stalled READ_DESC is still retried while another slot never answers IDENTIFY "
+          "[discovery][us1][robustness]") {
+    // The two deprioritisations of this file have to hold in BOTH directions at once, and each
+    // of the two cases above exercises only one of them: the ERR_BUSY case has no node that stays
+    // Identifying, and the AS3 case has no stalled descriptor read. Put both faults in one rig and
+    // the question becomes whether a pass that runs AFTER the IDENTIFY scan runs at all — the scan
+    // never runs out of candidates, because a module that does not answer is RETRIED and stays in
+    // Identifying for ever (User Story 1 AS3), so "after the scan" would mean "never".
+    BusyDescBackplane busy(omgp::MODULE_TYPE_CODES[0]);
+    Descriptor honest =
+        make_descriptor(0x9004, 1, 1, omgp::MODULE_TYPE_CODES[1], 2u * kDescChunkMax);
+
+    Rig rig;
+    busy.install(rig, 0x01, 1, 0b1u);
+    rig.install(
+        BackplaneScript{0x02, 4, 0b1111u, omgp::MODULE_TYPE_CODES[1], &honest, false, false});
+    // trunk §8's ERR_UNKNOWN_TARGET slot: occupied, given an id (FR-009), never identified.
+    rig.install(BackplaneScript{0x03, 1, 0b1u, omgp::MODULE_TYPE_CODES[2], nullptr, true, false});
+    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+
+    REQUIRE(rig.in_use_ids().size() == 6u); // 1 busy + 4 honest + 1 unanswering
+    REQUIRE(rig.discovered_count() == 4u);
+
+    const size_t reads_before = rig.transcript().count(omgp::OP_READ_DESC);
+    const size_t identifies_before = rig.transcript().count(omgp::OP_IDENTIFY);
+    rig.run_to_superframe(rig.transcript().last_superframe() + kSettleSuperframes, byte_us());
+
+    // AS3 in both directions, over the SAME stretch of superframes: the refused read keeps being
+    // attempted, and the unidentified slot keeps being asked. Neither fault silences the other.
+    REQUIRE(rig.transcript().count(omgp::OP_READ_DESC) > reads_before);
+    REQUIRE(rig.transcript().count(omgp::OP_IDENTIFY) > identifies_before);
+    REQUIRE(rig.discovered_count() == 4u);
+}
+
+TEST_CASE("AS3: one transient ERR_BUSY chunk does not lose a module when another slot never "
+          "answers IDENTIFY [discovery][us1][robustness]") {
+    BrieflyBusyBackplane brief(omgp::MODULE_TYPE_CODES[0]);
+
+    Rig rig;
+    brief.install(rig, 0x01, 1, 0b1u);
+    rig.install(BackplaneScript{0x02, 1, 0b1u, omgp::MODULE_TYPE_CODES[2], nullptr, true, false});
+    rig.run_to_superframe(kConvergeSuperframes + kSettleSuperframes, byte_us());
+
+    // The one refused chunk costs the module a place in the chunk ring, not its read: it resumes
+    // at the bytes already read (READ_DESC is idempotent, CLAUDE.md rule 2) and reaches Discovered.
+    const std::vector<uint8_t> ids = rig.in_use_ids();
+    REQUIRE(ids.size() == 2u);
+    REQUIRE(rig.engine().discovery_state(ids.front()) == DiscoveryState::Discovered);
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeDiscovered) == 1u);
+}

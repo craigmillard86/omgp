@@ -239,11 +239,12 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
             // backplane"). Measured before this: 893 READ_DESC to one busy backplane in 301
             // superframes, 0 IDENTIFY to the other, 0 of 4 honest modules discovered.
             //
-            // So a stalled node loses its PLACE, not its retry: the item is dropped here, and the
-            // last pass below retries the node — after the IDENTIFY scan, at most once per
-            // superframe, from its own rotating cursor. Dropping is safe because the item carries
-            // nothing the entry does not: the node stays in ReadingDescriptor and is resumed at
-            // the bytes already read, and READ_DESC is idempotent (CLAUDE.md rule 2).
+            // So a stalled node loses its PLACE, not its retry: the item is dropped here, and
+            // retry_stalled_desc() below retries the node — at most once per superframe, from its
+            // own rotating cursor, and alternating with the IDENTIFY scan by superframe parity.
+            // Dropping is safe because the item carries nothing the entry does not: the node stays
+            // in ReadingDescriptor and is resumed at the bytes already read, and READ_DESC is
+            // idempotent (CLAUDE.md rule 2).
             desc_held_ = false;
             continue;
         }
@@ -265,7 +266,7 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
     // It cannot interfere with a healthy read: while one is in progress the ring is non-empty
     // (each answered chunk queues the next), so this loop is not reached at all. Ascending node
     // id, with no cursor of its own: every node it can serve is one whose LAST chunk made
-    // progress (a stalled one is skipped here and retried by the last pass instead), so no node
+    // progress (a stalled one is skipped here and retried by retry_stalled_desc()), so no node
     // can hold this sweep's head against the others the way a permanently-failing one could.
     for (uint8_t id = ADDR_module_min; id <= ADDR_module_max; ++id) {
         NodeRecord& node = nodes_[node_index(id)];
@@ -273,7 +274,7 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
             continue;
         }
         if (node.desc_stalled_superframe != 0) {
-            continue; // the last pass's business, not this one's
+            continue; // retry_stalled_desc()'s business, not this one's
         }
         const Resume outcome = resume_desc_read(id, node, now_us);
         if (outcome == Resume::Issued) {
@@ -283,6 +284,39 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
             return false;
         }
     }
+    // The IDENTIFY scan and the stalled-read retry ALTERNATE by superframe parity, and neither is
+    // permanently ahead of the other. Fixing an order between them starves whichever comes second,
+    // in whichever direction the order is fixed, because BOTH can have work for ever:
+    //
+    //   * the IDENTIFY scan includes nodes already Identifying (see its own note), and a module
+    //     that never answers stays Identifying by design (AS3: retried, never abandoned) — so with
+    //     the scan first, a single unanswering slot means the retry pass is never REACHED at all,
+    //     and one spec-mandated ERR_BUSY (trunk §8) loses an otherwise-honest module for ever;
+    //   * a node whose READ_DESC is refused for ever is stalled again the moment it is retried —
+    //     so with the retry first and no parity, it takes the first demand item of every
+    //     superframe and, when the budget admits only one, no node is ever identified.
+    //
+    // Both directions are AS3's own criterion ("does not block the discovery of any other slot or
+    // backplane"), so the schedule has to satisfy it both ways. Parity does: each pass gets the
+    // whole demand phase of every second superframe ahead of the other, so neither can be held off
+    // for more than one superframe however the other behaves. The parity is read from superframe_,
+    // which is also what makes the transcript a pure function of the plan (FR-019/SC-001) — no
+    // wall-clock, no call count.
+    const bool retry_first = (superframe_ & 1u) != 0u;
+    for (unsigned pass = 0; pass < 2u; ++pass) {
+        const bool retry = ((pass == 0u) == retry_first);
+        const Resume outcome = retry ? retry_stalled_desc(now_us) : scan_identify(now_us);
+        if (outcome == Resume::Issued) {
+            return true;
+        }
+        if (outcome == Resume::Refused) {
+            return false;
+        }
+    }
+    return false;
+}
+
+CoreEngine::Resume CoreEngine::scan_identify(uint64_t now_us) {
     // spec FR-006: a node id whose module has not yet answered IDENTIFY. Ascending node id, but
     // from a ROTATING start (identify_cursor_, advanced past each id this scan actually issues
     // for) rather than from ADDR_module_min every time. Fairness is load-bearing here, not a
@@ -311,7 +345,7 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
             continue;
         }
         if (!admit_demand(cost_estimate(node.last_measured_duration_us))) {
-            return false;
+            return Resume::Refused;
         }
         if (begin_request(node.backplane_addr, id, OP_IDENTIFY, nullptr, 0, TxKind::Identify,
                           now_us)) {
@@ -321,21 +355,23 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
             // ReadingDescriptor or Discovered.
             node.discovery = DiscoveryState::Identifying;
             demand_issued_ = true;
-            return true;
+            return Resume::Issued;
         }
-        return false;
+        return Resume::Refused;
     }
-    // LAST: one retry for a node whose descriptor read is STALLED — its last chunk was refused
-    // (trunk §8's ERR_BUSY), answered for the wrong offset, or timed out. Deliberately after the
-    // IDENTIFY scan and not before it, which is this pass's whole reason for existing: a node that
-    // fails for ever otherwise takes the one demand item a busy superframe admits, every
-    // superframe, because the chunk ring is drained first (see that drain's note). It is a
-    // DIVERGENCE from R-07's fixed ring order, stated: R-07 orders the three RINGS, and this is
-    // not a fourth ring but the same descriptor work deprioritised for one superframe at a time.
-    // At most one such retry per superframe per node (desc_stalled_superframe), from a rotating
-    // cursor so two stalled nodes take turns, and "retried, not abandoned" (AS3) is what the
-    // retry itself is: the node keeps its cache entry and its place, for as long as it keeps
-    // answering that way.
+    return Resume::Nothing;
+}
+
+CoreEngine::Resume CoreEngine::retry_stalled_desc(uint64_t now_us) {
+    // One retry for a node whose descriptor read is STALLED — its last chunk was refused (trunk
+    // §8's ERR_BUSY), answered for the wrong offset, or timed out. The chunk ring dropped its item
+    // and the recovery sweep skips it, so this is the ONLY pass that can serve such a node; it is
+    // a DIVERGENCE from R-07's fixed ring order, stated: R-07 orders the three RINGS, and this is
+    // not a fourth ring but the same descriptor work rescheduled against the IDENTIFY scan.
+    // At most one retry per superframe per node (desc_stalled_superframe), from a rotating cursor
+    // so two stalled nodes take turns, and "retried, not abandoned" (AS3) is what the retry itself
+    // is: the node keeps its cache entry and its place, for as long as it keeps answering that way.
+    const uint16_t id_pool = static_cast<uint16_t>(ADDR_module_max - ADDR_module_min + 1);
     for (uint16_t n = 0; n < id_pool; ++n) {
         const uint16_t offset = static_cast<uint16_t>((desc_retry_cursor_ + n) % id_pool);
         const uint8_t id = static_cast<uint8_t>(ADDR_module_min + offset);
@@ -349,13 +385,13 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
         const Resume outcome = resume_desc_read(id, node, now_us);
         if (outcome == Resume::Issued) {
             desc_retry_cursor_ = static_cast<uint8_t>((offset + 1u) % id_pool);
-            return true;
+            return Resume::Issued;
         }
         if (outcome == Resume::Refused) {
-            return false;
+            return Resume::Refused;
         }
     }
-    return false;
+    return Resume::Nothing;
 }
 
 CoreEngine::Resume CoreEngine::resume_desc_read(uint8_t node_id, NodeRecord& node,
@@ -744,9 +780,10 @@ void CoreEngine::on_desc_chunk(const link::MasterEvent& ev, uint64_t now_us) {
     }
     l3::ReadDescResp resp{};
     if (l3::decode_read_desc_resp(payload.data, payload.len, resp) != l3::Status::Ok) {
-        // Nothing is re-queued: the recovery sweep picks this node up from what its entry holds.
-        // It is still a superframe's attempt spent, or that sweep — ascending node id — would
-        // re-issue for this same node for the rest of the superframe and starve the others.
+        // Nothing is re-queued: retry_stalled_desc() picks this node up from what its entry holds
+        // (the recovery sweep skips a stalled node — it is that pass's business). It is still a
+        // superframe's attempt spent, or the retry — which resumes from the entry either way —
+        // would re-issue for this same node for the rest of the superframe and starve the others.
         node.desc_stalled_superframe = superframe_;
         return;
     }
@@ -786,7 +823,7 @@ void CoreEngine::on_desc_chunk(const link::MasterEvent& ev, uint64_t now_us) {
     entry->received = static_cast<uint16_t>(entry->received + take);
     if (take != 0) {
         // Progress: this node is no longer stalled, so its next chunk goes back in the chunk
-        // ring's own pass rather than issue_demand()'s deprioritised last one. Cleared on the
+        // ring's own pass rather than retry_stalled_desc()'s rationed one. Cleared on the
         // FIRST good chunk, not on completion — a node recovering from one refused chunk should
         // not finish its descriptor at one chunk per superframe.
         node.desc_stalled_superframe = 0;

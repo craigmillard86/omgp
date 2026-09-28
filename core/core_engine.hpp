@@ -243,6 +243,12 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     // two resumption passes — the recovery sweep and the stalled-node retry — so that a node
     // resumed by either is resumed identically; the passes differ only in WHICH nodes they offer.
     Resume resume_desc_read(uint8_t node_id, NodeRecord& node, uint64_t now_us);
+    // issue_demand()'s two discovery passes, which ALTERNATE by superframe parity because each
+    // can have work for ever and so would starve the other if either were permanently first (see
+    // issue_demand()). Same tri-state as resume_desc_read(): nothing to do, a request issued, or
+    // the budget / link::Master refusing — which ends the demand phase for this superframe.
+    Resume scan_identify(uint64_t now_us);      // spec FR-006: nodes not yet identified
+    Resume retry_stalled_desc(uint64_t now_us); // nodes whose last chunk made no progress
     // One READ_DESC for `node_id` at `offset`, at the R-09 chunk size (protocol-l3 §3.1).
     bool begin_desc_chunk(uint8_t node_id, uint16_t offset, uint64_t now_us);
     // Encodes one L3 request (protocol-l3 §3) into request_buf_ and hands it to
@@ -326,7 +332,7 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     // every higher id (see issue_demand()). Persists across superframes deliberately — a per-
     // superframe reset would restore exactly the starvation it exists to prevent.
     uint8_t identify_cursor_ = 0;
-    // The same, for the stalled-node descriptor retry (issue_demand()'s last pass): where that
+    // The same, for the stalled-node descriptor retry (retry_stalled_desc()): where that
     // pass starts looking, as an offset from ADDR_module_min, advanced past each id it issues
     // for. Two stalled nodes would otherwise share the fate a single cursor gives them — the
     // lower id taking every retry the budget admits — for the same reason identify_cursor_
