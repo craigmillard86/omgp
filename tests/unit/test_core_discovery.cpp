@@ -1,0 +1,1034 @@
+// User Story 1 — a newly powered rig discovers itself (spec 003 T017, #688). The four
+// Acceptance Scenarios of specs/003-host-core-engine/spec.md User Story 1, plus SC-001 and
+// SC-005, driven against a REAL omgp::core::CoreEngine over MockL3Node (T012, contracts/
+// mock-l3-node.md) and F2's FakeClock — no stubbed engine, no pre-decoded messages, every byte
+// of every request and answer built by the real l3/ and link/ codecs.
+//
+// trunk §6 is the schedule under test: each superframe issues one status poll per enrolled
+// backplane (GET_STATUS and BP_SLOT_MAP on alternate superframes) before anything else, then
+// demand traffic under the budget, then exactly one enrolment probe. trunk §5 is the addressing
+// (0x01-0x0F backplanes; module ids never appear as L2 addresses, so every module request is
+// addressed to its backplane and bridged by L3 node id, §8). protocol-l3 §3.1 is the message
+// set (IDENTIFY, READ_DESC, GET_STATUS, BP_SLOT_MAP, PING) and §4 the descriptor TLV bytes.
+//
+// Time is explicit (CLAUDE.md rule 3): this file includes no <chrono>, calls nothing that
+// sleeps, and reads no wall clock — simulated time enters only through FakeClock, and every
+// decision the engine makes reaches it as run_superframe()'s own now_us argument. Every
+// protocol value is a generated symbol (rule 4); the STATIC_REQUIREs below pin that for the two
+// this file derives rather than names.
+//
+// WHAT THIS FILE IS AN ORACLE FOR, and what it is not (CLAUDE.md rule 11). Every claim here is
+// about discovery: enrolment, node-id assignment, IDENTIFY, the descriptor read and cache, the
+// presence half of the lifecycle stream, and the determinism of the resulting transcript. It is
+// NOT the oracle for the superframe budget under load (T025), parameter traffic (T026), channel
+// switching (T033), event latency (T038) or the SUSPECT/OFFLINE/BusFault contract (T041) —
+// each of those has its own test_core_*.cpp and this file asserts none of them.
+//
+// TWO PLACES WHERE THE ACCEPTANCE CRITERIA AND THE AVAILABLE INSTRUMENT DIVERGE, stated rather
+// than papered over (both are in the PR body too):
+//
+//   1. "one slot's module scripted SilenceStep for IDENTIFY" (AS3) is not expressible.
+//      MockL3Node scripts one trunk ADDRESS, not one slot (set_script() takes `node <
+//      kAddrCount`), and SilenceStep is a node-wide wildcard — a SilenceStep in a backplane's
+//      script silences that backplane's status polls too, which is a different scenario.
+//      trunk §8 also forbids the behaviour it would model: a backplane "MUST begin its response
+//      within T_turn ... with the module's reply if it is ready, otherwise ERR_BUSY ... or
+//      ERR_UNKNOWN_TARGET for a slot with no live module", and "MUST NOT stall the trunk". So
+//      the unanswering module is scripted the way trunk §8 says a real one appears: its
+//      backplane answers ERR_UNKNOWN_TARGET on its behalf, for ever. What AS3 asks to be
+//      OBSERVED is asserted unchanged — that node stays Identifying, the other eleven reach
+//      Discovered, and it is retried at distinct superframes rather than abandoned. A genuine
+//      trunk-level timeout is exercised separately, by a backplane that goes silent.
+//
+//   2. SC-005's clock granularity is exercised over granularities that divide one byte time.
+//      spec FR-027 requires the demand budget to be computed from the MEASURED duration of the
+//      superframe's own traffic, so a cadence coarse enough to change those measurements
+//      changes how many demand items a superframe admits — and with it which superframe a
+//      given request lands in. The two requirements are in tension; the tension is recorded in
+//      docs/OPEN-QUESTIONS.md (2026-09-28). This file fixes the wire's own event instants (all
+//      steps divide the byte time) and varies only the caller's cadence, which is what
+//      discriminates a scheduler that reads elapsed time or call counts from one that reads
+//      only its now_us argument. That is a labelled control, not a proof of SC-005 at every
+//      cadence.
+#include "core/core_engine.hpp"
+
+#include "catch_amalgamated.hpp"
+#include "fake_clock.hpp"
+#include "l3/l3_descriptor.hpp"
+#include "l3/l3_payload.hpp"
+#include "l3/l3_types.hpp"
+#include "link/link_types.hpp"
+#include "mock_l3_node.hpp"
+#include "omgp_protocol.h"
+
+#include <cstdint>
+#include <cstdio>
+#include <memory>
+#include <string>
+#include <vector>
+
+// --- the test-only transcript seam (T023) ------------------------------------------------------
+// core/core_engine.hpp declares `struct CoreEngineTestSeam;` and befriends it without defining
+// it; this is that definition, and it installs the transcript sink and nothing else. Deliberately
+// not a public setter: the transcript is a test instrument, and a friend declaration emits no
+// code for a build that never defines this type.
+namespace omgp {
+namespace core {
+struct CoreEngineTestSeam {
+    static void set_transcript(CoreEngine& engine, TranscriptFn fn, void* ctx) {
+        engine.transcript_ = fn;
+        engine.transcript_ctx_ = ctx;
+    }
+};
+} // namespace core
+} // namespace omgp
+
+using omgp::core::CoreCallbacks;
+using omgp::core::CoreEngine;
+using omgp::core::DiscoveryState;
+using omgp::core::LifecycleEvent;
+using omgp::core::LifecycleKind;
+using omgp::core::TranscriptEntry;
+using omgp_test::DescChunkStep;
+using omgp_test::ErrorStep;
+using omgp_test::FakeClock;
+using omgp_test::IdentifyStep;
+using omgp_test::L3Step;
+using omgp_test::MockL3Node;
+using omgp_test::SilenceStep;
+using omgp_test::SlotMapStep;
+using omgp_test::StatusStep;
+
+namespace {
+
+// research.md R-09 as corrected 2026-09-21: READ_DESC's response is `u16 offset, u8 len,
+// u8[len]`, so the largest chunk is what is left of LIMIT_max_l3_payload after that 3-byte
+// head. Derived, never restated — the number has already moved once (61 -> 56).
+constexpr uint8_t kDescChunkMax = static_cast<uint8_t>(omgp::LIMIT_max_l3_payload - 3);
+
+// CLAUDE.md rule 4, made checkable rather than asserted in prose: the two values this file
+// derives are derived from generated symbols, and a YAML edit that moves either moves these.
+static_assert(kDescChunkMax + 3 == omgp::LIMIT_max_l3_payload,
+              "the READ_DESC chunk size is LIMIT_max_l3_payload minus its own response head");
+static_assert(omgp::ADDR_module_min > omgp::ADDR_backplane_max,
+              "this file's rigs assume module ids and backplane addresses do not overlap "
+              "(protocol-l3 §2)");
+
+uint64_t byte_us() {
+    return omgp::link::byte_time_us(omgp::TRUNK_bit_rate);
+}
+
+// --- descriptors (protocol-l3 §4) --------------------------------------------------------------
+
+// A descriptor blob plus the CRC an IDENTIFY response must advertise for it (§4.1: desc_crc is
+// l3::descriptor_crc over the whole blob exactly as READ_DESC serves it). Built with the real
+// DescriptorWriter, so a blob this file scripts is one a real module could serve.
+struct Descriptor {
+    std::vector<uint8_t> bytes;
+    uint16_t crc = 0;
+    uint16_t vendor = 0, hw_rev = 0, fw_rev = 0;
+};
+
+// Builds a descriptor of EXACTLY `total_len` bytes. The exact length matters: the READ_DESC
+// coverage case counts chunks against it, and a length that is an exact multiple of the R-09
+// chunk size is what makes that count sensitive to the chunk size at all — at a length that is
+// not, ceil(len / max_len) is the same for max_len and max_len - 1, and an off-by-one chunk
+// request would go unnoticed (measured: with the first draft's arbitrary lengths, a max_len of
+// kDescChunkMax - 1 left every case green).
+Descriptor make_descriptor(uint16_t vendor, uint16_t hw_rev, uint16_t fw_rev, uint8_t module_type,
+                           size_t total_len) {
+    uint8_t buf[omgp::LIMIT_max_descriptor_bytes];
+    omgp::l3::DescriptorWriter writer(buf, sizeof buf);
+    REQUIRE(writer.add_protocol(omgp::l3::ProtocolRec{1, 0}) == omgp::l3::Status::Ok);
+    REQUIRE(writer.add_module_type(omgp::l3::ModuleTypeRec{module_type}) == omgp::l3::Status::Ok);
+    const char* name = "unit-under-test";
+    REQUIRE(writer.add_name(omgp::l3::Str{reinterpret_cast<const uint8_t*>(name),
+                                          static_cast<uint8_t>(__builtin_strlen(name))}) ==
+            omgp::l3::Status::Ok);
+    const char* maker = "OMGP";
+    REQUIRE(writer.add_manufacturer(omgp::l3::Str{reinterpret_cast<const uint8_t*>(maker),
+                                                  static_cast<uint8_t>(__builtin_strlen(maker))}) ==
+            omgp::l3::Status::Ok);
+    REQUIRE(writer.add_model_id(omgp::l3::ModelIdRec{vendor, hw_rev, fw_rev}) ==
+            omgp::l3::Status::Ok);
+    // §4's forward-compatibility rule cuts both ways: an unknown record type is skipped by
+    // length, so it is the honest way to make a descriptor a chosen number of bytes long
+    // without inventing values for records whose ranges the codecs police. One record is
+    // `u8 type, u8 len, u8[len]`, so padding to an exact total costs 2 bytes of head per record.
+    REQUIRE(total_len >= writer.size() + 2u);
+    size_t remaining = total_len - writer.size();
+    const std::vector<uint8_t> pad(remaining, 0xA5);
+    while (remaining > 0) {
+        REQUIRE(remaining >= 2u); // a 1-byte tail is not expressible: every record has a head
+        size_t body = remaining - 2u;
+        if (body > 200u) {
+            body = 200u;
+            if (remaining - (body + 2u) == 1u) {
+                --body; // leave a tail another whole record can carry
+            }
+        }
+        REQUIRE(writer.add_raw(0xF0, pad.data(), static_cast<uint8_t>(body)) ==
+                omgp::l3::Status::Ok);
+        remaining -= body + 2u;
+    }
+    REQUIRE(writer.size() == total_len);
+    Descriptor d;
+    d.bytes.assign(buf, buf + writer.size());
+    d.crc = omgp::l3::descriptor_crc(d.bytes.data(), d.bytes.size());
+    d.vendor = vendor;
+    d.hw_rev = hw_rev;
+    d.fw_rev = fw_rev;
+    return d;
+}
+
+omgp::l3::IdentifyResp identify_for(const Descriptor& d, uint8_t module_type) {
+    omgp::l3::IdentifyResp r{};
+    r.major = 1;
+    r.minor = 0;
+    r.module_type = module_type;
+    r.desc_len = static_cast<uint16_t>(d.bytes.size());
+    r.desc_crc = d.crc;
+    return r;
+}
+
+// The step that answers every READ_DESC for a backplane against this blob, honouring the
+// request's own offset and max_len (contracts/mock-l3-node.md).
+L3Step desc_step(const Descriptor& d) {
+    return L3Step::of(DescChunkStep{d.bytes.data(), static_cast<uint16_t>(d.bytes.size())});
+}
+
+omgp::l3::StatusBlock ready_status() {
+    omgp::l3::StatusBlock b{};
+    b.state = omgp::STATE_READY; // protocol-l3 §3.3: a value the codec's own range check accepts
+    b.active_channel = 0;
+    b.bypass = 0;
+    b.fault_code = 0;
+    b.uptime_s = 1;
+    b.event_pending = 0;
+    return b;
+}
+
+// --- the transcript (T023) ---------------------------------------------------------------------
+
+struct Transcript {
+    std::vector<TranscriptEntry> lines;
+
+    static void record(void* ctx, const TranscriptEntry& entry) {
+        static_cast<Transcript*>(ctx)->lines.push_back(entry);
+    }
+
+    // One line per Master::begin: superframe number, opcode, dst, node_id. Compared as a whole
+    // ORDERED string, never as a multiset and never by line count (AS2/SC-001).
+    std::string text() const {
+        std::string out;
+        char buf[64];
+        for (const TranscriptEntry& e : lines) {
+            std::snprintf(buf, sizeof buf, "sf=%06u op=%02X dst=%02X node=%02X\n",
+                          static_cast<unsigned>(e.superframe), static_cast<unsigned>(e.opcode),
+                          static_cast<unsigned>(e.dst), static_cast<unsigned>(e.node_id));
+            out += buf;
+        }
+        return out;
+    }
+
+    // The same lines with the superframe number dropped: the SEQUENCE OF OPERATIONS alone.
+    std::string operations() const {
+        std::string out;
+        char buf[48];
+        for (const TranscriptEntry& e : lines) {
+            std::snprintf(buf, sizeof buf, "op=%02X dst=%02X node=%02X\n",
+                          static_cast<unsigned>(e.opcode), static_cast<unsigned>(e.dst),
+                          static_cast<unsigned>(e.node_id));
+            out += buf;
+        }
+        return out;
+    }
+
+    size_t count(uint8_t opcode) const {
+        size_t n = 0;
+        for (const TranscriptEntry& e : lines) {
+            if (e.opcode == opcode)
+                ++n;
+        }
+        return n;
+    }
+    uint32_t last_superframe() const {
+        return lines.empty() ? 0u : lines.back().superframe;
+    }
+};
+
+// --- the lifecycle recorder (spec FR-021, R-04) ------------------------------------------------
+
+// Counts its OWN invocations, which is the whole point: run_superframe() must never reach it.
+struct Recorder {
+    unsigned calls = 0;
+    std::vector<LifecycleEvent> events;
+
+    static void on_lifecycle(void* ctx, LifecycleEvent ev) {
+        Recorder* self = static_cast<Recorder*>(ctx);
+        ++self->calls;
+        self->events.push_back(ev);
+    }
+    size_t count(LifecycleKind kind) const {
+        size_t n = 0;
+        for (const LifecycleEvent& e : events) {
+            if (e.kind == kind)
+                ++n;
+        }
+        return n;
+    }
+};
+
+// --- the scripted rig --------------------------------------------------------------------------
+
+// One backplane's script. Every step array lives in the Rig (MockL3Node::set_script() keeps the
+// caller's pointer), and the four-step shape is the same for every answering backplane:
+//   SlotMapStep   — its occupancy, answered to every BP_SLOT_MAP (steady state after the first)
+//   StatusStep    — its status block, answered to every GET_STATUS
+//   IdentifyStep  — the identity every one of its modules reports (they are like-for-like)
+//   DescChunkStep — the descriptor blob every READ_DESC is served from, honouring offset/max_len
+// PING (the enrolment probe) matches no step kind and no wildcard, so the double answers
+// ERR_UNKNOWN_OPCODE — a valid L2 answer, which is what enrols the backplane (trunk §6).
+struct BackplaneScript {
+    uint8_t addr = 0;
+    uint8_t slot_count = 0;
+    uint32_t occupied = 0;
+    uint8_t module_type = omgp::MODULE_TYPE_CODES[0];
+    const Descriptor* descriptor = nullptr;
+    // trunk §8: the backplane answers on a slot's behalf when the module does not. With no
+    // IdentifyStep of its own, every IDENTIFY falls back to this wildcard, for ever.
+    bool modules_unanswering = false;
+    bool absent = false; // scripted {SilenceStep}: nothing at this address at all
+};
+
+class Rig {
+  public:
+    Rig() : node_(clock_) {
+        callbacks_.ctx = &recorder_;
+        callbacks_.on_lifecycle = &Recorder::on_lifecycle;
+        engine_ = std::make_unique<CoreEngine>(node_, clock_, omgp::ADDR_host, callbacks_);
+        omgp::core::CoreEngineTestSeam::set_transcript(*engine_, &Transcript::record, &transcript_);
+        // Every trunk address starts ABSENT. An unscripted MockL3Node answers
+        // ERR_UNKNOWN_OPCODE to everything (contracts/mock-l3-node.md's unset-class rule), which
+        // is a valid L2 answer and would enrol all fifteen addresses; {SilenceStep} is how the
+        // double models "there is nothing there".
+        for (uint8_t addr = omgp::ADDR_backplane_min; addr <= omgp::ADDR_backplane_max; ++addr) {
+            install_absent(addr);
+        }
+    }
+
+    void install(const BackplaneScript& script) {
+        if (script.absent) {
+            install_absent(script.addr);
+            return;
+        }
+        std::vector<L3Step>& steps = scripts_[script.addr];
+        steps.clear();
+        steps.push_back(
+            L3Step::of(SlotMapStep{script.slot_count, script.occupied, script.occupied}));
+        steps.push_back(L3Step::of(StatusStep{ready_status()}));
+        if (script.modules_unanswering) {
+            // protocol-l3 §3.1 / trunk §8: ERR_UNKNOWN_TARGET is what a backplane answers for a
+            // slot with no live module. The enrolment probe (PING) consumes this wildcard, and
+            // from then on it is the disposition every class with no step of its own falls back
+            // to — which is exactly the IDENTIFY class here.
+            steps.push_back(L3Step::of(ErrorStep{omgp::ERR_UNKNOWN_TARGET}));
+        } else {
+            REQUIRE(script.descriptor != nullptr);
+            steps.push_back(
+                L3Step::of(IdentifyStep{identify_for(*script.descriptor, script.module_type)}));
+            steps.push_back(desc_step(*script.descriptor));
+        }
+        node_.set_script(script.addr, steps.data(), steps.size());
+    }
+
+    // Replaces a backplane's slot map, leaving the rest of its script as it was. Used for the
+    // occupancy-loss case: re-installing resets the double's own cursors, which is harmless —
+    // every class's steady state is the same answer it was already giving.
+    void reoccupy(const BackplaneScript& script, uint32_t occupied, uint32_t changed) {
+        BackplaneScript s = script;
+        s.occupied = occupied;
+        std::vector<L3Step>& steps = scripts_[s.addr];
+        steps.clear();
+        steps.push_back(L3Step::of(SlotMapStep{s.slot_count, occupied, changed}));
+        steps.push_back(L3Step::of(StatusStep{ready_status()}));
+        REQUIRE(s.descriptor != nullptr);
+        steps.push_back(L3Step::of(IdentifyStep{identify_for(*s.descriptor, s.module_type)}));
+        steps.push_back(desc_step(*s.descriptor));
+        node_.set_script(s.addr, steps.data(), steps.size());
+    }
+
+    // One call of the caller's loop: advance the simulated clock, let the double release whatever
+    // is due, hand the engine the same instant. The only place time moves in this file — nothing
+    // sleeps and nothing reads a wall clock (CLAUDE.md rule 3).
+    void step(uint64_t step_us) {
+        now_us_ += step_us;
+        node_.advance_to(now_us_);
+        engine_->run_superframe(now_us_);
+    }
+
+    // Drives the engine at `step_us` of simulated time per call until `target` superframes have
+    // been opened, or until the step budget is spent.
+    void run_to_superframe(uint32_t target, uint64_t step_us) {
+        const uint64_t calls_per_byte_time = byte_us() / step_us + 1u;
+        const uint64_t budget =
+            static_cast<uint64_t>(target) * kStepsPerSuperframeBound * calls_per_byte_time;
+        for (uint64_t i = 0; i < budget; ++i) {
+            step(step_us);
+            if (transcript_.last_superframe() > target) {
+                return;
+            }
+        }
+        FAIL("the engine did not reach superframe " << target << " within the step budget");
+    }
+
+    size_t discovered_count() const {
+        size_t n = 0;
+        for (uint8_t id = omgp::ADDR_module_min; id <= omgp::ADDR_module_max; ++id) {
+            if (engine_->discovery_state(id) == DiscoveryState::Discovered)
+                ++n;
+        }
+        return n;
+    }
+    size_t in_use_count() const {
+        size_t n = 0;
+        // The whole uint8_t range, not just the module window: "exactly 12 ids are in use" is
+        // only a real count if an id outside the pool cannot have quietly been assigned one.
+        for (unsigned id = 0; id <= 0xFFu; ++id) {
+            if (engine_->node_in_use(static_cast<uint8_t>(id)))
+                ++n;
+        }
+        return n;
+    }
+    std::vector<uint8_t> in_use_ids() const {
+        std::vector<uint8_t> ids;
+        for (unsigned id = 0; id <= 0xFFu; ++id) {
+            if (engine_->node_in_use(static_cast<uint8_t>(id)))
+                ids.push_back(static_cast<uint8_t>(id));
+        }
+        return ids;
+    }
+
+    CoreEngine& engine() {
+        return *engine_;
+    }
+    Transcript& transcript() {
+        return transcript_;
+    }
+    Recorder& recorder() {
+        return recorder_;
+    }
+    MockL3Node& node() {
+        return node_;
+    }
+    uint64_t now_us() const {
+        return now_us_;
+    }
+
+  private:
+    // A generous per-superframe bound on run_to_superframe()'s loop: three status polls, a
+    // handful of demand items and one enrolment probe whose worst case is trunk §7's full retry
+    // set. It bounds the LOOP, not the engine — a scheduler that stalls fails by FAIL() here
+    // rather than by hanging the suite (User Story 1 AS3's "the run still terminates").
+    static constexpr uint64_t kStepsPerSuperframeBound = 1200;
+
+    void install_absent(uint8_t addr) {
+        std::vector<L3Step>& steps = scripts_[addr];
+        steps.clear();
+        steps.push_back(L3Step::of(SilenceStep{}));
+        node_.set_script(addr, steps.data(), steps.size());
+    }
+
+    FakeClock clock_;
+    MockL3Node node_;
+    Recorder recorder_;
+    Transcript transcript_;
+    CoreCallbacks callbacks_{};
+    std::unique_ptr<CoreEngine> engine_;
+    std::vector<L3Step> scripts_[omgp::link::kAddrCount];
+    uint64_t now_us_ = 0;
+};
+
+// The rig SC-001 and User Story 1 AS1/AS2 name: 3 backplanes, 12 modules. Each backplane's four
+// slots hold like-for-like modules (one identity, one descriptor per backplane), which is what a
+// real FX backplane full of one model looks like and what makes the descriptor cache observable
+// in the transcript: one full READ_DESC sweep per DISTINCT descriptor, not per module.
+struct ThreeBackplanes {
+    // Two exact multiples of the R-09 chunk size and one that is not: the multiples make the
+    // chunk COUNT sensitive to the chunk size (see make_descriptor's note), and the odd one
+    // exercises a short final chunk.
+    Descriptor a = make_descriptor(0x1001, 1, 1, omgp::MODULE_TYPE_CODES[0], 2u * kDescChunkMax);
+    Descriptor b = make_descriptor(0x1002, 1, 2, omgp::MODULE_TYPE_CODES[1], 3u * kDescChunkMax);
+    Descriptor c =
+        make_descriptor(0x1003, 2, 1, omgp::MODULE_TYPE_CODES[2], 2u * kDescChunkMax - 9);
+
+    BackplaneScript bp1{0x01, 4, 0b1111u, omgp::MODULE_TYPE_CODES[0], &a, false, false};
+    BackplaneScript bp2{0x02, 4, 0b1111u, omgp::MODULE_TYPE_CODES[1], &b, false, false};
+    BackplaneScript bp3{0x03, 4, 0b1111u, omgp::MODULE_TYPE_CODES[2], &c, false, false};
+
+    void install(Rig& rig) const {
+        rig.install(bp1);
+        rig.install(bp2);
+        rig.install(bp3);
+    }
+};
+
+// How many superframes the three-backplane rig is given to converge, and how many further ones
+// AS1's "nothing more is discoverable" is observed over. Both are bounds on the TEST, not
+// thresholds the engine reads.
+constexpr uint32_t kConvergeSuperframes = 90;
+constexpr uint32_t kSettleSuperframes = 20;
+
+} // namespace
+
+// --- AS1: a cold rig discovers itself completely -----------------------------------------------
+
+TEST_CASE("AS1: a cold CoreEngine enrols 3 backplanes, assigns 12 node ids and discovers every "
+          "one of them [discovery][us1]") {
+    const ThreeBackplanes topo;
+    Rig rig;
+    topo.install(rig);
+
+    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+
+    // Every backplane enrolled — and only the three that are actually there. The other twelve
+    // addresses are scripted silent, so a rotation that enrolled an address on nothing but its
+    // own optimism would be caught here.
+    for (uint8_t addr = omgp::ADDR_backplane_min; addr <= omgp::ADDR_backplane_max; ++addr) {
+        const bool expected = addr >= 0x01 && addr <= 0x03;
+        INFO("backplane address " << static_cast<unsigned>(addr));
+        REQUIRE(rig.engine().backplane_enrolled(addr) == expected);
+    }
+
+    // Exactly twelve ids in use, every one of them inside the R-06 pool, all distinct (a set of
+    // ids by construction — each is read once from its own accessor), and every one Discovered.
+    const std::vector<uint8_t> ids = rig.in_use_ids();
+    REQUIRE(ids.size() == 12u);
+    for (uint8_t id : ids) {
+        INFO("node id " << static_cast<unsigned>(id));
+        REQUIRE(id >= omgp::ADDR_module_min);
+        REQUIRE(id <= omgp::ADDR_module_max);
+        REQUIRE(rig.engine().discovery_state(id) == DiscoveryState::Discovered);
+    }
+    REQUIRE(rig.discovered_count() == 12u);
+
+    // Identified exactly once each: twelve IDENTIFY lines carrying twelve distinct node ids,
+    // each addressed to the backplane that owns that slot (trunk §5/§8).
+    const Transcript& t = rig.transcript();
+    REQUIRE(t.count(omgp::OP_IDENTIFY) == 12u);
+    std::vector<uint8_t> identified;
+    for (const TranscriptEntry& e : t.lines) {
+        if (e.opcode != omgp::OP_IDENTIFY)
+            continue;
+        REQUIRE(e.dst >= omgp::ADDR_backplane_min);
+        REQUIRE(e.dst <= 0x03);
+        REQUIRE(e.node_id >= omgp::ADDR_module_min);
+        for (uint8_t seen : identified) {
+            REQUIRE(seen != e.node_id);
+        }
+        identified.push_back(e.node_id);
+    }
+    REQUIRE(identified.size() == 12u);
+}
+
+TEST_CASE("AS1: the descriptor of every distinct module is read whole — READ_DESC offsets cover "
+          "[0, desc_len) contiguously at the R-09 chunk size [discovery][us1]") {
+    const ThreeBackplanes topo;
+    Rig rig;
+    topo.install(rig);
+    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+    REQUIRE(rig.discovered_count() == 12u);
+
+    // One sweep per BACKPLANE, because each backplane's four modules are like-for-like: the
+    // first one's read fills the cache entry and the other three are served from it (spec
+    // FR-008). The assertion is against the SCRIPTED blob length, so a truncated or skipped
+    // chunk fails rather than merely shortening the transcript.
+    struct Expect {
+        uint8_t dst;
+        size_t len;
+    };
+    const Expect expected[] = {
+        {0x01, topo.a.bytes.size()}, {0x02, topo.b.bytes.size()}, {0x03, topo.c.bytes.size()}};
+    size_t total_chunks = 0;
+    for (const Expect& ex : expected) {
+        INFO("backplane " << static_cast<unsigned>(ex.dst) << ", descriptor " << ex.len
+                          << " bytes");
+        // Two independent halves make up "covers [0, desc_len) contiguously". (1) COUNT: the
+        // transcript carries no offset (T023 fixes its four fields), so the chunk count is
+        // compared against the SCRIPTED blob length — reading [0, len) in kDescChunkMax-sized
+        // steps takes exactly this many, and two of the three lengths here are exact multiples
+        // of that chunk size so the count moves if the chunk size does. (2) CONTENT: the engine
+        // only reaches Discovered after l3::descriptor_crc over the REASSEMBLED blob matches the
+        // desc_crc the scripted IdentifyResp advertised (core/core_engine.cpp), and AS1's case
+        // above asserts all twelve reach it — so a skipped, duplicated or misplaced chunk could
+        // not have produced this state. Neither half alone would do: the count would pass on a
+        // wrongly-ordered read, and the CRC would pass on any chunking that happened to
+        // reassemble correctly.
+        const size_t want = (ex.len + kDescChunkMax - 1u) / kDescChunkMax;
+        size_t got = 0;
+        for (const TranscriptEntry& e : rig.transcript().lines) {
+            if (e.opcode == omgp::OP_READ_DESC && e.dst == ex.dst)
+                ++got;
+        }
+        REQUIRE(want > 1u); // the case would not exercise chunking at all otherwise
+        REQUIRE(got == want);
+        total_chunks += got;
+    }
+    REQUIRE(rig.transcript().count(omgp::OP_READ_DESC) == total_chunks);
+}
+
+TEST_CASE("AS1: past the fixed point nothing further is discoverable — no node id, no state and "
+          "no IDENTIFY or READ_DESC is added [discovery][us1]") {
+    const ThreeBackplanes topo;
+    Rig rig;
+    topo.install(rig);
+    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+    REQUIRE(rig.discovered_count() == 12u);
+
+    const std::vector<uint8_t> ids_before = rig.in_use_ids();
+    const size_t identify_before = rig.transcript().count(omgp::OP_IDENTIFY);
+    const size_t read_desc_before = rig.transcript().count(omgp::OP_READ_DESC);
+    const size_t lines_before = rig.transcript().lines.size();
+
+    rig.run_to_superframe(kConvergeSuperframes + kSettleSuperframes, byte_us());
+
+    REQUIRE(rig.in_use_ids() == ids_before);
+    for (uint8_t id : ids_before) {
+        REQUIRE(rig.engine().discovery_state(id) == DiscoveryState::Discovered);
+    }
+    REQUIRE(rig.transcript().count(omgp::OP_IDENTIFY) == identify_before);
+    REQUIRE(rig.transcript().count(omgp::OP_READ_DESC) == read_desc_before);
+    // The traffic that DID continue is trunk §6's mandatory half and nothing else: status polls
+    // and the enrolment probe. Asserted positively so "nothing was added" cannot be satisfied by
+    // an engine that simply stopped.
+    REQUIRE(rig.transcript().lines.size() > lines_before);
+    for (size_t i = lines_before; i < rig.transcript().lines.size(); ++i) {
+        const TranscriptEntry& e = rig.transcript().lines[i];
+        INFO("transcript line " << i << " opcode " << static_cast<unsigned>(e.opcode));
+        REQUIRE((e.opcode == omgp::OP_GET_STATUS || e.opcode == omgp::OP_BP_SLOT_MAP ||
+                 e.opcode == omgp::OP_PING));
+    }
+}
+
+// --- AS2 / SC-001: determinism -----------------------------------------------------------------
+
+TEST_CASE("AS2: two runs of the same script from the same cold start produce identical "
+          "transcripts [discovery][us1]") {
+    const ThreeBackplanes topo;
+    std::string first;
+    std::string second;
+    {
+        Rig rig;
+        topo.install(rig);
+        rig.run_to_superframe(kConvergeSuperframes, byte_us());
+        REQUIRE(rig.discovered_count() == 12u);
+        first = rig.transcript().text();
+    }
+    {
+        Rig rig;
+        topo.install(rig);
+        rig.run_to_superframe(kConvergeSuperframes, byte_us());
+        REQUIRE(rig.discovered_count() == 12u);
+        second = rig.transcript().text();
+    }
+    REQUIRE(!first.empty());
+    // Whole ordered strings — not multisets, not line counts (SC-001).
+    REQUIRE(first == second);
+}
+
+// --- SC-005: the same scenario at a different clock granularity ---------------------------------
+
+TEST_CASE("SC-005: the transcript and the end state do not depend on how finely the caller "
+          "advances the clock between run_superframe() calls [discovery][us1][clock-granularity]") {
+    const ThreeBackplanes topo;
+    // Every step divides one byte time, so the WIRE's own event instants are identical across
+    // the three runs and only the caller's cadence differs — see this file's header note 2 for
+    // why that is the regime this case fixes, and what it therefore does and does not establish.
+    const uint64_t steps[] = {byte_us(), byte_us() / 2u, byte_us() / 5u, 1u};
+    std::string reference;
+    std::vector<uint8_t> reference_ids;
+    for (uint64_t step : steps) {
+        REQUIRE(step >= 1u);
+        REQUIRE(byte_us() % step == 0u);
+        Rig rig;
+        topo.install(rig);
+        rig.run_to_superframe(kConvergeSuperframes, step);
+        INFO("clock step " << step << " us");
+        REQUIRE(rig.discovered_count() == 12u);
+        if (reference.empty()) {
+            reference = rig.transcript().text();
+            reference_ids = rig.in_use_ids();
+            REQUIRE(!reference.empty());
+            continue;
+        }
+        REQUIRE(rig.transcript().text() == reference);
+        REQUIRE(rig.in_use_ids() == reference_ids);
+    }
+}
+
+// --- FR-002: the status polls come first, every superframe -------------------------------------
+
+TEST_CASE("FR-002: in every superframe each enrolled backplane's status poll precedes every "
+          "discovery transaction of that superframe [discovery][us1]") {
+    const ThreeBackplanes topo;
+    Rig rig;
+    topo.install(rig);
+    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+    REQUIRE(rig.discovered_count() == 12u);
+
+    uint32_t current = 0;
+    bool discovery_seen = false;
+    size_t superframes_with_discovery = 0;
+    for (const TranscriptEntry& e : rig.transcript().lines) {
+        if (e.superframe != current) {
+            current = e.superframe;
+            discovery_seen = false;
+        }
+        const bool is_poll = e.opcode == omgp::OP_GET_STATUS || e.opcode == omgp::OP_BP_SLOT_MAP;
+        const bool is_discovery = e.opcode == omgp::OP_IDENTIFY || e.opcode == omgp::OP_READ_DESC;
+        if (is_discovery && !discovery_seen) {
+            discovery_seen = true;
+            ++superframes_with_discovery;
+        }
+        INFO("superframe " << current << " opcode " << static_cast<unsigned>(e.opcode));
+        // A status poll after a discovery transaction in the SAME superframe is the failure
+        // this case exists to catch.
+        REQUIRE(!(is_poll && discovery_seen));
+    }
+    // Non-vacuous: the ordering was actually exercised in superframes that had both.
+    REQUIRE(superframes_with_discovery > 0u);
+}
+
+// --- AS3: a module that never answers IDENTIFY blocks nothing and is retried --------------------
+
+namespace {
+
+// 3 backplanes as before plus a fourth carrying one module; twelve modules in total, of which
+// eleven answer. The fourth backplane is the variable: `unanswering` makes it answer
+// ERR_UNKNOWN_TARGET for its one slot, for ever (see this file's header note 1).
+struct FourBackplanes {
+    Descriptor a = make_descriptor(0x2001, 1, 1, omgp::MODULE_TYPE_CODES[0], 2u * kDescChunkMax);
+    Descriptor b = make_descriptor(0x2002, 1, 2, omgp::MODULE_TYPE_CODES[1], kDescChunkMax);
+    Descriptor c = make_descriptor(0x2003, 2, 1, omgp::MODULE_TYPE_CODES[2], kDescChunkMax + 7);
+    Descriptor d = make_descriptor(0x2004, 2, 2, omgp::MODULE_TYPE_CODES[3], kDescChunkMax - 5);
+
+    void install(Rig& rig, bool unanswering) const {
+        rig.install(
+            BackplaneScript{0x01, 4, 0b1111u, omgp::MODULE_TYPE_CODES[0], &a, false, false});
+        rig.install(
+            BackplaneScript{0x02, 4, 0b1111u, omgp::MODULE_TYPE_CODES[1], &b, false, false});
+        rig.install(BackplaneScript{0x03, 3, 0b111u, omgp::MODULE_TYPE_CODES[2], &c, false, false});
+        rig.install(BackplaneScript{0x04, 1, 0b1u, omgp::MODULE_TYPE_CODES[3],
+                                    unanswering ? nullptr : &d, unanswering, false});
+    }
+};
+
+} // namespace
+
+TEST_CASE("AS3: a slot whose module never answers IDENTIFY blocks no other slot or backplane, "
+          "and is retried rather than abandoned [discovery][us1]") {
+    const FourBackplanes topo;
+
+    // The control: the same rig with every module answering. Its convergence point is the bound
+    // the unanswering rig's own eleven must also meet — "the same bounded superframe count".
+    uint32_t control_superframe = 0;
+    {
+        Rig rig;
+        topo.install(rig, false);
+        rig.run_to_superframe(kConvergeSuperframes, byte_us());
+        REQUIRE(rig.discovered_count() == 12u);
+        control_superframe = rig.transcript().last_superframe();
+        REQUIRE(control_superframe > 0u);
+    }
+
+    Rig rig;
+    topo.install(rig, true);
+    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+
+    // Twelve slots occupied, twelve ids assigned: the unanswering module is not skipped at
+    // assignment time — its slot is occupied and FR-009 gives it an id.
+    const std::vector<uint8_t> ids = rig.in_use_ids();
+    REQUIRE(ids.size() == 12u);
+    // Eleven reach Discovered; the twelfth stays Identifying (data-model.md §2: IDENTIFY in
+    // flight or unanswered).
+    REQUIRE(rig.discovered_count() == 11u);
+    uint8_t stuck = 0;
+    for (uint8_t id : ids) {
+        if (rig.engine().discovery_state(id) != DiscoveryState::Discovered) {
+            REQUIRE(stuck == 0); // exactly one, not "at least one"
+            REQUIRE(rig.engine().discovery_state(id) == DiscoveryState::Identifying);
+            stuck = id;
+        }
+    }
+    REQUIRE(stuck != 0);
+    // It belongs to the fourth backplane, which is the one scripted to answer for it.
+    // (Established from the transcript rather than from a new accessor: every IDENTIFY line for
+    // this id names the backplane the engine addressed it through.)
+    size_t attempts = 0;
+    uint32_t first_sf = 0;
+    uint32_t last_sf = 0;
+    for (const TranscriptEntry& e : rig.transcript().lines) {
+        if (e.opcode != omgp::OP_IDENTIFY || e.node_id != stuck)
+            continue;
+        REQUIRE(e.dst == 0x04);
+        if (attempts == 0)
+            first_sf = e.superframe;
+        last_sf = e.superframe;
+        ++attempts;
+    }
+    // Retried, not abandoned: two or more attempts, at DISTINCT superframes.
+    REQUIRE(attempts >= 2u);
+    REQUIRE(last_sf > first_sf);
+    // And the id is never released while its slot stays occupied (FR-009).
+    REQUIRE(rig.engine().node_in_use(stuck));
+
+    // The other eleven were not held up: this rig ran at least as far as the control did, and
+    // by that point every one of them is Discovered. A scheduler that let the unanswering
+    // module's retries take the demand slot its siblings needed would leave some of them short.
+    REQUIRE(rig.transcript().last_superframe() >= control_superframe);
+    for (uint8_t id : ids) {
+        if (id == stuck)
+            continue;
+        REQUIRE(rig.engine().discovery_state(id) == DiscoveryState::Discovered);
+    }
+}
+
+TEST_CASE("AS3: a backplane that goes silent at the trunk level holds up no other backplane's "
+          "discovery, and the run still terminates [discovery][us1]") {
+    const ThreeBackplanes topo;
+    Rig rig;
+    topo.install(rig);
+    // The third backplane answers nothing at all — a genuine trunk-level timeout on every
+    // transaction (trunk §3's T_resp, §7's two retries), not an answer this engine can read.
+    rig.install(BackplaneScript{0x03, 0, 0, omgp::MODULE_TYPE_CODES[2], nullptr, false, true});
+
+    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+
+    // The eight modules behind the two live backplanes are fully discovered, and no id was
+    // assigned behind the silent one (it never answered a BP_SLOT_MAP, so it reported no slots).
+    REQUIRE(rig.in_use_ids().size() == 8u);
+    REQUIRE(rig.discovered_count() == 8u);
+    REQUIRE(rig.engine().backplane_enrolled(0x01));
+    REQUIRE(rig.engine().backplane_enrolled(0x02));
+    REQUIRE(!rig.engine().backplane_enrolled(0x03));
+}
+
+// --- AS4: a backplane attached after cold boot --------------------------------------------------
+
+TEST_CASE("AS4: a backplane attached after cold boot is enrolled within 15 superframes and its "
+          "slots discovered, without re-running the already-enrolled ones [discovery][us1]") {
+    const ThreeBackplanes topo;
+    Descriptor late = make_descriptor(0x3001, 3, 1, omgp::MODULE_TYPE_CODES[3], 2u * kDescChunkMax);
+    Rig rig;
+    topo.install(rig);
+    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+    REQUIRE(rig.discovered_count() == 12u);
+
+    const std::vector<uint8_t> original = rig.in_use_ids();
+    const size_t identify_before = rig.transcript().count(omgp::OP_IDENTIFY);
+    const size_t read_desc_before = rig.transcript().count(omgp::OP_READ_DESC);
+    const uint32_t attached_at = rig.transcript().last_superframe();
+
+    // The fourth backplane becomes answerable. Nothing else about the rig changes.
+    rig.install(BackplaneScript{0x04, 2, 0b11u, omgp::MODULE_TYPE_CODES[3], &late, false, false});
+
+    // spec FR-003: the enrolment rotation reaches it within 15 superframes of its becoming
+    // answerable — there are 15 backplane addresses and one probe per superframe, so 15 is the
+    // whole rotation. (FR-003 bounds ENROLMENT; discovering its slots then follows on the
+    // ordinary schedule, which is what AS4 itself says: "when the next enrolment probes reach
+    // it ... discovered the same way a cold-boot backplane is".)
+    rig.run_to_superframe(attached_at + 15u, byte_us());
+    REQUIRE(rig.engine().backplane_enrolled(0x04));
+
+    rig.run_to_superframe(attached_at + 15u + kConvergeSuperframes, byte_us());
+    REQUIRE(rig.in_use_ids().size() == 14u);
+    REQUIRE(rig.discovered_count() == 14u);
+
+    // The twelve that were already Discovered kept their ids and were not re-identified or
+    // re-read: exactly two more IDENTIFYs, and READ_DESC only for the new descriptor.
+    for (uint8_t id : original) {
+        REQUIRE(rig.engine().node_in_use(id));
+        REQUIRE(rig.engine().discovery_state(id) == DiscoveryState::Discovered);
+    }
+    REQUIRE(rig.transcript().count(omgp::OP_IDENTIFY) == identify_before + 2u);
+    const size_t want_chunks = (late.bytes.size() + kDescChunkMax - 1u) / kDescChunkMax;
+    REQUIRE(rig.transcript().count(omgp::OP_READ_DESC) == read_desc_before + want_chunks);
+    for (size_t i = 0; i < rig.transcript().lines.size(); ++i) {
+        const TranscriptEntry& e = rig.transcript().lines[i];
+        if (e.superframe <= attached_at)
+            continue;
+        if (e.opcode != omgp::OP_IDENTIFY && e.opcode != omgp::OP_READ_DESC)
+            continue;
+        INFO("post-attachment discovery traffic at superframe " << e.superframe);
+        REQUIRE(e.dst == 0x04); // never to an already-discovered node's backplane
+    }
+}
+
+// --- FR-021: presence outcomes are QUEUED by the scheduler, never delivered by it ---------------
+
+TEST_CASE("FR-021: NodeDiscovered and NodeRemoved are observed only through drain_callbacks() "
+          "[discovery][us1]") {
+    Descriptor desc = make_descriptor(0x4001, 1, 1, omgp::MODULE_TYPE_CODES[0], kDescChunkMax + 3u);
+    const BackplaneScript bp{0x01, 2, 0b11u, omgp::MODULE_TYPE_CODES[0], &desc, false, false};
+    Rig rig;
+    rig.install(bp);
+    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+    REQUIRE(rig.discovered_count() == 2u);
+
+    // However many superframes have run, the application has not been called once.
+    REQUIRE(rig.recorder().calls == 0u);
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().calls >= 2u);
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeDiscovered) == 2u);
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeRemoved) == 0u);
+
+    // One slot empties. The `changed` bit is set for it too, but the reconciliation is against
+    // absolute `occupied` (ruled 2026-09-22, docs/OPEN-QUESTIONS.md) — this case asserts the
+    // OUTCOME, which both readings agree on.
+    const unsigned calls_before = rig.recorder().calls;
+    rig.reoccupy(bp, 0b01u, 0b10u);
+    rig.run_to_superframe(rig.transcript().last_superframe() + kSettleSuperframes, byte_us());
+
+    REQUIRE(rig.recorder().calls == calls_before); // still nothing delivered by the scheduler
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeRemoved) == 1u);
+    REQUIRE(rig.in_use_ids().size() == 1u);
+    // FR-009: the surviving slot's id is untouched by its neighbour's removal.
+    REQUIRE(rig.engine().node_in_use(omgp::ADDR_module_min));
+    REQUIRE(rig.engine().discovery_state(omgp::ADDR_module_min) == DiscoveryState::Discovered);
+}
+
+// --- CLAUDE.md rule 7: a hostile or malformed slot map is survived, not followed ----------------
+
+namespace {
+
+// A BP_SLOT_MAP response built by hand rather than by the codec, so the engine's own bound can
+// be exercised independently of l3::decode_bp_slot_map_resp's (which refuses an over-cap
+// slot_count outright, l3/l3_payload.cpp — so the wire path cannot deliver one and this is
+// reachable only by calling reconcile_slot_map() directly, as contracts/core-cpp.md allows).
+omgp::l3::BpSlotMapResp raw_slot_map(uint8_t slot_count, const uint8_t* occupied,
+                                     const uint8_t* changed, uint8_t bitmap_len) {
+    omgp::l3::BpSlotMapResp r{};
+    r.slot_count = slot_count;
+    r.occupied.data = occupied;
+    r.occupied.len = bitmap_len;
+    r.changed.data = changed;
+    r.changed.len = bitmap_len;
+    return r;
+}
+
+} // namespace
+
+TEST_CASE("rule 7: a slot map over LIMIT_bp_slot_map_max_slots, or with bits set past its own "
+          "slot_count, leaves the engine running and every other slot unaffected "
+          "[discovery][us1][robustness]") {
+    Descriptor desc = make_descriptor(0x5001, 1, 1, omgp::MODULE_TYPE_CODES[0], kDescChunkMax + 3u);
+    const BackplaneScript bp{0x01, 2, 0b11u, omgp::MODULE_TYPE_CODES[0], &desc, false, false};
+    Rig rig;
+    rig.install(bp);
+    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+    REQUIRE(rig.discovered_count() == 2u);
+    const std::vector<uint8_t> before = rig.in_use_ids();
+
+    SECTION("a slot_count above the wire cap is clamped, not followed") {
+        // Every bitmap byte set, but a bitmap far shorter than the claimed slot_count implies:
+        // an engine that trusted slot_count would read past `occupied` and write past
+        // node_id_by_slot. Under the native ASan/UBSan build either is a finding, not a pass.
+        uint8_t bits[4];
+        for (uint8_t& b : bits)
+            b = 0xFF;
+        const omgp::l3::BpSlotMapResp hostile = raw_slot_map(0xFF, bits, bits, sizeof bits);
+        rig.engine().reconcile_slot_map(0x02, hostile, rig.now_us());
+        // Address 0x02 is not a backplane this rig has, but it is a legal backplane address, so
+        // the response is reconciled: the first 32 slots the bitmaps DO cover get ids, and the
+        // 223 slots they do not are read as unoccupied rather than overrun.
+        REQUIRE(rig.in_use_ids().size() == before.size() + 32u);
+    }
+
+    SECTION("bits set at or past slot_count are ignored") {
+        uint8_t bits[1];
+        bits[0] = 0xFF; // slots 0..7 claimed occupied, but slot_count says there are only 3
+        const omgp::l3::BpSlotMapResp padded = raw_slot_map(3, bits, bits, sizeof bits);
+        rig.engine().reconcile_slot_map(0x03, padded, rig.now_us());
+        REQUIRE(rig.in_use_ids().size() == before.size() + 3u);
+    }
+
+    SECTION("an address that is not a backplane names no record at all") {
+        uint8_t bits[1];
+        bits[0] = 0xFF;
+        const omgp::l3::BpSlotMapResp anywhere = raw_slot_map(4, bits, bits, sizeof bits);
+        rig.engine().reconcile_slot_map(omgp::ADDR_host, anywhere, rig.now_us());
+        rig.engine().reconcile_slot_map(omgp::ADDR_module_min, anywhere, rig.now_us());
+        rig.engine().reconcile_slot_map(0xFF, anywhere, rig.now_us());
+        REQUIRE(rig.in_use_ids() == before);
+    }
+
+    // Whatever the section did, the engine is still running: the original two nodes keep their
+    // ids and their state, and further superframes still poll and probe.
+    for (uint8_t id : before) {
+        REQUIRE(rig.engine().node_in_use(id));
+        REQUIRE(rig.engine().discovery_state(id) == DiscoveryState::Discovered);
+    }
+    const size_t lines = rig.transcript().lines.size();
+    rig.run_to_superframe(rig.transcript().last_superframe() + 3u, byte_us());
+    REQUIRE(rig.transcript().lines.size() > lines);
+}
+
+TEST_CASE("a descriptor read whose reader's slot empties mid-read is taken over by another node "
+          "waiting on the same descriptor, not stranded [discovery][us1][robustness]") {
+    // Six chunks, so the read spans several superframes and the slot can be emptied while it is
+    // genuinely in progress rather than in a race with its completion.
+    Descriptor desc = make_descriptor(0x6001, 1, 1, omgp::MODULE_TYPE_CODES[0], 6u * kDescChunkMax);
+    const BackplaneScript bp{0x01, 2, 0b11u, omgp::MODULE_TYPE_CODES[0], &desc, false, false};
+    Rig rig;
+    rig.install(bp);
+
+    // Run only as far as the first READ_DESC: the lower of the two ids is reading, and the
+    // other has not been identified yet (descriptor chunks outrank the IDENTIFY scan).
+    bool reading = false;
+    for (uint64_t i = 0; i < 400000u && !reading; ++i) {
+        rig.step(byte_us());
+        reading = rig.transcript().count(omgp::OP_READ_DESC) > 0u &&
+                  rig.transcript().count(omgp::OP_READ_DESC) < 6u;
+    }
+    REQUIRE(reading);
+    REQUIRE(rig.engine().node_in_use(omgp::ADDR_module_min));
+    REQUIRE(rig.engine().discovery_state(omgp::ADDR_module_min) ==
+            DiscoveryState::ReadingDescriptor);
+
+    // Slot 0 empties under the reader (spec FR-010).
+    rig.reoccupy(bp, 0b10u, 0b01u);
+    rig.run_to_superframe(rig.transcript().last_superframe() + kConvergeSuperframes, byte_us());
+
+    // The surviving slot's module is fully discovered: the descriptor it was waiting on was
+    // taken over and finished rather than left half-read for ever.
+    REQUIRE(rig.in_use_ids().size() == 1u);
+    const uint8_t survivor = rig.in_use_ids().front();
+    REQUIRE(rig.engine().discovery_state(survivor) == DiscoveryState::Discovered);
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeRemoved) == 1u);
+}
+
+TEST_CASE("R-06: the node-id pool is never wrapped onto a live id — exhaustion is reported for "
+          "the slot instead [discovery][us1][robustness]") {
+    Rig rig;
+    // Four backplanes' worth of 32-slot maps is 128 occupied slots against a pool of
+    // ADDR_module_max - ADDR_module_min + 1 = 112 ids, so the last sixteen find none.
+    uint8_t bits[4];
+    for (uint8_t& b : bits)
+        b = 0xFF;
+    const omgp::l3::BpSlotMapResp full = raw_slot_map(32, bits, bits, sizeof bits);
+    for (uint8_t addr = 0x01; addr <= 0x04; ++addr) {
+        rig.engine().reconcile_slot_map(addr, full, 0);
+    }
+    const size_t pool = static_cast<size_t>(omgp::ADDR_module_max) -
+                        static_cast<size_t>(omgp::ADDR_module_min) + 1u;
+    REQUIRE(rig.in_use_ids().size() == pool);
+    for (uint8_t id : rig.in_use_ids()) {
+        REQUIRE(id >= omgp::ADDR_module_min);
+        REQUIRE(id <= omgp::ADDR_module_max);
+    }
+    REQUIRE(rig.recorder().calls == 0u);
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeIdPoolExhausted) == 4u * 32u - pool);
+}

@@ -1,8 +1,17 @@
-// OMGP host-core — CoreEngine implementation (skeleton, T015). See core/core_engine.hpp for the
-// contract, the dependency-surface ruling (research.md R-02) and what is deliberately absent.
-// trunk §6: run_superframe() is one superframe and here drains only link::Master's receive path;
-// trunk §7's retry/timeout/health rules live in link/, which this file never reaches past.
-// Makes tests/unit/test_core_callback_queue.cpp (T014) pass.
+// OMGP host-core — CoreEngine implementation. See core/core_engine.hpp for the contract, the
+// dependency-surface ruling (research.md R-02) and the stated divergences.
+//
+// AT THIS COMMIT this file is DECLARATION-ONLY for User Story 1: the API
+// tests/unit/test_core_discovery.cpp (T017, #688) compiles and links against exists, and does
+// nothing. run_superframe() still drains link::Master's receive path and nothing else (its T015
+// body), reconcile_slot_map() assigns no id, and no backplane is ever enrolled. That is
+// deliberate — CLAUDE.md rule 8: the test lands failing first, and the recorded failing run is
+// this PR's evidence that it can fail. T018-T023 (#689-#694) fill these bodies in the commits
+// that follow this one.
+//
+// trunk §6: run_superframe() is one step of one superframe; trunk §7's retry/timeout/health
+// rules live in link/, which this file never reaches past (core/ sees no frame byte).
+// protocol-l3 §3/§3.1 is the message vocabulary the following commits encode.
 #include "core/core_engine.hpp"
 
 namespace omgp {
@@ -20,24 +29,12 @@ CoreEngine::CoreEngine(link::ByteWire& wire, Clock& clock, uint8_t host_addr,
       // keep in step with those structs (the idiom link/health.cpp:73-77 uses one layer down).
       nodes_{}, backplanes_{}, descriptors_{}, event_queue_{}, desc_queue_{}, param_queue_{},
       pending_lifecycle_{}, pending_param_results_{}, budget_{} {
-    // Discarded reads of the state this skeleton declares but does not yet touch — the
+    // Discarded reads of the state this file declares but does not yet touch — the
     // link/health.cpp:78 idiom, kept for the same reason: a private member nothing in the TU
     // references is what clang's -Wunused-private-field (in -Wall, and this project builds
-    // -Werror) reports, and the contract requires these declarations to exist from this task on.
-    // PRECAUTIONARY, not measured: the native build is g++, which has no such warning, and the
-    // quality stage's clang-tidy branch did not run on this change (see the PR body), so nothing
-    // here demonstrates that removing these lines would fail. Each named consumer is the task
-    // that removes its line:
-    //   clock_        — T019/T029's superframe cadence bookkeeping
-    //   backplanes_   — T018's reconcile_slot_map()
-    //   descriptors_  — T021's descriptor-cache lookup
-    //   event_queue_/desc_queue_/param_queue_ — T029's demand drain (R-07)
-    //   budget_       — T029's budget accounting; data-model.md §9 seeds period_us from
-    //                   TRUNK_T_poll_us at the start of a superframe, so nothing here restates a
-    //                   timing value (CLAUDE.md rule 4) and budget_ stays zero-initialised as
-    //                   #686's acceptance criteria require.
+    // -Werror) reports, and the contract requires these declarations to exist from T015 on.
+    // PRECAUTIONARY, not measured: the native build is g++, which has no such warning.
     (void)clock_;
-    (void)backplanes_;
     (void)descriptors_;
     (void)event_queue_;
     (void)desc_queue_;
@@ -46,13 +43,22 @@ CoreEngine::CoreEngine(link::ByteWire& wire, Clock& clock, uint8_t host_addr,
 }
 
 void CoreEngine::run_superframe(uint64_t now_us) {
-    // trunk §6: the receive drain, and nothing else, at this task. link::Master::poll() is the
+    // trunk §6: the receive drain, and nothing else, at this commit. link::Master::poll() is the
     // only receive path (specs/002-trunk-link-layer/data-model.md §4); its MasterEvent is
     // discarded because no transaction is ever begun yet — T019 (#690) adds the status polls and
-    // the enrolment probe, T029 (#700) the demand items and the budget, T042 (#713) the
-    // health-notice forwarding. No callback is invoked here, directly or transitively: nothing
-    // in this body enqueues, and drain_callbacks() is the only invoker either way (spec FR-021).
+    // the enrolment probe, T020-T022 (#691-#693) the discovery transactions. No callback is
+    // invoked here, directly or transitively: nothing in this body enqueues, and
+    // drain_callbacks() is the only invoker either way (spec FR-021).
     (void)master_.poll(now_us);
+}
+
+void CoreEngine::reconcile_slot_map(uint8_t backplane_addr, const l3::BpSlotMapResp& resp,
+                                    uint64_t now_us) {
+    // T018 (#689): R-06's first-fit assignment, FR-010's release and the rule 7 bounds land in
+    // the next commit. Declared here so T017's test compiles against the real signature.
+    (void)backplane_addr;
+    (void)resp;
+    (void)now_us;
 }
 
 void CoreEngine::drain_callbacks(size_t max_deliveries) {
@@ -175,6 +181,15 @@ size_t CoreEngine::node_index(uint8_t node_id) {
     return static_cast<size_t>(node_id) - static_cast<size_t>(ADDR_module_min);
 }
 
+size_t CoreEngine::backplane_index(uint8_t addr) {
+    // data-model.md §4 / trunk §5: 0x01..0x0F are the backplane addresses; the host's own
+    // address and every module id name no BackplaneRecord.
+    if (addr < ADDR_backplane_min || addr > ADDR_backplane_max) {
+        return kNoNodeIndex;
+    }
+    return static_cast<size_t>(addr) - static_cast<size_t>(ADDR_backplane_min);
+}
+
 DiscoveryState CoreEngine::discovery_state(uint8_t node_id) const {
     const size_t idx = node_index(node_id);
     if (idx == kNoNodeIndex) {
@@ -191,16 +206,25 @@ bool CoreEngine::node_in_use(uint8_t node_id) const {
     return nodes_[idx].in_use;
 }
 
+bool CoreEngine::backplane_enrolled(uint8_t addr) const {
+    const size_t idx = backplane_index(addr);
+    if (idx == kNoNodeIndex) {
+        return false;
+    }
+    return backplanes_[idx].enrolled;
+}
+
 uint32_t CoreEngine::dropped_deliveries() const {
     return dropped_deliveries_;
 }
 
 void CoreEngine::on_notice(link::Notice notice, uint8_t addr) {
-    // R-03 / trunk §6: forwarding a backplane or bus notice as a LifecycleEvent, and degrading
-    // every node behind `addr`, is T042 (#713). It compiles and does nothing observable here, by
-    // design — CoreEngine satisfies link::HealthListener from its first commit so nothing later
-    // has to change its base list. In particular it does NOT call back: §8a's rings are the only
-    // delivery path, and only drain_callbacks() reads them (spec FR-021).
+    // R-03 / trunk §6: recording link::Notice::ENROLLED against data-model.md §4's
+    // BackplaneRecord::enrolled is T019's (#690), and forwarding the SUSPECT/OFFLINE/RECOVERED
+    // and bus notices as LifecycleEvents is T042's (#713). It compiles and does nothing
+    // observable here, by design — CoreEngine satisfies link::HealthListener from its first
+    // commit so nothing later has to change its base list. In particular it does NOT call back:
+    // §8a's rings are the only delivery path, and only drain_callbacks() reads them (FR-021).
     (void)notice;
     (void)addr;
 }

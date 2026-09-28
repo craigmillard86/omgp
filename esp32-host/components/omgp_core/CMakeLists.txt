@@ -9,17 +9,17 @@
 # PRIVATE is a configure error) can never be true for this file. omgp_l3/CMakeLists.txt has
 # the same unconditional shape for the same reason.
 set(OMGP_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../..")
-# REQUIRES omgp_link, mirroring core/CMakeLists.txt's `target_link_libraries(omgp_core PUBLIC
-# omgp_link)`: core_engine.cpp uses link::Master and link::HealthTracker, and core/'s public
-# header includes link/master.hpp and link/health.hpp, so the dependency is public, not PRIV_.
-# Not omgp_l3 — no core/ source includes an l3/ header yet; it joins this line with the first
-# codec user (T020-T022), and declaring it now would be a dependency nothing here uses.
+# REQUIRES omgp_link and omgp_l3, mirroring core/CMakeLists.txt's `target_link_libraries(
+# omgp_core PUBLIC omgp_link omgp_l3)`: core_engine.cpp uses link::Master and
+# link::HealthTracker, and since T020-T022 (#691-#693) also l3/'s header, payload and descriptor
+# codecs. Both are public rather than PRIV_ because core/'s own public header includes
+# link/master.hpp, link/health.hpp and l3/l3_types.hpp (reconcile_slot_map()'s parameter type).
 # tools/refimpl/test_esp32_core_component.py derives this set from core/'s own #include lines
 # and fails on either a missing or an extra entry, so the comment cannot drift from the code.
 idf_component_register(
   SRC_DIRS     "${OMGP_ROOT}/core"
   INCLUDE_DIRS "${OMGP_ROOT}/core" "${OMGP_ROOT}/build/gen" "${OMGP_ROOT}"
-  REQUIRES     omgp_link
+  REQUIRES     omgp_link omgp_l3
 )
 # This is the only toolchain in the tree that COMPILES core/ -fno-rtti. Not the native preset:
 # CoreEngine is core/'s first polymorphic class and its key function on_notice() is defined in
