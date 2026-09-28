@@ -495,7 +495,9 @@ TEST_CASE("AS1: a cold CoreEngine enrols 3 backplanes, assigns 12 node ids and d
     // addresses are scripted silent, so a rotation that enrolled an address on nothing but its
     // own optimism would be caught here.
     for (uint8_t addr = omgp::ADDR_backplane_min; addr <= omgp::ADDR_backplane_max; ++addr) {
-        const bool expected = addr >= 0x01 && addr <= 0x03;
+        // addr is already >= ADDR_backplane_min (0x01) by the loop bound; only the upper edge
+        // of the three-backplane rig discriminates (CodeQL: the dropped half was a tautology).
+        const bool expected = addr <= 0x03;
         INFO("backplane address " << static_cast<unsigned>(addr));
         REQUIRE(rig.engine().backplane_enrolled(addr) == expected);
     }
