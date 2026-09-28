@@ -5647,3 +5647,217 @@ the constant's, 20 ms, and not ten superframes; no code changes under this entry
 **Supersedes:** none. **Related:** the previous entry (the clock-based reading this is a
 consequence of), and the 2026-09-13 F4 ruling, whose refinements carried the rate-scaled
 superframe into trunk §7 and data-model §7 without reaching this constant.
+
+---
+
+## 2026-09-28 — T017-T023 (#688): spec FR-008 keys the descriptor cache on a field `IDENTIFY` does not carry
+
+**Context:** `specs/003-host-core-engine/spec.md` FR-008 requires the engine to "cache descriptors
+keyed by the pair (MODEL_ID, descriptor CRC)" and to "skip the descriptor read for a node whose
+IDENTIFY response's MODEL_ID and CRC match an existing cache entry"; `data-model.md` §5 repeats the
+key as the full `l3::ModelIdRec` triple plus the CRC, and `tasks.md` T021 as
+`(model_vendor, model_hw_rev, model_fw_rev, desc_crc)`. **`IDENTIFY`'s response has no MODEL_ID.**
+`protocol/omgp-protocol.yaml` `l3_payloads.IDENTIFY.response` is `major, minor, module_type,
+desc_len, desc_crc` (`docs/protocol-l3.md` §3.1), and `MODEL_ID` is a descriptor TLV record
+(§4.1) — knowable only *after* the read the cache exists to avoid. The named key is therefore
+unreachable at the moment the lookup has to happen. CLAUDE.md rule 1 puts the YAML above the plan,
+so the wire is what it is and the feature artefacts are what is wrong.
+
+**Options:** (a) key the lookup on the identity `IdentifyResp` does carry —
+`(module_type, desc_len, desc_crc)` — and record the MODEL_ID triple on the entry once the blob is
+read, so `data-model.md` §5's key is still populated and still describes the entry, just not the
+lookup; (b) add `MODEL_ID` to `IDENTIFY`'s response in the YAML (a protocol change: T3, human, and
+it widens a message every node must emit for a host-side cache's convenience); (c) drop the cache
+short-circuit and read every descriptor fresh, abandoning FR-008 and SC-004.
+
+**Recommendation:** (a), implemented in this dispatch unit and labelled at
+`core/core_types.hpp`'s `NodeRecord::module_type` and at `CoreEngine::on_identify()`. What it costs,
+stated rather than claimed away (CLAUDE.md rule 11): the lookup is a CRC-16 match within one
+`module_type` and one exact `desc_len`, so a false hit needs two *different* descriptors of
+identical length and module type colliding on CRC-16 — it is a narrowing of FR-008's key, not an
+equivalent of it, and the residual risk is the CRC's, which is the same CRC `IDENTIFY` already asks
+the host to trust for the read's own integrity. (b) remains the only way to get FR-008's literal
+key and is the right answer if a collision is ever judged unacceptable.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** the
+2026-08-28 ruling that fixed `IDENTIFY`'s response layout (provisional there, and unchanged since).
+
+---
+
+## 2026-09-28 — T017-T023 (#688): FR-005's budget, taken literally, livelocks discovery on the spec's own 3-backplane rig
+
+**Context:** `spec.md` FR-005 requires that "a superframe's total scheduled traffic MUST NOT exceed
+its period" and FR-027 that the remaining demand budget be computed from the *measured* duration of
+that superframe's own traffic, while FR-003/FR-028 make the status polls and the enrolment probe
+unconditional. On SC-001's own rig — 3 backplanes at `TRUNK_bit_rate` — the three mandatory status
+polls measure ≈ 350-400 µs each against a `TRUNK_T_poll_us` of 2000, and a single `READ_DESC` chunk
+at the R-09 size (`LIMIT_max_l3_payload - 3` = 56 bytes of payload) costs ≈ 900 µs. `data-model.md`
+§9's own seed for a target never yet measured is "the worst-case wire time at the rate
+`Master::bit_rate()` currently reports", which at `link::kMaxWire` is ≈ 2.8 ms — larger than the
+whole period. Admitting a demand item only when its estimate fits what is left therefore admits
+**nothing, ever**: no node is ever measured, so no node's estimate ever shrinks. That is a
+livelock, not slow progress — discovery never starts. Separately, an enrolment probe to a silent
+address costs trunk §7's full retry set (≈ 1.1 ms) and cannot be both unconditional and inside a
+budget the polls have already spent.
+
+**Options:** (a) admit the first demand item of each superframe whatever the estimate says, and
+apply the budget to every later one — a progress guarantee, at the cost of one item's overrun in
+the worst case; (b) seed an unmeasured target with something smaller than `kMaxWire` (e.g. the
+actual encoded request size plus a full-frame response), which removes the livelock for ordinary
+messages but not for the case §9's seed exists to cover; (c) treat FR-005 as binding only on the
+*sum of estimates at admission* and let measurement overrun it silently, which is what a naive
+implementation does by accident and reports nothing.
+
+**Recommendation:** (a), implemented in this dispatch unit and labelled at
+`CoreEngine::admit_demand()` and in `core/core_engine.hpp`'s `run_superframe()` note; the enrolment
+probe is likewise issued outside the budget, which trunk §7 already contemplates ("the superframe
+that issues it stretches accordingly"). Both are DIVERGENCES from FR-005's literal wording and are
+recorded as such rather than presented as compliance. (b) is a reasonable refinement to land with
+T028/T029 (#699/#700), which own the budget proper; it reduces how often (a) is reached but does
+not remove the need for it, since a target whose first transaction is a full-size descriptor chunk
+still overruns whatever it was seeded with.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** the
+2026-09-21 "#110 F2c" ruling that produced FR-027/FR-028 (measured cost, unconditional polls).
+
+---
+
+## 2026-09-28 — T017-T023 (#688): SC-005's "any clock granularity" and FR-027's measured budget cannot both hold
+
+**Context:** `spec.md` SC-005 requires "the same sequence of operations and the same end state
+regardless of how quickly the simulated clock is advanced between steps". FR-027 requires each
+superframe's demand budget to be computed from the *measured* duration of that superframe's own
+traffic. A caller that advances the clock in coarser steps measures every transaction as taking
+longer (it observes completion at the next step boundary, not at the byte boundary), so it admits
+fewer demand items per superframe — and an item deferred to the next superframe lands *after* that
+superframe's mandatory status polls, which changes the sequence of operations, not merely its
+timing. The two requirements are in direct tension, and no implementation can satisfy both.
+
+**Options:** (a) read SC-005 as a statement about the *caller's cadence* at a fixed wire model —
+the engine must not depend on how many times it is called or on elapsed time between calls, only
+on its `now_us` argument — and test it over granularities that do not move the wire's own event
+instants; (b) quantise measured durations to some unit, which invents a value no artefact fixes and
+merely moves the boundary; (c) weaken FR-027 back to an assumed bound, which the 2026-09-21 "#110
+F2c" ruling explicitly rejected.
+
+**Recommendation:** (a). `tests/unit/test_core_discovery.cpp`'s `[clock-granularity]` case
+therefore compares full transcripts across steps that all divide one byte time (10, 5, 2 and 1 µs
+at `TRUNK_bit_rate`), and says in the file what that establishes and what it does not: it
+discriminates a scheduler that reads call counts or inter-call elapsed time from one that reads
+only `now_us`; it is not a demonstration of SC-005 at every cadence, because under FR-027 that
+property is not true. Amending SC-005's wording to match is a spec edit and a human's.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** the previous
+entry (the same budget, the other half of its consequences).
+
+---
+
+## 2026-09-28 — T017-T023 (#688): R-06's shared node-id pool versus F12's adopted per-backplane quota
+
+**Context:** `specs/003-host-core-engine/research.md` R-06 decides that node ids are assigned
+"first-fit from one shared free pool (`ADDR_module_min..ADDR_module_max`)" and explicitly rejects a
+per-backplane block, having found that 112 ids across 15 backplanes does not divide into blocks
+large enough for a single 16-slot FX backplane. The ADOPTED ruling of 2026-09-06 (this file, "#110
+F12") says "the host allocates node ids from a fixed per-backplane quota". The two are each
+self-consistent and produce different id sequences. The 2026-09-22 ruling amended F12's
+slot-cap half and left its quota sentence untouched; #154, the limit-symbol issue F12 was tracked
+under, is closed.
+
+**Options:** (a) implement R-06 (shared pool, first-fit, canonical order) and treat F12's quota
+sentence as superseded in substance by R-06's own analysis, which F12 predates and which was
+accepted with `specs/003-host-core-engine/` in PR #725; (b) implement a per-backplane quota and
+amend R-06; (c) block the story.
+
+**Recommendation:** (a), implemented in this dispatch unit at `CoreEngine::reconcile_slot_map()`,
+because R-06 gives a reason F12 does not answer and `tasks.md` T018 states it as the task. The
+choice is deliberately **not** load-bearing for the tests: `tests/unit/test_core_discovery.cpp`
+asserts the count, distinctness, range and stability of the assigned ids and never their literal
+values, exactly as #688's own acceptance criteria require, so a later ruling for (b) changes
+`core/core_engine.cpp` and leaves the test file alone.
+
+**Ruling:** pending — human. This entry asks for the contradiction to be closed in one direction
+or the other, not for the code to change today. **Amends:** none. **Supersedes:** none.
+**Related:** 2026-09-06 "#110 F12"; the 2026-09-22 ruling that amended its slot-cap half.
+
+---
+
+## 2026-09-28 — T017-T023 (#688): with the descriptor cache full there is nowhere to reassemble a fresh descriptor
+
+**Context:** `data-model.md` §5 says a full descriptor cache "refuses new entries and every
+subsequent unique descriptor is read fresh rather than cached — a graceful degradation, not a
+crash". In `core/` a cache entry IS the reassembly buffer: `DescriptorCacheEntry::blob` is the only
+`LIMIT_max_descriptor_bytes` store the engine owns, and a per-node staging area would be
+`LIMIT_max_nodes` × 2048 = 256 KB of fixed allocation on a device whose whole cache is already 64
+KB. So "read fresh rather than cached" has nowhere to put the bytes.
+
+**Options:** (a) with no entry free, leave the node in `Identifying` and retry it later, when a
+freed entry (`refcount == 0`) may exist — no descriptor is ever reported that was not read, and a
+rig with more than 32 distinct descriptors and no churn leaves some nodes undiscovered; (b) carry
+one scratch buffer and serialise uncached reads through it — 2 KB more, and one node at a time;
+(c) evict a `refcount == 0` entry that is complete, which the implementation already does at claim
+time, and accept that a rig with more than 32 *live* distinct descriptors thrashes.
+
+**Recommendation:** (a) for this story, implemented and labelled at `CoreEngine::on_identify()`,
+with (c) already in place as the ordinary path. (b) is the honest fix if a rig with more than 32
+distinct live descriptors is ever a real target; nothing in `docs/omgp-spec-v0.7.md` §5 suggests
+one is, and R-12 chose 32 as "generous against realistic rigs".
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** R-12
+(descriptor cache capacity).
+
+---
+
+## 2026-09-28 — T017-T023 (#688): `CoreStatus::NoFreeNodeId` has no shape `LifecycleEvent` can carry
+
+**Context:** `contracts/core-cpp.md` §Node-ID assignment and `tasks.md` T018 both require
+`CoreStatus::NoFreeNodeId` to be "enqueued onto `pending_lifecycle_`" when R-06's pool is
+exhausted, "rather than failing silently". `data-model.md` §7's `LifecycleKind` list has no member
+for it and `LifecycleEvent` has no field that can carry a `CoreStatus` — and the finding is about a
+*slot*, which by definition has no node id to name it by, while `LifecycleEvent::node_id` is the
+only identifier the struct carries.
+
+**Options:** (a) append `LifecycleKind::NodeIdPoolExhausted` and a `slot` field, reporting
+`node_id` = the backplane address and `slot` = the slot that got nothing; (b) report it as a
+`CoreStatus` return from `reconcile_slot_map()`, which has no caller able to act on it (the caller
+is `run_superframe()`, not the application); (c) count it in a counter with an accessor, like
+`dropped_deliveries()`.
+
+**Recommendation:** (a), implemented in this dispatch unit. The enumerator is appended after every
+existing member so no existing value moves, and `slot` is documented as meaningful only for
+`NodeRemoved` and `NodeIdPoolExhausted`. Both are additions to `data-model.md` §7, which a human
+should fold into that artefact (or reject) — the code says so at each field.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** R-06.
+
+---
+
+## 2026-09-28 — T017 (#688): `MockL3Node` cannot script one SLOT's silence, so User Story 1 AS3 is scripted the way trunk §8 says a backplane behaves
+
+**Context:** #688's acceptance criteria ask for "one slot's module scripted `SilenceStep` for
+`IDENTIFY`". `tests/support/mock_l3_node.hpp`'s `set_script()` takes a trunk address
+(`node < kAddrCount`), not a slot, and `SilenceStep` is a node-wide wildcard: a `SilenceStep` in a
+backplane's script silences that backplane's status polls and slot maps too, which is the
+"backplane went away" scenario and not AS3's. `contracts/mock-l3-node.md`'s own sentence "one
+script per simulated trunk address (backplane or, via its owning backplane's bridging, one of its
+slots)" describes a per-slot capability T012 did not build, and extending the double is #683's,
+which is closed.
+
+**Options:** (a) script the unanswering module the way `docs/trunk-link-layer.md` §8 says a real
+backplane presents one — the backplane answers `ERR_UNKNOWN_TARGET` on its behalf, which §8 in fact
+*requires* ("MUST begin its response within T_turn ... otherwise `ERR_BUSY` ... or
+`ERR_UNKNOWN_TARGET` for a slot with no live module ... MUST NOT stall the trunk"), so a
+trunk-level timeout from a slot is behaviour §8 forbids; (b) extend `MockL3Node` with per-slot
+scripts (a #683 reopening, and a test-support change inside a story that is out of scope for it);
+(c) drop AS3's per-slot half.
+
+**Recommendation:** (a), implemented in `tests/unit/test_core_discovery.cpp` and stated in its
+header. Everything AS3 asks to be *observed* is asserted unchanged — the unanswering node stays
+`Identifying`, the other eleven reach `Discovered`, its id is never released, and it is retried at
+distinct superframes — and a genuine trunk-level timeout is exercised separately by a backplane
+scripted `{SilenceStep}`. (b) is worth doing when a later story needs a slot to misbehave
+differently from its backplane; note that `contracts/mock-l3-node.md`'s sentence above should be
+corrected either way, since it currently describes a capability that does not exist.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** the
+2026-09-23 "`MockL3Node`: an opcode class with no step ever scripted" entry (the wildcard
+consumption rules this reading depends on).
