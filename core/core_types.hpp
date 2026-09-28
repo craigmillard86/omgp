@@ -184,6 +184,18 @@ struct BackplaneRecord {
     // (bounds-checked on every write, by whichever code writes it — this header only fixes
     // the size).
     uint8_t node_id_by_slot[LIMIT_bp_slot_map_max_slots] = {};
+    // One bit per slot: whether "this slot is occupied and no free node id could be assigned to
+    // it" (R-06 exhaustion) has already been REPORTED as LifecycleKind::NodeIdPoolExhausted.
+    // Makes that report EDGE-triggered — once per transition INTO the shortage for a given slot,
+    // not once per BP_SLOT_MAP that re-observes it. A standing id shortage is re-observed by
+    // every later sweep unchanged, and §8a's ring is drop-NEWEST: level-triggered reporting fills
+    // it with repeats of one unchanged condition and then refuses the genuine NodeRemoved /
+    // NodeDiscovered behind them. Cleared the moment the slot is assigned an id, reports
+    // unoccupied, or falls outside slot_count, so a fresh transition is reported again.
+    // Sized to LIMIT_bp_slot_map_max_slots like node_id_by_slot above, never to a peer's
+    // slot_count. NOT a data-model.md §4 field — added with LifecycleKind::NodeIdPoolExhausted,
+    // which cannot be reported at a bounded rate without it (docs/OPEN-QUESTIONS.md 2026-09-28).
+    uint8_t exhaustion_reported[(LIMIT_bp_slot_map_max_slots + 7) / 8] = {};
     // Transaction cost / demotion for this backplane's OWN status poll (spec FR-027/FR-028,
     // R-11 correction) — separate from any NodeRecord's own fields: a backplane's status poll
     // and its modules' demand traffic are measured and demoted independently, since a slow

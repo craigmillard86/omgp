@@ -136,7 +136,13 @@ class CoreEngine : public link::HealthListener { // R-03: this engine IS the hea
     // a slot newly unoccupied has its id released to the pool, its NodeRecord cleared, its
     // DescriptorCacheEntry refcount decremented and LifecycleKind::NodeRemoved enqueued —
     // whether or not it had reached Discovered. Pool exhaustion enqueues
-    // LifecycleKind::NodeIdPoolExhausted for that slot and never wraps onto a live id.
+    // LifecycleKind::NodeIdPoolExhausted for that slot and never wraps onto a live id —
+    // EDGE-triggered, once per transition into the shortage per slot, never once per sweep that
+    // re-observes the same standing shortage (BackplaneRecord::exhaustion_reported; a repeat per
+    // sweep would fill §8a's drop-newest ring with one unchanged condition and refuse the
+    // presence events behind it). The slot is reconsidered on every sweep either way, and a slot
+    // that empties, is assigned an id, or leaves slot_count is reported again if it later
+    // transitions back into the shortage.
     // Nothing is reported as NodeDiscovered here: that fires on reaching Discovered (T022).
     //
     // TOTAL for any input (spec FR-030's forward-compatibility rule, CLAUDE.md rule 7): a
@@ -306,6 +312,11 @@ class CoreEngine : public link::HealthListener { // R-03: this engine IS the hea
     // Next backplane address the Poll phase will consider; walks ADDR_backplane_min upward once
     // per superframe, so every enrolled backplane is polled exactly once (FR-002).
     uint8_t poll_cursor_ = ADDR_backplane_min;
+    // Where the IDENTIFY scan (FR-006) starts, as an OFFSET from ADDR_module_min: advanced past
+    // each id it issues for, so a node that never answers cannot hold the scan's head and starve
+    // every higher id (see issue_demand()). Persists across superframes deliberately — a per-
+    // superframe reset would restore exactly the starvation it exists to prevent.
+    uint8_t identify_cursor_ = 0;
     bool probe_issued_ = false;  // this superframe's one enrolment probe (FR-003)
     bool demand_issued_ = false; // whether the first-item exception has been spent
     // The head of the descriptor-chunk queue, popped but not yet admitted by the budget: held

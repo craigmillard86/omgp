@@ -5861,3 +5861,65 @@ corrected either way, since it currently describes a capability that does not ex
 **Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** the
 2026-09-23 "`MockL3Node`: an opcode class with no step ever scripted" entry (the wildcard
 consumption rules this reading depends on).
+
+---
+
+## 2026-09-28 — T018 (#689): nothing fixes how OFTEN R-06's pool-exhaustion outcome is reported
+
+**Context:** `research.md` R-06 says pool exhaustion "is reported through the lifecycle callback as
+a discovery failure for that slot"; `contracts/core-cpp.md` and `tasks.md` T018 say it is "enqueued
+onto `pending_lifecycle_` ... rather than failing silently". None of the three says whether a
+STANDING shortage is reported once per transition or once per `BP_SLOT_MAP` that re-observes it —
+and the two readings are not equivalent, because `data-model.md` §8a's pending ring holds
+`LIMIT_max_nodes` items and is drop-NEWEST. Level-triggered reporting on an over-full rig (two
+backplanes at `LIMIT_bp_slot_map_max_slots` = 464 occupied slots against 112 ids) enqueues hundreds
+of notices for one unchanged condition per sweep, and the ring then refuses the genuine
+`NodeRemoved`/`NodeDiscovered` behind them — spec FR-017's presence reporting stops for good.
+Reported by the red-team pass on PR #871 (finding 1) against the level-triggered first
+implementation.
+
+**Options:** (a) edge-triggered per slot — report the transition into the shortage once, re-report
+only after that slot is assigned an id, empties, or leaves `slot_count`; (b) level-triggered, as
+first implemented; (c) edge-triggered per BACKPLANE, naming the first unassignable slot, which
+reports less but loses R-06's own "for that slot" granularity.
+
+**Recommendation:** (a), implemented (`BackplaneRecord::exhaustion_reported`, one bit per slot).
+It keeps R-06's per-slot granularity, bounds the notice stream by the number of real transitions —
+the same bound `NodeRemoved` already has — and leaves the ASSIGNMENT decision untouched: every
+slot is still reconsidered on every sweep, only the notice is deduplicated. What this does NOT
+establish: an over-full rig whose transitions in one undrained window exceed 128 still loses the
+surplus to §8a's drop-newest rule, exactly as a rig with that many presence changes would;
+`dropped_deliveries()` counts them. `BackplaneRecord` gains a field data-model.md §4 does not
+list, which a human should fold into that artefact (or reject).
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** R-06, the
+2026-09-28 "`CoreStatus::NoFreeNodeId` has no shape `LifecycleEvent` can carry" entry.
+
+---
+
+## 2026-09-28 — T019/T020 (#690, #691): the IDENTIFY scan's order is fixed by no artefact, and a fixed start starves
+
+**Context:** `spec.md` FR-006 requires every assigned-but-unidentified node to be identified and
+FR-019/SC-001 require the resulting transcript to be reproducible, but no artefact fixes the ORDER
+the scan visits ids in. The first implementation scanned `ADDR_module_min` upward on every demand
+slot, which is reproducible but not fair: `data-model.md` §2 keeps a node in `Identifying` until it
+answers with an identity, so the lowest such id takes every demand slot for ever. Measured on the
+PR #871 branch before the fix: one slot answering trunk §8's `ERR_UNKNOWN_TARGET` at
+`ADDR_module_min` took all 264 IDENTIFY requests of 90 superframes, and four honest modules on
+another backplane were never identified at all — i.e. User Story 1 AS3's "blocks no other slot or
+backplane" held only because AS3's own rig gives the unanswering module the HIGHEST id.
+
+**Options:** (a) rotate the scan's start past each id it issues for (round robin over the id
+space); (b) keep the fixed start and skip a node after N unanswered attempts, which contradicts
+AS3's "retried rather than abandoned"; (c) keep the fixed start and accept the starvation as a
+property of a rig with a permanently-failing low id.
+
+**Recommendation:** (a), implemented (`CoreEngine::identify_cursor_`). Reproducibility is
+preserved: the cursor advances only when a request is issued, so the order stays a pure function of
+the engine's own state sequence and not of the caller's cadence — demonstrated by the existing
+determinism cases (AS2/SC-001/SC-005), which compare whole transcripts between runs and are
+unchanged. Demonstrated by "AS3: an unanswering module at the LOWEST node id blocks no other slot
+either" in `tests/unit/test_core_discovery.cpp`.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** R-07 (demand
+scheduling order), FR-019.

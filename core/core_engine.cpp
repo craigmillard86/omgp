@@ -41,6 +41,29 @@ bool slot_bit(const l3::Bytes& bitmap, uint8_t slot) {
     return ((bitmap.data[byte] >> (slot % 8u)) & 1u) != 0u;
 }
 
+// data-model.md §4 / R-06: BackplaneRecord::exhaustion_reported, bit `slot`. Bounded by the
+// record's own array, never by a peer's slot_count — a slot index the array cannot hold reads
+// false and writes nothing, the same rule slot_bit() above follows (CLAUDE.md rule 7).
+bool exhaustion_reported(const BackplaneRecord& bp, uint8_t slot) {
+    const size_t byte = static_cast<size_t>(slot) / 8u;
+    if (byte >= sizeof bp.exhaustion_reported)
+        return false;
+    return ((bp.exhaustion_reported[byte] >> (slot % 8u)) & 1u) != 0u;
+}
+
+void set_exhaustion_reported(BackplaneRecord& bp, uint8_t slot, bool reported) {
+    const size_t byte = static_cast<size_t>(slot) / 8u;
+    if (byte >= sizeof bp.exhaustion_reported)
+        return;
+    const uint8_t mask = static_cast<uint8_t>(1u << (slot % 8u));
+    if (reported) {
+        bp.exhaustion_reported[byte] = static_cast<uint8_t>(bp.exhaustion_reported[byte] | mask);
+    } else {
+        bp.exhaustion_reported[byte] =
+            static_cast<uint8_t>(bp.exhaustion_reported[byte] & static_cast<uint8_t>(~mask));
+    }
+}
+
 } // namespace
 
 CoreEngine::CoreEngine(link::ByteWire& wire, Clock& clock, uint8_t host_addr,
@@ -247,13 +270,25 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
         }
         return false;
     }
-    // spec FR-006: a node id whose module has not yet answered IDENTIFY. Ascending node id, so
-    // the order is a pure function of which ids are assigned — no cursor to persist and no
-    // dependence on the order outcomes happened to arrive in (spec FR-019/SC-001).
+    // spec FR-006: a node id whose module has not yet answered IDENTIFY. Ascending node id, but
+    // from a ROTATING start (identify_cursor_, advanced past each id this scan actually issues
+    // for) rather than from ADDR_module_min every time. Fairness is load-bearing here, not a
+    // refinement: a node stays in Identifying until it answers with an identity, so with a fixed
+    // start the lowest such id takes EVERY demand slot of every superframe and no higher id is
+    // ever identified — which is exactly what trunk §8's ERR_UNKNOWN_TARGET slot (User Story 1
+    // AS3) or a module whose descriptor answer keeps being refused looks like. Measured before
+    // this rotation existed: one unanswering module at ADDR_module_min took all 264 IDENTIFY
+    // requests of 90 superframes and four honest modules on another backplane were never
+    // identified at all. The transcript stays reproducible (FR-019/SC-001): the cursor moves only
+    // when a request is issued, so the order remains a pure function of the engine's own state
+    // sequence, not of wall-clock or caller cadence.
     // Identifying is included, not only Undiscovered: a module that did not answer is RETRIED,
     // never abandoned (User Story 1 AS3), and data-model.md §2 keeps a node whose IDENTIFY is
     // in flight or unanswered in exactly that state.
-    for (uint8_t id = ADDR_module_min; id <= ADDR_module_max; ++id) {
+    const uint16_t id_pool = static_cast<uint16_t>(ADDR_module_max - ADDR_module_min + 1);
+    for (uint16_t n = 0; n < id_pool; ++n) {
+        const uint16_t offset = static_cast<uint16_t>((identify_cursor_ + n) % id_pool);
+        const uint8_t id = static_cast<uint8_t>(ADDR_module_min + offset);
         NodeRecord& node = nodes_[node_index(id)];
         if (!node.in_use) {
             continue;
@@ -267,6 +302,7 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
         }
         if (begin_request(node.backplane_addr, id, OP_IDENTIFY, nullptr, 0, TxKind::Identify,
                           now_us)) {
+            identify_cursor_ = static_cast<uint8_t>((offset + 1u) % id_pool);
             // data-model.md §2: Identifying is "IDENTIFY in flight, or its result known but not
             // yet checked against the cache" — entered when the request goes out, left only for
             // ReadingDescriptor or Discovered.
@@ -647,6 +683,22 @@ void CoreEngine::on_desc_chunk(const link::MasterEvent& ev, uint64_t now_us) {
         return;
     }
     const uint16_t room = static_cast<uint16_t>(entry->len - entry->received);
+    // protocol-l3 §3.1 / §4.1: a chunk carrying MORE bytes than the desc_len this node's own
+    // IDENTIFY advertised still has room for is a node contradicting itself — every request this
+    // engine sends asks for kDescChunkMax, so the last chunk of a descriptor whose length is not
+    // a multiple of it is where an over-serving node shows up (with desc_len at
+    // LIMIT_max_descriptor_bytes the surplus would be written past the blob entirely). The read
+    // is ABANDONED and the node retried from IDENTIFY — where a changed desc_len is re-learned —
+    // rather than the surplus being silently truncated and the node credited with a descriptor it
+    // did not serve (CLAUDE.md rule 7: never over-write on arbitrary bytes). Same disposition as
+    // the zero-length and CRC-mismatch answers below, for the same reason.
+    if (resp.bytes.len > room) {
+        entry->in_use = false;
+        node.discovery = DiscoveryState::Identifying;
+        return;
+    }
+    // take <= room holds by the guard above; the min() is a redundant second bound kept so the
+    // write stays inside blob[LIMIT_max_descriptor_bytes] by construction, not only by the guard.
     const uint16_t take = resp.bytes.len < room ? resp.bytes.len : room;
     for (uint16_t i = 0; i < take; ++i) {
         entry->blob[entry->received + i] = resp.bytes.data[i];
@@ -801,6 +853,11 @@ void CoreEngine::reconcile_slot_map(uint8_t backplane_addr, const l3::BpSlotMapR
         // So the diff is against this engine's own record, and `changed` triggers nothing.
         const bool occupied = slot_bit(resp.occupied, slot);
         const uint8_t assigned = bp.node_id_by_slot[slot];
+        if (!occupied) {
+            // No slot that reports empty has a standing id shortage, whether or not it ever held
+            // an id: a later re-occupation is a NEW transition, and is reported again.
+            set_exhaustion_reported(bp, slot, false);
+        }
         if (occupied && assigned == 0) {
             // R-06: first fit from the one shared pool, in this response's own ascending slot
             // order — the canonical order that makes a scripted rig reproducible (FR-019).
@@ -814,13 +871,27 @@ void CoreEngine::reconcile_slot_map(uint8_t backplane_addr, const l3::BpSlotMapR
             if (chosen == 0) {
                 // Never a wraparound onto a live id (R-06). The slot keeps no assignment and is
                 // reconsidered on the next BP_SLOT_MAP, when an id may have been freed.
-                LifecycleEvent exhausted{};
-                exhausted.kind = LifecycleKind::NodeIdPoolExhausted;
-                exhausted.node_id = backplane_addr;
-                exhausted.slot = slot;
-                (void)enqueue_lifecycle(exhausted);
+                //
+                // Reported EDGE-triggered — once per transition into the shortage for this slot,
+                // not once per sweep that re-observes it (BackplaneRecord::exhaustion_reported).
+                // A shortage is a STANDING condition: every later BP_SLOT_MAP re-reports the
+                // same occupancy, so a level-triggered notice would enqueue one notice per
+                // occupied-but-unassignable slot per sweep, without bound, and §8a's drop-newest
+                // ring would then refuse the genuine presence events behind the repeats. The
+                // slot is still reconsidered every sweep; only the NOTICE is deduplicated.
+                if (!exhaustion_reported(bp, slot)) {
+                    set_exhaustion_reported(bp, slot, true);
+                    LifecycleEvent exhausted{};
+                    exhausted.kind = LifecycleKind::NodeIdPoolExhausted;
+                    exhausted.node_id = backplane_addr;
+                    exhausted.slot = slot;
+                    (void)enqueue_lifecycle(exhausted);
+                }
                 continue;
             }
+            // The shortage, if this slot was ever in one, is over: it has an id now, so a future
+            // one is a new transition to report.
+            set_exhaustion_reported(bp, slot, false);
             NodeRecord& node = nodes_[node_index(chosen)];
             const bool ever = node.ever_discovered;
             node = NodeRecord{};
@@ -853,6 +924,9 @@ void CoreEngine::reconcile_slot_map(uint8_t backplane_addr, const l3::BpSlotMapR
     // A backplane that shrinks its slot_count: every slot past the new count is gone, and its
     // id must not be stranded in_use for ever. Same release path as an emptied slot.
     for (size_t slot = slot_count; slot < LIMIT_bp_slot_map_max_slots; ++slot) {
+        // A slot outside the backplane's own slot_count is not occupied, so it carries no
+        // standing shortage either (same rule as an emptied slot above).
+        set_exhaustion_reported(bp, static_cast<uint8_t>(slot), false);
         const uint8_t assigned = bp.node_id_by_slot[slot];
         if (assigned == 0) {
             continue;
