@@ -180,7 +180,7 @@ and two runs produce byte-identical transcripts.
 
 ### Tests for User Story 1 ⚠️
 
-- [ ] T017 [P] [US1] Write `tests/unit/test_core_discovery.cpp` (write first, RED): spec's four
+- [x] T017 [P] [US1] Write `tests/unit/test_core_discovery.cpp` (write first, RED): spec's four
       Acceptance Scenarios — full discovery of 3 backplanes/12 modules with matching
       transcripts across two runs (AS1, AS2), including a `[clock-granularity]`-tagged case
       that replays the same script through `run_superframe()` at a different `FakeClock` step
@@ -194,33 +194,33 @@ and two runs produce byte-identical transcripts.
 
 ### Implementation for User Story 1
 
-- [ ] T018 [US1] Implement `CoreEngine::reconcile_slot_map()` (R-06): first-fit node-ID
+- [x] T018 [US1] Implement `CoreEngine::reconcile_slot_map()` (R-06): first-fit node-ID
       assignment from the shared `ADDR_module_min..max` pool in canonical order (ascending
       backplane address, then ascending slot index), enqueueing `CoreStatus::NoFreeNodeId`
       onto `pending_lifecycle_` on pool exhaustion rather than failing silently; releasing an
       id when its slot's `changed` bit reports newly-unoccupied — clears the freed
       `NodeRecord::descriptor` (decrementing that `DescriptorCacheEntry::refcount`, U1) and
       enqueues `LifecycleKind::NodeRemoved` — make part of T017 pass
-- [ ] T019 [US1] Implement `CoreEngine::run_superframe()`'s status-poll and enrolment-probe
+- [x] T019 [US1] Implement `CoreEngine::run_superframe()`'s status-poll and enrolment-probe
       halves (spec FR-001/FR-002/FR-003, trunk §6 order): one `GET_STATUS`/`BP_SLOT_MAP`
       alternating poll per enrolled backplane via `Master::begin`, `HealthTracker::
       poll_due`/`mark_polled`/`next_probe`/`on_result`/`tick` driven exactly per
       `contracts/core-cpp.md`'s "What this feature needs" obligations — make more of T017 pass
-- [ ] T020 [US1] Implement `IDENTIFY` issuance for a freshly assigned node id and
+- [x] T020 [US1] Implement `IDENTIFY` issuance for a freshly assigned node id and
       `IdentifyResp` handling: `Undiscovered → Identifying`, `ModelIdRec`+`desc_crc` recorded on
       `NodeRecord`
-- [ ] T021 [US1] Implement descriptor-cache lookup (spec FR-008): on a fresh `IdentifyResp`,
+- [x] T021 [US1] Implement descriptor-cache lookup (spec FR-008): on a fresh `IdentifyResp`,
       check `DescriptorCacheEntry` by `(model_vendor, model_hw_rev, model_fw_rev, desc_crc)` —
       a hit sets `NodeRecord::descriptor` (incrementing that entry's `refcount`, U1) and jumps
       straight to `Discovered` (SC-004); a miss queues the first `DescChunkItem`
-- [ ] T022 [US1] Implement chunked `READ_DESC` (R-09, `max_len = 61`) as `DescChunkItem` demand
+- [x] T022 [US1] Implement chunked `READ_DESC` (R-09, `max_len = 61`) as `DescChunkItem` demand
       items: reassembly into a fresh `DescriptorCacheEntry` (`refcount` set to 1 on completion,
       U1), `descriptor_crc()` check against the `IdentifyResp` value, `ReadingDescriptor →
       Discovered` on match, enqueueing `LifecycleKind::NodeDiscovered` (first time this node id
       has reached `Discovered`) or `NodeRediscovered` (it has before) onto `pending_lifecycle_`
       (C1: this and T018 are the only two emission points for spec FR-017's presence events —
       `data-model.md` §7's `LifecycleKind` comment) — make the rest of T017 pass
-- [ ] T023 [US1] Add a test-only transcript hook to `CoreEngine` (one line per `Master::begin`
+- [x] T023 [US1] Add a test-only transcript hook to `CoreEngine` (one line per `Master::begin`
       call: superframe number, opcode, dst, node_id) gated so it costs nothing when unused,
       exposed to `test_core_discovery.cpp` for the determinism assertion (AS2)
 - [ ] T024 [US1] Full `./pipeline.sh` + `./pipeline.sh esp32`; raise `UNIT_TEST_FLOOR`; local
