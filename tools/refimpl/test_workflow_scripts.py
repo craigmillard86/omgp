@@ -1700,7 +1700,8 @@ def test_gate_budgets_are_read_from_the_default_branch_and_wired():
     its prompt come from the same source, not from literals that drift."""
     for wfn, job, tkey, turnkey in (("claude-review.yml", "review", "review_timeout_minutes", "review_max_turns"),
                                     ("red-team.yml", "attack-pr", "red_team_timeout_minutes", "red_team_max_turns"),
-                                    ("ci.yml", "deep-verify", "deep_verify_timeout_minutes", None)):
+                                    ("ci.yml", "deep-verify", "deep_verify_timeout_minutes", None),
+                                    ("ci.yml", "deep-verify-mutate", "deep_verify_timeout_minutes", None)):
         budgets = _job(wfn, "budgets")
         co = next(s for s in budgets["steps"] if "actions/checkout" in s.get("uses", ""))
         assert "default_branch" in co["with"]["ref"], f"{wfn}: budgets must check out the default branch"
