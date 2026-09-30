@@ -268,9 +268,17 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
 
     // The entry keyed by (module_type, desc_len, desc_crc), complete or still filling, or null.
     DescriptorCacheEntry* find_descriptor(uint8_t module_type, uint16_t desc_len, uint16_t crc);
-    // A free entry (never used, or used with refcount 0 and complete), reset and keyed, or null
-    // when the table is full — R-12's graceful degradation, not a crash.
+    // A never-used entry if there is one, else one no node still points at — by refcount OR by
+    // key, see the function's own note — reset and keyed. Null when every entry is spoken for:
+    // R-12's graceful degradation, not a crash.
     DescriptorCacheEntry* claim_descriptor(uint8_t module_type, uint16_t desc_len, uint16_t crc);
+    // Whether any node is currently READING the descriptor this entry is keyed to, which is the
+    // half of "still pointing at it" the refcount cannot see (a reader holds no refcount).
+    bool descriptor_has_reader(const DescriptorCacheEntry& entry) const;
+    // Resets `entry` and keys it to (module_type, desc_len, crc); returns it. The one place a
+    // claim's bookkeeping lives, so both of claim_descriptor()'s passes key an entry identically.
+    DescriptorCacheEntry* key_descriptor(DescriptorCacheEntry& entry, uint8_t module_type,
+                                         uint16_t desc_len, uint16_t crc);
     // Attaches `entry` to every node still waiting on it, each reaching Discovered and
     // enqueueing its own NodeDiscovered / NodeRediscovered (spec FR-017, data-model.md §7).
     void attach_descriptor(DescriptorCacheEntry& entry);

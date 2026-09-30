@@ -97,6 +97,38 @@ struct CoreEngineTestSeam {
     static bool read_desc_outstanding(const CoreEngine& engine) {
         return engine.tx_kind_ == CoreEngine::TxKind::ReadDesc;
     }
+    // The descriptor cache itself (spec FR-008, R-12), for the one property no rig-level run can
+    // pin as a PROPERTY rather than as a symptom: which entry claim_descriptor() is willing to
+    // hand out. A rig shows the consequence (a module losing its reassembly buffer); these show
+    // the rule. Read-only apart from claim(), which is the very call under test.
+    static DescriptorCacheEntry* claim(CoreEngine& engine, uint8_t module_type, uint16_t desc_len,
+                                       uint16_t crc) {
+        return engine.claim_descriptor(module_type, desc_len, crc);
+    }
+    static DescriptorCacheEntry* find(CoreEngine& engine, uint8_t module_type, uint16_t desc_len,
+                                      uint16_t crc) {
+        return engine.find_descriptor(module_type, desc_len, crc);
+    }
+    static size_t cache_entries(const CoreEngine& engine) {
+        return sizeof engine.descriptors_ / sizeof engine.descriptors_[0];
+    }
+    static const DescriptorCacheEntry& entry(const CoreEngine& engine, size_t i) {
+        return engine.descriptors_[i];
+    }
+    // A node record put straight into the state a chunked READ_DESC leaves it in. Not a shortcut
+    // around the wire: the rig-level cases above reach this state through real IDENTIFY and
+    // READ_DESC traffic, and this seam only lets a case reach it for all 32 cache entries at once,
+    // which no scriptable rig can (MockL3Node scripts one identity per trunk address).
+    static void put_reading(CoreEngine& engine, uint8_t node_id, uint8_t module_type,
+                            uint16_t desc_len, uint16_t crc) {
+        NodeRecord& node = engine.nodes_[CoreEngine::node_index(node_id)];
+        node.in_use = true;
+        node.backplane_addr = ADDR_backplane_min;
+        node.module_type = module_type;
+        node.desc_len = desc_len;
+        node.desc_crc = crc;
+        node.discovery = DiscoveryState::ReadingDescriptor;
+    }
 };
 } // namespace core
 } // namespace omgp
@@ -266,6 +298,17 @@ struct Transcript {
         size_t n = 0;
         for (const TranscriptEntry& e : lines) {
             if (e.opcode == opcode)
+                ++n;
+        }
+        return n;
+    }
+    // The same, for ONE node id: "this module was asked to identify itself exactly once" is a
+    // per-node claim, and a rig-wide count cannot make it (another backplane's retries would
+    // swamp it).
+    size_t count_for(uint8_t opcode, uint8_t node_id) const {
+        size_t n = 0;
+        for (const TranscriptEntry& e : lines) {
+            if (e.opcode == opcode && e.node_id == node_id)
                 ++n;
         }
         return n;
@@ -1481,6 +1524,158 @@ TEST_CASE("AS3: a stalled READ_DESC is still retried while another slot never an
     REQUIRE(rig.transcript().count(omgp::OP_READ_DESC) > reads_before);
     REQUIRE(rig.transcript().count(omgp::OP_IDENTIFY) > identifies_before);
     REQUIRE(rig.discovered_count() == 4u);
+}
+
+namespace {
+
+// Serves the FIRST chunk of its descriptor honestly and then goes busy for a stretch — ERR_BUSY to
+// whatever it is asked next, which trunk §8 allows a bridge for any request it cannot serve yet —
+// before answering honestly again. Partial progress before the refusals is the whole point: it is
+// the state in which this node's cache entry holds bytes that a reclaim would DESTROY, and a
+// stretch of refusals rather than one keeps the node stalled — its ring item dropped by
+// issue_demand() — across enough superframes that the parity alternation is certain to give
+// scan_identify() a turn while it is in that state.
+// ErrorStep is a WILDCARD (contracts/mock-l3-node.md): the steps below are consumed in script
+// order by whichever class asks next, so the enrolment PING takes the first and this backplane's
+// own status and slot-map polls take some of the rest. Only two of them reach the descriptor read,
+// which is why the stretch is six and not two.
+struct StallsMidReadBackplane {
+    Descriptor blob;
+    omgp::l3::IdentifyResp identify{};
+    std::vector<L3Step> steps;
+
+    explicit StallsMidReadBackplane(uint8_t module_type)
+        : blob(make_descriptor(0x9005, 1, 1, module_type, 3u * kDescChunkMax)) {
+        identify = identify_for(blob, module_type);
+    }
+
+    void install(Rig& rig, uint8_t addr, uint8_t slot_count, uint32_t occupied) {
+        steps.clear();
+        steps.push_back(L3Step::of(SlotMapStep{slot_count, occupied, occupied}));
+        steps.push_back(L3Step::of(StatusStep{ready_status()}));
+        steps.push_back(L3Step::of(IdentifyStep{identify}));
+        steps.push_back(L3Step::of(ErrorStep{omgp::ERR_BUSY})); // the enrolment PING's
+        steps.push_back(desc_step(blob));                       // chunk 0, honestly
+        for (int i = 0; i < 6; ++i) {
+            steps.push_back(L3Step::of(ErrorStep{omgp::ERR_BUSY})); // stalled, and stays stalled
+        }
+        steps.push_back(desc_step(blob)); // then honest for ever
+        rig.node().set_script(addr, steps.data(), steps.size());
+    }
+};
+
+} // namespace
+
+TEST_CASE("data-model.md §5: a module identifying on another backplane does not take the cache "
+          "entry a stalled read is still filling [discovery][us1][robustness]") {
+    // A stalled descriptor read is the ONE state in which this engine holds an incomplete cache
+    // entry with no chunk queued for it: issue_demand() drops a stalled node's ring item, so the
+    // ring goes empty and scan_identify() runs — while the stalled node's entry still holds every
+    // byte it has read. If claim_descriptor() treats that entry as reusable, the next module with a
+    // DIFFERENT descriptor key takes it, and the stalled node loses its reassembly buffer: its
+    // retry finds no entry for its key and sends it back to IDENTIFY (core_engine.cpp's
+    // resume_desc_read), so its read restarts from offset 0 rather than resuming. That contradicts
+    // what this engine claims of a stalled read in core/core_types.hpp — "resumed at the bytes its
+    // cache entry already holds" — and it is a module losing work to another backplane's arrival,
+    // which User Story 1 AS3 forbids in that direction too.
+    //
+    // The second module's type is DIFFERENT deliberately: a same-key IDENTIFY never reaches
+    // claim_descriptor() at all (on_identify() finds the entry and waits on it), which is why every
+    // other rig in this file — like-for-like modules per backplane — cannot observe this.
+    StallsMidReadBackplane stalls(omgp::MODULE_TYPE_CODES[0]);
+    Descriptor other =
+        make_descriptor(0x9006, 1, 1, omgp::MODULE_TYPE_CODES[1], 2u * kDescChunkMax);
+
+    Rig rig;
+    stalls.install(rig, 0x01, 1, 0b1u); // the lower node id: it identifies and claims first
+    rig.install(BackplaneScript{0x02, 1, 0b1u, omgp::MODULE_TYPE_CODES[1], &other, false, false});
+    rig.run_to_superframe(kConvergeSuperframes + kSettleSuperframes, byte_us());
+
+    const std::vector<uint8_t> ids = rig.in_use_ids();
+    REQUIRE(ids.size() == 2u);
+    const uint8_t stalled_id = ids.front();
+    const uint8_t other_id = ids.back();
+
+    // Both modules end up described — the stalled one by resuming, not by starting over, which is
+    // what the IDENTIFY count pins: one IDENTIFY means its read was never sent back to the
+    // beginning. A second one is the signature of a stolen entry.
+    REQUIRE(rig.engine().discovery_state(stalled_id) == DiscoveryState::Discovered);
+    REQUIRE(rig.engine().discovery_state(other_id) == DiscoveryState::Discovered);
+    REQUIRE(rig.transcript().count_for(omgp::OP_IDENTIFY, stalled_id) == 1u);
+    REQUIRE(rig.transcript().count_for(omgp::OP_IDENTIFY, other_id) == 1u);
+    // Five READ_DESC for this node and no more: the three chunks of a three-chunk descriptor plus
+    // the two refusals the read itself received. A read restarted from offset 0 needs more than
+    // five, so this pins the resumption as well as the IDENTIFY count above does.
+    REQUIRE(rig.transcript().count_for(omgp::OP_READ_DESC, stalled_id) == 5u);
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeDiscovered) == 2u);
+    REQUIRE(rig.engine().dropped_deliveries() == 0u);
+}
+
+TEST_CASE("data-model.md §5: claim_descriptor() reuses no entry a node is still reading, and "
+          "prefers a never-used one [discovery][us1][cache]") {
+    // The rule behind the rig-level case above, asserted as a rule. A node in ReadingDescriptor
+    // points at its entry BY KEY (find_descriptor is that pointer) and holds no refcount — the
+    // count is taken in mark_discovered(), which only a COMPLETE entry reaches — so "no node still
+    // pointing at it" cannot be read off refcount alone.
+    using Seam = omgp::core::CoreEngineTestSeam;
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    const size_t entries = Seam::cache_entries(engine);
+    REQUIRE(entries > 1u);
+
+    // One in-flight read per cache entry, each a DISTINCT key, each mid-reassembly. Distinct keys
+    // are the point: a second claim for a key already present never reaches claim_descriptor() at
+    // all (on_identify() waits on the entry it found instead).
+    for (size_t i = 0; i < entries; ++i) {
+        const uint8_t module_type = static_cast<uint8_t>(i + 1u);
+        const uint8_t node_id = static_cast<uint8_t>(omgp::ADDR_module_min + i);
+        omgp::core::DescriptorCacheEntry* claimed = Seam::claim(engine, module_type, 2000, 0xBEEF);
+        REQUIRE(claimed != nullptr);
+        // A never-used entry is preferred: each of these claims must land on a DIFFERENT entry, so
+        // the i-th claim is the i-th entry and none of the previous ones was recycled.
+        REQUIRE(claimed == &Seam::entry(engine, i));
+        Seam::put_reading(engine, node_id, module_type, 2000, 0xBEEF);
+    }
+    // Every one of them is still findable by its own key: the capacity is 32 in-flight reads, not
+    // one.
+    for (size_t i = 0; i < entries; ++i) {
+        REQUIRE(Seam::find(engine, static_cast<uint8_t>(i + 1u), 2000, 0xBEEF) ==
+                &Seam::entry(engine, i));
+    }
+    // With every entry held by a live reader, a further distinct key gets R-12's graceful
+    // degradation — a null, which on_identify() turns into "back to Identifying, retry later" —
+    // never another node's buffer.
+    REQUIRE(Seam::claim(engine, 0xF1, 300, 0x1234) == nullptr);
+    for (size_t i = 0; i < entries; ++i) {
+        REQUIRE(Seam::find(engine, static_cast<uint8_t>(i + 1u), 2000, 0xBEEF) ==
+                &Seam::entry(engine, i));
+    }
+}
+
+TEST_CASE("R-12: a cached descriptor nobody is using is not evicted while an entry has never been "
+          "used [discovery][us1][cache]") {
+    // The other half of the claim rule, and the reason the never-used pass exists rather than the
+    // reader check alone: an entry that is complete with refcount 0 IS reclaimable — that is what
+    // makes the table a cache — but reclaiming it FIRST throws away a descriptor the rig may be
+    // about to need again (SC-004's "no descriptor read at all" on a re-seated module of a type
+    // already seen) for nothing, while 31 entries have never been touched.
+    using Seam = omgp::core::CoreEngineTestSeam;
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    REQUIRE(Seam::cache_entries(engine) > 1u);
+
+    omgp::core::DescriptorCacheEntry* cached = Seam::claim(engine, 0x41, 8, 0x0101);
+    REQUIRE(cached == &Seam::entry(engine, 0));
+    // Complete, and no node pointing at it: the state an entry is left in when the module that was
+    // read is removed from its slot (reconcile_slot_map releases the refcount, R-06).
+    cached->received = cached->len;
+    cached->complete = true;
+
+    REQUIRE(Seam::claim(engine, 0x42, 8, 0x0202) == &Seam::entry(engine, 1));
+    // The cached descriptor is still there, still complete, and still findable by its own key.
+    REQUIRE(Seam::find(engine, 0x41, 8, 0x0101) == &Seam::entry(engine, 0));
+    REQUIRE(Seam::entry(engine, 0).complete);
 }
 
 TEST_CASE("AS3: one transient ERR_BUSY chunk does not lose a module when another slot never "

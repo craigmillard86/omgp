@@ -892,20 +892,58 @@ DescriptorCacheEntry* CoreEngine::claim_descriptor(uint8_t module_type, uint16_t
     if (desc_len > LIMIT_max_descriptor_bytes) {
         return nullptr; // protocol-l3 §4's own cap; blob[] is exactly that long
     }
+    // data-model.md §5: an entry is reusable only with no node still pointing at it. TWO passes,
+    // because "free" and "reusable" are not the same thing and the never-used entry must win: with
+    // one first-fit pass a fresh claim recycles descriptors_[0] while 31 entries are untouched, so
+    // a cached descriptor is thrown away for nothing — and, before the second pass's own predicate
+    // below, so was another node's half-read one.
     for (DescriptorCacheEntry& entry : descriptors_) {
-        // data-model.md §5: an entry is reusable only with no node still pointing at it. A
-        // never-used entry is preferred implicitly — it is found by the same predicate.
-        if (entry.in_use && entry.refcount != 0) {
+        if (!entry.in_use) {
+            return key_descriptor(entry, module_type, desc_len, crc);
+        }
+    }
+    for (DescriptorCacheEntry& entry : descriptors_) {
+        // "No node still pointing at it" is NOT refcount == 0 alone. The refcount counts the nodes
+        // whose NodeRecord::descriptor is set, which mark_discovered() does and only a COMPLETE
+        // entry reaches — so an entry still being FILLED by a chunked READ_DESC (in_use, !complete,
+        // refcount 0) has a node pointing at it BY KEY, through find_descriptor(), and nothing in
+        // the refcount says so. Reclaiming it would discard that node's reassembly buffer, which IS
+        // the entry (core/core_types.hpp): resume_desc_read() would then find no entry for the
+        // node's key and send it back to IDENTIFY to read the whole descriptor again, contradicting
+        // "resumed at the bytes its cache entry already holds". Reachable on two spec-conformant
+        // backplanes: one trunk §8 ERR_BUSY leaves a node stalled with its ring item dropped (see
+        // issue_demand()), so the ring is empty, scan_identify() runs, and the next module with a
+        // DIFFERENT descriptor key claims. So a live reader is looked for by key, the same way the
+        // reader itself finds the entry.
+        if (entry.refcount != 0 || descriptor_has_reader(entry)) {
             continue;
         }
-        entry = DescriptorCacheEntry{};
-        entry.in_use = true;
-        entry.module_type = module_type;
-        entry.desc_crc = crc;
-        entry.len = desc_len;
-        return &entry;
+        return key_descriptor(entry, module_type, desc_len, crc);
     }
     return nullptr;
+}
+
+bool CoreEngine::descriptor_has_reader(const DescriptorCacheEntry& entry) const {
+    for (const NodeRecord& node : nodes_) {
+        if (!node.in_use || node.discovery != DiscoveryState::ReadingDescriptor) {
+            continue;
+        }
+        if (node.module_type == entry.module_type && node.desc_len == entry.len &&
+            node.desc_crc == entry.desc_crc) {
+            return true; // find_descriptor() would hand this node exactly this entry
+        }
+    }
+    return false;
+}
+
+DescriptorCacheEntry* CoreEngine::key_descriptor(DescriptorCacheEntry& entry, uint8_t module_type,
+                                                 uint16_t desc_len, uint16_t crc) {
+    entry = DescriptorCacheEntry{};
+    entry.in_use = true;
+    entry.module_type = module_type;
+    entry.desc_crc = crc;
+    entry.len = desc_len;
+    return &entry;
 }
 
 void CoreEngine::attach_descriptor(DescriptorCacheEntry& entry) {

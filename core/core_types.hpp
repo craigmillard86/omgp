@@ -254,9 +254,12 @@ struct DescriptorCacheEntry {
                                                 // with an l3::RecordCursor over it
     // Nodes currently pointing at this entry: incremented when a NodeRecord::descriptor is set
     // to this entry (a fresh read's own completion, or a cache hit), decremented when that
-    // NodeRecord's slot is freed (reconcile_slot_map, R-06). An entry with refcount == 0 is
-    // eligible for reuse by a later miss; an entry is never reclaimed while any node still
-    // points at it.
+    // NodeRecord's slot is freed (reconcile_slot_map, R-06). An entry is never reclaimed while any
+    // node still points at it — but refcount == 0 is NOT by itself "nobody points at it": a node
+    // whose read is still in flight points at this entry by KEY and holds no count, because the
+    // count is taken where a NodeRecord::descriptor is set and only a complete entry gets that far.
+    // CoreEngine::claim_descriptor() therefore checks both, and prefers a never-used entry to
+    // either.
     uint32_t refcount = 0;
 };
 
