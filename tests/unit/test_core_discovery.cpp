@@ -537,8 +537,21 @@ struct ThreeBackplanes {
 // How many superframes the three-backplane rig is given to converge, and how many further ones
 // AS1's "nothing more is discoverable" is observed over. Both are bounds on the TEST, not
 // thresholds the engine reads.
-constexpr uint32_t kConvergeSuperframes = 90;
+// The three-backplane rig is fully discovered by superframe 18 (measured), so 45 is 2.5x that and is
+// what every case that just waits for discovery to finish is given. The four cases that assert a
+// stalled or unanswering module is RETRIED rather than abandoned keep the longer horizon: what
+// they observe is the engine's behaviour over a long stall, which is the point of them.
+constexpr uint32_t kConvergeSuperframes = 45;
+constexpr uint32_t kStallHorizonSuperframes = 90;
 constexpr uint32_t kSettleSuperframes = 20;
+
+// SC-005 replays the cold boot once per cadence, and its finest cadence (1 us) makes 10 engine calls
+// per byte time, so it is by far the most expensive case in this file — and the file is the
+// mutation oracle, run once per mutant. Measured, not derived: this rig has all twelve modules
+// discovered by superframe 18, so 40 compares the whole discovery plus a steady state longer than
+// one full enrolment-probe rotation (15 addresses). A bound on the TEST, not a threshold the
+// engine reads; the case still REQUIREs twelve discovered at the end of every run.
+constexpr uint32_t kGranularitySuperframes = 40;
 
 } // namespace
 
@@ -715,7 +728,7 @@ TEST_CASE("SC-005: the transcript and the end state do not depend on how finely 
         REQUIRE(byte_us() % step == 0u);
         Rig rig;
         topo.install(rig);
-        rig.run_to_superframe(kConvergeSuperframes, step);
+        rig.run_to_superframe(kGranularitySuperframes, step);
         INFO("clock step " << step << " us");
         REQUIRE(rig.discovered_count() == 12u);
         if (reference.empty()) {
@@ -798,7 +811,7 @@ TEST_CASE("AS3: a slot whose module never answers IDENTIFY blocks no other slot 
     {
         Rig rig;
         topo.install(rig, false);
-        rig.run_to_superframe(kConvergeSuperframes, byte_us());
+        rig.run_to_superframe(kStallHorizonSuperframes, byte_us());
         REQUIRE(rig.discovered_count() == 12u);
         control_superframe = rig.transcript().last_superframe();
         REQUIRE(control_superframe > 0u);
@@ -806,7 +819,7 @@ TEST_CASE("AS3: a slot whose module never answers IDENTIFY blocks no other slot 
 
     Rig rig;
     topo.install(rig, true);
-    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+    rig.run_to_superframe(kStallHorizonSuperframes, byte_us());
 
     // Twelve slots occupied, twelve ids assigned: the unanswering module is not skipped at
     // assignment time — its slot is occupied and FR-009 gives it an id.
@@ -1113,7 +1126,7 @@ TEST_CASE("AS3: an unanswering module at the LOWEST node id blocks no other slot
     rig.install(BackplaneScript{0x01, 1, 0b1u, omgp::MODULE_TYPE_CODES[3], nullptr, true, false});
     rig.install(
         BackplaneScript{0x02, 4, 0b1111u, omgp::MODULE_TYPE_CODES[0], &honest, false, false});
-    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+    rig.run_to_superframe(kStallHorizonSuperframes, byte_us());
 
     REQUIRE(rig.in_use_ids().size() == 5u);
     REQUIRE(rig.engine().discovery_state(omgp::ADDR_module_min) == DiscoveryState::Identifying);
@@ -1510,7 +1523,7 @@ TEST_CASE("AS3: a stalled READ_DESC is still retried while another slot never an
         BackplaneScript{0x02, 4, 0b1111u, omgp::MODULE_TYPE_CODES[1], &honest, false, false});
     // trunk §8's ERR_UNKNOWN_TARGET slot: occupied, given an id (FR-009), never identified.
     rig.install(BackplaneScript{0x03, 1, 0b1u, omgp::MODULE_TYPE_CODES[2], nullptr, true, false});
-    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+    rig.run_to_superframe(kStallHorizonSuperframes, byte_us());
 
     REQUIRE(rig.in_use_ids().size() == 6u); // 1 busy + 4 honest + 1 unanswering
     REQUIRE(rig.discovered_count() == 4u);
@@ -1685,7 +1698,7 @@ TEST_CASE("AS3: one transient ERR_BUSY chunk does not lose a module when another
     Rig rig;
     brief.install(rig, 0x01, 1, 0b1u);
     rig.install(BackplaneScript{0x02, 1, 0b1u, omgp::MODULE_TYPE_CODES[2], nullptr, true, false});
-    rig.run_to_superframe(kConvergeSuperframes + kSettleSuperframes, byte_us());
+    rig.run_to_superframe(kStallHorizonSuperframes + kSettleSuperframes, byte_us());
 
     // The one refused chunk costs the module a place in the chunk ring, not its read: it resumes
     // at the bytes already read (READ_DESC is idempotent, CLAUDE.md rule 2) and reaches Discovered.
