@@ -322,6 +322,13 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
     // which is also what makes the transcript a pure function of the plan (FR-019/SC-001) — no
     // wall-clock, no call count.
     const bool retry_first = (superframe_ & 1u) != 0u;
+    // `pass < 2u` -> `pass <= 2u` adds a third pass, and for pass >= 1 `retry` is !retry_first, so
+    // it repeats pass 1's call. That call returned Nothing (anything else returned above) and
+    // left nothing a repeat could act on: scan_identify() changes no state when it finds nothing,
+    // and retry_stalled_desc() leaves every node it passed over out of ReadingDescriptor. Argued
+    // from the two callees, not measured.
+    // mutant-ok(equivalent, cxx_lt_to_le): a third pass repeats pass 1, which already found
+    // nothing.
     for (unsigned pass = 0; pass < 2u; ++pass) {
         const bool retry = ((pass == 0u) == retry_first);
         const Resume outcome = retry ? retry_stalled_desc(now_us) : scan_identify(now_us);
