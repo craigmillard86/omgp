@@ -46,6 +46,10 @@ bool slot_bit(const l3::Bytes& bitmap, uint8_t slot) {
 // false and writes nothing, the same rule slot_bit() above follows (CLAUDE.md rule 7).
 bool exhaustion_reported(const BackplaneRecord& bp, uint8_t slot) {
     const size_t byte = static_cast<size_t>(slot) / 8u;
+    // slot < slot_count <= LIMIT_bp_slot_map_max_slots here (reconcile_slot_map() clamps
+    // slot_count before any slot is used), so byte never reaches sizeof: the >= / > boundary is
+    // not reachable today. A CONTROL on that clamp, not a guarantee (CLAUDE.md rule 11).
+    // mutant-ok(equivalent, cxx_ge_to_gt): byte == sizeof is unreachable behind the caller's clamp.
     if (byte >= sizeof bp.exhaustion_reported)
         return false;
     return ((bp.exhaustion_reported[byte] >> (slot % 8u)) & 1u) != 0u;
@@ -53,6 +57,7 @@ bool exhaustion_reported(const BackplaneRecord& bp, uint8_t slot) {
 
 void set_exhaustion_reported(BackplaneRecord& bp, uint8_t slot, bool reported) {
     const size_t byte = static_cast<size_t>(slot) / 8u;
+    // mutant-ok(equivalent, cxx_ge_to_gt): byte == sizeof is unreachable; see above.
     if (byte >= sizeof bp.exhaustion_reported)
         return;
     const uint8_t mask = static_cast<uint8_t>(1u << (slot % 8u));
@@ -115,7 +120,16 @@ void CoreEngine::run_superframe(uint64_t now_us) {
     // The plan is spent. The NEXT call opens the next superframe rather than this one doing it
     // and issuing again: one link::Master::begin() per call is what makes the transcript a
     // function of the plan and not of the caller's cadence (spec SC-005).
+    // The `x = false` stores below on a bool: Mull's cxx_assign_const writes 42, and a bool reads
+    // its low bit, which is 0 — the value the original stores. ASSUMED from Mull's IR semantics,
+    // not measured (CLAUDE.md rule 11).
+    // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
     superframe_open_ = false;
+    // phase_ is already Closed at every `return false` of issue_next() — it is set at the top of
+    // the probe phase, before anything that can return false — and nothing reads it between here
+    // and the next open_superframe(), which sets it again. Proved by reading issue_next(), a
+    // structural property of today's code (a control, not a guarantee).
+    // mutant-ok(equivalent, cxx_assign_const): a redundant store; phase_ is already Closed.
     phase_ = Phase::Closed;
 }
 
@@ -124,7 +138,9 @@ void CoreEngine::open_superframe(uint64_t now_us) {
     superframe_open_ = true;
     phase_ = Phase::Poll;
     poll_cursor_ = ADDR_backplane_min;
+    // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
     probe_issued_ = false;
+    // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
     demand_issued_ = false;
     // data-model.md §9: the period is TRUNK_T_poll_us, read from the generated header and never
     // restated (CLAUDE.md rule 4); the budget is reset to it at the start of every superframe
@@ -225,6 +241,7 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
             nodes_[idx].discovery != DiscoveryState::ReadingDescriptor) {
             // The slot emptied (FR-010) or the read was abandoned while this item waited: drop
             // it rather than addressing a node id that no longer names what queued it.
+            // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
             desc_held_ = false;
             continue;
         }
@@ -245,6 +262,7 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
             // Dropping is safe because the item carries nothing the entry does not: the node stays
             // in ReadingDescriptor and is resumed at the bytes already read, and READ_DESC is
             // idempotent (CLAUDE.md rule 2).
+            // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
             desc_held_ = false;
             continue;
         }
@@ -253,6 +271,7 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
             return false; // FR-005: carries over, keeping its place at the head of the queue
         }
         if (begin_desc_chunk(desc_hold_.node_id, desc_hold_.offset, now_us)) {
+            // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
             desc_held_ = false;
             return true;
         }
@@ -333,6 +352,9 @@ CoreEngine::Resume CoreEngine::scan_identify(uint64_t now_us) {
     // never abandoned (User Story 1 AS3), and data-model.md §2 keeps a node whose IDENTIFY is
     // in flight or unanswered in exactly that state.
     const uint16_t id_pool = static_cast<uint16_t>(ADDR_module_max - ADDR_module_min + 1);
+    // n == id_pool would revisit the node n == 0 named, which this loop already passed over as
+    // ineligible (an eligible one returned). Argued from the loop body, not measured.
+    // mutant-ok(equivalent, cxx_lt_to_le): n == id_pool revisits the n == 0 node, already skipped.
     for (uint16_t n = 0; n < id_pool; ++n) {
         const uint16_t offset = static_cast<uint16_t>((identify_cursor_ + n) % id_pool);
         const uint8_t id = static_cast<uint8_t>(ADDR_module_min + offset);
@@ -372,6 +394,10 @@ CoreEngine::Resume CoreEngine::retry_stalled_desc(uint64_t now_us) {
     // so two stalled nodes take turns, and "retried, not abandoned" (AS3) is what the retry itself
     // is: the node keeps its cache entry and its place, for as long as it keeps answering that way.
     const uint16_t id_pool = static_cast<uint16_t>(ADDR_module_max - ADDR_module_min + 1);
+    // As in scan_identify(): n == id_pool revisits the n == 0 node. If resume_desc_read() returned
+    // Nothing for it, it has left ReadingDescriptor (Identifying or Discovered), so the revisit
+    // skips it. Argued from resume_desc_read(), not measured.
+    // mutant-ok(equivalent, cxx_lt_to_le): n == id_pool revisits the n == 0 node, already skipped.
     for (uint16_t n = 0; n < id_pool; ++n) {
         const uint16_t offset = static_cast<uint16_t>((desc_retry_cursor_ + n) % id_pool);
         const uint8_t id = static_cast<uint8_t>(ADDR_module_min + offset);
@@ -423,6 +449,10 @@ bool CoreEngine::begin_desc_chunk(uint8_t node_id, uint16_t offset, uint64_t now
     req.offset = offset;
     req.max_len = kDescChunkMax;
     uint8_t payload[LIMIT_max_l3_payload] = {};
+    // `written` is set by the encoder on Ok, the only branch that reads it, so its initial value
+    // is never observed (the encoder's contract, shown by every READ_DESC frame the discovery
+    // tests decode; not a guarantee of the encoder).
+    // mutant-ok(equivalent, cxx_init_const): overwritten by the encoder before any read.
     size_t written = 0;
     if (l3::encode_read_desc_req(req, payload, sizeof payload, written) != l3::Status::Ok) {
         return false;
@@ -553,10 +583,16 @@ bool CoreEngine::begin_request(uint8_t dst, uint8_t node_id, uint8_t opcode, con
     header.seq = l3_seq_;
     header.flags = 0;
     header.payload_len = len;
+    // mutant-ok(equivalent, cxx_init_const): overwritten by encode_header() before any read.
     size_t written = 0;
     if (l3::encode_header(header, request_buf_, sizeof request_buf_, written) != l3::Status::Ok) {
         return false;
     }
+    // encode_header() accepted payload_len == len, so len <= LIMIT_max_l3_payload and written ==
+    // HEADER_LEN; request_buf_ is LIMIT_max_l3_message bytes (core_engine.hpp), so
+    // len <= sizeof request_buf_ - written already. The guard is a second bound that cannot fire
+    // while those constants hold (a control on the constants), with either operator.
+    // mutant-ok(equivalent, cxx_sub_to_add): the guard cannot fire with - or +; see above.
     if (static_cast<size_t>(len) > sizeof request_buf_ - written) {
         return false;
     }
@@ -589,8 +625,12 @@ void CoreEngine::complete_request(const link::MasterEvent& ev, uint64_t now_us) 
     // only (CLAUDE.md rule 3). Monotonic by the Clock contract, so the subtraction cannot wrap;
     // written the defensive way anyway, since a caller that rewinds now_us would otherwise turn
     // one bad call into a budget of ~2^64 microseconds.
+    // At equality both forms give 0: now_us - tx_issued_us_ is 0 and so is the else branch.
+    // mutant-ok(equivalent, cxx_ge_to_gt): at now_us == tx_issued_us_ both branches give 0.
     const uint64_t duration_us = now_us >= tx_issued_us_ ? now_us - tx_issued_us_ : 0u;
     budget_.remaining_us =
+        // At equality both forms give 0: remaining_us - duration_us is 0 and so is the then branch.
+        // mutant-ok(equivalent, cxx_ge_to_gt): at duration_us == remaining_us both branches give 0.
         duration_us >= budget_.remaining_us ? 0u : budget_.remaining_us - duration_us;
 
     // trunk §6/§7: every transaction's outcome is this trunk address's outcome, whether it
@@ -626,6 +666,9 @@ void CoreEngine::complete_request(const link::MasterEvent& ev, uint64_t now_us) 
     }
     switch (kind) {
     case TxKind::StatusPoll:
+        // on_status_block() is empty today (it only discards now_us), so removing the call changes
+        // nothing observable. It becomes killable the moment User Story 4 gives it a body.
+        // mutant-ok(equivalent, cxx_remove_void_call): on_status_block() has an empty body today.
         on_status_block(now_us);
         break;
     case TxKind::SlotMap:
@@ -744,6 +787,7 @@ void CoreEngine::on_identify(const link::MasterEvent& ev, uint64_t now_us) {
         // R-07: the ring refused. Nothing is partially queued; the node returns to Identifying
         // and the whole read is re-decided next time, rather than leaving a claimed entry with
         // no reader.
+        // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
         entry->in_use = false;
         node.discovery = DiscoveryState::Identifying;
     }
@@ -810,12 +854,15 @@ void CoreEngine::on_desc_chunk(const link::MasterEvent& ev, uint64_t now_us) {
     // did not serve (CLAUDE.md rule 7: never over-write on arbitrary bytes). Same disposition as
     // the zero-length and CRC-mismatch answers below, for the same reason.
     if (resp.bytes.len > room) {
+        // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
         entry->in_use = false;
         node.discovery = DiscoveryState::Identifying;
         return;
     }
     // take <= room holds by the guard above; the min() is a redundant second bound kept so the
     // write stays inside blob[LIMIT_max_descriptor_bytes] by construction, not only by the guard.
+    // At resp.bytes.len == room both operands are equal, so `<` and `<=` select the same value.
+    // mutant-ok(equivalent, cxx_lt_to_le): at len == room both arms of the ?: are the same value.
     const uint16_t take = resp.bytes.len < room ? resp.bytes.len : room;
     for (uint16_t i = 0; i < take; ++i) {
         entry->blob[entry->received + i] = resp.bytes.data[i];
@@ -834,6 +881,7 @@ void CoreEngine::on_desc_chunk(const link::MasterEvent& ev, uint64_t now_us) {
             // would otherwise re-ask for the same offset for ever. The read is abandoned and
             // the node retried from IDENTIFY, which is where a changed descriptor length would
             // be learned anyway.
+            // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
             entry->in_use = false;
             node.discovery = DiscoveryState::Identifying;
             return;
@@ -842,6 +890,7 @@ void CoreEngine::on_desc_chunk(const link::MasterEvent& ev, uint64_t now_us) {
         next.node_id = tx_node_;
         next.offset = entry->received;
         if (!desc_queue_.push(next)) {
+            // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
             entry->in_use = false;
             node.discovery = DiscoveryState::Identifying;
         }
@@ -851,6 +900,7 @@ void CoreEngine::on_desc_chunk(const link::MasterEvent& ev, uint64_t now_us) {
     // as READ_DESC served it. A mismatch means the bytes are not the descriptor that was
     // advertised — the entry is discarded rather than cached and handed to a node.
     if (l3::descriptor_crc(entry->blob, entry->len) != entry->desc_crc) {
+        // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
         entry->in_use = false;
         node.discovery = DiscoveryState::Identifying;
         return;
@@ -1005,6 +1055,8 @@ void CoreEngine::reconcile_slot_map(uint8_t backplane_addr, const l3::BpSlotMapR
     // LIMIT_bp_slot_map_max_slots, never to a slot_count a peer chose, so a backplane cannot
     // overrun it by over-claiming. Everything past the table is ignored by bound.
     uint8_t slot_count = resp.slot_count;
+    // At slot_count == LIMIT_bp_slot_map_max_slots the clamp stores the value it already has.
+    // mutant-ok(equivalent, cxx_gt_to_ge): at slot_count == the limit the clamp is a no-op.
     if (static_cast<uint32_t>(slot_count) > LIMIT_bp_slot_map_max_slots) {
         slot_count = static_cast<uint8_t>(LIMIT_bp_slot_map_max_slots);
     }
