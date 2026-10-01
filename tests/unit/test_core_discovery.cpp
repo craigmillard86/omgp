@@ -2083,3 +2083,143 @@ TEST_CASE("reconcile_slot_map: ADDR_backplane_max is a backplane and the address
                               raw_slot_map(1, bits, bits, 1), 0);
     REQUIRE(rig.in_use_count() == 1u);
 }
+
+TEST_CASE("claim_descriptor: a descriptor of exactly LIMIT_max_descriptor_bytes is claimable and "
+          "one byte more is refused [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    DescriptorCacheEntry* at_cap =
+        Bk::claim(engine, 0x31, omgp::LIMIT_max_descriptor_bytes, 0x1111);
+    REQUIRE(at_cap != nullptr);
+    REQUIRE(at_cap->len == omgp::LIMIT_max_descriptor_bytes);
+    REQUIRE(Bk::claim(engine, 0x32, omgp::LIMIT_max_descriptor_bytes + 1u, 0x2222) == nullptr);
+    // The refusal claimed nothing: the one entry in use is still the first.
+    REQUIRE(Bk::find(engine, 0x32, omgp::LIMIT_max_descriptor_bytes + 1u, 0x2222) == nullptr);
+    REQUIRE(Bk::find(engine, 0x31, omgp::LIMIT_max_descriptor_bytes, 0x1111) == at_cap);
+}
+
+TEST_CASE("claim_descriptor: with every entry in use, the reclaim pass skips an entry a node "
+          "holds a reference to and takes the first unreferenced one [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    const size_t entries = Bk::cache_entries(engine);
+    REQUIRE(entries > 2u);
+    for (size_t i = 0; i < entries; ++i) {
+        complete_entry(engine, i, static_cast<uint8_t>(0x40 + i), 100, static_cast<uint16_t>(i));
+    }
+    Bk::entry_mut(engine, 0).refcount = 1;
+
+    DescriptorCacheEntry* reclaimed = Bk::claim(engine, 0xE0, 50, 0xAAAA);
+    REQUIRE(reclaimed == &Bk::entry(engine, 1));
+    REQUIRE(reclaimed->module_type == 0xE0);
+    REQUIRE(reclaimed->len == 50u);
+    REQUIRE(reclaimed->desc_crc == 0xAAAA);
+    REQUIRE_FALSE(reclaimed->complete);
+    // The referenced entry is untouched.
+    REQUIRE(Bk::entry(engine, 0).module_type == 0x40);
+    REQUIRE(Bk::entry(engine, 0).complete);
+
+    // Every entry referenced: nothing is reclaimable.
+    for (size_t i = 0; i < entries; ++i) {
+        Bk::entry_mut(engine, i).refcount = 1;
+    }
+    REQUIRE(Bk::claim(engine, 0xE1, 50, 0xBBBB) == nullptr);
+}
+
+TEST_CASE("descriptor_has_reader: only a node reading the entry's own (module_type, len, crc) "
+          "counts [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    DescriptorCacheEntry& exact = complete_entry(engine, 0, 0x50, 200, 0x0A0A);
+    DescriptorCacheEntry& other_type = complete_entry(engine, 1, 0x51, 200, 0x0A0A);
+    DescriptorCacheEntry& other_len = complete_entry(engine, 2, 0x50, 201, 0x0A0A);
+    DescriptorCacheEntry& other_crc = complete_entry(engine, 3, 0x50, 200, 0x0A0B);
+
+    REQUIRE_FALSE(Bk::has_reader(engine, exact));
+    NodeRecord& reader = Bk::node(engine, omgp::ADDR_module_min);
+    reader.in_use = true;
+    reader.discovery = DiscoveryState::ReadingDescriptor;
+    reader.module_type = 0x50;
+    reader.desc_len = 200;
+    reader.desc_crc = 0x0A0A;
+
+    REQUIRE(Bk::has_reader(engine, exact));
+    REQUIRE_FALSE(Bk::has_reader(engine, other_type));
+    REQUIRE_FALSE(Bk::has_reader(engine, other_len));
+    REQUIRE_FALSE(Bk::has_reader(engine, other_crc));
+
+    // The same key on a node that is not reading, or not in use, is not a reader.
+    reader.discovery = DiscoveryState::Discovered;
+    REQUIRE_FALSE(Bk::has_reader(engine, exact));
+    reader.discovery = DiscoveryState::ReadingDescriptor;
+    reader.in_use = false;
+    REQUIRE_FALSE(Bk::has_reader(engine, exact));
+}
+
+TEST_CASE("attach_descriptor: every node id from ADDR_module_min to ADDR_module_max reading this "
+          "key reaches Discovered, and no other node does [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    DescriptorCacheEntry& entry = complete_entry(engine, 0, 0x60, 300, 0x0C0C);
+
+    const uint8_t matching[4] = {omgp::ADDR_module_min,
+                                 static_cast<uint8_t>(omgp::ADDR_module_min + 1u), 0x40,
+                                 omgp::ADDR_module_max};
+    auto reading = [&](uint8_t id, uint8_t type, uint16_t len, uint16_t crc) -> NodeRecord& {
+        NodeRecord& n = Bk::node(engine, id);
+        n.in_use = true;
+        n.slot = static_cast<uint8_t>(id & 0x0F);
+        n.discovery = DiscoveryState::ReadingDescriptor;
+        n.module_type = type;
+        n.desc_len = len;
+        n.desc_crc = crc;
+        return n;
+    };
+    for (const uint8_t id : matching) {
+        reading(id, 0x60, 300, 0x0C0C);
+    }
+    // Decoys: one field off each, a node already Discovered, and a key-matching node not in use.
+    reading(0x20, 0x61, 300, 0x0C0C);
+    reading(0x21, 0x60, 301, 0x0C0C);
+    reading(0x22, 0x60, 300, 0x0C0D);
+    reading(0x23, 0x60, 300, 0x0C0C).discovery = DiscoveryState::Discovered;
+    reading(0x24, 0x60, 300, 0x0C0C).in_use = false;
+
+    Bk::attach_descriptor(engine, entry);
+
+    for (const uint8_t id : matching) {
+        const NodeRecord& n = Bk::node(engine, id);
+        REQUIRE(n.discovery == DiscoveryState::Discovered);
+        REQUIRE(n.descriptor == &entry);
+    }
+    REQUIRE(entry.refcount == 4u);
+    for (const uint8_t id : {0x20, 0x21, 0x22}) {
+        REQUIRE(Bk::node(engine, static_cast<uint8_t>(id)).discovery ==
+                DiscoveryState::ReadingDescriptor);
+        REQUIRE(Bk::node(engine, static_cast<uint8_t>(id)).descriptor == nullptr);
+    }
+    REQUIRE(Bk::node(engine, 0x23).descriptor == nullptr);
+    REQUIRE(Bk::node(engine, 0x24).descriptor == nullptr);
+    REQUIRE(Bk::node(engine, 0x24).discovery == DiscoveryState::ReadingDescriptor);
+}
+
+TEST_CASE("descriptor read: the MODEL_ID record is found among the others and lands in the cache "
+          "entry and the node [discovery][mutation]") {
+    Descriptor desc =
+        make_descriptor(0x7A01, 0x0B02, 0x0C03, omgp::MODULE_TYPE_CODES[0], 2u * kDescChunkMax);
+    const BackplaneScript bp{0x01, 1, 0b1u, omgp::MODULE_TYPE_CODES[0], &desc, false, false};
+    Rig rig;
+    rig.install(bp);
+    rig.run_to_superframe(kConvergeSuperframes, byte_us());
+    REQUIRE(rig.discovered_count() == 1u);
+
+    const NodeRecord& n = Bk::node(rig.engine(), omgp::ADDR_module_min);
+    REQUIRE(n.discovery == DiscoveryState::Discovered);
+    REQUIRE(n.model_vendor == 0x7A01);
+    REQUIRE(n.model_hw_rev == 0x0B02);
+    REQUIRE(n.model_fw_rev == 0x0C03);
+    REQUIRE(n.descriptor != nullptr);
+    REQUIRE(n.descriptor->model_vendor == 0x7A01);
+    REQUIRE(n.descriptor->model_hw_rev == 0x0B02);
+    REQUIRE(n.descriptor->model_fw_rev == 0x0C03);
+}
