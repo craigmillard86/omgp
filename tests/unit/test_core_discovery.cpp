@@ -129,6 +129,134 @@ struct CoreEngineTestSeam {
         node.desc_crc = crc;
         node.discovery = DiscoveryState::ReadingDescriptor;
     }
+
+    // --- mutation-kill accessors -------------------------------------------------------------
+    // Reference-returning views of the tables and cursors the engine's bookkeeping lives in, so a
+    // case can pin a field a rig-level run only reaches by coincidence (a stored value that every
+    // downstream read happens to tolerate). Test-only for the same reason the seam above is: this
+    // type is defined by this binary alone, so no other build carries any of it.
+    static NodeRecord& node(CoreEngine& engine, uint8_t node_id) {
+        return engine.nodes_[CoreEngine::node_index(node_id)];
+    }
+    static omgp::core::BackplaneRecord& backplane(CoreEngine& engine, uint8_t addr) {
+        return engine.backplanes_[CoreEngine::backplane_index(addr)];
+    }
+    static DescriptorCacheEntry& entry_mut(CoreEngine& engine, size_t i) {
+        return engine.descriptors_[i];
+    }
+    static omgp::core::SuperframeBudget& budget(CoreEngine& engine) {
+        return engine.budget_;
+    }
+    static uint32_t& superframe(CoreEngine& engine) {
+        return engine.superframe_;
+    }
+    static bool& demand_issued(CoreEngine& engine) {
+        return engine.demand_issued_;
+    }
+    static bool& probe_issued(CoreEngine& engine) {
+        return engine.probe_issued_;
+    }
+    static bool& superframe_open(CoreEngine& engine) {
+        return engine.superframe_open_;
+    }
+    static bool& desc_held(CoreEngine& engine) {
+        return engine.desc_held_;
+    }
+    static omgp::core::DescChunkItem& desc_hold(CoreEngine& engine) {
+        return engine.desc_hold_;
+    }
+    static uint8_t& l3_seq(CoreEngine& engine) {
+        return engine.l3_seq_;
+    }
+    static uint8_t& identify_cursor(CoreEngine& engine) {
+        return engine.identify_cursor_;
+    }
+    static uint8_t& desc_retry_cursor(CoreEngine& engine) {
+        return engine.desc_retry_cursor_;
+    }
+    static uint8_t& poll_cursor(CoreEngine& engine) {
+        return engine.poll_cursor_;
+    }
+    static uint32_t& wire_rate(CoreEngine& engine) {
+        return engine.wire_rate_;
+    }
+    static uint16_t& tx_offset(CoreEngine& engine) {
+        return engine.tx_offset_;
+    }
+    static uint8_t& tx_node(CoreEngine& engine) {
+        return engine.tx_node_;
+    }
+    static uint64_t& tx_issued_us(CoreEngine& engine) {
+        return engine.tx_issued_us_;
+    }
+    static bool tx_idle(const CoreEngine& engine) {
+        return engine.tx_kind_ == CoreEngine::TxKind::None;
+    }
+    static bool phase_closed(const CoreEngine& engine) {
+        return engine.phase_ == CoreEngine::Phase::Closed;
+    }
+    static size_t desc_queue_size(const CoreEngine& engine) {
+        return engine.desc_queue_.size();
+    }
+    static bool push_desc(CoreEngine& engine, uint8_t node_id, uint16_t offset) {
+        return engine.desc_queue_.push(omgp::core::DescChunkItem{node_id, offset});
+    }
+    static bool pop_desc(CoreEngine& engine, omgp::core::DescChunkItem& out) {
+        return engine.desc_queue_.pop(out);
+    }
+
+    // Wrappers over the private operations a case drives directly. Each returns what the
+    // operation returns; none adds behaviour.
+    static uint64_t cost_estimate(const CoreEngine& engine, uint64_t last_measured_us) {
+        return engine.cost_estimate(last_measured_us);
+    }
+    static bool admit_demand(const CoreEngine& engine, uint64_t estimate) {
+        return engine.admit_demand(estimate);
+    }
+    static void mark_discovered(CoreEngine& engine, NodeRecord& node, uint8_t node_id,
+                                const DescriptorCacheEntry& entry) {
+        engine.mark_discovered(node, node_id, entry);
+    }
+    static void release_descriptor(CoreEngine& engine, NodeRecord& node) {
+        engine.release_descriptor(node);
+    }
+    static void attach_descriptor(CoreEngine& engine, DescriptorCacheEntry& entry) {
+        engine.attach_descriptor(entry);
+    }
+    static bool has_reader(const CoreEngine& engine, const DescriptorCacheEntry& entry) {
+        return engine.descriptor_has_reader(entry);
+    }
+    static void on_identify(CoreEngine& engine, const link::MasterEvent& ev, uint64_t now_us) {
+        engine.on_identify(ev, now_us);
+    }
+    static void complete_request(CoreEngine& engine, const link::MasterEvent& ev, uint64_t now_us) {
+        engine.complete_request(ev, now_us);
+    }
+    static bool begin_request(CoreEngine& engine, uint8_t dst, uint8_t node_id, uint8_t opcode,
+                              const uint8_t* payload, uint8_t len, uint64_t now_us) {
+        return engine.begin_request(dst, node_id, opcode, payload, len,
+                                    CoreEngine::TxKind::ReadDesc, now_us);
+    }
+    static bool begin_desc_chunk(CoreEngine& engine, uint8_t node_id, uint16_t offset,
+                                 uint64_t now_us) {
+        return engine.begin_desc_chunk(node_id, offset, now_us);
+    }
+    // 0 = Nothing, 1 = Issued, 2 = Refused: CoreEngine::Resume is private to the engine.
+    static int resume_desc_read(CoreEngine& engine, uint8_t node_id, uint64_t now_us) {
+        return static_cast<int>(engine.resume_desc_read(node_id, node(engine, node_id), now_us));
+    }
+    static int scan_identify(CoreEngine& engine, uint64_t now_us) {
+        return static_cast<int>(engine.scan_identify(now_us));
+    }
+    static int retry_stalled_desc(CoreEngine& engine, uint64_t now_us) {
+        return static_cast<int>(engine.retry_stalled_desc(now_us));
+    }
+    static bool issue_demand(CoreEngine& engine, uint64_t now_us) {
+        return engine.issue_demand(now_us);
+    }
+    static void open_superframe(CoreEngine& engine, uint64_t now_us) {
+        engine.open_superframe(now_us);
+    }
 };
 } // namespace core
 } // namespace omgp
@@ -537,16 +665,16 @@ struct ThreeBackplanes {
 // How many superframes the three-backplane rig is given to converge, and how many further ones
 // AS1's "nothing more is discoverable" is observed over. Both are bounds on the TEST, not
 // thresholds the engine reads.
-// The three-backplane rig is fully discovered by superframe 18 (measured), so 45 is 2.5x that and is
-// what every case that just waits for discovery to finish is given. The four cases that assert a
+// The three-backplane rig is fully discovered by superframe 18 (measured), so 45 is 2.5x that and
+// is what every case that just waits for discovery to finish is given. The four cases that assert a
 // stalled or unanswering module is RETRIED rather than abandoned keep the longer horizon: what
 // they observe is the engine's behaviour over a long stall, which is the point of them.
 constexpr uint32_t kConvergeSuperframes = 45;
 constexpr uint32_t kStallHorizonSuperframes = 90;
 constexpr uint32_t kSettleSuperframes = 20;
 
-// SC-005 replays the cold boot once per cadence, and its finest cadence (1 us) makes 10 engine calls
-// per byte time, so it is by far the most expensive case in this file — and the file is the
+// SC-005 replays the cold boot once per cadence, and its finest cadence (1 us) makes 10 engine
+// calls per byte time, so it is by far the most expensive case in this file — and the file is the
 // mutation oracle, run once per mutant. Measured, not derived: this rig has all twelve modules
 // discovered by superframe 18, so 40 compares the whole discovery plus a steady state longer than
 // one full enrolment-probe rotation (15 addresses). A bound on the TEST, not a threshold the
@@ -1707,4 +1835,251 @@ TEST_CASE("AS3: one transient ERR_BUSY chunk does not lose a module when another
     REQUIRE(rig.engine().discovery_state(ids.front()) == DiscoveryState::Discovered);
     rig.engine().drain_callbacks();
     REQUIRE(rig.recorder().count(LifecycleKind::NodeDiscovered) == 1u);
+}
+
+// =================================================================================================
+// Mutation-kill cases (PR #871, deep-verify-mutate). Each case below pins a field or a boundary
+// that the rig-level cases above reach only by coincidence: a stored value every downstream read
+// happens to tolerate. They drive the engine's own operations directly through the seam, so each
+// is cheap; this file is the mutation oracle and runs once per surviving mutant.
+// =================================================================================================
+
+namespace {
+
+using Bk = omgp::core::CoreEngineTestSeam;
+using omgp::core::BackplaneRecord;
+using omgp::core::DescriptorCacheEntry;
+using omgp::core::NodeRecord;
+
+bool exhaustion_bit(const BackplaneRecord& bp, unsigned slot) {
+    return ((bp.exhaustion_reported[slot / 8u] >> (slot % 8u)) & 1u) != 0u;
+}
+
+// A complete cache entry keyed (module_type, len, crc) carrying a recognisable MODEL_ID.
+DescriptorCacheEntry& complete_entry(CoreEngine& engine, size_t i, uint8_t module_type,
+                                     uint16_t len, uint16_t crc) {
+    DescriptorCacheEntry& e = Bk::entry_mut(engine, i);
+    e = DescriptorCacheEntry{};
+    e.in_use = true;
+    e.complete = true;
+    e.module_type = module_type;
+    e.len = len;
+    e.received = len;
+    e.desc_crc = crc;
+    e.model_vendor = 0x1234;
+    e.model_hw_rev = 0x5678;
+    e.model_fw_rev = 0x9ABC;
+    return e;
+}
+
+} // namespace
+
+TEST_CASE("mark_discovered: the node takes the entry's model and one reference, and reports its "
+          "own id and slot, NodeDiscovered then NodeRediscovered [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    DescriptorCacheEntry& entry = complete_entry(engine, 0, 0x21, 100, 0xBEEF);
+    const uint8_t id = static_cast<uint8_t>(omgp::ADDR_module_min + 3u);
+    NodeRecord& node = Bk::node(engine, id);
+    node.in_use = true;
+    node.slot = 7;
+
+    Bk::mark_discovered(engine, node, id, entry);
+    REQUIRE(node.descriptor == &entry);
+    REQUIRE(node.model_vendor == 0x1234);
+    REQUIRE(node.model_hw_rev == 0x5678);
+    REQUIRE(node.model_fw_rev == 0x9ABC);
+    REQUIRE(entry.refcount == 1u);
+    REQUIRE(node.discovery == DiscoveryState::Discovered);
+    REQUIRE(node.ever_discovered);
+
+    // Reaching Discovered a second time is a re-arrival: the id has history now.
+    Bk::mark_discovered(engine, node, id, entry);
+    REQUIRE(entry.refcount == 2u);
+    engine.drain_callbacks();
+    REQUIRE(rig.recorder().events.size() == 2u);
+    REQUIRE(rig.recorder().events[0].kind == LifecycleKind::NodeDiscovered);
+    REQUIRE(rig.recorder().events[0].node_id == id);
+    REQUIRE(rig.recorder().events[0].slot == 7u);
+    REQUIRE(rig.recorder().events[1].kind == LifecycleKind::NodeRediscovered);
+    REQUIRE(rig.recorder().events[1].node_id == id);
+}
+
+TEST_CASE("release_descriptor: gives back exactly one reference, never below zero, and detaches "
+          "the node [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    DescriptorCacheEntry& entry = complete_entry(engine, 0, 0x21, 100, 0xBEEF);
+    NodeRecord& node = Bk::node(engine, omgp::ADDR_module_min);
+
+    entry.refcount = 2;
+    node.descriptor = &entry;
+    Bk::release_descriptor(engine, node);
+    REQUIRE(entry.refcount == 1u);
+    REQUIRE(node.descriptor == nullptr);
+
+    // A node that holds no entry releases nothing.
+    Bk::release_descriptor(engine, node);
+    REQUIRE(entry.refcount == 1u);
+
+    // A count already at zero stays at zero rather than wrapping.
+    entry.refcount = 0;
+    node.descriptor = &entry;
+    Bk::release_descriptor(engine, node);
+    REQUIRE(entry.refcount == 0u);
+    REQUIRE(node.descriptor == nullptr);
+}
+
+TEST_CASE("reconcile_slot_map: a first assignment records the backplane's slot count and each "
+          "node's own slot, and keeps the id's history [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    // The id first-fit will pick has been discovered before, on some earlier slot.
+    Bk::node(engine, omgp::ADDR_module_min).ever_discovered = true;
+
+    const uint8_t bits[1] = {0b10101};
+    engine.reconcile_slot_map(omgp::ADDR_backplane_max, raw_slot_map(5, bits, bits, 1), 0);
+
+    BackplaneRecord& bp = Bk::backplane(engine, omgp::ADDR_backplane_max);
+    REQUIRE(bp.slot_count == 5u);
+    const uint8_t expect_slot[3] = {0, 2, 4};
+    for (uint8_t k = 0; k < 3; ++k) {
+        const uint8_t id = static_cast<uint8_t>(omgp::ADDR_module_min + k);
+        const NodeRecord& n = Bk::node(engine, id);
+        REQUIRE(n.in_use);
+        REQUIRE(n.backplane_addr == omgp::ADDR_backplane_max);
+        REQUIRE(n.slot == expect_slot[k]);
+        REQUIRE(n.discovery == DiscoveryState::Undiscovered);
+        REQUIRE(bp.node_id_by_slot[expect_slot[k]] == id);
+    }
+    REQUIRE(Bk::node(engine, omgp::ADDR_module_min).ever_discovered);
+    REQUIRE_FALSE(Bk::node(engine, omgp::ADDR_module_min + 1).ever_discovered);
+}
+
+TEST_CASE("reconcile_slot_map: an emptied slot releases its id and descriptor reference, reports "
+          "NodeRemoved with that id and slot, and keeps the id's history [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    const uint8_t bits3[1] = {0b111};
+    engine.reconcile_slot_map(0x02, raw_slot_map(3, bits3, bits3, 1), 0);
+    const uint8_t id0 = omgp::ADDR_module_min;
+    const uint8_t id1 = static_cast<uint8_t>(omgp::ADDR_module_min + 1u);
+    const uint8_t id2 = static_cast<uint8_t>(omgp::ADDR_module_min + 2u);
+    DescriptorCacheEntry& entry = complete_entry(engine, 0, 0x21, 100, 0xBEEF);
+    entry.refcount = 1;
+    NodeRecord& middle = Bk::node(engine, id1);
+    middle.ever_discovered = true;
+    middle.descriptor = &entry;
+    middle.discovery = DiscoveryState::Discovered;
+
+    const uint8_t bits_no_middle[1] = {0b101};
+    engine.reconcile_slot_map(0x02, raw_slot_map(3, bits_no_middle, bits_no_middle, 1), 0);
+
+    REQUIRE_FALSE(Bk::node(engine, id1).in_use);
+    REQUIRE(Bk::node(engine, id0).in_use);
+    REQUIRE(Bk::node(engine, id2).in_use);
+    REQUIRE(entry.refcount == 0u);
+    REQUIRE(Bk::node(engine, id1).ever_discovered);
+    REQUIRE(Bk::backplane(engine, 0x02).node_id_by_slot[1] == 0u);
+    engine.drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeRemoved) == 1u);
+    const LifecycleEvent& removed = rig.recorder().events.back();
+    REQUIRE(removed.kind == LifecycleKind::NodeRemoved);
+    REQUIRE(removed.node_id == id1);
+    REQUIRE(removed.slot == 1u);
+}
+
+TEST_CASE("reconcile_slot_map: a backplane that shrinks drops every slot past its new count, "
+          "releasing ids and references and reporting each [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    const uint8_t bits4[1] = {0b1111};
+    engine.reconcile_slot_map(0x03, raw_slot_map(4, bits4, bits4, 1), 0);
+    const uint8_t id2 = static_cast<uint8_t>(omgp::ADDR_module_min + 2u);
+    const uint8_t id3 = static_cast<uint8_t>(omgp::ADDR_module_min + 3u);
+    DescriptorCacheEntry& entry = complete_entry(engine, 0, 0x21, 100, 0xBEEF);
+    entry.refcount = 1;
+    Bk::node(engine, id2).ever_discovered = true;
+    Bk::node(engine, id3).descriptor = &entry;
+    // A bystander id that a mis-indexed release would clear instead.
+    const uint8_t bystander = static_cast<uint8_t>(omgp::ADDR_module_min + 42u);
+    Bk::node(engine, bystander).in_use = true;
+
+    const uint8_t bits2[1] = {0b11};
+    engine.reconcile_slot_map(0x03, raw_slot_map(2, bits2, bits2, 1), 0);
+
+    REQUIRE(Bk::node(engine, omgp::ADDR_module_min).in_use);
+    REQUIRE(Bk::node(engine, omgp::ADDR_module_min + 1u).in_use);
+    REQUIRE_FALSE(Bk::node(engine, id2).in_use);
+    REQUIRE_FALSE(Bk::node(engine, id3).in_use);
+    REQUIRE(Bk::node(engine, bystander).in_use);
+    REQUIRE(entry.refcount == 0u);
+    REQUIRE(Bk::node(engine, id2).ever_discovered);
+    BackplaneRecord& bp = Bk::backplane(engine, 0x03);
+    REQUIRE(bp.slot_count == 2u);
+    REQUIRE(bp.node_id_by_slot[2] == 0u);
+    REQUIRE(bp.node_id_by_slot[3] == 0u);
+    engine.drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeRemoved) == 2u);
+    REQUIRE(rig.recorder().events[0].kind == LifecycleKind::NodeRemoved);
+    REQUIRE(rig.recorder().events[0].node_id == id2);
+    REQUIRE(rig.recorder().events[0].slot == 2u);
+    REQUIRE(rig.recorder().events[1].kind == LifecycleKind::NodeRemoved);
+    REQUIRE(rig.recorder().events[1].node_id == id3);
+    REQUIRE(rig.recorder().events[1].slot == 3u);
+}
+
+TEST_CASE("reconcile_slot_map: a hostile slot_count is clamped to LIMIT_bp_slot_map_max_slots "
+          "and the starved slots are reported with the backplane and slot [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    uint8_t bits[(omgp::LIMIT_bp_slot_map_max_slots + 7) / 8];
+    for (uint8_t& b : bits)
+        b = 0xFF;
+    engine.reconcile_slot_map(0x01, raw_slot_map(0xFF, bits, bits, sizeof bits), 0);
+
+    BackplaneRecord& bp = Bk::backplane(engine, 0x01);
+    REQUIRE(bp.slot_count == omgp::LIMIT_bp_slot_map_max_slots);
+    const unsigned pool = omgp::ADDR_module_max - omgp::ADDR_module_min + 1u;
+    const unsigned starved = omgp::LIMIT_bp_slot_map_max_slots - pool;
+    engine.drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeIdPoolExhausted) == starved);
+    for (unsigned k = 0; k < starved; ++k) {
+        const LifecycleEvent& e = rig.recorder().events[k];
+        REQUIRE(e.kind == LifecycleKind::NodeIdPoolExhausted);
+        REQUIRE(e.node_id == 0x01u);
+        REQUIRE(e.slot == pool + k);
+        REQUIRE(exhaustion_bit(bp, pool + k));
+    }
+    REQUIRE_FALSE(exhaustion_bit(bp, 0));
+}
+
+TEST_CASE("reconcile_slot_map: a standing exhaustion bit is cleared the moment its slot is "
+          "assigned, reports empty, or falls past slot_count [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    BackplaneRecord& bp = Bk::backplane(engine, 0x01);
+    for (uint8_t& b : bp.exhaustion_reported)
+        b = 0xFF;
+
+    // Slots 0-1 are occupied and get ids (cleared on assignment); slots 2-7 report empty
+    // (cleared on emptiness); every slot from 8 up is past slot_count (cleared on shrink).
+    const uint8_t bits[1] = {0b11};
+    engine.reconcile_slot_map(0x01, raw_slot_map(8, bits, bits, 1), 0);
+    for (unsigned i = 0; i < sizeof bp.exhaustion_reported; ++i) {
+        REQUIRE(bp.exhaustion_reported[i] == 0u);
+    }
+}
+
+TEST_CASE("reconcile_slot_map: ADDR_backplane_max is a backplane and the address past it is not "
+          "[discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    const uint8_t bits[1] = {0b1};
+    engine.reconcile_slot_map(omgp::ADDR_backplane_max, raw_slot_map(1, bits, bits, 1), 0);
+    REQUIRE(rig.in_use_count() == 1u);
+    REQUIRE(Bk::backplane(engine, omgp::ADDR_backplane_max).node_id_by_slot[0] != 0u);
+    engine.reconcile_slot_map(static_cast<uint8_t>(omgp::ADDR_backplane_max + 1u),
+                              raw_slot_map(1, bits, bits, 1), 0);
+    REQUIRE(rig.in_use_count() == 1u);
 }
