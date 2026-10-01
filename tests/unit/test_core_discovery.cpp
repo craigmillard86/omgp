@@ -194,6 +194,9 @@ struct CoreEngineTestSeam {
     static uint8_t& tx_addr(CoreEngine& engine) {
         return engine.tx_addr_;
     }
+    static omgp::link::HealthTracker& health(CoreEngine& engine) {
+        return engine.health_;
+    }
     // Puts the engine in the state begin_request() leaves it in for a transaction of `kind`
     // (CoreEngine::TxKind is private: 0 None, 1 StatusPoll, 2 SlotMap, 3 Probe, 4 Identify, 5
     // ReadDesc), so complete_request() can be driven for any of them without a wire.
@@ -2369,19 +2372,19 @@ TEST_CASE("begin_request: the transmitted L3 message is the header and payload v
     Bk::l3_seq(rig.engine) = 7;
     Bk::superframe(rig.engine) = 41;
 
-    REQUIRE(Bk::begin_request(rig.engine, omgp::ADDR_backplane_min, 0x2A, omgp::OP_READ_DESC,
+    REQUIRE(Bk::begin_request(rig.engine, omgp::ADDR_backplane_min, 0x2B, omgp::OP_READ_DESC,
                               payload, sizeof payload, 1000));
 
     REQUIRE(Bk::l3_seq(rig.engine) == 8u);
     REQUIRE(Bk::tx_kind(rig.engine) == 5);
     REQUIRE(Bk::tx_addr(rig.engine) == omgp::ADDR_backplane_min);
-    REQUIRE(Bk::tx_node(rig.engine) == 0x2A);
+    REQUIRE(Bk::tx_node(rig.engine) == 0x2B);
     REQUIRE(Bk::tx_issued_us(rig.engine) == 1000u);
     REQUIRE(seen.size() == 1u);
     REQUIRE(seen[0].superframe == 41u);
     REQUIRE(seen[0].opcode == omgp::OP_READ_DESC);
     REQUIRE(seen[0].dst == omgp::ADDR_backplane_min);
-    REQUIRE(seen[0].node_id == 0x2A);
+    REQUIRE(seen[0].node_id == 0x2B);
 
     // What went on the wire, decoded by the real deframer and the real L3 decoder.
     REQUIRE_FALSE(rig.wire.sent.empty());
@@ -2400,7 +2403,7 @@ TEST_CASE("begin_request: the transmitted L3 message is the header and payload v
     REQUIRE(omgp::l3::decode_message(view.f.payload, view.f.len, hdr, body) ==
             omgp::l3::Status::Ok);
     REQUIRE(hdr.opcode == omgp::OP_READ_DESC);
-    REQUIRE(hdr.node_id == 0x2A);
+    REQUIRE(hdr.node_id == 0x2B);
     REQUIRE(hdr.seq == 7u);
     REQUIRE(hdr.flags == 0u); // a request: FLAG_response clear, no reserved bit
     REQUIRE(hdr.payload_len == sizeof payload);
@@ -2751,6 +2754,7 @@ TEST_CASE("on_desc_chunk: refusals leave the reassembly alone and spend the node
     Bk::deliver_desc_chunk(engine, answer.ev, 10);
     REQUIRE(node.desc_stalled_superframe == 23u);
     REQUIRE(next_queued(engine, qid, qoff));
+    REQUIRE(qid == id);
     REQUIRE(qoff == 10u);
     REQUIRE(entry.received == 10u);
 
@@ -2865,4 +2869,455 @@ TEST_CASE("on_desc_chunk: more bytes than the advertised length has room for aba
         REQUIRE_FALSE(entry.in_use);
         REQUIRE(Bk::node(engine, id).discovery == DiscoveryState::Identifying);
     }
+}
+
+// --- group 4b: the schedule's own bookkeeping — cost seed, probe, tick, poll, demand order -------
+// Direct drives of the scheduler on a wire that never answers (Seam4), so each case pins one
+// decision the rig-level runs reach only by coincidence. Node ids avoid 0x2A: Mull's
+// cxx_assign_const stores 42, and a test value equal to it cannot tell the mutant from the code.
+
+namespace {
+
+using omgp::link::HealthState;
+
+constexpr uint64_t kT0 = 1000;
+
+void enrol(CoreEngine& engine, uint8_t addr, uint64_t now) {
+    Bk::health(engine).on_result(addr, true, now);
+}
+
+void fail_to_suspect(CoreEngine& engine, uint8_t addr, uint64_t now) {
+    for (unsigned i = 0; i < omgp::TRUNK_suspect_after_failures; ++i) {
+        Bk::health(engine).on_result(addr, false, now);
+    }
+}
+
+NodeRecord& undiscovered(CoreEngine& engine, uint8_t id) {
+    NodeRecord& n = Bk::node(engine, id);
+    n.in_use = true;
+    n.backplane_addr = omgp::ADDR_backplane_min;
+    n.discovery = DiscoveryState::Undiscovered;
+    return n;
+}
+
+// A node reading the descriptor keyed (type, len, crc), with that entry claimed and incomplete.
+DescriptorCacheEntry& reading(CoreEngine& engine, uint8_t id, uint8_t type, uint16_t len,
+                              uint16_t crc) {
+    Bk::put_reading(engine, id, type, len, crc);
+    DescriptorCacheEntry* e = Bk::claim(engine, type, len, crc);
+    REQUIRE(e != nullptr);
+    return *e;
+}
+
+} // namespace
+
+TEST_CASE("cost_estimate: an unmeasured target costs two worst-case frames plus T_turn_min and "
+          "T_gap at the rate in use; a measured one costs what was measured "
+          "[discovery][mutation]") {
+    Seam4 rig;
+    for (const uint32_t rate : {omgp::TRUNK_bit_rate, omgp::TRUNK_bit_rate_fallback}) {
+        Bk::wire_rate(rig.engine) = rate;
+        const uint64_t frame_us =
+            static_cast<uint64_t>(omgp::link::kMaxWire) * omgp::link::byte_time_us(rate);
+        REQUIRE(Bk::cost_estimate(rig.engine, 0) ==
+                2u * frame_us + omgp::TRUNK_T_turn_min_us + omgp::TRUNK_T_gap_us);
+    }
+    REQUIRE(Bk::cost_estimate(rig.engine, 777) == 777u);
+}
+
+TEST_CASE("admit_demand: after the first item, an estimate equal to what is left is admitted and "
+          "one more is not [discovery][mutation]") {
+    Seam4 rig;
+    REQUIRE(Bk::admit_demand(rig.engine, 1000000));
+    Bk::demand_issued(rig.engine) = true;
+    Bk::budget(rig.engine).remaining_us = 500;
+    REQUIRE(Bk::admit_demand(rig.engine, 500));
+    REQUIRE_FALSE(Bk::admit_demand(rig.engine, 501));
+}
+
+TEST_CASE("reconcile_slot_map: an emptied slot clears only its own exhaustion bit "
+          "[discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    BackplaneRecord& bp = Bk::backplane(engine, 0x01);
+    bp.exhaustion_reported[0] = 0b11;
+    bp.node_id_by_slot[0] = omgp::ADDR_module_min;
+    const uint8_t occupied[1] = {0b01};
+    engine.reconcile_slot_map(0x01, raw_slot_map(2, occupied, occupied, 1), 0);
+    REQUIRE(bp.exhaustion_reported[0] == 0b01);
+}
+
+TEST_CASE("run_superframe: the first call opens superframe 1 and ends it with the one enrolment "
+          "probe [discovery][mutation]") {
+    Seam4 rig;
+    CoreEngine& engine = rig.engine;
+    Transcript tr;
+    Bk::set_transcript(engine, Transcript::record, &tr);
+
+    engine.run_superframe(kT0);
+
+    REQUIRE(tr.lines.size() == 1u);
+    REQUIRE(tr.lines[0].opcode == omgp::OP_PING);
+    REQUIRE(tr.lines[0].dst == omgp::ADDR_backplane_min);
+    REQUIRE(Bk::tx_kind(engine) == 3);
+    REQUIRE(Bk::probe_issued(engine));
+    REQUIRE(Bk::phase_closed(engine));
+    REQUIRE(Bk::superframe_open(engine));
+    REQUIRE(Bk::wire_rate(engine) == omgp::TRUNK_bit_rate);
+    REQUIRE(rig.wire.rate == omgp::TRUNK_bit_rate);
+}
+
+TEST_CASE("run_superframe: a probe at a rate the wire is not using switches the wire and the "
+          "engine's record of it [discovery][mutation]") {
+    Seam4 rig;
+    CoreEngine& engine = rig.engine;
+    Bk::health(engine).set_bit_rate(omgp::TRUNK_bit_rate_fallback);
+
+    engine.run_superframe(kT0);
+
+    REQUIRE(Bk::tx_kind(engine) == 3);
+    REQUIRE_FALSE(rig.wire.sent.empty());
+    REQUIRE(rig.wire.rate == omgp::TRUNK_bit_rate_fallback);
+    REQUIRE(Bk::wire_rate(engine) == omgp::TRUNK_bit_rate_fallback);
+}
+
+TEST_CASE("open_superframe: runs the health tick, so a SUSPECT node that has waited out "
+          "TRUNK_offline_after_suspect_ms goes OFFLINE [discovery][mutation]") {
+    Seam4 rig;
+    CoreEngine& engine = rig.engine;
+    enrol(engine, 0x01, kT0);
+    enrol(engine, 0x02, kT0);
+    fail_to_suspect(engine, 0x01, kT0);
+    REQUIRE(Bk::health(engine).state(0x01) == HealthState::SUSPECT);
+    REQUIRE_FALSE(Bk::health(engine).bus_fault());
+
+    Bk::open_superframe(engine, kT0 + omgp::TRUNK_offline_after_suspect_ms * 1000ull + 1u);
+
+    REQUIRE(Bk::health(engine).state(0x01) == HealthState::OFFLINE);
+    REQUIRE(Bk::health(engine).state(0x02) == HealthState::ENROLLED);
+}
+
+TEST_CASE("status poll phase: the highest backplane address is polled, and GET_STATUS and "
+          "BP_SLOT_MAP alternate by superframe parity [discovery][mutation]") {
+    SECTION("ADDR_backplane_max is polled") {
+        Seam4 rig;
+        CoreEngine& engine = rig.engine;
+        Transcript tr;
+        Bk::set_transcript(engine, Transcript::record, &tr);
+        enrol(engine, omgp::ADDR_backplane_max, kT0);
+
+        engine.run_superframe(kT0);
+
+        REQUIRE(tr.lines.size() == 1u);
+        REQUIRE(tr.lines[0].dst == omgp::ADDR_backplane_max);
+        REQUIRE(tr.lines[0].opcode == omgp::OP_BP_SLOT_MAP);
+    }
+    SECTION("an odd superframe polls BP_SLOT_MAP") {
+        Seam4 rig;
+        CoreEngine& engine = rig.engine;
+        Transcript tr;
+        Bk::set_transcript(engine, Transcript::record, &tr);
+        enrol(engine, 0x01, kT0);
+
+        engine.run_superframe(kT0);
+
+        REQUIRE(Bk::superframe(engine) == 1u);
+        REQUIRE(tr.lines.size() == 1u);
+        REQUIRE(tr.lines[0].opcode == omgp::OP_BP_SLOT_MAP);
+        REQUIRE(Bk::tx_kind(engine) == 2);
+    }
+    SECTION("an even superframe polls GET_STATUS") {
+        Seam4 rig;
+        CoreEngine& engine = rig.engine;
+        Transcript tr;
+        Bk::set_transcript(engine, Transcript::record, &tr);
+        enrol(engine, 0x01, kT0);
+        Bk::superframe(engine) = 1;
+
+        engine.run_superframe(kT0);
+
+        REQUIRE(Bk::superframe(engine) == 2u);
+        REQUIRE(tr.lines.size() == 1u);
+        REQUIRE(tr.lines[0].opcode == omgp::OP_GET_STATUS);
+        REQUIRE(Bk::tx_kind(engine) == 1);
+    }
+}
+
+TEST_CASE("status poll phase: a poll that is issued is marked polled, so a SUSPECT backplane is "
+          "not due again straight away [discovery][mutation]") {
+    Seam4 rig;
+    CoreEngine& engine = rig.engine;
+    Transcript tr;
+    Bk::set_transcript(engine, Transcript::record, &tr);
+    enrol(engine, 0x01, kT0);
+    enrol(engine, 0x02, kT0);
+    fail_to_suspect(engine, 0x01, kT0);
+    const uint64_t now = kT0 + omgp::link::kSuspectPollPeriod_us + 1u;
+    REQUIRE(Bk::health(engine).poll_due(0x01, now));
+
+    engine.run_superframe(now);
+
+    REQUIRE(tr.lines.size() == 1u);
+    REQUIRE(tr.lines[0].dst == 0x01);
+    REQUIRE(Bk::health(engine).state(0x01) == HealthState::SUSPECT);
+    REQUIRE_FALSE(Bk::health(engine).poll_due(0x01, now));
+    REQUIRE(Bk::health(engine).poll_due(0x02, now));
+}
+
+TEST_CASE("descriptor read: an unrecognised record is skipped by length and the read still "
+          "completes with no MODEL_ID [discovery][mutation]") {
+    const uint8_t id = omgp::ADDR_module_min + 4u;
+    Descriptor desc;
+    desc.bytes = {0xF0, 2, 0xA5, 0xA5};
+    desc.crc = omgp::l3::descriptor_crc(desc.bytes.data(), desc.bytes.size());
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    DescriptorCacheEntry& entry = start_read(engine, id, desc, 0x09);
+    Bk::set_tx(engine, 5, omgp::ADDR_backplane_min, id, 0, 0);
+    ForgedAnswer answer;
+    answer.set_chunk(id, 0, desc.bytes.data(), static_cast<uint8_t>(desc.bytes.size()));
+
+    Bk::deliver_desc_chunk(engine, answer.ev, 10);
+
+    REQUIRE(entry.complete);
+    REQUIRE(entry.model_vendor == 0);
+    REQUIRE(entry.model_hw_rev == 0);
+    REQUIRE(entry.model_fw_rev == 0);
+    REQUIRE(Bk::node(engine, id).discovery == DiscoveryState::Discovered);
+    REQUIRE(Bk::node(engine, id).descriptor == &entry);
+}
+
+TEST_CASE("issue_demand: a queued chunk is issued for its own node at its own offset, and with a "
+          "bus fault declared nothing is issued [discovery][mutation]") {
+    SECTION("the queued chunk goes out") {
+        Seam4 rig;
+        CoreEngine& engine = rig.engine;
+        reading(engine, 0x10, 0x05, 100, 0x1111);
+        REQUIRE(Bk::push_desc(engine, 0x10, 17));
+
+        REQUIRE(Bk::issue_demand(engine, kT0));
+
+        REQUIRE(Bk::tx_kind(engine) == 5);
+        REQUIRE(Bk::tx_node(engine) == 0x10);
+        REQUIRE(Bk::tx_offset(engine) == 17u);
+        REQUIRE(Bk::desc_queue_size(engine) == 0u);
+        REQUIRE_FALSE(Bk::desc_held(engine));
+        REQUIRE(Bk::demand_issued(engine));
+    }
+    SECTION("a bus fault silences demand traffic") {
+        Seam4 rig;
+        CoreEngine& engine = rig.engine;
+        enrol(engine, 0x01, kT0);
+        fail_to_suspect(engine, 0x01, kT0);
+        REQUIRE(Bk::health(engine).bus_fault());
+        undiscovered(engine, 0x10);
+
+        REQUIRE_FALSE(Bk::issue_demand(engine, kT0));
+
+        REQUIRE(rig.wire.sent.empty());
+        REQUIRE(Bk::node(engine, 0x10).discovery == DiscoveryState::Undiscovered);
+    }
+}
+
+TEST_CASE("issue_demand: an item the budget cannot admit is held at the head and issued once it "
+          "can be [discovery][mutation]") {
+    Seam4 rig;
+    CoreEngine& engine = rig.engine;
+    reading(engine, 0x10, 0x05, 100, 0x1111).received = 7;
+    Bk::node(engine, 0x10).last_measured_duration_us = 500;
+    Bk::demand_issued(engine) = true;
+    Bk::budget(engine).remaining_us = 100;
+    REQUIRE(Bk::push_desc(engine, 0x10, 7));
+
+    REQUIRE_FALSE(Bk::issue_demand(engine, kT0));
+    REQUIRE(Bk::desc_held(engine));
+    REQUIRE(Bk::desc_queue_size(engine) == 0u);
+    REQUIRE(rig.wire.sent.empty());
+
+    Bk::budget(engine).remaining_us = 1000;
+    REQUIRE(Bk::issue_demand(engine, kT0));
+    REQUIRE_FALSE(Bk::desc_held(engine));
+    REQUIRE(Bk::tx_node(engine) == 0x10);
+    REQUIRE(Bk::tx_offset(engine) == 7u);
+    REQUIRE_FALSE(rig.wire.sent.empty());
+}
+
+TEST_CASE("resume_desc_read: no entry sends the node back to IDENTIFY, a complete entry "
+          "discovers it, and an incomplete one resumes at what it holds if the budget admits it "
+          "[discovery][mutation]") {
+    SECTION("no entry") {
+        Seam4 rig;
+        CoreEngine& engine = rig.engine;
+        Bk::put_reading(engine, 0x10, 0x05, 100, 0x1111);
+        REQUIRE(Bk::resume_desc_read(engine, 0x10, kT0) == 0);
+        REQUIRE(Bk::node(engine, 0x10).discovery == DiscoveryState::Identifying);
+        REQUIRE(rig.wire.sent.empty());
+    }
+    SECTION("a complete entry") {
+        Seam4 rig;
+        CoreEngine& engine = rig.engine;
+        DescriptorCacheEntry& entry = complete_entry(engine, 0, 0x05, 100, 0x1111);
+        Bk::put_reading(engine, 0x10, 0x05, 100, 0x1111);
+        REQUIRE(Bk::resume_desc_read(engine, 0x10, kT0) == 0);
+        REQUIRE(Bk::node(engine, 0x10).discovery == DiscoveryState::Discovered);
+        REQUIRE(Bk::node(engine, 0x10).descriptor == &entry);
+        REQUIRE(entry.refcount == 1u);
+        REQUIRE(rig.wire.sent.empty());
+    }
+    SECTION("an incomplete entry") {
+        Seam4 rig;
+        CoreEngine& engine = rig.engine;
+        reading(engine, 0x10, 0x05, 100, 0x1111).received = 17;
+        Bk::node(engine, 0x10).last_measured_duration_us = 500;
+        Bk::demand_issued(engine) = true;
+        Bk::budget(engine).remaining_us = 100;
+        REQUIRE(Bk::resume_desc_read(engine, 0x10, kT0) == 2);
+        REQUIRE(rig.wire.sent.empty());
+
+        Bk::budget(engine).remaining_us = 1000;
+        REQUIRE(Bk::resume_desc_read(engine, 0x10, kT0) == 1);
+        REQUIRE(Bk::tx_node(engine) == 0x10);
+        REQUIRE(Bk::tx_offset(engine) == 17u);
+        REQUIRE_FALSE(rig.wire.sent.empty());
+    }
+}
+
+TEST_CASE("issue_demand: the recovery sweep reaches ADDR_module_max, stops at the first node it "
+          "issues for, and carries on past one that issues nothing [discovery][mutation]") {
+    SECTION("the last id in the pool") {
+        Seam4 rig;
+        CoreEngine& engine = rig.engine;
+        reading(engine, omgp::ADDR_module_max, 0x05, 100, 0x1111);
+
+        REQUIRE(Bk::issue_demand(engine, kT0));
+        REQUIRE(Bk::tx_node(engine) == omgp::ADDR_module_max);
+        REQUIRE(Bk::tx_kind(engine) == 5);
+    }
+    SECTION("a node with no entry is passed over for the next") {
+        Seam4 rig;
+        CoreEngine& engine = rig.engine;
+        Bk::put_reading(engine, 0x10, 0x05, 100, 0x1111);
+        reading(engine, 0x11, 0x06, 100, 0x2222);
+
+        REQUIRE(Bk::issue_demand(engine, kT0));
+        REQUIRE(Bk::tx_node(engine) == 0x11);
+        REQUIRE(Bk::node(engine, 0x10).discovery == DiscoveryState::Identifying);
+    }
+}
+
+TEST_CASE("issue_demand: IDENTIFY and the stalled-read retry alternate by superframe parity, and "
+          "the second is tried when the first has nothing [discovery][mutation]") {
+    auto stalled_and_undiscovered = [](Seam4& rig, uint32_t superframe) {
+        CoreEngine& engine = rig.engine;
+        reading(engine, 0x10, 0x05, 100, 0x1111);
+        Bk::node(engine, 0x10).desc_stalled_superframe = 5;
+        undiscovered(engine, 0x11);
+        Bk::superframe(engine) = superframe;
+    };
+    SECTION("an odd superframe retries the stalled read first") {
+        Seam4 rig;
+        stalled_and_undiscovered(rig, 3);
+        REQUIRE(Bk::issue_demand(rig.engine, kT0));
+        REQUIRE(Bk::tx_kind(rig.engine) == 5);
+        REQUIRE(Bk::tx_node(rig.engine) == 0x10);
+    }
+    SECTION("an even superframe identifies first") {
+        Seam4 rig;
+        stalled_and_undiscovered(rig, 4);
+        REQUIRE(Bk::issue_demand(rig.engine, kT0));
+        REQUIRE(Bk::tx_kind(rig.engine) == 4);
+        REQUIRE(Bk::tx_node(rig.engine) == 0x11);
+    }
+    SECTION("an odd superframe with nothing stalled still identifies") {
+        Seam4 rig;
+        undiscovered(rig.engine, 0x11);
+        Bk::superframe(rig.engine) = 3;
+        REQUIRE(Bk::issue_demand(rig.engine, kT0));
+        REQUIRE(Bk::tx_kind(rig.engine) == 4);
+        REQUIRE(Bk::tx_node(rig.engine) == 0x11);
+    }
+    SECTION("an even superframe with nothing to identify still retries the stalled read") {
+        Seam4 rig;
+        reading(rig.engine, 0x10, 0x05, 100, 0x1111);
+        Bk::node(rig.engine, 0x10).desc_stalled_superframe = 5;
+        Bk::superframe(rig.engine) = 4;
+        REQUIRE(Bk::issue_demand(rig.engine, kT0));
+        REQUIRE(Bk::tx_kind(rig.engine) == 5);
+        REQUIRE(Bk::tx_node(rig.engine) == 0x10);
+    }
+}
+
+TEST_CASE("scan_identify: the scan starts at its cursor, wraps the id pool, and leaves the cursor "
+          "one past the id it issued for [discovery][mutation]") {
+    Seam4 rig;
+    CoreEngine& engine = rig.engine;
+    const uint8_t target = omgp::ADDR_module_min + 3u;
+    undiscovered(engine, target);
+    undiscovered(engine, omgp::ADDR_module_min + 85u);
+    Bk::identify_cursor(engine) = 100;
+
+    REQUIRE(Bk::scan_identify(engine, kT0) == 1);
+
+    REQUIRE(Bk::tx_node(engine) == target);
+    REQUIRE(Bk::tx_kind(engine) == 4);
+    REQUIRE(Bk::identify_cursor(engine) == 4u);
+}
+
+TEST_CASE("retry_stalled_desc: the retry starts at its cursor, wraps the id pool, leaves the "
+          "cursor one past the node it served, and passes over a node that has nothing to resume "
+          "[discovery][mutation]") {
+    SECTION("wrapping from a high cursor") {
+        Seam4 rig;
+        CoreEngine& engine = rig.engine;
+        const uint8_t target = omgp::ADDR_module_min + 3u;
+        reading(engine, target, 0x05, 100, 0x1111);
+        reading(engine, omgp::ADDR_module_min + 85u, 0x06, 100, 0x2222);
+        Bk::node(engine, target).desc_stalled_superframe = 5;
+        Bk::node(engine, omgp::ADDR_module_min + 85u).desc_stalled_superframe = 5;
+        Bk::desc_retry_cursor(engine) = 100;
+
+        REQUIRE(Bk::retry_stalled_desc(engine, kT0) == 1);
+
+        REQUIRE(Bk::tx_node(engine) == target);
+        REQUIRE(Bk::desc_retry_cursor(engine) == 4u);
+    }
+    SECTION("from the start of the pool") {
+        Seam4 rig;
+        CoreEngine& engine = rig.engine;
+        const uint8_t target = omgp::ADDR_module_min + 5u;
+        reading(engine, target, 0x05, 100, 0x1111);
+        Bk::node(engine, target).desc_stalled_superframe = 5;
+        Bk::desc_retry_cursor(engine) = 0;
+
+        REQUIRE(Bk::retry_stalled_desc(engine, kT0) == 1);
+
+        REQUIRE(Bk::tx_node(engine) == target);
+        REQUIRE(Bk::desc_retry_cursor(engine) == 6u);
+    }
+    SECTION("a stalled node with no entry does not end the pass") {
+        Seam4 rig;
+        CoreEngine& engine = rig.engine;
+        Bk::put_reading(engine, omgp::ADDR_module_min + 1u, 0x05, 100, 0x1111);
+        Bk::node(engine, omgp::ADDR_module_min + 1u).desc_stalled_superframe = 5;
+        const uint8_t second = omgp::ADDR_module_min + 2u;
+        reading(engine, second, 0x06, 100, 0x2222);
+        Bk::node(engine, second).desc_stalled_superframe = 5;
+
+        REQUIRE(Bk::retry_stalled_desc(engine, kT0) == 1);
+
+        REQUIRE(Bk::tx_node(engine) == second);
+        REQUIRE(Bk::node(engine, omgp::ADDR_module_min + 1u).discovery ==
+                DiscoveryState::Identifying);
+    }
+}
+
+TEST_CASE("begin_desc_chunk: the offset asked for is the offset recorded for the answer "
+          "[discovery][mutation]") {
+    Seam4 rig;
+    CoreEngine& engine = rig.engine;
+    undiscovered(engine, 0x10);
+    REQUIRE(Bk::begin_desc_chunk(engine, 0x10, 17, kT0));
+    REQUIRE(Bk::tx_offset(engine) == 17u);
+    REQUIRE(Bk::tx_node(engine) == 0x10);
+    REQUIRE(Bk::demand_issued(engine));
 }
