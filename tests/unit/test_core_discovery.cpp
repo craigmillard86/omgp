@@ -3236,6 +3236,16 @@ TEST_CASE("issue_demand: IDENTIFY and the stalled-read retry alternate by superf
         REQUIRE(Bk::tx_kind(rig.engine) == 4);
         REQUIRE(Bk::tx_node(rig.engine) == 0x11);
     }
+    SECTION("an even superframe's retry pass sends a stalled node with no entry back to "
+            "Identifying, and that is all it issues") {
+        Seam4 rig;
+        Bk::put_reading(rig.engine, 0x10, 0x05, 100, 0x1111);
+        Bk::node(rig.engine, 0x10).desc_stalled_superframe = 5;
+        Bk::superframe(rig.engine) = 4;
+        REQUIRE_FALSE(Bk::issue_demand(rig.engine, kT0));
+        REQUIRE(Bk::node(rig.engine, 0x10).discovery == DiscoveryState::Identifying);
+        REQUIRE(rig.wire.sent.empty());
+    }
     SECTION("an even superframe with nothing to identify still retries the stalled read") {
         Seam4 rig;
         reading(rig.engine, 0x10, 0x05, 100, 0x1111);
