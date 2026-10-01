@@ -58,6 +58,8 @@
 #include "l3/l3_header.hpp"
 #include "l3/l3_payload.hpp"
 #include "l3/l3_types.hpp"
+#include "link/byte_wire.hpp"
+#include "link/frame.hpp"
 #include "link/link_types.hpp"
 #include "mock_l3_node.hpp"
 #include "omgp_protocol.h"
@@ -188,6 +190,24 @@ struct CoreEngineTestSeam {
     }
     static uint64_t& tx_issued_us(CoreEngine& engine) {
         return engine.tx_issued_us_;
+    }
+    static uint8_t& tx_addr(CoreEngine& engine) {
+        return engine.tx_addr_;
+    }
+    // Puts the engine in the state begin_request() leaves it in for a transaction of `kind`
+    // (CoreEngine::TxKind is private: 0 None, 1 StatusPoll, 2 SlotMap, 3 Probe, 4 Identify, 5
+    // ReadDesc), so complete_request() can be driven for any of them without a wire.
+    static void set_tx(CoreEngine& engine, int kind, uint8_t addr, uint8_t node, uint16_t offset,
+                       uint64_t issued_us) {
+        engine.tx_kind_ = static_cast<CoreEngine::TxKind>(kind);
+        engine.tx_addr_ = addr;
+        engine.tx_node_ = node;
+        engine.tx_offset_ = offset;
+        engine.tx_issued_us_ = issued_us;
+    }
+    // 0 None, 1 StatusPoll, 2 SlotMap, 3 Probe, 4 Identify, 5 ReadDesc.
+    static int tx_kind(const CoreEngine& engine) {
+        return static_cast<int>(engine.tx_kind_);
     }
     static bool tx_idle(const CoreEngine& engine) {
         return engine.tx_kind_ == CoreEngine::TxKind::None;
@@ -2222,4 +2242,627 @@ TEST_CASE("descriptor read: the MODEL_ID record is found among the others and la
     REQUIRE(n.descriptor->model_vendor == 0x7A01);
     REQUIRE(n.descriptor->model_hw_rev == 0x0B02);
     REQUIRE(n.descriptor->model_fw_rev == 0x0C03);
+}
+
+// --- group 4a: begin_request / complete_request / on_identify / on_desc_chunk -------------------
+// The request path and the answer path, driven directly. Every answer below is a real, codec-
+// encoded response in the exact shape link::Master hands the engine; what is forged is only the
+// instant and the content, which MockL3Node cannot script (its answers echo the request).
+
+namespace {
+
+using omgp::core::DescChunkItem;
+
+struct ForgedAnswer {
+    uint8_t message[omgp::LIMIT_max_l3_message] = {};
+    omgp::link::MasterEvent ev{};
+    ForgedAnswer() = default;
+    ForgedAnswer(const ForgedAnswer&) = delete;
+    ForgedAnswer& operator=(const ForgedAnswer&) = delete;
+
+    void set(uint8_t opcode, uint8_t node_id, const uint8_t* payload, size_t payload_len) {
+        omgp::l3::Header hdr{};
+        hdr.opcode = opcode;
+        hdr.node_id = node_id;
+        hdr.seq = 0;
+        hdr.flags = omgp::FLAG_response;
+        hdr.payload_len = static_cast<uint8_t>(payload_len);
+        size_t written = 0;
+        REQUIRE(omgp::l3::encode_header(hdr, message, sizeof message, written) ==
+                omgp::l3::Status::Ok);
+        for (size_t i = 0; i < payload_len; ++i) {
+            message[written + i] = payload[i];
+        }
+        ev = omgp::link::MasterEvent{};
+        ev.kind = omgp::link::MasterEvent::Answered;
+        ev.response.payload = message;
+        ev.response.len = static_cast<uint8_t>(written + payload_len);
+    }
+    void set_chunk(uint8_t node_id, uint16_t offset, const uint8_t* bytes, uint8_t n) {
+        omgp::l3::ReadDescResp resp{};
+        resp.offset = offset;
+        resp.bytes.data = bytes;
+        resp.bytes.len = n;
+        uint8_t payload[omgp::LIMIT_max_l3_payload];
+        size_t len = 0;
+        REQUIRE(omgp::l3::encode_read_desc_resp(resp, payload, sizeof payload, len) ==
+                omgp::l3::Status::Ok);
+        set(omgp::OP_READ_DESC, node_id, payload, len);
+    }
+    void set_identify(uint8_t node_id, uint8_t module_type, uint16_t desc_len, uint16_t crc) {
+        omgp::l3::IdentifyResp resp{};
+        resp.major = 1;
+        resp.minor = 0;
+        resp.module_type = module_type;
+        resp.desc_len = desc_len;
+        resp.desc_crc = crc;
+        uint8_t payload[omgp::LIMIT_max_l3_payload];
+        size_t len = 0;
+        REQUIRE(omgp::l3::encode_identify_resp(resp, payload, sizeof payload, len) ==
+                omgp::l3::Status::Ok);
+        set(omgp::OP_IDENTIFY, node_id, payload, len);
+    }
+};
+
+// Records what the engine puts on the wire; never answers.
+struct CaptureWire final : omgp::link::ByteWire {
+    std::vector<uint8_t> sent;
+    uint32_t rate = omgp::TRUNK_bit_rate;
+    uint64_t transmit(const uint8_t* bytes, size_t n, uint64_t now_us) override {
+        sent.insert(sent.end(), bytes, bytes + n);
+        return now_us + n * omgp::link::byte_time_us(rate);
+    }
+    bool receive(uint8_t&, uint64_t&) override {
+        return false;
+    }
+    uint32_t bit_rate() const override {
+        return rate;
+    }
+    void set_bit_rate(uint32_t bps) override {
+        rate = bps;
+    }
+};
+
+struct Seam4 {
+    CaptureWire wire;
+    FakeClock clock;
+    CoreEngine engine;
+    Seam4() : engine(wire, clock, omgp::ADDR_host, CoreCallbacks{}) {}
+};
+
+// A cache entry claimed for `d` and a node reading it, as IDENTIFY leaves them.
+DescriptorCacheEntry& start_read(CoreEngine& engine, uint8_t node_id, const Descriptor& d,
+                                 uint8_t module_type) {
+    Bk::put_reading(engine, node_id, module_type, static_cast<uint16_t>(d.bytes.size()), d.crc);
+    DescriptorCacheEntry* e =
+        Bk::claim(engine, module_type, static_cast<uint16_t>(d.bytes.size()), d.crc);
+    REQUIRE(e != nullptr);
+    return *e;
+}
+
+bool next_queued(CoreEngine& engine, uint8_t& node_id, uint16_t& offset) {
+    DescChunkItem item{};
+    if (!Bk::pop_desc(engine, item)) {
+        return false;
+    }
+    node_id = item.node_id;
+    offset = item.offset;
+    return true;
+}
+
+} // namespace
+
+TEST_CASE("begin_request: the transmitted L3 message is the header and payload verbatim, up to "
+          "LIMIT_max_l3_payload, and a refusal leaves no trace [discovery][mutation]") {
+    Seam4 rig;
+    uint8_t payload[omgp::LIMIT_max_l3_payload];
+    for (size_t i = 0; i < sizeof payload; ++i) {
+        payload[i] = static_cast<uint8_t>(0x80u + i);
+    }
+    std::vector<TranscriptEntry> seen;
+    Bk::set_transcript(
+        rig.engine,
+        [](void* ctx, const TranscriptEntry& e) {
+            static_cast<std::vector<TranscriptEntry>*>(ctx)->push_back(e);
+        },
+        &seen);
+    Bk::l3_seq(rig.engine) = 7;
+    Bk::superframe(rig.engine) = 41;
+
+    REQUIRE(Bk::begin_request(rig.engine, omgp::ADDR_backplane_min, 0x2A, omgp::OP_READ_DESC,
+                              payload, sizeof payload, 1000));
+
+    REQUIRE(Bk::l3_seq(rig.engine) == 8u);
+    REQUIRE(Bk::tx_kind(rig.engine) == 5);
+    REQUIRE(Bk::tx_addr(rig.engine) == omgp::ADDR_backplane_min);
+    REQUIRE(Bk::tx_node(rig.engine) == 0x2A);
+    REQUIRE(Bk::tx_issued_us(rig.engine) == 1000u);
+    REQUIRE(seen.size() == 1u);
+    REQUIRE(seen[0].superframe == 41u);
+    REQUIRE(seen[0].opcode == omgp::OP_READ_DESC);
+    REQUIRE(seen[0].dst == omgp::ADDR_backplane_min);
+    REQUIRE(seen[0].node_id == 0x2A);
+
+    // What went on the wire, decoded by the real deframer and the real L3 decoder.
+    REQUIRE_FALSE(rig.wire.sent.empty());
+    omgp::link::Deframer deframer;
+    omgp::link::FrameView view{};
+    bool framed = false;
+    for (const uint8_t b : rig.wire.sent) {
+        framed = deframer.feed(b, view) || framed;
+    }
+    REQUIRE(framed);
+    REQUIRE(view.f.dst == omgp::ADDR_backplane_min);
+    REQUIRE(view.f.src == omgp::ADDR_host);
+    REQUIRE_FALSE(view.f.response);
+    omgp::l3::Header hdr{};
+    omgp::l3::Bytes body{};
+    REQUIRE(omgp::l3::decode_message(view.f.payload, view.f.len, hdr, body) ==
+            omgp::l3::Status::Ok);
+    REQUIRE(hdr.opcode == omgp::OP_READ_DESC);
+    REQUIRE(hdr.node_id == 0x2A);
+    REQUIRE(hdr.seq == 7u);
+    REQUIRE(hdr.flags == 0u); // a request: FLAG_response clear, no reserved bit
+    REQUIRE(hdr.payload_len == sizeof payload);
+    REQUIRE(body.len == sizeof payload);
+    for (size_t i = 0; i < sizeof payload; ++i) {
+        REQUIRE(body.data[i] == payload[i]);
+    }
+
+    // One byte past the L3 payload limit is refused by the encoder before anything is begun.
+    Seam4 other;
+    uint8_t too_long[omgp::LIMIT_max_l3_payload + 1u] = {};
+    Bk::l3_seq(other.engine) = 3;
+    REQUIRE_FALSE(Bk::begin_request(other.engine, omgp::ADDR_backplane_min, 0x10,
+                                    omgp::OP_READ_DESC, too_long, sizeof too_long, 5));
+    REQUIRE(Bk::l3_seq(other.engine) == 3u);
+    REQUIRE(Bk::tx_idle(other.engine));
+    REQUIRE(other.wire.sent.empty());
+}
+
+TEST_CASE("begin_request: a request the link refuses (transaction open) is not recorded as issued "
+          "[discovery][mutation]") {
+    Seam4 rig;
+    uint8_t payload[3] = {1, 2, 3};
+    REQUIRE(Bk::begin_request(rig.engine, omgp::ADDR_backplane_min, 0x10, omgp::OP_READ_DESC,
+                              payload, sizeof payload, 10));
+    REQUIRE(Bk::l3_seq(rig.engine) == 1u);
+    // link::Master runs one transaction at a time (trunk §3): a second begin() is refused.
+    REQUIRE_FALSE(
+        Bk::begin_request(rig.engine, 0x02, 0x11, omgp::OP_READ_DESC, payload, sizeof payload, 20));
+    REQUIRE(Bk::l3_seq(rig.engine) == 1u);
+    REQUIRE(Bk::tx_addr(rig.engine) == omgp::ADDR_backplane_min);
+    REQUIRE(Bk::tx_node(rig.engine) == 0x10);
+    REQUIRE(Bk::tx_issued_us(rig.engine) == 10u);
+}
+
+TEST_CASE("complete_request: with nothing outstanding a terminal event changes nothing "
+          "[discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    Bk::budget(engine).remaining_us = 1000;
+    Bk::backplane(engine, omgp::ADDR_backplane_min).last_measured_duration_us = 999;
+    Bk::set_tx(engine, 0, omgp::ADDR_backplane_min, omgp::ADDR_module_min, 0, 100);
+    ForgedAnswer answer;
+    answer.set(omgp::OP_IDENTIFY, omgp::ADDR_module_min, nullptr, 0);
+
+    Bk::complete_request(engine, answer.ev, 400);
+
+    REQUIRE(Bk::budget(engine).remaining_us == 1000u);
+    REQUIRE(Bk::backplane(engine, omgp::ADDR_backplane_min).last_measured_duration_us == 999u);
+    REQUIRE_FALSE(engine.backplane_enrolled(omgp::ADDR_backplane_min));
+    REQUIRE(Bk::tx_idle(engine));
+}
+
+TEST_CASE("complete_request: the budget is debited by the measured duration, floored at zero, and "
+          "a rewound clock debits nothing [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    ForgedAnswer answer;
+    answer.set(omgp::OP_GET_STATUS, omgp::ADDR_backplane_min, nullptr, 0);
+
+    struct Case {
+        uint64_t remaining, issued, now, want_remaining, want_duration;
+    };
+    const Case cases[] = {
+        {1000, 100, 400, 700, 300}, // ordinary debit
+        {1000, 400, 400, 1000, 0},  // zero elapsed
+        {300, 100, 400, 0, 300},    // duration == remaining
+        {200, 100, 400, 0, 300},    // duration > remaining: floored, not wrapped
+        {1000, 400, 100, 1000, 0},  // clock behind the issue instant: nothing debited
+    };
+    for (const Case& c : cases) {
+        Bk::budget(engine).remaining_us = c.remaining;
+        Bk::set_tx(engine, 1, omgp::ADDR_backplane_min, 0, 0, c.issued);
+        Bk::backplane(engine, omgp::ADDR_backplane_min).last_measured_duration_us = 12345;
+        Bk::complete_request(engine, answer.ev, c.now);
+        INFO("remaining=" << c.remaining << " issued=" << c.issued << " now=" << c.now);
+        REQUIRE(Bk::budget(engine).remaining_us == c.want_remaining);
+        REQUIRE(Bk::backplane(engine, omgp::ADDR_backplane_min).last_measured_duration_us ==
+                c.want_duration);
+        REQUIRE(Bk::tx_idle(engine));
+    }
+}
+
+TEST_CASE("complete_request: the measured duration lands on the backplane and on the node, each "
+          "only when the id names one [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    ForgedAnswer answer;
+    answer.set(omgp::OP_ERROR, omgp::ADDR_module_min, nullptr, 0);
+
+    Bk::budget(engine).remaining_us = 5000;
+    Bk::set_tx(engine, 3, omgp::ADDR_backplane_min, omgp::ADDR_module_min, 0, 100);
+    Bk::complete_request(engine, answer.ev, 350);
+    REQUIRE(Bk::backplane(engine, omgp::ADDR_backplane_min).last_measured_duration_us == 250u);
+    REQUIRE(Bk::node(engine, omgp::ADDR_module_min).last_measured_duration_us == 250u);
+
+    // A transaction addressed to the host's own id records on neither table.
+    Bk::set_tx(engine, 3, omgp::ADDR_host, 0, 0, 100);
+    Bk::backplane(engine, omgp::ADDR_backplane_min).last_measured_duration_us = 7;
+    Bk::node(engine, omgp::ADDR_module_min).last_measured_duration_us = 8;
+    Bk::complete_request(engine, answer.ev, 900);
+    REQUIRE(Bk::backplane(engine, omgp::ADDR_backplane_min).last_measured_duration_us == 7u);
+    REQUIRE(Bk::node(engine, omgp::ADDR_module_min).last_measured_duration_us == 8u);
+}
+
+TEST_CASE("complete_request: an answer enrols the trunk address with the health tracker and a "
+          "timeout does not [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    ForgedAnswer answer;
+    answer.set(omgp::OP_ERROR, omgp::ADDR_module_min, nullptr, 0);
+    omgp::link::MasterEvent timeout{};
+    timeout.kind = omgp::link::MasterEvent::Failed;
+
+    Bk::set_tx(engine, 3, 0x02, 0, 0, 0);
+    Bk::complete_request(engine, timeout, 50);
+    REQUIRE_FALSE(engine.backplane_enrolled(0x02));
+
+    Bk::set_tx(engine, 3, 0x02, 0, 0, 0);
+    Bk::complete_request(engine, answer.ev, 100);
+    REQUIRE(engine.backplane_enrolled(0x02));
+}
+
+TEST_CASE("complete_request: an unanswered READ_DESC spends the node's attempt and re-queues the "
+          "same chunk; no other transaction does [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    omgp::link::MasterEvent timeout{};
+    timeout.kind = omgp::link::MasterEvent::Failed;
+    Bk::superframe(engine) = 17;
+    Bk::put_reading(engine, omgp::ADDR_module_min, 0x01, 100, 0x1111);
+    Bk::node(engine, omgp::ADDR_module_min).desc_stalled_superframe = 0;
+
+    // Identify (4) unanswered: re-queues nothing, stalls nothing.
+    Bk::set_tx(engine, 4, omgp::ADDR_backplane_min, omgp::ADDR_module_min, 33, 0);
+    Bk::complete_request(engine, timeout, 10);
+    REQUIRE(Bk::desc_queue_size(engine) == 0u);
+    REQUIRE(Bk::node(engine, omgp::ADDR_module_min).desc_stalled_superframe == 0u);
+
+    // ReadDesc (5) unanswered, for an id that names no node: nothing to stall or re-queue.
+    Bk::set_tx(engine, 5, omgp::ADDR_backplane_min, 0, 33, 0);
+    Bk::complete_request(engine, timeout, 10);
+    REQUIRE(Bk::desc_queue_size(engine) == 0u);
+
+    // ReadDesc unanswered, for a node: stalled this superframe, same offset re-queued.
+    Bk::set_tx(engine, 5, omgp::ADDR_backplane_min, omgp::ADDR_module_min, 33, 0);
+    Bk::complete_request(engine, timeout, 10);
+    REQUIRE(Bk::node(engine, omgp::ADDR_module_min).desc_stalled_superframe == 17u);
+    uint8_t id = 0;
+    uint16_t offset = 0;
+    REQUIRE(next_queued(engine, id, offset));
+    REQUIRE(id == omgp::ADDR_module_min);
+    REQUIRE(offset == 33u);
+    REQUIRE_FALSE(next_queued(engine, id, offset));
+}
+
+TEST_CASE("complete_request: an answer is routed to the handler for what was asked "
+          "[discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    Descriptor desc = make_descriptor(0x1, 0x2, 0x3, 0x01, 100);
+    Bk::put_reading(engine, omgp::ADDR_module_min, 0, 0, 0);
+    Bk::node(engine, omgp::ADDR_module_min).discovery = DiscoveryState::Identifying;
+    ForgedAnswer identify;
+    identify.set_identify(omgp::ADDR_module_min, 0x01, static_cast<uint16_t>(desc.bytes.size()),
+                          desc.crc);
+    Bk::set_tx(engine, 4, omgp::ADDR_backplane_min, omgp::ADDR_module_min, 0, 0);
+    Bk::complete_request(engine, identify.ev, 10);
+    REQUIRE(Bk::node(engine, omgp::ADDR_module_min).module_type == 0x01);
+    REQUIRE(Bk::node(engine, omgp::ADDR_module_min).discovery == DiscoveryState::ReadingDescriptor);
+
+    ForgedAnswer chunk;
+    chunk.set_chunk(omgp::ADDR_module_min, 0, desc.bytes.data(), 40);
+    Bk::set_tx(engine, 5, omgp::ADDR_backplane_min, omgp::ADDR_module_min, 0, 0);
+    Bk::complete_request(engine, chunk.ev, 20);
+    const DescriptorCacheEntry* e =
+        Bk::find(engine, 0x01, static_cast<uint16_t>(desc.bytes.size()), desc.crc);
+    REQUIRE(e != nullptr);
+    REQUIRE(e->received == 40u);
+}
+
+TEST_CASE("on_identify: what an IdentifyResp teaches the node, and what each refusal leaves "
+          "alone [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    const uint8_t id = omgp::ADDR_module_min;
+    ForgedAnswer answer;
+    auto fresh_node = [&] {
+        Bk::put_reading(engine, id, 0, 0, 0);
+        NodeRecord& n = Bk::node(engine, id);
+        n.discovery = DiscoveryState::Identifying;
+        n.desc_stalled_superframe = 9;
+        Bk::set_tx(engine, 4, omgp::ADDR_backplane_min, id, 0, 0);
+        return &n;
+    };
+
+    SECTION("a node that is not in use ignores the answer") {
+        NodeRecord* n = fresh_node();
+        n->in_use = false;
+        answer.set_identify(id, 0x02, 50, 0xAAAA);
+        Bk::on_identify(engine, answer.ev, 10);
+        REQUIRE(n->module_type == 0u);
+        REQUIRE(n->desc_len == 0u);
+        REQUIRE(Bk::find(engine, 0x02, 50, 0xAAAA) == nullptr);
+    }
+    SECTION("an undecodable answer and a wrong-opcode answer teach nothing") {
+        NodeRecord* n = fresh_node();
+        answer.set(omgp::OP_ERROR, id, nullptr, 0);
+        Bk::on_identify(engine, answer.ev, 10);
+        REQUIRE(n->discovery == DiscoveryState::Identifying);
+        REQUIRE(n->module_type == 0u);
+        const uint8_t one_byte[1] = {1};
+        answer.set(omgp::OP_IDENTIFY, id, one_byte, sizeof one_byte); // too short for IdentifyResp
+        Bk::on_identify(engine, answer.ev, 10);
+        REQUIRE(n->discovery == DiscoveryState::Identifying);
+        REQUIRE(n->module_type == 0u);
+        REQUIRE(n->desc_stalled_superframe == 9u);
+        omgp::link::MasterEvent short_frame{};
+        short_frame.kind = omgp::link::MasterEvent::Answered;
+        short_frame.response.payload = answer.message;
+        short_frame.response.len = 2; // shorter than an L3 header
+        Bk::on_identify(engine, short_frame, 10);
+        REQUIRE(n->discovery == DiscoveryState::Identifying);
+    }
+    SECTION("a first sight claims an entry, queues the first chunk and un-stalls the node") {
+        NodeRecord* n = fresh_node();
+        answer.set_identify(id, 0x03, 100, 0xBBBB);
+        Bk::on_identify(engine, answer.ev, 10);
+        REQUIRE(n->module_type == 0x03);
+        REQUIRE(n->desc_len == 100u);
+        REQUIRE(n->desc_crc == 0xBBBB);
+        REQUIRE(n->discovery == DiscoveryState::ReadingDescriptor);
+        REQUIRE(n->desc_stalled_superframe == 0u);
+        DescriptorCacheEntry* e = Bk::find(engine, 0x03, 100, 0xBBBB);
+        REQUIRE(e != nullptr);
+        REQUIRE_FALSE(e->complete);
+        uint8_t qid = 0;
+        uint16_t qoff = 99;
+        REQUIRE(next_queued(engine, qid, qoff));
+        REQUIRE(qid == id);
+        REQUIRE(qoff == 0u);
+        REQUIRE_FALSE(next_queued(engine, qid, qoff));
+    }
+    SECTION("a complete cache hit goes straight to Discovered with no read") {
+        NodeRecord* n = fresh_node();
+        DescriptorCacheEntry& e = complete_entry(engine, 3, 0x04, 120, 0xCCCC);
+        answer.set_identify(id, 0x04, 120, 0xCCCC);
+        Bk::on_identify(engine, answer.ev, 10);
+        REQUIRE(n->discovery == DiscoveryState::Discovered);
+        REQUIRE(n->descriptor == &e);
+        REQUIRE(Bk::desc_queue_size(engine) == 0u);
+    }
+    SECTION("an entry another node is still reading is waited on, not read twice") {
+        NodeRecord* n = fresh_node();
+        DescriptorCacheEntry& e = complete_entry(engine, 3, 0x05, 120, 0xDDDD);
+        e.complete = false;
+        answer.set_identify(id, 0x05, 120, 0xDDDD);
+        Bk::on_identify(engine, answer.ev, 10);
+        REQUIRE(n->discovery == DiscoveryState::ReadingDescriptor);
+        REQUIRE(n->desc_stalled_superframe == 0u);
+        REQUIRE(Bk::desc_queue_size(engine) == 0u);
+    }
+    SECTION("with no cache entry to claim the node falls back to Identifying") {
+        NodeRecord* n = fresh_node();
+        for (size_t i = 0; i < Bk::cache_entries(engine); ++i) {
+            complete_entry(engine, i, static_cast<uint8_t>(0x60 + i), 10, 0);
+            Bk::entry_mut(engine, i).refcount = 1;
+        }
+        answer.set_identify(id, 0x06, 120, 0xEEEE);
+        Bk::on_identify(engine, answer.ev, 10);
+        REQUIRE(n->discovery == DiscoveryState::Identifying);
+        REQUIRE(n->module_type == 0x06);
+        REQUIRE(Bk::desc_queue_size(engine) == 0u);
+    }
+    SECTION("an empty descriptor is complete on arrival") {
+        NodeRecord* n = fresh_node();
+        answer.set_identify(id, 0x07, 0, omgp::l3::descriptor_crc(nullptr, 0));
+        Bk::on_identify(engine, answer.ev, 10);
+        REQUIRE(n->discovery == DiscoveryState::Discovered);
+        REQUIRE(n->descriptor != nullptr);
+        REQUIRE(n->descriptor->complete);
+        REQUIRE(Bk::desc_queue_size(engine) == 0u);
+    }
+    SECTION("a full chunk ring returns the claimed entry and the node to Identifying") {
+        NodeRecord* n = fresh_node();
+        while (Bk::push_desc(engine, 0x7F, 0)) {
+        }
+        answer.set_identify(id, 0x08, 100, 0x1234);
+        Bk::on_identify(engine, answer.ev, 10);
+        REQUIRE(n->discovery == DiscoveryState::Identifying);
+        REQUIRE(Bk::find(engine, 0x08, 100, 0x1234) == nullptr);
+    }
+}
+
+TEST_CASE("on_desc_chunk: refusals leave the reassembly alone and spend the node's attempt "
+          "[discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    Descriptor desc = make_descriptor(0x11, 0x22, 0x33, 0x09, 100);
+    const uint8_t id = omgp::ADDR_module_min;
+    DescriptorCacheEntry& entry = start_read(engine, id, desc, 0x09);
+    Bk::superframe(engine) = 23;
+    NodeRecord& node = Bk::node(engine, id);
+    ForgedAnswer answer;
+    uint8_t qid = 0;
+    uint16_t qoff = 0;
+
+    // The node is not in use: ignored whole.
+    Bk::set_tx(engine, 5, omgp::ADDR_backplane_min, id, 0, 0);
+    node.in_use = false;
+    answer.set_chunk(id, 0, desc.bytes.data(), kDescChunkMax);
+    Bk::deliver_desc_chunk(engine, answer.ev, 10);
+    node.in_use = true;
+    REQUIRE(entry.received == 0u);
+
+    // An ERROR answer: same offset re-queued, attempt spent, nothing written.
+    Bk::set_tx(engine, 5, omgp::ADDR_backplane_min, id, 17, 0);
+    answer.set(omgp::OP_ERROR, id, nullptr, 0);
+    Bk::deliver_desc_chunk(engine, answer.ev, 10);
+    REQUIRE(node.desc_stalled_superframe == 23u);
+    REQUIRE(next_queued(engine, qid, qoff));
+    REQUIRE(qid == id);
+    REQUIRE(qoff == 17u);
+    REQUIRE(entry.received == 0u);
+
+    // A READ_DESC answer whose body is too short for its own head: spent, but not re-queued.
+    node.desc_stalled_superframe = 0;
+    const uint8_t stub[2] = {0, 0};
+    answer.set(omgp::OP_READ_DESC, id, stub, sizeof stub);
+    Bk::deliver_desc_chunk(engine, answer.ev, 10);
+    REQUIRE(node.desc_stalled_superframe == 23u);
+    REQUIRE(Bk::desc_queue_size(engine) == 0u);
+
+    // An undecodable L3 frame: re-queued as above.
+    node.desc_stalled_superframe = 0;
+    omgp::link::MasterEvent shortf{};
+    shortf.kind = omgp::link::MasterEvent::Answered;
+    shortf.response.payload = answer.message;
+    shortf.response.len = 2;
+    Bk::deliver_desc_chunk(engine, shortf, 10);
+    REQUIRE(node.desc_stalled_superframe == 23u);
+    REQUIRE(next_queued(engine, qid, qoff));
+
+    // An offset that does not continue the reassembly: re-queued at the entry's own cursor.
+    entry.received = 10;
+    node.desc_stalled_superframe = 0;
+    answer.set_chunk(id, 11, desc.bytes.data(), 8);
+    Bk::deliver_desc_chunk(engine, answer.ev, 10);
+    REQUIRE(node.desc_stalled_superframe == 23u);
+    REQUIRE(next_queued(engine, qid, qoff));
+    REQUIRE(qoff == 10u);
+    REQUIRE(entry.received == 10u);
+
+    // A completed entry (reclaimed or finished while in flight) is not written to.
+    entry.complete = true;
+    answer.set_chunk(id, 10, desc.bytes.data() + 10, 8);
+    Bk::deliver_desc_chunk(engine, answer.ev, 10);
+    REQUIRE(entry.received == 10u);
+}
+
+TEST_CASE("on_desc_chunk: a chunk lands at the cursor, progress un-stalls the node, and an "
+          "over-long or empty chunk abandons the read [discovery][mutation]") {
+    Rig rig;
+    CoreEngine& engine = rig.engine();
+    Descriptor desc = make_descriptor(0x11, 0x22, 0x33, 0x09, 100);
+    const uint8_t id = omgp::ADDR_module_min;
+    DescriptorCacheEntry& entry = start_read(engine, id, desc, 0x09);
+    NodeRecord& node = Bk::node(engine, id);
+    node.desc_stalled_superframe = 9;
+    Bk::set_tx(engine, 5, omgp::ADDR_backplane_min, id, 0, 0);
+    ForgedAnswer answer;
+
+    answer.set_chunk(id, 0, desc.bytes.data(), kDescChunkMax);
+    Bk::deliver_desc_chunk(engine, answer.ev, 10);
+    REQUIRE(entry.received == kDescChunkMax);
+    REQUIRE(node.desc_stalled_superframe == 0u);
+    for (size_t i = 0; i < kDescChunkMax; ++i) {
+        REQUIRE(entry.blob[i] == desc.bytes[i]);
+    }
+    REQUIRE(entry.blob[kDescChunkMax] == 0u); // nothing written past the chunk
+    uint8_t qid = 0;
+    uint16_t qoff = 0;
+    REQUIRE(next_queued(engine, qid, qoff));
+    REQUIRE(qid == id);
+    REQUIRE(qoff == kDescChunkMax);
+
+    // An empty chunk short of the advertised length abandons the read.
+    answer.set_chunk(id, kDescChunkMax, desc.bytes.data(), 0);
+    Bk::deliver_desc_chunk(engine, answer.ev, 10);
+    REQUIRE_FALSE(entry.in_use);
+    REQUIRE(node.discovery == DiscoveryState::Identifying);
+}
+
+TEST_CASE("on_desc_chunk: more bytes than the advertised length has room for abandons the read, "
+          "exactly the room completes it [discovery][mutation]") {
+    Descriptor desc = make_descriptor(0x11, 0x22, 0x33, 0x0A, 100);
+    const uint8_t id = omgp::ADDR_module_min;
+    const uint16_t first = kDescChunkMax;
+    const uint8_t rest = static_cast<uint8_t>(desc.bytes.size() - first);
+
+    SECTION("one byte more than the room") {
+        Rig rig;
+        CoreEngine& engine = rig.engine();
+        DescriptorCacheEntry& entry = start_read(engine, id, desc, 0x0A);
+        entry.received = first;
+        Bk::set_tx(engine, 5, omgp::ADDR_backplane_min, id, first, 0);
+        std::vector<uint8_t> over(desc.bytes.begin() + first, desc.bytes.end());
+        over.push_back(0xEE);
+        ForgedAnswer answer;
+        answer.set_chunk(id, first, over.data(), static_cast<uint8_t>(over.size()));
+        Bk::deliver_desc_chunk(engine, answer.ev, 10);
+        REQUIRE_FALSE(entry.in_use);
+        REQUIRE(Bk::node(engine, id).discovery == DiscoveryState::Identifying);
+    }
+    SECTION("exactly the room, with the right CRC, completes and attaches") {
+        Rig rig;
+        CoreEngine& engine = rig.engine();
+        DescriptorCacheEntry& entry = start_read(engine, id, desc, 0x0A);
+        for (uint16_t i = 0; i < first; ++i) {
+            entry.blob[i] = desc.bytes[i];
+        }
+        entry.received = first;
+        Bk::set_tx(engine, 5, omgp::ADDR_backplane_min, id, first, 0);
+        ForgedAnswer answer;
+        answer.set_chunk(id, first, desc.bytes.data() + first, rest);
+        Bk::deliver_desc_chunk(engine, answer.ev, 10);
+        REQUIRE(entry.complete);
+        REQUIRE(entry.model_vendor == 0x11);
+        REQUIRE(entry.model_hw_rev == 0x22);
+        REQUIRE(entry.model_fw_rev == 0x33);
+        REQUIRE(Bk::node(engine, id).discovery == DiscoveryState::Discovered);
+        REQUIRE(Bk::node(engine, id).descriptor == &entry);
+    }
+    SECTION("the full length with a wrong CRC is discarded") {
+        Rig rig;
+        CoreEngine& engine = rig.engine();
+        DescriptorCacheEntry& entry = start_read(engine, id, desc, 0x0A);
+        for (uint16_t i = 0; i < first; ++i) {
+            entry.blob[i] = desc.bytes[i];
+        }
+        entry.received = first;
+        Bk::set_tx(engine, 5, omgp::ADDR_backplane_min, id, first, 0);
+        std::vector<uint8_t> bad(desc.bytes.begin() + first, desc.bytes.end());
+        bad[0] ^= 0xFF;
+        ForgedAnswer answer;
+        answer.set_chunk(id, first, bad.data(), rest);
+        Bk::deliver_desc_chunk(engine, answer.ev, 10);
+        REQUIRE_FALSE(entry.complete);
+        REQUIRE_FALSE(entry.in_use);
+        REQUIRE(Bk::node(engine, id).discovery == DiscoveryState::Identifying);
+    }
+    SECTION("a full chunk ring abandons a read that has more to ask for") {
+        Rig rig;
+        CoreEngine& engine = rig.engine();
+        DescriptorCacheEntry& entry = start_read(engine, id, desc, 0x0A);
+        Bk::set_tx(engine, 5, omgp::ADDR_backplane_min, id, 0, 0);
+        while (Bk::push_desc(engine, 0x7F, 0)) {
+        }
+        ForgedAnswer answer;
+        answer.set_chunk(id, 0, desc.bytes.data(), kDescChunkMax);
+        Bk::deliver_desc_chunk(engine, answer.ev, 10);
+        REQUIRE_FALSE(entry.in_use);
+        REQUIRE(Bk::node(engine, id).discovery == DiscoveryState::Identifying);
+    }
 }
