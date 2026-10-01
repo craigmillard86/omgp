@@ -270,10 +270,31 @@ rm -rf "$BUILD" && mkdir -p "$BUILD"
 # when present (CI installs it); the default generator otherwise.
 GEN=()
 command -v ninja >/dev/null 2>&1 && GEN=(-G Ninja)
-cmake -S . -B "$BUILD" "${GEN[@]}" -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug -DOMGP_SANITIZERS=OFF \
-  -DCMAKE_CXX_FLAGS="-fpass-plugin=$PLUGIN -g -grecord-command-line -O0" >/dev/null
+# QUIET ON SUCCESS, LOUD ON FAILURE — and the build below is why the distinction is written out
+# rather than left to a plain `>/dev/null`. Ninja writes the compiler's diagnostics AND its own
+# "ninja: build stopped" line to STDOUT, not stderr (ninja 1.11 StatusPrinter::Info), so
+# discarding stdout discarded the whole of a failed build's evidence: CI run 36453322675 printed
+# the scope, the oracle and the gate line and then exited 1 with nothing else, which names
+# neither the failing file nor whether a compiler ever ran. Both logs are kept beside the build
+# tree, and the failing one is echoed here, because a gate that fails with no evidence is the
+# same blind spot the rest of this script refuses everywhere else.
+CONFIGURE_LOG="$BUILD/configure.log"
+BUILD_LOG="$BUILD/build.log"
+if ! cmake -S . -B "$BUILD" "${GEN[@]}" -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug \
+     -DOMGP_SANITIZERS=OFF -DCMAKE_CXX_FLAGS="-fpass-plugin=$PLUGIN -g -grecord-command-line -O0" \
+     > "$CONFIGURE_LOG" 2>&1; then
+  echo "mutation: instrumented cmake configure failed — failing (last 80 lines of $CONFIGURE_LOG):" >&2
+  tail -80 "$CONFIGURE_LOG" >&2
+  exit 1
+fi
 # shellcheck disable=SC2086
-cmake --build "$BUILD" --parallel --target $ORACLE >/dev/null
+if ! cmake --build "$BUILD" --parallel --target $ORACLE > "$BUILD_LOG" 2>&1; then
+  # The tail is the error: both generators stop at the first failing edge by default, so the
+  # last lines of the log are the diagnostic that stopped it, not an unrelated later one.
+  echo "mutation: instrumented build failed — failing (last 80 lines of $BUILD_LOG):" >&2
+  tail -80 "$BUILD_LOG" >&2
+  exit 1
+fi
 # Library objects only: header-only code (constexpr helpers) is instrumented inside the test
 # TUs and shows up in the report, not in this count — the count is a sanity signal, the gate
 # is mutate_report.py's blind-spot rule.

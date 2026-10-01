@@ -11,14 +11,14 @@
 add_library(omgp_core STATIC
   core_engine.cpp
 )
-# omgp_link, not omgp_l3: core_engine.cpp needs link::Master and link::HealthTracker, and no
-# core/ source includes an l3/ header yet. omgp_l3 joins this line when the first one does
-# (T020-T022, the IDENTIFY/READ_DESC codec users) — declaring it here now would be a dependency
-# nothing in this target uses. Either is permitted by contracts/core-cpp.md's surface; core/ may
-# depend on both l3/ and link/ because it is the layer above both, and that is not a channel
-# between them (CLAUDE.md "Architecture invariants": L2 stays opaque to L3 because omgp_link
-# itself never links omgp_l3 — see link/CMakeLists.txt).
-target_link_libraries(omgp_core PUBLIC omgp_link)
+# Both, since T020-T022 (#691-#693): core_engine.cpp needs link::Master and link::HealthTracker,
+# and now also l3/'s header, payload and descriptor codecs for IDENTIFY, READ_DESC, BP_SLOT_MAP
+# and the descriptor CRC — and core/core_engine.hpp includes l3/l3_types.hpp for
+# reconcile_slot_map()'s parameter, so omgp_l3 is PUBLIC rather than PRIVATE. Both are permitted
+# by contracts/core-cpp.md's surface; core/ may depend on l3/ and link/ alike because it is the
+# layer above both, and that is not a channel between them (CLAUDE.md "Architecture invariants":
+# L2 stays opaque to L3 because omgp_link itself never links omgp_l3 — see link/CMakeLists.txt).
+target_link_libraries(omgp_core PUBLIC omgp_link omgp_l3)
 target_include_directories(omgp_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_SOURCE_DIR}

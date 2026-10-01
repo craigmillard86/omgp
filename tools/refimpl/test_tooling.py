@@ -955,6 +955,56 @@ def test_mutate_attestation_is_handed_to_the_reporter_end_to_end(tmp_path):
     assert "malformed mutant-ok label(s) in the attested dir(s) — reported, NOT gated" in out, out
 
 
+# --- tools/mutate.sh: an instrumented build that FAILS must say so, with the evidence ----------
+# Observed on CI run 36453322675 (PR #871, this branch): the "Diff-scoped mutation" step printed
+# its scope, its oracle and its gate line, then exited 1 four and a half minutes later having
+# printed NOTHING else — no survivor, no report, no diagnostic. The instrumented build had
+# failed, and ninja writes both the compiler's diagnostics and its own "build stopped" line to
+# STDOUT, which the script discarded. A gate that fails with no evidence is the blind spot the
+# rest of this script names everywhere else, so it is one here too.
+_CMAKE_SHIM_BUILD_FAILS = r"""#!/usr/bin/env bash
+# Stand-in for cmake whose --build fails the way a real ninja build does: every word of it on
+# STDOUT, exit status 1. Configuring still succeeds, so the failure under test is the build's.
+if [ "$1" = "--build" ]; then
+  echo "[3/9] Building CXX object CMakeFiles/test_link_master.dir/x.cpp.o"
+  echo "FAILED: CMakeFiles/test_link_master.dir/x.cpp.o"
+  echo "tests/unit/x.cpp:7:5: error: zz_shim_diagnostic"
+  echo "ninja: build stopped: subcommand failed."
+  exit 1
+fi
+exit 0
+"""
+
+
+def test_mutate_reports_the_instrumented_builds_own_output_when_the_build_fails(tmp_path):
+    """A failed instrumented build must fail the run WITH the compiler's own output, not as a
+    bare exit code. Restore the plain `>/dev/null` on either cmake call and this case fails on
+    the evidence half (`zz_shim_diagnostic`) while still exiting 1 — which is exactly the
+    indistinguishable state CI was left in."""
+    clone = shared_clone(tmp_path, "link/zz_probe.cpp", "int zz_probe() { return 1; }\n")
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "cmake").write_text(_CMAKE_SHIM_BUILD_FAILS)
+    (shim / "clang++").write_text('#!/usr/bin/env bash\necho "clang version 18.1.8"\nexit 0\n')
+    (shim / "mull-runner").write_text('#!/usr/bin/env bash\nexit 0\n')
+    for tool in ("cmake", "clang++", "mull-runner"):
+        (shim / tool).chmod(0o755)
+    (shim / "mull-ir-frontend").write_text("not a real plugin; mutate.sh only tests -f\n")
+    env = {"PATH": f"{shim}:{os.environ['PATH']}", "OMGP_CLANG_MAJOR": "18",
+           "MULL_RUNNER": str(shim / "mull-runner"), "MULL_PLUGIN": str(shim / "mull-ir-frontend")}
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--require",
+                     env_overrides=env, timeout=300)
+    assert rc == 1, out
+    assert "instrumented build failed" in out, out
+    # The evidence, not only the verdict: the diagnostic and ninja's own line both reach the log.
+    assert "zz_shim_diagnostic" in out, out
+    assert "ninja: build stopped" in out, out
+    # And the run STOPS there: no runner loop, no merged report, no gate verdict off a build
+    # that produced no binary.
+    assert "mutation: PASS" not in out, out
+    assert not (clone / "build" / "mutate" / "report.json").exists(), out
+
+
 # --- tools/mutate_report.py: the triage gate on synthetic Elements reports --------------------
 
 REPORT = ROOT / "tools" / "mutate_report.py"

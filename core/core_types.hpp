@@ -122,9 +122,26 @@ struct NodeRecord {
     DiscoveryState discovery = DiscoveryState::Undiscovered;
     // l3::ModelIdRec's three u16 fields, once known (protocol-l3 §4.1); part of the descriptor
     // cache key (§5, spec FR-008) — held as plain integers so core/ needs no l3/ include here.
+    // Read from the descriptor's own MODEL_ID record once the blob is in hand, NOT from
+    // IdentifyResp: protocol-l3 §3.1's IDENTIFY response carries `major, minor, module_type,
+    // desc_len, desc_crc` and no MODEL_ID at all, so spec FR-008's "the IDENTIFY response's
+    // MODEL_ID" names a field the wire does not have (recorded in docs/OPEN-QUESTIONS.md,
+    // 2026-09-28, with the cache-key narrowing T021 implements).
     uint16_t model_vendor = 0, model_hw_rev = 0, model_fw_rev = 0;
+    // The three IdentifyResp fields the cache lookup CAN be keyed on (spec FR-006: "learning
+    // its module type, descriptor length and descriptor CRC"). §3's own table predates T020 and
+    // lists only desc_crc; module_type and desc_len are added here because FR-006 requires them
+    // to be learned and T021's lookup key is exactly this triple (see the note above).
+    uint8_t module_type = 0;
+    uint16_t desc_len = 0;
     uint16_t desc_crc = 0;                            // IdentifyResp::desc_crc, once known
     const DescriptorCacheEntry* descriptor = nullptr; // set once Discovered (hit or fresh read)
+    // Whether this node id has ever reached DiscoveryState::Discovered, for the
+    // NodeDiscovered / NodeRediscovered split (§7, contracts/core-cpp.md §Node-ID assignment).
+    // Deliberately NOT cleared when the slot frees: "has this node id ever been discovered
+    // before" is a question about the id's whole history, which is what makes a re-inserted
+    // module's second arrival a NodeRediscovered rather than a second NodeDiscovered.
+    bool ever_discovered = false;
     // Liveness (R-03): independent of link::HealthTracker, which never sees module ids. The
     // thresholds are trunk §7's own, reused one layer up at module level.
     uint8_t consecutive_failures = 0; // status-poll / demand-item failures since last success
@@ -133,6 +150,26 @@ struct NodeRecord {
     bool suspect_or_worse = false;    // true once SUSPECT; cleared by a valid answer
     bool offline = false;             // true once TRUNK_offline_after_suspect_ms elapses in
                                       // SUSPECT
+    // The superframe in which this node's last READ_DESC made NO progress — an ERROR answer
+    // (trunk §8's mandated ERR_BUSY, above all), an undecodable one, an answer for an offset that
+    // does not continue the reassembly, or a trunk-level timeout. Non-zero means "stalled", and 0
+    // is therefore also "making progress": cleared by the first chunk that adds a byte and by any
+    // return through IDENTIFY. Superframe numbering starts at 1, so 0 is never a real superframe.
+    //
+    // A stalled node loses its PLACE in issue_demand()'s schedule, not its retry: its chunk-ring
+    // item is dropped and it is retried by retry_stalled_desc() instead, at most once per
+    // superframe, in a pass that alternates with the IDENTIFY scan by superframe parity (neither
+    // pass ever empties, so a fixed order between them starves one of them — see issue_demand()).
+    // Load-bearing, not a refinement. A failed chunk is RE-QUEUED for the same offset (READ_DESC
+    // is idempotent, CLAUDE.md rule 2), so a node whose read is refused for ever — trunk §8's
+    // MANDATED ERR_BUSY, which §10.5 leaves unbounded at L2 — keeps that ring permanently
+    // non-empty; and since the ring is drained before the IDENTIFY scan while a busy superframe
+    // admits only one demand item, it would take that item every superframe and no other node
+    // would ever be identified (User Story 1 AS3: a slot whose module does not answer "does not
+    // block the discovery of any other slot or backplane"). Dropping the item abandons nothing:
+    // the node stays in ReadingDescriptor and is resumed at the bytes its cache entry already
+    // holds. A stated divergence from R-07's ring order (docs/OPEN-QUESTIONS.md, 2026-09-28).
+    uint32_t desc_stalled_superframe = 0;
     // Channel-switch (spec User Story 3):
     bool switch_outstanding = false;
     uint8_t switch_channel = 0;
@@ -167,6 +204,21 @@ struct BackplaneRecord {
     // (bounds-checked on every write, by whichever code writes it — this header only fixes
     // the size).
     uint8_t node_id_by_slot[LIMIT_bp_slot_map_max_slots] = {};
+    // One bit per slot: whether "this slot is occupied and no free node id could be assigned to
+    // it" (R-06 exhaustion) has already been REPORTED as LifecycleKind::NodeIdPoolExhausted.
+    // Makes that report EDGE-triggered — once per transition INTO the shortage for a given slot,
+    // not once per BP_SLOT_MAP that re-observes it. A standing id shortage is re-observed by
+    // every later sweep unchanged, and §8a's ring is drop-NEWEST: level-triggered reporting fills
+    // it with repeats of one unchanged condition and then refuses the genuine NodeRemoved /
+    // NodeDiscovered behind them. Cleared the moment the slot is assigned an id, reports
+    // unoccupied, or falls outside slot_count, so a fresh transition is reported again.
+    // Set only when the enqueue SUCCEEDED: the bit means "the application has been told", and a
+    // rig with more unassignable slots than the ring holds has some notices refused on a sweep —
+    // those are re-offered by the next sweep rather than lost for ever.
+    // Sized to LIMIT_bp_slot_map_max_slots like node_id_by_slot above, never to a peer's
+    // slot_count. NOT a data-model.md §4 field — added with LifecycleKind::NodeIdPoolExhausted,
+    // which cannot be reported at a bounded rate without it (docs/OPEN-QUESTIONS.md 2026-09-28).
+    uint8_t exhaustion_reported[(LIMIT_bp_slot_map_max_slots + 7) / 8] = {};
     // Transaction cost / demotion for this backplane's OWN status poll (spec FR-027/FR-028,
     // R-11 correction) — separate from any NodeRecord's own fields: a backplane's status poll
     // and its modules' demand traffic are measured and demoted independently, since a slow
@@ -187,14 +239,27 @@ struct BackplaneRecord {
 struct DescriptorCacheEntry {
     bool in_use = false;
     uint16_t model_vendor = 0, model_hw_rev = 0, model_fw_rev = 0, desc_crc = 0;
+    // The other two thirds of the lookup key T021 can actually form from an IdentifyResp
+    // (see NodeRecord's note above): §5's own key is the MODEL_ID triple plus the CRC, and
+    // the triple is only knowable after the blob has been read.
+    uint8_t module_type = 0;
+    // false while this entry is being FILLED by a chunked READ_DESC (R-09): claimed, keyed,
+    // `len` set from IdentifyResp::desc_len, `received` climbing towards it. A lookup only ever
+    // hits a complete entry; an incomplete one is the leader's reassembly buffer, which is why
+    // core/ needs no separate per-node staging area (128 x LIMIT_max_descriptor_bytes of it).
+    bool complete = false;
+    uint16_t received = 0;                      // bytes reassembled so far; <= len
     uint16_t len = 0;                           // <= LIMIT_max_descriptor_bytes
     uint8_t blob[LIMIT_max_descriptor_bytes]{}; // raw TLV bytes (protocol-l3 §4), read back
                                                 // with an l3::RecordCursor over it
     // Nodes currently pointing at this entry: incremented when a NodeRecord::descriptor is set
     // to this entry (a fresh read's own completion, or a cache hit), decremented when that
-    // NodeRecord's slot is freed (reconcile_slot_map, R-06). An entry with refcount == 0 is
-    // eligible for reuse by a later miss; an entry is never reclaimed while any node still
-    // points at it.
+    // NodeRecord's slot is freed (reconcile_slot_map, R-06). An entry is never reclaimed while any
+    // node still points at it — but refcount == 0 is NOT by itself "nobody points at it": a node
+    // whose read is still in flight points at this entry by KEY and holds no count, because the
+    // count is taken where a NodeRecord::descriptor is set and only a complete entry gets that far.
+    // CoreEngine::claim_descriptor() therefore checks both, and prefers a never-used entry to
+    // either.
     uint32_t refcount = 0;
 };
 
@@ -277,6 +342,15 @@ enum class LifecycleKind : uint8_t {
     // enrolment probe, which demotion never touches.
     Demoted,
     DemotionCleared,
+    // research.md R-06 pool exhaustion: a slot reported occupied that no free node id in
+    // ADDR_module_min..ADDR_module_max could be assigned to. contracts/core-cpp.md and
+    // tasks.md T018 both say `CoreStatus::NoFreeNodeId` is "enqueued onto pending_lifecycle_",
+    // but data-model.md §7's LifecycleKind list (and therefore LifecycleEvent) has no member
+    // that can carry a CoreStatus — so the outcome had no representable shape. APPENDED here,
+    // after every existing member, so no enumerator's value moves. `node_id` carries the
+    // BACKPLANE address and `slot` the slot that went unassigned: the slot has no node id, which
+    // is the whole finding. Recorded in docs/OPEN-QUESTIONS.md (2026-09-28).
+    NodeIdPoolExhausted,
 };
 
 // LIFETIME of module_event_detail (ASSUMED here, not established by this header — this file
@@ -305,9 +379,15 @@ struct LifecycleEvent {
     const uint8_t* module_event_detail = nullptr;
     uint8_t module_event_detail_len = 0;
     uint8_t failed_param_id = 0, failed_reason = 0; // ParamSetFailed
-    bool demoted_is_backplane = false;              // Demoted/DemotionCleared: node_id names a
-                                                    // module, or (this true) a backplane whose
-                                                    // MODULES were demoted
+    // The slot within node_id's backplane, for the two presence outcomes that are about a SLOT
+    // rather than only about an id: NodeRemoved (which slot emptied) and NodeIdPoolExhausted
+    // (which slot got no id at all, and so has no id to name it by). Meaningless for every
+    // other kind. Not a data-model.md §7 field — added with NodeIdPoolExhausted, which cannot
+    // be reported at all without it (see the enumerator's own note).
+    uint8_t slot = 0;
+    // Demoted/DemotionCleared: node_id names a module, or (this true) a backplane whose MODULES
+    // were demoted.
+    bool demoted_is_backplane = false;
 };
 
 // --- §8a Pending-delivery element ----------------------------------------------------------
