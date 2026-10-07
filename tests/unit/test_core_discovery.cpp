@@ -579,19 +579,43 @@ class Rig {
         engine_->run_superframe(now_us_);
     }
 
-    // Drives the engine at `step_us` of simulated time per call until `target` superframes have
-    // been opened, or until the step budget is spent.
-    void run_to_superframe(uint32_t target, uint64_t step_us) {
-        const uint64_t calls_per_byte_time = byte_us() / step_us + 1u;
-        const uint64_t budget =
-            static_cast<uint64_t>(target) * kStepsPerSuperframeBound * calls_per_byte_time;
-        for (uint64_t i = 0; i < budget; ++i) {
+    // Drives the engine at `step_us` of simulated time per call until `done()` holds, checked
+    // after every step. Fails when `horizon` more superframes open without it holding, and
+    // fails at a STALL: one per-superframe bound of steps (kStepsPerSuperframeBound) in which
+    // no new superframe opens. The stall check is what keeps a broken scheduler cheap: a
+    // budget of `horizon` bounds let a mutant that stops discovery run the whole budget before
+    // FAIL() — 1.7 to 19 s per AS3 case at -O0, a 20 s Mull timeout for 77 of PR #871's 448
+    // core/ mutants — where the stall itself is one bound away. The loop is finite by
+    // construction: every step either returns, counts towards the stall bound, or opens a
+    // superframe, of which `horizon` + 1 end it.
+    template <typename Done> void run_until(Done done, uint32_t horizon, uint64_t step_us) {
+        const uint64_t bound = kStepsPerSuperframeBound * (byte_us() / step_us + 1u);
+        uint32_t last = transcript_.last_superframe();
+        const uint32_t limit = last + horizon;
+        uint64_t idle = 0;
+        for (;;) {
             step(step_us);
-            if (transcript_.last_superframe() > target) {
+            if (done()) {
                 return;
             }
+            const uint32_t sf = transcript_.last_superframe();
+            if (sf != last) {
+                last = sf;
+                idle = 0;
+            } else if (++idle >= bound) {
+                FAIL("the engine opened no superframe after " << last << " within " << bound
+                                                              << " steps");
+            }
+            if (sf > limit) {
+                FAIL("superframe " << limit << " passed before the condition held");
+            }
         }
-        FAIL("the engine did not reach superframe " << target << " within the step budget");
+    }
+
+    // Drives the engine at `step_us` of simulated time per call until `target` superframes have
+    // been opened.
+    void run_to_superframe(uint32_t target, uint64_t step_us) {
+        run_until([&] { return transcript_.last_superframe() > target; }, target, step_us);
     }
 
     size_t discovered_count() const {
@@ -638,10 +662,10 @@ class Rig {
     }
 
   private:
-    // A generous per-superframe bound on run_to_superframe()'s loop: three status polls, a
-    // handful of demand items and one enrolment probe whose worst case is trunk §7's full retry
-    // set. It bounds the LOOP, not the engine — a scheduler that stalls fails by FAIL() here
-    // rather than by hanging the suite (User Story 1 AS3's "the run still terminates").
+    // A generous per-superframe bound on run_until()'s loop: three status polls, a handful of
+    // demand items and one enrolment probe whose worst case is trunk §7's full retry set. It
+    // bounds the LOOP, not the engine — a scheduler that stalls fails by FAIL() there, at the
+    // stall, rather than by hanging the suite (User Story 1 AS3's "the run still terminates").
     static constexpr uint64_t kStepsPerSuperframeBound = 1200;
 
     void install_absent(uint8_t addr) {
@@ -1212,13 +1236,12 @@ TEST_CASE("a descriptor read whose reader's slot empties mid-read is taken over 
 
     // Run only as far as the first READ_DESC: the lower of the two ids is reading, and the
     // other has not been identified yet (descriptor chunks outrank the IDENTIFY scan).
-    bool reading = false;
-    for (uint64_t i = 0; i < 400000u && !reading; ++i) {
-        rig.step(byte_us());
-        reading = rig.transcript().count(omgp::OP_READ_DESC) > 0u &&
-                  rig.transcript().count(omgp::OP_READ_DESC) < 6u;
-    }
-    REQUIRE(reading);
+    rig.run_until(
+        [&] {
+            return rig.transcript().count(omgp::OP_READ_DESC) > 0u &&
+                   rig.transcript().count(omgp::OP_READ_DESC) < 6u;
+        },
+        kConvergeSuperframes, byte_us());
     REQUIRE(rig.engine().node_in_use(omgp::ADDR_module_min));
     REQUIRE(rig.engine().discovery_state(omgp::ADDR_module_min) ==
             DiscoveryState::ReadingDescriptor);
@@ -1487,12 +1510,9 @@ TEST_CASE("protocol-l3 §3.1: a READ_DESC chunk whose offset does not continue t
 
     // Run until a READ_DESC is outstanding: that is the state in which a lying answer could
     // arrive, and it fixes which node on_desc_chunk() attributes the forged chunk to.
-    bool outstanding = false;
-    for (uint64_t i = 0; i < 400000u && !outstanding; ++i) {
-        rig.step(byte_us());
-        outstanding = omgp::core::CoreEngineTestSeam::read_desc_outstanding(rig.engine());
-    }
-    REQUIRE(outstanding);
+    rig.run_until(
+        [&] { return omgp::core::CoreEngineTestSeam::read_desc_outstanding(rig.engine()); },
+        kConvergeSuperframes, byte_us());
     REQUIRE(rig.engine().discovery_state(omgp::ADDR_module_min) ==
             DiscoveryState::ReadingDescriptor);
 
