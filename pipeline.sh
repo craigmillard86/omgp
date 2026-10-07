@@ -167,9 +167,25 @@ unit_sources_plain() {
 # (test_link_interfaces, 6 checks) leaves 616793, below the floor — demonstrated by that
 # arithmetic over this run's per-binary EXECUTED lines, and only while no binary shrinks to
 # 5 checks or fewer, which is a property of the repo's current contents, not a guarantee.
+# 1686409 = 1686414 executed (25 binaries) minus 5 slack — raised 2026-10-07 at the T024/#695
+# US1 checkpoint of feature 003 (contracts/tooling.md "pipeline.sh": "raised to the new total
+# minus 5, never lowered"). Was 616794. Measured on the ctest path at this commit.
+# Where the +1069615 since the entry above's 616799 comes from (rule 11): one binary,
+# test_core_discovery (1069615 checks here; tests/unit/test_core_discovery.cpp, T017/#688 via
+# PR #871). `git diff --name-status --diff-filter=A b994320..HEAD -- tests/unit tests/property`
+# (b994320 is the commit that set 616794) names exactly that source, and the other 24 binaries
+# sum to 616799, the entry above's total to the check; per binary they are byte-identical to a
+# `pipeline.sh codegen build unit` run at b994320 on this host (demonstrated: that run's
+# LastTest.log EXECUTED lines against this one's, 24 of 24 equal), so none of the growth is
+# theirs. This checkpoint's raise is therefore US1 checks arriving, as a "sum of what this
+# feature added" reading of SC-009 predicts — the first of the raises above for which it holds.
+# At total-5 the gate still fires if ANY ONE of the 25 binaries stops reporting: the smallest
+# (test_link_interfaces, 6 checks) leaves 1686408, below the floor — demonstrated by that
+# arithmetic over this run's per-binary EXECUTED lines, and only while no binary shrinks to
+# 5 checks or fewer, which is a property of the repo's current contents, not a guarantee.
 # The floor is the COUNT gate. The SET gate — every tests/{unit,property}/test_*.cpp compiled,
 # registered and executed, by name — is tools/check_test_set.py in stage_unit (#133).
-UNIT_TEST_FLOOR=616794
+UNIT_TEST_FLOOR=1686409
 
 stage_codegen() {
   # Constants + vectors header from the YAML, then prove the human-authored docs tables
