@@ -67,6 +67,12 @@ struct CoreEngineTestSeam {
     static NodeRecord& node(CoreEngine& engine, uint8_t node_id) {
         return engine.nodes_[CoreEngine::node_index(node_id)];
     }
+    // The producer T030 will be: a decoded answer enqueued against its request id. Used here to
+    // reach delivery — and so the release of the id — without the issue path T029 owns.
+    static bool enqueue_param_result(CoreEngine& engine, ParamRequestId id,
+                                     const ParamResult& result) {
+        return engine.enqueue_param_result(id, result);
+    }
 };
 } // namespace omgp::core
 
@@ -379,10 +385,119 @@ TEST_CASE("get_param: two outstanding requests for the same node, parameter and 
         CHECK(item.kind == ParamOpItem::Kind::Get);
         CHECK(item.node_id == node);
         CHECK(item.param_id == 7u);
+        CHECK(item.scope == 0u);
         CHECK(item.request_id == first);
         REQUIRE(Bk::pop_param(rig.engine(), item));
         CHECK(item.request_id == second);
     }
+}
+
+TEST_CASE("set_param: the queued item carries every field the caller passed, and no other "
+          "[params][us2]") {
+    // What the drain loop (T029) will encode is this item, so each field is asserted against a
+    // value distinct from the others AND from 42 — the constant Mull's cxx_assign_const stores,
+    // which an assertion against a field's default or against 42 itself could not tell apart
+    // from the real assignment.
+    Rig rig;
+    bring_up(rig);
+    const uint8_t node = rig.a_discovered_node();
+
+    REQUIRE(rig.engine().set_param(node, 7, 3, 1234) == CoreStatus::Ok);
+
+    ParamOpItem item{};
+    REQUIRE(Bk::pop_param(rig.engine(), item));
+    CHECK(item.node_id == node);
+    CHECK(item.kind == ParamOpItem::Kind::Set);
+    CHECK(item.param_id == 7u);
+    CHECK(item.scope == 3u);
+    CHECK(item.value == 1234u);
+    // data-model.md §6: a Set carries no request id, so nothing was taken from R-10's pool —
+    // the property the "every id outstanding" case below relies on to keep Sets admissible.
+    CHECK(item.request_id == 0u);
+
+    SECTION("two identical calls queue two identically-encoding items (CLAUDE.md rule 2)") {
+        // L3 sets are ABSOLUTE: the queued value is the caller's, never a delta computed from a
+        // value read back, so a retry at any layer is safe.
+        REQUIRE(rig.engine().set_param(node, 7, 3, 1234) == CoreStatus::Ok);
+        REQUIRE(rig.engine().set_param(node, 7, 3, 1234) == CoreStatus::Ok);
+        ParamOpItem a{}, b{};
+        REQUIRE(Bk::pop_param(rig.engine(), a));
+        REQUIRE(Bk::pop_param(rig.engine(), b));
+        CHECK(a.node_id == b.node_id);
+        CHECK(a.param_id == b.param_id);
+        CHECK(a.scope == b.scope);
+        CHECK(a.value == b.value);
+        CHECK(a.kind == b.kind);
+    }
+}
+
+TEST_CASE("get_param: a request id is released when its result is delivered, and only then "
+          "[params][us2]") {
+    // R-10's "reused once its result has been delivered", which is the whole reason the pool is
+    // a uint8_t sized against the FIFO rather than a growing counter. The release point is
+    // drain_callbacks(), so this case exhausts the pool, delivers ONE result through the §8a
+    // ring (the producer T030 will be), and shows the freed id — and only it — comes back.
+    Rig rig;
+    bring_up(rig);
+    const uint8_t node = rig.a_discovered_node();
+    // Discovery's own NodeDiscovered events are still queued, and drain_callbacks() ALTERNATES
+    // between the two §8a rings — so a budget of one spent while the lifecycle ring is
+    // non-empty may serve that ring instead. Emptied here so the single delivery below is
+    // unambiguously the parameter result's.
+    rig.engine().drain_callbacks(kParamCapacity * 2u);
+    REQUIRE(rig.engine().dropped_deliveries() == 0u);
+
+    std::vector<ParamRequestId> ids;
+    for (size_t i = 0; i < kParamCapacity; ++i) {
+        ParamRequestId id = 0;
+        REQUIRE(rig.engine().get_param(node, 3, 0, id) == CoreStatus::Ok);
+        ids.push_back(id);
+        ParamOpItem item{};
+        REQUIRE(Bk::pop_param(rig.engine(), item)); // in flight: dequeued, result still pending
+    }
+    ParamRequestId fresh = 0xA5;
+    REQUIRE(rig.engine().get_param(node, 3, 0, fresh) == CoreStatus::RequestIdReused);
+
+    // Queued but NOT yet delivered: the id is still outstanding, so the pool is still empty.
+    ParamResult result{};
+    result.ok = true;
+    result.value = 7;
+    REQUIRE(Bk::enqueue_param_result(rig.engine(), ids[3], result));
+    CHECK(rig.engine().get_param(node, 3, 0, fresh) == CoreStatus::RequestIdReused);
+
+    // Delivered: now that id, and no other, is available again.
+    rig.recorder().result_ids.clear();
+    rig.engine().drain_callbacks(1);
+    REQUIRE(rig.recorder().result_ids.size() == 1u);
+    CHECK(rig.recorder().result_ids[0] == ids[3]);
+
+    REQUIRE(rig.engine().get_param(node, 3, 0, fresh) == CoreStatus::Ok);
+    CHECK(fresh == ids[3]);
+    // And the pool is empty again: one released, one taken.
+    ParamRequestId again = 0xA5;
+    CHECK(rig.engine().get_param(node, 3, 0, again) == CoreStatus::RequestIdReused);
+    CHECK(again == 0xA5);
+}
+
+TEST_CASE("get_param: a ring that is full of gets is refused as QueueFull, not RequestIdReused "
+          "[params][us2]") {
+    // The two refusals are reachable together — every queued Get holds an id, so a ring filled
+    // with Gets exhausts the pool at the same moment — and the ring is checked FIRST, so that
+    // is the status the caller sees. Pinned because the alternative order is observationally
+    // different only in this state, and it is the state a parameter burst actually reaches.
+    Rig rig;
+    bring_up(rig);
+    const uint8_t node = rig.a_discovered_node();
+
+    for (size_t i = 0; i < kParamCapacity; ++i) {
+        ParamRequestId id = 0;
+        REQUIRE(rig.engine().get_param(node, 3, 0, id) == CoreStatus::Ok);
+    }
+    REQUIRE(Bk::param_queued(rig.engine()) == kParamCapacity);
+
+    ParamRequestId refused = 0xA5;
+    CHECK(rig.engine().get_param(node, 3, 0, refused) == CoreStatus::QueueFull);
+    CHECK(refused == 0xA5);
 }
 
 TEST_CASE("set_param: a full parameter ring refuses the next operation and queues nothing "

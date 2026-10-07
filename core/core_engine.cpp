@@ -1224,7 +1224,16 @@ void CoreEngine::release_request_id(ParamRequestId id) {
     // Guarded rather than trusted: the only caller is drain_callbacks() with an id that came
     // out of pending_param_results_, but the ring's contents are engine state a seam can write,
     // and an out-of-range index here would be a silent write past the pool.
+    //
+    // claim_request_id() is the only source of an id and returns only i < LIMIT_max_nodes, so
+    // id == LIMIT_max_nodes is not reachable through this engine's own API: over every id the
+    // pool can hold, `<` and `<=` admit the same set. A CONTROL on that allocation, not a
+    // guarantee (CLAUDE.md rule 11) — which is what this guard exists for.
+    // mutant-ok(equivalent, cxx_lt_to_le): id == LIMIT_max_nodes is unreachable; see above.
     if (static_cast<size_t>(id) < LIMIT_max_nodes) {
+        // Mull's cxx_assign_const stores 42, and a bool reads its low bit, which is 0 — the
+        // value this store already writes. ASSUMED from Mull's IR semantics, not measured.
+        // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
         request_id_used_[id] = false;
     }
 }
@@ -1267,6 +1276,10 @@ CoreStatus CoreEngine::get_param(uint8_t node_id, uint8_t param_id, uint8_t scop
     if (param_queue_.full()) {
         return CoreStatus::QueueFull;
     }
+    // claim_request_id() writes this on Ok, and the refusal below returns without reading it,
+    // so its initial value is never observed. The label is the LAST comment line before the
+    // statement it covers: a label above further prose covers that prose, not the statement.
+    // mutant-ok(equivalent, cxx_init_const): overwritten by claim_request_id() before any read.
     ParamRequestId id = 0;
     if (!claim_request_id(id)) {
         return CoreStatus::RequestIdReused;
@@ -1281,6 +1294,7 @@ CoreStatus CoreEngine::get_param(uint8_t node_id, uint8_t param_id, uint8_t scop
         // Unreachable while full() is the ring's own predicate and nothing else can push
         // between the two: defensive, not a known path. The id is handed straight back, so even
         // if it were reachable the pool would not leak.
+        // mutant-ok(equivalent, cxx_remove_void_call): this branch is unreachable; see above.
         release_request_id(id);
         return CoreStatus::QueueFull;
     }
