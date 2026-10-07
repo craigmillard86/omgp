@@ -82,7 +82,7 @@ CoreEngine::CoreEngine(link::ByteWire& wire, Clock& clock, uint8_t host_addr,
       // field in core/core_types.hpp, so these are empty braces rather than positional lists to
       // keep in step with those structs (the idiom link/health.cpp:73-77 uses one layer down).
       nodes_{}, backplanes_{}, descriptors_{}, event_queue_{}, desc_queue_{}, param_queue_{},
-      pending_lifecycle_{}, pending_param_results_{}, budget_{} {
+      request_id_used_{}, pending_lifecycle_{}, pending_param_results_{}, budget_{} {
     // Discarded reads of the state this engine declares but does not yet touch — the
     // link/health.cpp:78 idiom, kept for the same reason: a private member nothing in the TU
     // references is what clang's -Wunused-private-field (in -Wall, and this project builds
@@ -91,10 +91,10 @@ CoreEngine::CoreEngine(link::ByteWire& wire, Clock& clock, uint8_t host_addr,
     // named consumer is the task that removes its line:
     //   clock_        — T029's superframe cadence bookkeeping (every time this engine reads
     //                   today arrives as run_superframe()'s own now_us argument, rule 3)
-    //   event_queue_/param_queue_ — T029's demand drain for User Stories 2 and 4 (R-07)
+    //   event_queue_  — T029's demand drain for User Story 4 (R-07); param_queue_ left this
+    //                   list at T027, which fills it from set_param()/get_param()
     (void)clock_;
     (void)event_queue_;
-    (void)param_queue_;
 }
 
 void CoreEngine::run_superframe(uint64_t now_us) {
@@ -539,6 +539,12 @@ void CoreEngine::drain_callbacks(size_t max_deliveries) {
             }
             --param_budget;
             --remaining;
+            // R-10: an id is outstanding until its result is DELIVERED, and this is that
+            // moment — released before the callback runs, so a get_param() made from inside
+            // on_param_result correctly sees the id as free again. Released whether or not the
+            // pointer below is null: the delivery is consumed either way, so an id held back
+            // for a null callback would be one the pool never got back.
+            release_request_id(delivery.id);
             // Argued like link/master.cpp:400 and link/health.cpp:700, not assumed: the mutant
             // either reads back false and coincides with the original, or leaves next_is_param_
             // set through every param delivery — which serves the param ring until its budget is
@@ -1183,6 +1189,103 @@ bool CoreEngine::enqueue_lifecycle(const LifecycleEvent& ev) {
         return false;
     }
     return true;
+}
+
+// --- parameters (spec FR-023/FR-024, R-10) -------------------------------------------------------
+
+bool CoreEngine::param_target_ready(uint8_t node_id) const {
+    // protocol-l3 §3.1 addresses SET_PARAM/GET_PARAM to a module, and a module's parameter set
+    // is what its descriptor declares — so an operation is only admissible once the descriptor
+    // is known. TOTAL for any uint8_t (CLAUDE.md rule 7): node_index() returns kNoNodeIndex for
+    // every id outside the module window, so a backplane address or the broadcast address is
+    // refused by this bound rather than indexed into the table.
+    const size_t idx = node_index(node_id);
+    if (idx == kNoNodeIndex) {
+        return false;
+    }
+    return nodes_[idx].in_use && nodes_[idx].discovery == DiscoveryState::Discovered;
+}
+
+bool CoreEngine::claim_request_id(ParamRequestId& out_id) {
+    // First free, not a rotating counter: R-10's ids are reused once delivered, so a counter
+    // would need to test occupancy anyway, and a scan cannot hand out an id already outstanding.
+    // LIMIT_max_nodes passes, so this is bounded by the pool, which is bounded by the ring.
+    for (size_t i = 0; i < LIMIT_max_nodes; ++i) {
+        if (!request_id_used_[i]) {
+            request_id_used_[i] = true;
+            out_id = static_cast<ParamRequestId>(i);
+            return true;
+        }
+    }
+    return false;
+}
+
+void CoreEngine::release_request_id(ParamRequestId id) {
+    // Guarded rather than trusted: the only caller is drain_callbacks() with an id that came
+    // out of pending_param_results_, but the ring's contents are engine state a seam can write,
+    // and an out-of-range index here would be a silent write past the pool.
+    if (static_cast<size_t>(id) < LIMIT_max_nodes) {
+        request_id_used_[id] = false;
+    }
+}
+
+CoreStatus CoreEngine::set_param(uint8_t node_id, uint8_t param_id, uint8_t scope, uint16_t value) {
+    if (!param_target_ready(node_id)) {
+        return CoreStatus::NotDiscovered;
+    }
+    // protocol/omgp-protocol.yaml gives SET_PARAM's value `max: 4095` (LIMIT_param_value_max);
+    // l3::encode_set_param refuses above it with Status::OutOfRange. Checked HERE so the refusal
+    // reaches the caller as a return value — see CoreStatus::InvalidValue in core_types.hpp.
+    if (value > LIMIT_param_value_max) {
+        return CoreStatus::InvalidValue;
+    }
+    ParamOpItem item{};
+    item.node_id = node_id;
+    item.kind = ParamOpItem::Kind::Set;
+    item.param_id = param_id;
+    item.scope = scope;
+    item.value = value;
+    // A Set carries no request id (data-model.md §6): it is fire-and-forget except for its own
+    // failure report (spec FR-023), which is a LifecycleEvent, not a correlated result.
+    if (!param_queue_.push(item)) {
+        return CoreStatus::QueueFull;
+    }
+    // Idempotent by construction (CLAUDE.md rule 2): the queued item holds the ABSOLUTE value
+    // the caller passed, and no path here reads the current value to compute it, so two
+    // identical calls queue two items that encode identically.
+    return CoreStatus::Ok;
+}
+
+CoreStatus CoreEngine::get_param(uint8_t node_id, uint8_t param_id, uint8_t scope,
+                                 ParamRequestId& out_id) {
+    if (!param_target_ready(node_id)) {
+        return CoreStatus::NotDiscovered;
+    }
+    // Ring first, pool second, and the ORDER matters: claiming an id for an operation the ring
+    // then refuses would leak it, since an id is released only when its result is delivered and
+    // a refused operation produces no result. Nothing is claimed until the push can be made.
+    if (param_queue_.full()) {
+        return CoreStatus::QueueFull;
+    }
+    ParamRequestId id = 0;
+    if (!claim_request_id(id)) {
+        return CoreStatus::RequestIdReused;
+    }
+    ParamOpItem item{};
+    item.node_id = node_id;
+    item.kind = ParamOpItem::Kind::Get;
+    item.param_id = param_id;
+    item.scope = scope;
+    item.request_id = id;
+    if (!param_queue_.push(item)) {
+        // Unreachable while full() is the ring's own predicate and nothing else can push
+        // between the two: defensive, not a known path. The id is handed straight back, so even
+        // if it were reachable the pool would not leak.
+        release_request_id(id);
+        return CoreStatus::QueueFull;
+    }
+    out_id = id; // written only on Ok, so a refusal leaves the caller's variable as it was
+    return CoreStatus::Ok;
 }
 
 bool CoreEngine::enqueue_param_result(ParamRequestId id, const ParamResult& result) {
