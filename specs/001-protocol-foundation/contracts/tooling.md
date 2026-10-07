@@ -61,12 +61,19 @@ in `tools/mutate_report.py` (tested on synthetic Elements reports in
    the oracle targets (`cmake --build --target <oracle…>`, Ninja when present): nothing else
    runs under the runner. Before the runner starts the file is rewritten (`mutate.sh
    --print-phase2-config` shows it) with the same mutators, the timeout, `quiet: true` and
-   `includePaths` for `scope_dirs` (`^<root>/<dir>/.*`), so only scope-dir mutants are
-   *executed*; the runner captures no test output (`--no-output`; kills are exit-status);
-   the merge in step 4 is unchanged and still the gate. (Amended 2026-09-06, gate-budget PR;
-   ruled 2026-09-14 — `docs/OPEN-QUESTIONS.md` 2026-09-06 "Mull path filters are safe at
-   RUN time" and the 2026-09-14 ratification entry; `tools/mutate_diff_reports.py` compares
-   two Elements reports mutant by mutant and is the evidence tool for it.)
+   `includePaths` for the scope dirs the run changes or attests (`^<root>/<dir>/.*`; every
+   scope dir holding a source when there is no `--diff`), so only those dirs' mutants are
+   *executed* — the oracle binaries link every scope library, so until 2026-10-07 the filter
+   listed every scope dir and a `core/`-only diff executed every `l3/` and `link/` mutant
+   too, which the merge then discarded; the runner captures no test output (`--no-output`;
+   kills are exit-status) and passes Catch2 `--abort` through to the oracle, so a killed
+   mutant stops at the assertion that caught it while a survivor and the baseline still run
+   every case; the merge in step 4 is unchanged and still the gate. (Amended 2026-09-06,
+   gate-budget PR; ruled 2026-09-14 — `docs/OPEN-QUESTIONS.md` 2026-09-06 "Mull path filters
+   are safe at RUN time" and the 2026-09-14 ratification entry; amended 2026-10-07 for the
+   narrowed filter and `--abort`, #596/#599, `docs/OPEN-QUESTIONS.md` 2026-10-07;
+   `tools/mutate_diff_reports.py` compares two Elements reports mutant by mutant and is the
+   evidence tool for all of it.)
 4. Runs the three unit binaries (`test_l3_header/payload/descriptor` — the property
    binaries are too slow per mutant at -O0) under the runner with `--workers $(nproc)`
    and the `IDE` + `Elements` reporters (+ `GitHubAnnotations` under CI); merges the

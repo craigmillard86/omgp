@@ -1587,7 +1587,8 @@ def test_mutate_phase2_config_is_one_anchored_regex_per_scope_dir(tmp_path):
     text — exactly one regex per configured scope dir, anchored on the physical root with
     every regex metacharacter in that root escaped — without needing Mull. The clone lives
     under a directory name built from metacharacters, so an unescaped ROOT would either fail
-    to match its own path or match far too much."""
+    to match its own path or match far too much. Without --diff nothing narrows the run, so
+    every scope dir holding a source is listed; the two cases below pin the narrowed list."""
     weird = tmp_path / "r(o)[o]t+x.y$z"
     weird.mkdir()
     clone = weird / "clone"
@@ -1615,6 +1616,41 @@ def test_mutate_phase2_config_is_one_anchored_regex_per_scope_dir(tmp_path):
     assert f"timeout: {cp['policy']['timeout_ms']}" in lines and "quiet: true" in lines, out
     for g in cp["mutators"]["groups"].split():
         assert f"  - {g}" in lines[:lines.index("includePaths:")], out
+
+
+def phase2_paths(out):
+    lines = out.splitlines()
+    assert "includePaths:" in lines, out
+    return [line[4:] for line in lines[lines.index("includePaths:") + 1:] if line.startswith("  - ")]
+
+
+def test_mutate_phase2_config_narrows_to_the_changed_dirs(tmp_path):
+    """The filter is one regex per scope dir THE RUN TOUCHES, not per configured scope dir
+    (#596/#599). The oracle binaries link every scope library, so a core/-only diff used to
+    execute every l3/ and link/ mutant they reach and the merge then discarded the lot: PR
+    #871's test_core_discovery pass was 1592 mutants / 23m16s on 12 cores and 448 / 6m56s
+    narrowed, the 448 in-scope verdicts unchanged but for three Killed→Timeout flips per
+    tools/mutate_diff_reports.py, after CI's 4 cores had hit the 45-minute budget. Pinned
+    without Mull: a one-dir diff prints one regex, and it is that dir's."""
+    clone = shared_clone(tmp_path, "core/zz_probe.cpp", "int zz_probe() { return 1; }\n")
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--print-phase2-config")
+    assert rc == 0, out
+    paths = phase2_paths(out)
+    assert len(paths) == 1 and paths[0].endswith("/core/.*"), out
+    assert re.fullmatch(paths[0], f"{clone.resolve()}/core/core_engine.cpp"), paths
+    assert not re.fullmatch(paths[0], f"{clone.resolve()}/link/master.cpp"), paths
+
+
+def test_mutate_phase2_config_of_an_attestation_is_the_attested_dirs(tmp_path):
+    """Same for the attest path, whose `attest.dirs` named one dir while the runner executed
+    three (#596, #601's execution half; its reporter half — the survivor/label scan — is
+    untouched here)."""
+    clone = shared_clone(tmp_path, "tests/unit/test_link_zz_probe.cpp", "// a changed link test\n")
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--print-phase2-config")
+    assert rc == 0, out
+    assert "mode=attest" in out, out
+    paths = phase2_paths(out)
+    assert len(paths) == 1 and paths[0].endswith("/link/.*"), out
 
 
 # --- tools/mutate_diff_reports.py: the evidence tool for mutate.sh changes -----------------------

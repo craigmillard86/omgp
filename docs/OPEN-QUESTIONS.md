@@ -6016,3 +6016,68 @@ nothing bounds a descriptor read whose chunks are refused for ever, and R-07's o
 everything else" — its option (c) is adopted as before, but "after the IDENTIFY scan" is replaced by
 "alternating with the IDENTIFY scan". **Related:** R-07 (demand scheduling order), R-09 (chunked
 `READ_DESC`), trunk §8/§10.5, User Story 1 AS3, and the 2026-09-28 IDENTIFY-scan-order entry.
+
+## 2026-10-07 — PR #871 (#688): `deep-verify-mutate` ran out of its 45-minute budget on a `core/`-only diff; three cuts, none to the gate
+
+**Context:** PR #871's `deep-verify-mutate` run at `f7a2b99` was cancelled at the job's 45-minute
+budget (`timeout-minutes`, from `agent-config.yml` on the default branch) before reaching the
+survivor gate: 2m40s of instrumented build, then 42 minutes of `test_core_discovery` under the
+runner on GitHub's 4 cores. The same oracle locally, 12 cores: 23m16s. Three causes, each measured
+below, each cut without touching a `[policy]` constant (`timeout_ms`, `max_unlabelled_survivors`,
+the mutator set) or the merge in `tools/mutate_report.py` that is the gate:
+
+1. **The runner executed every scope dir's mutants, not the changed dir's.** `phase2_config`
+   emitted one `includePaths` regex per `scope_dirs` entry — the gap the 2026-09-15 entry names and
+   #596/#599/#601 file — and the oracle binaries link every scope library, so this `core/`-only
+   diff executed 1592 mutants, 1144 of them `l3/` and `link/` ones the merge then discarded.
+   Narrowed to the changed (or attested) dirs: 448 mutants, 6m56s, every in-scope verdict
+   identical but three Killed→Timeout flips (both are kills) per
+   `tools/mutate_diff_reports.py --scope-dirs core` — **demonstrated**. Pinned without Mull by
+   `test_mutate_phase2_config_narrows_to_the_changed_dirs` and
+   `test_mutate_phase2_config_of_an_attestation_is_the_attested_dirs` (`tools/refimpl/
+   test_tooling.py`); a dir the filter misses still fails closed by `mutate_report.py`'s
+   per-changed-dir rule, unchanged.
+2. **A killed mutant ran the whole binary.** Kills are exit-status and Catch2 keeps going after a
+   failure, so a mutant that stops discovery failed the cold-boot case in its first second and then
+   ran every stall-horizon case (`kStallHorizonSuperframes` = 90) to its step budget: 77 of the
+   448 `core/` mutants hit the 20 s `timeout_ms` that way — an **estimated** 1540 s of the run's
+   ~2580 s CPU (77 × 20 s against 371 × the 2.8 s instrumented baseline). A scan of all 77 outside
+   Mull, 12 at a time with Catch2 per-case shards: 65 finish in 23–59 s and 12 pass 60 s; the one
+   of the 12 inspected case by case (`core_engine.cpp:594:79` `cxx_ne_to_eq`) is 65 bounded cases
+   summing past 60 s, the slowest 19.5 s, and the other 11 are **assumed** the same shape — no
+   infinite loop was found. `mutate.sh` now passes Catch2 `--abort` through the runner to the
+   oracle (`mull-runner` hands trailing arguments to the test program: a bogus flag fails its
+   baseline run, measured on 0.34.0). By construction a survivor is a run with no failure, as is
+   the baseline, and `--abort` leaves both alone, so the flag can only shorten a kill; measured:
+   6m56s → 1m56s, the same 44 survivors, 75 of the 77 Timeouts now Killed and no other difference
+   (`mutate_diff_reports.py`) — **demonstrated**.
+3. **The test rig's step budget was `target` superframes' worth, spent in full on a stall.**
+   `run_to_superframe()` stepped `target × kStepsPerSuperframeBound × calls_per_byte_time` times
+   before `FAIL()`, so a stalled engine cost one AS3 case 1.7–19 s at -O0. `run_until()` replaces
+   it and fails at the stall — one per-superframe bound of steps in which no superframe opens —
+   or at a superframe horizon, finite by construction (every step returns, counts toward the
+   bound, or opens one of `horizon` + 1 superframes); the two 400000-step waits use it too. All 65
+   cases still pass (1069615 assertions; the two `REQUIRE`s those waits ended with are now the
+   helper's horizon). After cut 2 the remaining Timeouts went from 2 to 1.
+
+End to end at `f7a2b99` plus these changes, 12 cores: `tools/mutate.sh --diff origin/main` in
+254 s wall including the instrumented build, `test_core_discovery` 1m36.8s (was 23m16s),
+`mutants=398 killed=373 survived=25 labelled[equivalent=25] unlabelled=0`, no stale label, PASS.
+(398 rather than the 439 of the 2026-10-01 local runs: those ran in a tree whose
+`core_engine.cpp` carried CRLF endings, so `git diff -U0 origin/main` marked every line changed
+and gated 41 mutants on lines the PR does not touch — a superset, never a miss; `main` already
+holds `core_engine.cpp` at 209 lines.) The CI time is **assumed** from these, ~3× at 4 cores and
+well inside 45 minutes; it is to be read from the run, not from here.
+
+Not done, because each needs a ruling: sharding the job across runners, lowering `timeout_ms`,
+trimming the mutator set for the PR gate. #601's reporter half — the survivor/label scan still
+covers every scope dir — is untouched too.
+
+**Recommendation:** accept the three cuts as tooling and test changes under the standing rulings
+(2026-08-29 triage gate, 2026-09-14 run-time path filters); close #596 and #599 with the PR and
+leave #601 open for its reporter half.
+
+**Ruling:** pending — human. **Amends:** `specs/001-protocol-foundation/contracts/tooling.md`
+step 3 and `research.md` trap (5) in place — both said every scope-dir mutant runs. **Supersedes:**
+none; the 2026-09-15 entry's "left for an issue" is done here. **Related:** #140/#153 (gate
+budgets), #596, #599, #601, PR #593, PR #871.
