@@ -104,6 +104,17 @@ class CoreEngine {
 
     SuperframeBudget budget_;
 
+    // The superframe the plan now being executed IS (trunk §6): 0 before the first plan opens,
+    // incremented by open_superframe(), so the first plan is superframe 1. A COUNT OF PLANS, not
+    // a function of now_us — no Clock read and no wall-clock access contributes to it (CLAUDE.md
+    // rule 3), which is what makes the transcript below insensitive to the caller's step size
+    // (spec SC-005).
+    uint32_t superframe_ = 0;
+
+    // The operation transcript's sink (T023, below). Null unless a test installs one.
+    TranscriptFn transcript_ = nullptr;
+    void* transcript_ctx_ = nullptr;
+
     // link::HealthListener:
     void on_notice(link::Notice notice, uint8_t addr) override;  // R-03: forwards
                                                                    // backplane/bus notices,
@@ -128,6 +139,90 @@ class CoreEngine {
 // not that node had reached Discovered yet.
 void reconcile_slot_map(uint8_t backplane_addr, const l3::BpSlotMapResp& resp, uint64_t now_us);
 ```
+
+## Operation transcript (test-only observation, tasks.md T023)
+
+```cpp
+// One line of the transcript: the four fields tasks.md T023 fixes, and no fifth.
+struct TranscriptEntry {
+    uint32_t superframe;  // the plan this request belonged to (superframe_ above)
+    uint8_t opcode;       // the L3 opcode (protocol-l3 §3.1)
+    uint8_t dst;          // the trunk address the frame went to (trunk §5: a backplane, always)
+    uint8_t node_id;      // the L3 node id inside it (protocol-l3 §8)
+};
+
+// The sink: a plain function pointer plus one opaque context — the shape R-04 chose for
+// CoreCallbacks, for the same reasons (no std::function, no virtual, nothing to construct).
+using TranscriptFn = void (*)(void* ctx, const TranscriptEntry& entry);
+
+// Declared in core/core_engine.hpp and befriended there; DEFINED ONLY by a test binary, which is
+// the sole way to install a sink. There is no public setter.
+struct CoreEngineTestSeam;
+```
+
+What the transcript is for: spec SC-001/AS2 ("two runs of the same scripted scenario produce an
+identical sequence of operations") and SC-005 ("the same sequence however coarsely the simulated
+clock is advanced") are claims about the ORDER of transactions, which no end-state assertion can
+check. Its rules, each labelled per CLAUDE.md rule 11:
+
+1. **One line per request this engine issues, in issue order, recorded at the `core/` call
+   site.** `begin_request()` (`core/core_engine.cpp`) is this engine's ONLY caller of
+   `link::Master::begin`, and the sink is invoked there — *proved by construction* (single call
+   site; `link/` is not modified and records nothing, so the L2/L3 opacity invariant holds).
+   *Demonstrated by* `begin_request: the transmitted L3 message is the header and payload
+   verbatim…` and the whole-sequence comparisons in `tests/unit/test_core_discovery.cpp`.
+
+2. **A `begin()` that is REFUSED is not recorded** — neither one `link::Master` refuses (`Busy`
+   on an open transaction, `PayloadTooLong`, `ReservedAddress`) nor one this engine's own L3
+   encoder refuses before reaching `Master`. The transcript is a record of requests *issued*, not
+   of calls attempted. Two reasons, both load-bearing: a `TranscriptEntry` carries no `Status`
+   (four fields, rule above), so a refused line would be indistinguishable from an issued one and
+   would weaken rather than strengthen the sequence comparison; and whether a given call is
+   refused is a function of wire state at that instant, so recording refusals would make the
+   transcript depend on the caller's step size — exactly what SC-005 denies. A `begin()` the
+   `Master` *accepts* but defers to honour `T_gap` IS recorded, at the accepting call, because it
+   is an issued transaction (`link/master.hpp:66`: `busy()` is already true). *Demonstrated by*
+   `begin_request: a request the link refuses (transaction open) is not recorded as issued` and
+   the payload-limit half of the test named in 1. *Measured, not assumed*: a recorder that
+   emitted per transmission instead of per transaction was patched into `run_superframe()` and
+   failed AS2 and SC-005 as well as the test in 3 (#694, PR body).
+   This is the ruling on issue #694's open AC3, taken on 2026-10-07 against the shipped,
+   tested behaviour; the alternative (record refusals too) was rejected for the two reasons above
+   and would need a fifth field to be meaningful, which is a tasks.md amendment.
+
+3. **An L2 retry of an already-begun transaction adds no further line.** trunk §7's retry
+   re-sends the same seq from inside `link::Master` (`fire_pending()`); `core/` neither sees nor
+   initiates it, and `master_.busy()` keeps this engine from beginning anything while the
+   transaction is open. *Proved by construction* (the retransmission path contains no `core/`
+   code), and *demonstrated by* `trunk §7: an L2 retry of an already-begun transaction adds no
+   further transcript line`, which pins `Master::attempts() == 2` and two request frames at the
+   double against exactly one transcript line.
+
+4. **Cost when unused: two null pointers and one null test per `begin_request()`** — stated
+   precisely rather than as "nothing". This is the non-owning-sink mechanism, not the
+   compile-time gate T023 allowed as an equal alternative; `#ifdef` was rejected so that the
+   native and ESP-IDF builds compile the identical `core/` sources (CLAUDE.md rule 10). *Proved
+   by construction*: the sink is null at construction, there is no public setter, and a build
+   that never defines `CoreEngineTestSeam` has no way to install one — a friend declaration emits
+   no code.
+
+5. **`core/` holds no transcript storage at all.** The entry is a stack temporary handed to the
+   sink; the buffer belongs to whoever installs one. So there is no fixed-capacity ring here and
+   `data-model.md` §8a's drop-newest rule does not apply to the transcript — §8a governs the two
+   pending-delivery rings, which are `core/` state. The only buffer that exists is the
+   `std::vector<TranscriptEntry>` in `tests/unit/test_core_discovery.cpp`, host-only code where
+   the full language is allowed (CLAUDE.md rule 5). *Consequence, stated rather than guarded*:
+   nothing in `core/` bounds what a sink retains, so a sink on the embedded path would have to
+   bound itself. No production path installs one today — that is a property of the repo's current
+   contents, a control and not a guarantee.
+
+6. **Observation only: `run_superframe()` schedules the same transactions in the same order with
+   and without a sink installed.** *Proved by construction*: the sink is invoked after
+   `master_.begin()` has already returned `Ok`, it is passed values the engine had already
+   computed, no `begin()` call exists in order to be transcribed, and nothing on the path reads
+   the sink's state or the `Clock`; the `SuperframeBudget` debit stays in `complete_request()`,
+   untouched. *Demonstrated by* every other case in the discovery suite, which installs a sink
+   and asserts the engine's own behaviour through it.
 
 ## What this feature needs from `link/` and `l3/` (interface note, mirrors `link-cpp.md`'s own "What F3/F4 need")
 

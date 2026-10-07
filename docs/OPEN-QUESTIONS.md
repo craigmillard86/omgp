@@ -6081,3 +6081,47 @@ leave #601 open for its reporter half.
 step 3 and `research.md` trap (5) in place — both said every scope-dir mutant runs. **Supersedes:**
 none; the 2026-09-15 entry's "left for an issue" is done here. **Related:** #140/#153 (gate
 budgets), #596, #599, #601, PR #593, PR #871.
+
+## 2026-10-07 — The operation transcript records requests ISSUED, not `Master::begin` calls attempted
+
+**Context:** tasks.md T023 (`specs/003-host-core-engine/`) says "one line per
+`Master::begin` call: superframe number, opcode, dst, node_id" and fixes those four fields
+and no fifth. It does not say what a *refused* call is. `link::Master::begin` can return
+`Busy` (a transaction is already open, trunk §3), `PayloadTooLong` or `ReservedAddress`
+(`link/master.hpp:66`), and `CoreEngine::begin_request()` can also refuse before reaching
+`Master` at all, when its own L3 encoder rejects the request. Issue #694's enriched
+acceptance criteria read the task text literally and required a line for every call
+including the refused ones ("the record is of calls made"); the shipped code records only
+accepted calls (`core/core_engine.cpp`, the sink invoked after `master_.begin() == Ok`), and
+`tests/unit/test_core_discovery.cpp`'s `begin_request: a request the link refuses
+(transaction open) is not recorded as issued` pins that. The repository owner's audit of
+#694 against `main` (904acdf, 2026-10-07) called this out as "a decision, not a bug" and
+asked for it to be settled either way.
+
+**Recommendation:** record accepted calls only — reconcile the criterion to the shipped
+behaviour rather than widen the record. Two reasons, both load-bearing rather than
+aesthetic. (1) A `TranscriptEntry` carries no `Status`, so a refused line is
+indistinguishable from an issued one; a reader comparing two transcripts could no longer
+tell "this request went out" from "this request did not", which weakens the very comparison
+the transcript exists for (spec SC-001/AS2). Distinguishing them means a fifth field, and
+that is a tasks.md amendment, not a quiet addition here. (2) Whether a call is refused
+depends on wire state at the instant of the call, and the caller chooses how often
+`run_superframe()` is called — so a transcript that recorded refusals would vary with
+clock-advance granularity, which spec SC-005 denies. Measured, not argued: a recorder
+emitting per transmission rather than per accepted transaction was patched into
+`run_superframe()` and failed AS2 and SC-005 immediately (2 lines where 1 was expected),
+alongside the new trunk §7 retry case. A `begin()` the `Master` ACCEPTS but defers to
+honour `T_gap` is recorded, at the accepting call — it is an issued transaction (`busy()`
+is already true).
+
+**Ruling:** accepted calls only — taken 2026-10-07 under the owner's explicit delegation on
+#694 ("Either reconcile the AC to the shipped, tested behaviour (accepted calls only) or add
+the refused-call line and change that test — a decision"), which is the human ruling this
+entry would otherwise be waiting for. Recorded in
+`specs/003-host-core-engine/contracts/core-cpp.md` §"Operation transcript" rule 2 as the
+transcript's contract, and pinned by the two refusal cases in
+`tests/unit/test_core_discovery.cpp` (`Busy` and the encoder's payload limit), both of which
+now assert the transcript is untouched rather than only the engine's outstanding-transaction
+state. No `core/` behaviour changed under this ruling.
+**Supersedes:** none — first entry on the transcript's contract. **Related:** #694 (T023),
+#688 (T017), tasks.md T023, `contracts/core-cpp.md`.
