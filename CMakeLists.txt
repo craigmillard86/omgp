@@ -115,6 +115,7 @@ omgp_add_catch_test(test_link_loop tests/unit/test_link_loop.cpp)
 omgp_add_catch_test(test_core_types tests/unit/test_core_types.cpp)
 # CoreEngine's §8a pending-delivery rings and drain_callbacks() (spec 003 T014/T015).
 omgp_add_catch_test(test_core_callback_queue tests/unit/test_core_callback_queue.cpp)
+omgp_add_catch_test(test_core_discovery tests/unit/test_core_discovery.cpp)
 
 # --- host-only tools ---
 add_executable(crc_helper tools/crc_helper.cpp)

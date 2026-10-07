@@ -955,6 +955,56 @@ def test_mutate_attestation_is_handed_to_the_reporter_end_to_end(tmp_path):
     assert "malformed mutant-ok label(s) in the attested dir(s) — reported, NOT gated" in out, out
 
 
+# --- tools/mutate.sh: an instrumented build that FAILS must say so, with the evidence ----------
+# Observed on CI run 36453322675 (PR #871, this branch): the "Diff-scoped mutation" step printed
+# its scope, its oracle and its gate line, then exited 1 four and a half minutes later having
+# printed NOTHING else — no survivor, no report, no diagnostic. The instrumented build had
+# failed, and ninja writes both the compiler's diagnostics and its own "build stopped" line to
+# STDOUT, which the script discarded. A gate that fails with no evidence is the blind spot the
+# rest of this script names everywhere else, so it is one here too.
+_CMAKE_SHIM_BUILD_FAILS = r"""#!/usr/bin/env bash
+# Stand-in for cmake whose --build fails the way a real ninja build does: every word of it on
+# STDOUT, exit status 1. Configuring still succeeds, so the failure under test is the build's.
+if [ "$1" = "--build" ]; then
+  echo "[3/9] Building CXX object CMakeFiles/test_link_master.dir/x.cpp.o"
+  echo "FAILED: CMakeFiles/test_link_master.dir/x.cpp.o"
+  echo "tests/unit/x.cpp:7:5: error: zz_shim_diagnostic"
+  echo "ninja: build stopped: subcommand failed."
+  exit 1
+fi
+exit 0
+"""
+
+
+def test_mutate_reports_the_instrumented_builds_own_output_when_the_build_fails(tmp_path):
+    """A failed instrumented build must fail the run WITH the compiler's own output, not as a
+    bare exit code. Restore the plain `>/dev/null` on either cmake call and this case fails on
+    the evidence half (`zz_shim_diagnostic`) while still exiting 1 — which is exactly the
+    indistinguishable state CI was left in."""
+    clone = shared_clone(tmp_path, "link/zz_probe.cpp", "int zz_probe() { return 1; }\n")
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "cmake").write_text(_CMAKE_SHIM_BUILD_FAILS)
+    (shim / "clang++").write_text('#!/usr/bin/env bash\necho "clang version 18.1.8"\nexit 0\n')
+    (shim / "mull-runner").write_text('#!/usr/bin/env bash\nexit 0\n')
+    for tool in ("cmake", "clang++", "mull-runner"):
+        (shim / tool).chmod(0o755)
+    (shim / "mull-ir-frontend").write_text("not a real plugin; mutate.sh only tests -f\n")
+    env = {"PATH": f"{shim}:{os.environ['PATH']}", "OMGP_CLANG_MAJOR": "18",
+           "MULL_RUNNER": str(shim / "mull-runner"), "MULL_PLUGIN": str(shim / "mull-ir-frontend")}
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--require",
+                     env_overrides=env, timeout=300)
+    assert rc == 1, out
+    assert "instrumented build failed" in out, out
+    # The evidence, not only the verdict: the diagnostic and ninja's own line both reach the log.
+    assert "zz_shim_diagnostic" in out, out
+    assert "ninja: build stopped" in out, out
+    # And the run STOPS there: no runner loop, no merged report, no gate verdict off a build
+    # that produced no binary.
+    assert "mutation: PASS" not in out, out
+    assert not (clone / "build" / "mutate" / "report.json").exists(), out
+
+
 # --- tools/mutate_report.py: the triage gate on synthetic Elements reports --------------------
 
 REPORT = ROOT / "tools" / "mutate_report.py"
@@ -1537,7 +1587,8 @@ def test_mutate_phase2_config_is_one_anchored_regex_per_scope_dir(tmp_path):
     text — exactly one regex per configured scope dir, anchored on the physical root with
     every regex metacharacter in that root escaped — without needing Mull. The clone lives
     under a directory name built from metacharacters, so an unescaped ROOT would either fail
-    to match its own path or match far too much."""
+    to match its own path or match far too much. Without --diff nothing narrows the run, so
+    every scope dir holding a source is listed; the two cases below pin the narrowed list."""
     weird = tmp_path / "r(o)[o]t+x.y$z"
     weird.mkdir()
     clone = weird / "clone"
@@ -1565,6 +1616,41 @@ def test_mutate_phase2_config_is_one_anchored_regex_per_scope_dir(tmp_path):
     assert f"timeout: {cp['policy']['timeout_ms']}" in lines and "quiet: true" in lines, out
     for g in cp["mutators"]["groups"].split():
         assert f"  - {g}" in lines[:lines.index("includePaths:")], out
+
+
+def phase2_paths(out):
+    lines = out.splitlines()
+    assert "includePaths:" in lines, out
+    return [line[4:] for line in lines[lines.index("includePaths:") + 1:] if line.startswith("  - ")]
+
+
+def test_mutate_phase2_config_narrows_to_the_changed_dirs(tmp_path):
+    """The filter is one regex per scope dir THE RUN TOUCHES, not per configured scope dir
+    (#596/#599). The oracle binaries link every scope library, so a core/-only diff used to
+    execute every l3/ and link/ mutant they reach and the merge then discarded the lot: PR
+    #871's test_core_discovery pass was 1592 mutants / 23m16s on 12 cores and 448 / 6m56s
+    narrowed, the 448 in-scope verdicts unchanged but for three Killed→Timeout flips per
+    tools/mutate_diff_reports.py, after CI's 4 cores had hit the 45-minute budget. Pinned
+    without Mull: a one-dir diff prints one regex, and it is that dir's."""
+    clone = shared_clone(tmp_path, "core/zz_probe.cpp", "int zz_probe() { return 1; }\n")
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--print-phase2-config")
+    assert rc == 0, out
+    paths = phase2_paths(out)
+    assert len(paths) == 1 and paths[0].endswith("/core/.*"), out
+    assert re.fullmatch(paths[0], f"{clone.resolve()}/core/core_engine.cpp"), paths
+    assert not re.fullmatch(paths[0], f"{clone.resolve()}/link/master.cpp"), paths
+
+
+def test_mutate_phase2_config_of_an_attestation_is_the_attested_dirs(tmp_path):
+    """Same for the attest path, whose `attest.dirs` named one dir while the runner executed
+    three (#596, #601's execution half; its reporter half — the survivor/label scan — is
+    untouched here)."""
+    clone = shared_clone(tmp_path, "tests/unit/test_link_zz_probe.cpp", "// a changed link test\n")
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--print-phase2-config")
+    assert rc == 0, out
+    assert "mode=attest" in out, out
+    paths = phase2_paths(out)
+    assert len(paths) == 1 and paths[0].endswith("/link/.*"), out
 
 
 # --- tools/mutate_diff_reports.py: the evidence tool for mutate.sh changes -----------------------

@@ -5647,3 +5647,437 @@ the constant's, 20 ms, and not ten superframes; no code changes under this entry
 **Supersedes:** none. **Related:** the previous entry (the clock-based reading this is a
 consequence of), and the 2026-09-13 F4 ruling, whose refinements carried the rate-scaled
 superframe into trunk §7 and data-model §7 without reaching this constant.
+
+---
+
+## 2026-09-28 — T017-T023 (#688): spec FR-008 keys the descriptor cache on a field `IDENTIFY` does not carry
+
+**Context:** `specs/003-host-core-engine/spec.md` FR-008 requires the engine to "cache descriptors
+keyed by the pair (MODEL_ID, descriptor CRC)" and to "skip the descriptor read for a node whose
+IDENTIFY response's MODEL_ID and CRC match an existing cache entry"; `data-model.md` §5 repeats the
+key as the full `l3::ModelIdRec` triple plus the CRC, and `tasks.md` T021 as
+`(model_vendor, model_hw_rev, model_fw_rev, desc_crc)`. **`IDENTIFY`'s response has no MODEL_ID.**
+`protocol/omgp-protocol.yaml` `l3_payloads.IDENTIFY.response` is `major, minor, module_type,
+desc_len, desc_crc` (`docs/protocol-l3.md` §3.1), and `MODEL_ID` is a descriptor TLV record
+(§4.1) — knowable only *after* the read the cache exists to avoid. The named key is therefore
+unreachable at the moment the lookup has to happen. CLAUDE.md rule 1 puts the YAML above the plan,
+so the wire is what it is and the feature artefacts are what is wrong.
+
+**Options:** (a) key the lookup on the identity `IdentifyResp` does carry —
+`(module_type, desc_len, desc_crc)` — and record the MODEL_ID triple on the entry once the blob is
+read, so `data-model.md` §5's key is still populated and still describes the entry, just not the
+lookup; (b) add `MODEL_ID` to `IDENTIFY`'s response in the YAML (a protocol change: T3, human, and
+it widens a message every node must emit for a host-side cache's convenience); (c) drop the cache
+short-circuit and read every descriptor fresh, abandoning FR-008 and SC-004.
+
+**Recommendation:** (a), implemented in this dispatch unit and labelled at
+`core/core_types.hpp`'s `NodeRecord::module_type` and at `CoreEngine::on_identify()`. What it costs,
+stated rather than claimed away (CLAUDE.md rule 11): the lookup is a CRC-16 match within one
+`module_type` and one exact `desc_len`, so a false hit needs two *different* descriptors of
+identical length and module type colliding on CRC-16 — it is a narrowing of FR-008's key, not an
+equivalent of it, and the residual risk is the CRC's, which is the same CRC `IDENTIFY` already asks
+the host to trust for the read's own integrity. (b) remains the only way to get FR-008's literal
+key and is the right answer if a collision is ever judged unacceptable.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** the
+2026-08-28 ruling that fixed `IDENTIFY`'s response layout (provisional there, and unchanged since).
+
+---
+
+## 2026-09-28 — T017-T023 (#688): FR-005's budget, taken literally, livelocks discovery on the spec's own 3-backplane rig
+
+**Context:** `spec.md` FR-005 requires that "a superframe's total scheduled traffic MUST NOT exceed
+its period" and FR-027 that the remaining demand budget be computed from the *measured* duration of
+that superframe's own traffic, while FR-003/FR-028 make the status polls and the enrolment probe
+unconditional. On SC-001's own rig — 3 backplanes at `TRUNK_bit_rate` — the three mandatory status
+polls measure ≈ 350-400 µs each against a `TRUNK_T_poll_us` of 2000, and a single `READ_DESC` chunk
+at the R-09 size (`LIMIT_max_l3_payload - 3` = 56 bytes of payload) costs ≈ 900 µs. `data-model.md`
+§9's own seed for a target never yet measured is "the worst-case wire time at the rate
+`Master::bit_rate()` currently reports", which at `link::kMaxWire` is ≈ 2.8 ms — larger than the
+whole period. Admitting a demand item only when its estimate fits what is left therefore admits
+**nothing, ever**: no node is ever measured, so no node's estimate ever shrinks. That is a
+livelock, not slow progress — discovery never starts. Separately, an enrolment probe to a silent
+address costs trunk §7's full retry set (≈ 1.1 ms) and cannot be both unconditional and inside a
+budget the polls have already spent.
+
+**Options:** (a) admit the first demand item of each superframe whatever the estimate says, and
+apply the budget to every later one — a progress guarantee, at the cost of one item's overrun in
+the worst case; (b) seed an unmeasured target with something smaller than `kMaxWire` (e.g. the
+actual encoded request size plus a full-frame response), which removes the livelock for ordinary
+messages but not for the case §9's seed exists to cover; (c) treat FR-005 as binding only on the
+*sum of estimates at admission* and let measurement overrun it silently, which is what a naive
+implementation does by accident and reports nothing.
+
+**Recommendation:** (a), implemented in this dispatch unit and labelled at
+`CoreEngine::admit_demand()` and in `core/core_engine.hpp`'s `run_superframe()` note; the enrolment
+probe is likewise issued outside the budget, which trunk §7 already contemplates ("the superframe
+that issues it stretches accordingly"). Both are DIVERGENCES from FR-005's literal wording and are
+recorded as such rather than presented as compliance. (b) is a reasonable refinement to land with
+T028/T029 (#699/#700), which own the budget proper; it reduces how often (a) is reached but does
+not remove the need for it, since a target whose first transaction is a full-size descriptor chunk
+still overruns whatever it was seeded with.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** the
+2026-09-21 "#110 F2c" ruling that produced FR-027/FR-028 (measured cost, unconditional polls).
+
+---
+
+## 2026-09-28 — T017-T023 (#688): SC-005's "any clock granularity" and FR-027's measured budget cannot both hold
+
+**Context:** `spec.md` SC-005 requires "the same sequence of operations and the same end state
+regardless of how quickly the simulated clock is advanced between steps". FR-027 requires each
+superframe's demand budget to be computed from the *measured* duration of that superframe's own
+traffic. A caller that advances the clock in coarser steps measures every transaction as taking
+longer (it observes completion at the next step boundary, not at the byte boundary), so it admits
+fewer demand items per superframe — and an item deferred to the next superframe lands *after* that
+superframe's mandatory status polls, which changes the sequence of operations, not merely its
+timing. The two requirements are in direct tension, and no implementation can satisfy both.
+
+**Options:** (a) read SC-005 as a statement about the *caller's cadence* at a fixed wire model —
+the engine must not depend on how many times it is called or on elapsed time between calls, only
+on its `now_us` argument — and test it over granularities that do not move the wire's own event
+instants; (b) quantise measured durations to some unit, which invents a value no artefact fixes and
+merely moves the boundary; (c) weaken FR-027 back to an assumed bound, which the 2026-09-21 "#110
+F2c" ruling explicitly rejected.
+
+**Recommendation:** (a). `tests/unit/test_core_discovery.cpp`'s `[clock-granularity]` case
+therefore compares full transcripts across steps that all divide one byte time (10, 5, 2 and 1 µs
+at `TRUNK_bit_rate`), and says in the file what that establishes and what it does not: it
+discriminates a scheduler that reads call counts or inter-call elapsed time from one that reads
+only `now_us`; it is not a demonstration of SC-005 at every cadence, because under FR-027 that
+property is not true. Amending SC-005's wording to match is a spec edit and a human's.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** the previous
+entry (the same budget, the other half of its consequences).
+
+---
+
+## 2026-09-28 — T017-T023 (#688): R-06's shared node-id pool versus F12's adopted per-backplane quota
+
+**Context:** `specs/003-host-core-engine/research.md` R-06 decides that node ids are assigned
+"first-fit from one shared free pool (`ADDR_module_min..ADDR_module_max`)" and explicitly rejects a
+per-backplane block, having found that 112 ids across 15 backplanes does not divide into blocks
+large enough for a single 16-slot FX backplane. The ADOPTED ruling of 2026-09-06 (this file, "#110
+F12") says "the host allocates node ids from a fixed per-backplane quota". The two are each
+self-consistent and produce different id sequences. The 2026-09-22 ruling amended F12's
+slot-cap half and left its quota sentence untouched; #154, the limit-symbol issue F12 was tracked
+under, is closed.
+
+**Options:** (a) implement R-06 (shared pool, first-fit, canonical order) and treat F12's quota
+sentence as superseded in substance by R-06's own analysis, which F12 predates and which was
+accepted with `specs/003-host-core-engine/` in PR #725; (b) implement a per-backplane quota and
+amend R-06; (c) block the story.
+
+**Recommendation:** (a), implemented in this dispatch unit at `CoreEngine::reconcile_slot_map()`,
+because R-06 gives a reason F12 does not answer and `tasks.md` T018 states it as the task. The
+choice is deliberately **not** load-bearing for the tests: `tests/unit/test_core_discovery.cpp`
+asserts the count, distinctness, range and stability of the assigned ids and never their literal
+values, exactly as #688's own acceptance criteria require, so a later ruling for (b) changes
+`core/core_engine.cpp` and leaves the test file alone.
+
+**Ruling:** pending — human. This entry asks for the contradiction to be closed in one direction
+or the other, not for the code to change today. **Amends:** none. **Supersedes:** none.
+**Related:** 2026-09-06 "#110 F12"; the 2026-09-22 ruling that amended its slot-cap half.
+
+---
+
+## 2026-09-28 — T017-T023 (#688): with the descriptor cache full there is nowhere to reassemble a fresh descriptor
+
+**Context:** `data-model.md` §5 says a full descriptor cache "refuses new entries and every
+subsequent unique descriptor is read fresh rather than cached — a graceful degradation, not a
+crash". In `core/` a cache entry IS the reassembly buffer: `DescriptorCacheEntry::blob` is the only
+`LIMIT_max_descriptor_bytes` store the engine owns, and a per-node staging area would be
+`LIMIT_max_nodes` × 2048 = 256 KB of fixed allocation on a device whose whole cache is already 64
+KB. So "read fresh rather than cached" has nowhere to put the bytes.
+
+**Options:** (a) with no entry free, leave the node in `Identifying` and retry it later, when a
+freed entry (`refcount == 0`) may exist — no descriptor is ever reported that was not read, and a
+rig with more than 32 distinct descriptors and no churn leaves some nodes undiscovered; (b) carry
+one scratch buffer and serialise uncached reads through it — 2 KB more, and one node at a time;
+(c) evict a `refcount == 0` entry that is complete, which the implementation already does at claim
+time, and accept that a rig with more than 32 *live* distinct descriptors thrashes.
+
+**Recommendation:** (a) for this story, implemented and labelled at `CoreEngine::on_identify()`,
+with (c) already in place as the ordinary path. (b) is the honest fix if a rig with more than 32
+distinct live descriptors is ever a real target; nothing in `docs/omgp-spec-v0.7.md` §5 suggests
+one is, and R-12 chose 32 as "generous against realistic rigs".
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** R-12
+(descriptor cache capacity).
+
+---
+
+## 2026-09-28 — T017-T023 (#688): `CoreStatus::NoFreeNodeId` has no shape `LifecycleEvent` can carry
+
+**Context:** `contracts/core-cpp.md` §Node-ID assignment and `tasks.md` T018 both require
+`CoreStatus::NoFreeNodeId` to be "enqueued onto `pending_lifecycle_`" when R-06's pool is
+exhausted, "rather than failing silently". `data-model.md` §7's `LifecycleKind` list has no member
+for it and `LifecycleEvent` has no field that can carry a `CoreStatus` — and the finding is about a
+*slot*, which by definition has no node id to name it by, while `LifecycleEvent::node_id` is the
+only identifier the struct carries.
+
+**Options:** (a) append `LifecycleKind::NodeIdPoolExhausted` and a `slot` field, reporting
+`node_id` = the backplane address and `slot` = the slot that got nothing; (b) report it as a
+`CoreStatus` return from `reconcile_slot_map()`, which has no caller able to act on it (the caller
+is `run_superframe()`, not the application); (c) count it in a counter with an accessor, like
+`dropped_deliveries()`.
+
+**Recommendation:** (a), implemented in this dispatch unit. The enumerator is appended after every
+existing member so no existing value moves, and `slot` is documented as meaningful only for
+`NodeRemoved` and `NodeIdPoolExhausted`. Both are additions to `data-model.md` §7, which a human
+should fold into that artefact (or reject) — the code says so at each field.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** R-06.
+
+---
+
+## 2026-09-28 — T017 (#688): `MockL3Node` cannot script one SLOT's silence, so User Story 1 AS3 is scripted the way trunk §8 says a backplane behaves
+
+**Context:** #688's acceptance criteria ask for "one slot's module scripted `SilenceStep` for
+`IDENTIFY`". `tests/support/mock_l3_node.hpp`'s `set_script()` takes a trunk address
+(`node < kAddrCount`), not a slot, and `SilenceStep` is a node-wide wildcard: a `SilenceStep` in a
+backplane's script silences that backplane's status polls and slot maps too, which is the
+"backplane went away" scenario and not AS3's. `contracts/mock-l3-node.md`'s own sentence "one
+script per simulated trunk address (backplane or, via its owning backplane's bridging, one of its
+slots)" describes a per-slot capability T012 did not build, and extending the double is #683's,
+which is closed.
+
+**Options:** (a) script the unanswering module the way `docs/trunk-link-layer.md` §8 says a real
+backplane presents one — the backplane answers `ERR_UNKNOWN_TARGET` on its behalf, which §8 in fact
+*requires* ("MUST begin its response within T_turn ... otherwise `ERR_BUSY` ... or
+`ERR_UNKNOWN_TARGET` for a slot with no live module ... MUST NOT stall the trunk"), so a
+trunk-level timeout from a slot is behaviour §8 forbids; (b) extend `MockL3Node` with per-slot
+scripts (a #683 reopening, and a test-support change inside a story that is out of scope for it);
+(c) drop AS3's per-slot half.
+
+**Recommendation:** (a), implemented in `tests/unit/test_core_discovery.cpp` and stated in its
+header. Everything AS3 asks to be *observed* is asserted unchanged — the unanswering node stays
+`Identifying`, the other eleven reach `Discovered`, its id is never released, and it is retried at
+distinct superframes — and a genuine trunk-level timeout is exercised separately by a backplane
+scripted `{SilenceStep}`. (b) is worth doing when a later story needs a slot to misbehave
+differently from its backplane; note that `contracts/mock-l3-node.md`'s sentence above should be
+corrected either way, since it currently describes a capability that does not exist.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** the
+2026-09-23 "`MockL3Node`: an opcode class with no step ever scripted" entry (the wildcard
+consumption rules this reading depends on).
+
+---
+
+## 2026-09-28 — T018 (#689): nothing fixes how OFTEN R-06's pool-exhaustion outcome is reported
+
+**Context:** `research.md` R-06 says pool exhaustion "is reported through the lifecycle callback as
+a discovery failure for that slot"; `contracts/core-cpp.md` and `tasks.md` T018 say it is "enqueued
+onto `pending_lifecycle_` ... rather than failing silently". None of the three says whether a
+STANDING shortage is reported once per transition or once per `BP_SLOT_MAP` that re-observes it —
+and the two readings are not equivalent, because `data-model.md` §8a's pending ring holds
+`LIMIT_max_nodes` items and is drop-NEWEST. Level-triggered reporting on an over-full rig (two
+backplanes at `LIMIT_bp_slot_map_max_slots` = 464 occupied slots against 112 ids) enqueues hundreds
+of notices for one unchanged condition per sweep, and the ring then refuses the genuine
+`NodeRemoved`/`NodeDiscovered` behind them — spec FR-017's presence reporting stops for good.
+Reported by the red-team pass on PR #871 (finding 1) against the level-triggered first
+implementation.
+
+**Options:** (a) edge-triggered per slot — report the transition into the shortage once, re-report
+only after that slot is assigned an id, empties, or leaves `slot_count`; (b) level-triggered, as
+first implemented; (c) edge-triggered per BACKPLANE, naming the first unassignable slot, which
+reports less but loses R-06's own "for that slot" granularity.
+
+**Recommendation:** (a), implemented (`BackplaneRecord::exhaustion_reported`, one bit per slot).
+It keeps R-06's per-slot granularity, bounds the notice stream by the number of real transitions —
+the same bound `NodeRemoved` already has — and leaves the ASSIGNMENT decision untouched: every
+slot is still reconsidered on every sweep, only the notice is deduplicated. What this does NOT
+establish: an over-full rig whose transitions in one undrained window exceed 128 still loses the
+surplus to §8a's drop-newest rule, exactly as a rig with that many presence changes would;
+`dropped_deliveries()` counts them. `BackplaneRecord` gains a field data-model.md §4 does not
+list, which a human should fold into that artefact (or reject).
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** R-06, the
+2026-09-28 "`CoreStatus::NoFreeNodeId` has no shape `LifecycleEvent` can carry" entry.
+
+---
+
+## 2026-09-28 — T019/T020 (#690, #691): the IDENTIFY scan's order is fixed by no artefact, and a fixed start starves
+
+**Context:** `spec.md` FR-006 requires every assigned-but-unidentified node to be identified and
+FR-019/SC-001 require the resulting transcript to be reproducible, but no artefact fixes the ORDER
+the scan visits ids in. The first implementation scanned `ADDR_module_min` upward on every demand
+slot, which is reproducible but not fair: `data-model.md` §2 keeps a node in `Identifying` until it
+answers with an identity, so the lowest such id takes every demand slot for ever. Measured on the
+PR #871 branch before the fix: one slot answering trunk §8's `ERR_UNKNOWN_TARGET` at
+`ADDR_module_min` took all 264 IDENTIFY requests of 90 superframes, and four honest modules on
+another backplane were never identified at all — i.e. User Story 1 AS3's "blocks no other slot or
+backplane" held only because AS3's own rig gives the unanswering module the HIGHEST id.
+
+**Options:** (a) rotate the scan's start past each id it issues for (round robin over the id
+space); (b) keep the fixed start and skip a node after N unanswered attempts, which contradicts
+AS3's "retried rather than abandoned"; (c) keep the fixed start and accept the starvation as a
+property of a rig with a permanently-failing low id.
+
+**Recommendation:** (a), implemented (`CoreEngine::identify_cursor_`). Reproducibility is
+preserved: the cursor advances only when a request is issued, so the order stays a pure function of
+the engine's own state sequence and not of the caller's cadence — demonstrated by the existing
+determinism cases (AS2/SC-001/SC-005), which compare whole transcripts between runs and are
+unchanged. Demonstrated by "AS3: an unanswering module at the LOWEST node id blocks no other slot
+either" in `tests/unit/test_core_discovery.cpp`.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** R-07 (demand
+scheduling order), FR-019.
+
+## 2026-09-28 — T022 (#693): nothing bounds a descriptor read whose chunks are refused for ever, and R-07's order makes it starve everything else
+
+**Context:** `research.md` R-07 fixes the order of the three demand rings (event drains, then
+descriptor chunks, then parameter operations), and `core/`'s IDENTIFY scan sits after the chunk
+ring for the stated reason that finishing a read already in flight releases a node to `Discovered`
+while starting another identity does not. `trunk-link-layer.md` §8 REQUIRES a backplane to answer
+`ERR_BUSY` rather than stall the trunk when its module bus is not ready (CLAUDE.md rule 6), and
+§10.5 records that a persistent busy is unbounded at L2 — so a spec-conformant rig may refuse a
+`READ_DESC` for ever. `protocol-l3.md` and `spec.md` say nothing about how often such a read may be
+retried, and the refusal is not an error the node can be failed on: AS3 requires it to be retried
+rather than abandoned. Measured on the PR #871 branch before the fix: one backplane answering
+`ERR_BUSY` to every `READ_DESC` took 893 of 893 demand items over 301 superframes (a refused chunk
+is re-queued for the same offset, keeping the ring non-empty, and a busy superframe admits only one
+demand item), so 0 of 4 honest modules on another backplane were ever identified — User Story 1
+AS3's "does not block the discovery of any other slot or backplane", violated outright.
+
+**Options:** (a) keep R-07's order exactly and accept that a permanently-refused read starves the
+rig; (b) abandon the read after N refusals, which contradicts AS3's "retried rather than
+abandoned"; (c) keep the read alive but DEPRIORITISE it — a node whose last chunk made no progress
+loses its place in the chunk ring and is retried after the IDENTIFY scan instead, at most once per
+superframe, from a rotating cursor; (d) bound re-pushes per node per superframe without reordering,
+which the measurement above rules out (the one demand item a busy superframe admits still goes to
+the chunk ring first).
+
+**Recommendation:** (c), implemented (`NodeRecord::desc_stalled_superframe`,
+`CoreEngine::desc_retry_cursor_`). It is a stated DIVERGENCE from R-07's fixed order, narrow by
+construction: R-07 orders the three rings and this is not a fourth ring but the same descriptor work
+deprioritised for as long as it is making no progress — the flag is cleared by the first chunk that
+adds a byte and by any return through IDENTIFY, so a healthy read is scheduled exactly as before
+(demonstrated by the unchanged AS1/AS2/SC-001 whole-transcript cases). Idempotence carries the
+retry: the node keeps its cache entry and resumes at `entry->received` (CLAUDE.md rule 2).
+Demonstrated by "trunk §8: a backplane answering `ERR_BUSY` to every `READ_DESC` blocks no other
+slot's discovery" in `tests/unit/test_core_discovery.cpp`, which fails at 0 of 4 modules discovered
+without it. What it does NOT settle, and is the reason this entry exists: whether a rig that refuses
+a descriptor for ever should eventually be REPORTED (a lifecycle notice for a node stuck in
+`ReadingDescriptor`) rather than only retried quietly — there is no `LifecycleKind` for it and this
+change adds none.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** R-07 (demand
+scheduling order), R-09 (chunked READ_DESC), trunk §8/§10.5, User Story 1 AS3, and the 2026-09-28
+IDENTIFY-scan-order entry above (same class of gap, different pass).
+
+## 2026-09-28 — T022 (#693): deprioritising a stalled `READ_DESC` behind the IDENTIFY scan means never, because that scan never empties
+
+**Context:** the entry above ("nothing bounds a descriptor read whose chunks are refused for ever")
+adopted option (c): a node whose last chunk made no progress loses its place in the chunk ring and is
+"retried after the IDENTIFY scan instead". That description is what this entry supersedes. The
+IDENTIFY scan includes nodes already in `DiscoveryState::Identifying` — deliberately, because
+`spec.md` User Story 1 AS3 requires a module that does not answer to be RETRIED rather than
+abandoned, and `data-model.md` §2 keeps such a node in `Identifying` for ever. So the scan always has
+a candidate whenever any slot answers trunk §8's `ERR_UNKNOWN_TARGET` (or times out), it returns from
+`issue_demand()` on every call, and a pass placed after it is not merely late but unreachable.
+Measured on the PR #871 branch at `5fcbf5a`, with a busy backplane plus one unanswering slot in the
+same rig: `READ_DESC` 3 → 3 over a further 20 superframes while IDENTIFY kept rising, and a module
+that drew a single `ERR_BUSY` chunk stayed in `ReadingDescriptor` for ever. The starvation was not
+fixed, only reversed: before, a refused read starved IDENTIFY; after, an unidentified slot starved
+the refused read. AS3 is the criterion on BOTH sides — "does not block the discovery of any other
+slot or backplane" is symmetric, and each pass can have work for ever, so no fixed order between them
+can satisfy it.
+
+**Options:** (a) keep the fixed order and accept that whichever pass is second starves whenever the
+first has permanent work — ruled out by the measurement, in both directions; (b) bound the IDENTIFY
+scan's attempts per node per superframe the way the retry already bounds itself, which makes the
+retry reachable but leaves the schedule's fairness resting on two independent bounds rather than on
+the order itself, and still gives the scan every demand item of every superframe in which any node
+has not yet had its attempt; (c) ALTERNATE the two passes by superframe parity, so each runs first in
+every second superframe; (d) merge the two into one cursor over a combined candidate set, which
+couples two different retry policies (one per superframe per node, versus one per demand item) into a
+single loop.
+
+**Recommendation:** (c), implemented (`CoreEngine::scan_identify()` and
+`CoreEngine::retry_stalled_desc()`, ordered by `superframe_ & 1`). It bounds the harm by construction
+rather than by a second policy constant: neither pass can be held off for more than one superframe
+however the other behaves, whatever either's internal bound is. The per-node once-per-superframe
+bound on the retry (`NodeRecord::desc_stalled_superframe`) and the rotating cursors of both passes
+are unchanged. Reproducibility is preserved (FR-019/SC-001): the parity is read from `superframe_`,
+which is the plan's own number — no wall clock, no call count. A healthy rig is scheduled exactly as
+before, by construction: with no stalled node `retry_stalled_desc()` returns "nothing to do" without
+touching any state, so swapping its position changes no transcript — demonstrated by the unchanged
+AS1/AS2/SC-001/SC-005 whole-transcript cases. Demonstrated by "AS3: a stalled `READ_DESC` is still
+retried while another slot never answers IDENTIFY" and "AS3: one transient `ERR_BUSY` chunk does not
+lose a module when another slot never answers IDENTIFY" in `tests/unit/test_core_discovery.cpp`, both
+written before the fix and both RED at `5fcbf5a` (`3 > 3` and `2 == 3`). What this entry does NOT
+settle is unchanged from the entry it supersedes: whether a read refused for ever should eventually
+be REPORTED rather than only retried quietly — there is still no `LifecycleKind` for a node stuck in
+`ReadingDescriptor`.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** the 2026-09-28 entry "T022 (#693):
+nothing bounds a descriptor read whose chunks are refused for ever, and R-07's order makes it starve
+everything else" — its option (c) is adopted as before, but "after the IDENTIFY scan" is replaced by
+"alternating with the IDENTIFY scan". **Related:** R-07 (demand scheduling order), R-09 (chunked
+`READ_DESC`), trunk §8/§10.5, User Story 1 AS3, and the 2026-09-28 IDENTIFY-scan-order entry.
+
+## 2026-10-07 — PR #871 (#688): `deep-verify-mutate` ran out of its 45-minute budget on a `core/`-only diff; three cuts, none to the gate
+
+**Context:** PR #871's `deep-verify-mutate` run at `f7a2b99` was cancelled at the job's 45-minute
+budget (`timeout-minutes`, from `agent-config.yml` on the default branch) before reaching the
+survivor gate: 2m40s of instrumented build, then 42 minutes of `test_core_discovery` under the
+runner on GitHub's 4 cores. The same oracle locally, 12 cores: 23m16s. Three causes, each measured
+below, each cut without touching a `[policy]` constant (`timeout_ms`, `max_unlabelled_survivors`,
+the mutator set) or the merge in `tools/mutate_report.py` that is the gate:
+
+1. **The runner executed every scope dir's mutants, not the changed dir's.** `phase2_config`
+   emitted one `includePaths` regex per `scope_dirs` entry — the gap the 2026-09-15 entry names and
+   #596/#599/#601 file — and the oracle binaries link every scope library, so this `core/`-only
+   diff executed 1592 mutants, 1144 of them `l3/` and `link/` ones the merge then discarded.
+   Narrowed to the changed (or attested) dirs: 448 mutants, 6m56s, every in-scope verdict
+   identical but three Killed→Timeout flips (both are kills) per
+   `tools/mutate_diff_reports.py --scope-dirs core` — **demonstrated**. Pinned without Mull by
+   `test_mutate_phase2_config_narrows_to_the_changed_dirs` and
+   `test_mutate_phase2_config_of_an_attestation_is_the_attested_dirs` (`tools/refimpl/
+   test_tooling.py`); a dir the filter misses still fails closed by `mutate_report.py`'s
+   per-changed-dir rule, unchanged.
+2. **A killed mutant ran the whole binary.** Kills are exit-status and Catch2 keeps going after a
+   failure, so a mutant that stops discovery failed the cold-boot case in its first second and then
+   ran every stall-horizon case (`kStallHorizonSuperframes` = 90) to its step budget: 77 of the
+   448 `core/` mutants hit the 20 s `timeout_ms` that way — an **estimated** 1540 s of the run's
+   ~2580 s CPU (77 × 20 s against 371 × the 2.8 s instrumented baseline). A scan of all 77 outside
+   Mull, 12 at a time with Catch2 per-case shards: 65 finish in 23–59 s and 12 pass 60 s; the one
+   of the 12 inspected case by case (`core_engine.cpp:594:79` `cxx_ne_to_eq`) is 65 bounded cases
+   summing past 60 s, the slowest 19.5 s, and the other 11 are **assumed** the same shape — no
+   infinite loop was found. `mutate.sh` now passes Catch2 `--abort` through the runner to the
+   oracle (`mull-runner` hands trailing arguments to the test program: a bogus flag fails its
+   baseline run, measured on 0.34.0). By construction a survivor is a run with no failure, as is
+   the baseline, and `--abort` leaves both alone, so the flag can only shorten a kill; measured:
+   6m56s → 1m56s, the same 44 survivors, 75 of the 77 Timeouts now Killed and no other difference
+   (`mutate_diff_reports.py`) — **demonstrated**.
+3. **The test rig's step budget was `target` superframes' worth, spent in full on a stall.**
+   `run_to_superframe()` stepped `target × kStepsPerSuperframeBound × calls_per_byte_time` times
+   before `FAIL()`, so a stalled engine cost one AS3 case 1.7–19 s at -O0. `run_until()` replaces
+   it and fails at the stall — one per-superframe bound of steps in which no superframe opens —
+   or at a superframe horizon, finite by construction (every step returns, counts toward the
+   bound, or opens one of `horizon` + 1 superframes); the two 400000-step waits use it too. All 65
+   cases still pass (1069615 assertions; the two `REQUIRE`s those waits ended with are now the
+   helper's horizon). After cut 2 the remaining Timeouts went from 2 to 1.
+
+End to end at `f7a2b99` plus these changes, 12 cores: `tools/mutate.sh --diff origin/main` in
+254 s wall including the instrumented build, `test_core_discovery` 1m36.8s (was 23m16s),
+`mutants=398 killed=373 survived=25 labelled[equivalent=25] unlabelled=0`, no stale label, PASS.
+(398 rather than the 439 of the 2026-10-01 local runs: those ran in a tree whose
+`core_engine.cpp` carried CRLF endings, so `git diff -U0 origin/main` marked every line changed
+and gated 41 mutants on lines the PR does not touch — a superset, never a miss; `main` already
+holds `core_engine.cpp` at 209 lines.) The CI time is **assumed** from these, ~3× at 4 cores and
+well inside 45 minutes; it is to be read from the run, not from here.
+
+Not done, because each needs a ruling: sharding the job across runners, lowering `timeout_ms`,
+trimming the mutator set for the PR gate. #601's reporter half — the survivor/label scan still
+covers every scope dir — is untouched too.
+
+**Recommendation:** accept the three cuts as tooling and test changes under the standing rulings
+(2026-08-29 triage gate, 2026-09-14 run-time path filters); close #596 and #599 with the PR and
+leave #601 open for its reporter half.
+
+**Ruling:** pending — human. **Amends:** `specs/001-protocol-foundation/contracts/tooling.md`
+step 3 and `research.md` trap (5) in place — both said every scope-dir mutant runs. **Supersedes:**
+none; the 2026-09-15 entry's "left for an issue" is done here. **Related:** #140/#153 (gate
+budgets), #596, #599, #601, PR #593, PR #871.

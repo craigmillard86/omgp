@@ -51,7 +51,7 @@
 #   ./tools/mutate.sh --diff origin/main --require     # CI: fail if Mull is missing
 #   ./tools/mutate.sh --diff HEAD~1                    # local: disclosed skip if Mull is missing
 #   ./tools/mutate.sh --diff <ref> --dry-run           # print the scope and stop
-#   ./tools/mutate.sh --print-phase2-config           # print the run-time mull.yml and stop
+#   ./tools/mutate.sh [--diff <ref>] --print-phase2-config   # print that scope's run-time mull.yml and stop
 #   ./tools/mutate.sh --trend-log metrics/mutation-trend.jsonl   # whole tree, append trend
 #
 # Overrides: OMGP_CLANG_MAJOR, MULL_RUNNER (path), MULL_PLUGIN (path) — used to run an
@@ -81,26 +81,38 @@ FIND_EXT=(); for e in $SOURCE_EXT; do [ ${#FIND_EXT[@]} -gt 0 ] && FIND_EXT+=(-o
 ROOT=$(pwd -P)
 
 # Run-time (phase 2) mull.yml, see "configuration is TWO-PHASE" below: what the RUNNER
-# reads. `includePaths` is one regex per scope dir, anchored on the physical root with every
-# regex metacharacter in it escaped — this is the one line that can silently narrow what
-# gets executed, so it is printable (--print-phase2-config) and pinned by
-# tools/refimpl/test_tooling.py without Mull present (#141 review).
+# reads. `includePaths` is one regex per scope dir THE RUN TOUCHES — $1 is the changed (or
+# attested) dirs; without --diff that is every scope dir holding a source — emitted in
+# scope_dirs order and anchored on the physical root with every regex metacharacter in it
+# escaped. This is the one line that can silently narrow what gets executed, so it is
+# printable (--print-phase2-config, once the scope is known) and pinned by
+# tools/refimpl/test_tooling.py without Mull present (#141 review). Until 2026-10-07 it
+# listed every scope dir: the oracle binaries link every scope library, so a core/-only diff
+# executed every l3/ and link/ mutant they reached and the merge then discarded the lot
+# (docs/OPEN-QUESTIONS.md 2026-09-15 named the gap, 2026-10-07 the measurement: PR #871's
+# test_core_discovery pass went 1592 mutants / 23m16s → 448 / 6m56s on 12 cores, the 448
+# in-scope verdicts unchanged but for three Killed→Timeout flips — both are kills — per
+# tools/mutate_diff_reports.py, after CI's 4 cores had hit the job's 45-minute budget).
 phase2_config() {
-  local root_re
+  local root_re dirs
   root_re=$(printf '%s' "$ROOT" | sed 's/[][\.*^$+?(){}|\\]/\\&/g')
+  dirs=" $(echo "$1" | tr '\n' ' ') "
   echo "mutators:"; for g in $GROUPS_; do echo "  - $g"; done   # as phase 1; every pre-#141 run carried it here and ran, so the runner tolerates it — kept so phase 2 differs from phase 1 by includePaths alone (#141 review)
   echo "timeout: $TIMEOUT_MS"
   echo "quiet: true"
-  echo "includePaths:"; for d in $SCOPE_DIRS; do echo "  - ^$root_re/$d/.*"; done
+  echo "includePaths:"
+  for d in $SCOPE_DIRS; do
+    case "$dirs" in *" $d "*) echo "  - ^$root_re/$d/.*" ;; esac
+  done
 }
 
-REF=""; REQUIRE=0; DRY=0; TREND_LOG=""
+REF=""; REQUIRE=0; DRY=0; TREND_LOG=""; PRINT_PHASE2=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --diff) REF="$2"; shift 2 ;;
     --require) REQUIRE=1; shift ;;
     --dry-run) DRY=1; shift ;;
-    --print-phase2-config) phase2_config; exit 0 ;;
+    --print-phase2-config) PRINT_PHASE2=1; shift ;;
     --trend-log) TREND_LOG="$2"; shift 2 ;;
     --threshold) echo "mutate: --threshold was removed — the gate is the survivor triage (tools/mutate.cfg [policy])" >&2; exit 2 ;;
     *) echo "mutate: unknown argument $1" >&2; exit 2 ;;
@@ -187,6 +199,8 @@ if [ "$ATTEST" -eq 1 ]; then
 else
   CHANGED_DIRS=$(echo "$SCOPE" | cut -d/ -f1 | sort -u)
 fi
+# The runner's path filter is derived from CHANGED_DIRS, so it cannot be printed any earlier.
+if [ "$PRINT_PHASE2" -eq 1 ]; then phase2_config "$CHANGED_DIRS"; exit 0; fi
 # Comment lines are dropped first: a commented-out registration is not a binary.
 UNIT_BINS=$(grep -vE '^[[:space:]]*#' CMakeLists.txt | grep -oE 'omgp_add_catch_test\(test_[A-Za-z0-9_]+ +tests/unit/' | sed -E 's/omgp_add_catch_test\(//; s/ .*//')
 ORACLE=""
@@ -270,10 +284,31 @@ rm -rf "$BUILD" && mkdir -p "$BUILD"
 # when present (CI installs it); the default generator otherwise.
 GEN=()
 command -v ninja >/dev/null 2>&1 && GEN=(-G Ninja)
-cmake -S . -B "$BUILD" "${GEN[@]}" -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug -DOMGP_SANITIZERS=OFF \
-  -DCMAKE_CXX_FLAGS="-fpass-plugin=$PLUGIN -g -grecord-command-line -O0" >/dev/null
+# QUIET ON SUCCESS, LOUD ON FAILURE — and the build below is why the distinction is written out
+# rather than left to a plain `>/dev/null`. Ninja writes the compiler's diagnostics AND its own
+# "ninja: build stopped" line to STDOUT, not stderr (ninja 1.11 StatusPrinter::Info), so
+# discarding stdout discarded the whole of a failed build's evidence: CI run 36453322675 printed
+# the scope, the oracle and the gate line and then exited 1 with nothing else, which names
+# neither the failing file nor whether a compiler ever ran. Both logs are kept beside the build
+# tree, and the failing one is echoed here, because a gate that fails with no evidence is the
+# same blind spot the rest of this script refuses everywhere else.
+CONFIGURE_LOG="$BUILD/configure.log"
+BUILD_LOG="$BUILD/build.log"
+if ! cmake -S . -B "$BUILD" "${GEN[@]}" -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug \
+     -DOMGP_SANITIZERS=OFF -DCMAKE_CXX_FLAGS="-fpass-plugin=$PLUGIN -g -grecord-command-line -O0" \
+     > "$CONFIGURE_LOG" 2>&1; then
+  echo "mutation: instrumented cmake configure failed — failing (last 80 lines of $CONFIGURE_LOG):" >&2
+  tail -80 "$CONFIGURE_LOG" >&2
+  exit 1
+fi
 # shellcheck disable=SC2086
-cmake --build "$BUILD" --parallel --target $ORACLE >/dev/null
+if ! cmake --build "$BUILD" --parallel --target $ORACLE > "$BUILD_LOG" 2>&1; then
+  # The tail is the error: both generators stop at the first failing edge by default, so the
+  # last lines of the log are the diagnostic that stopped it, not an unrelated later one.
+  echo "mutation: instrumented build failed — failing (last 80 lines of $BUILD_LOG):" >&2
+  tail -80 "$BUILD_LOG" >&2
+  exit 1
+fi
 # Library objects only: header-only code (constexpr helpers) is instrumented inside the test
 # TUs and shows up in the report, not in this count — the count is a sanity signal, the gate
 # is mutate_report.py's blind-spot rule.
@@ -284,7 +319,8 @@ for d in $CHANGED_DIRS; do
 done
 echo "mutation: instrumented build done (mutated functions in library objects:$embedded)"
 
-# Phase 2 (run time): timeout + a path filter restricting EXECUTION to the scope dirs. The
+# Phase 2 (run time): timeout + a path filter restricting EXECUTION to the scope dirs this
+# run changes or attests (every scope dir with a source, without --diff; see phase2_config). The
 # runner's includePaths (regexes over the absolute source path; mull_filters FilePathFilter)
 # are applied after discovery, so the Catch2 main() TU stays instrumented and dispatch works.
 # The report merge counts only scope_dirs anyway (mutate_report.py in_scope), so this drops
@@ -298,7 +334,7 @@ echo "mutation: instrumented build done (mutated functions in library objects:$e
 # modified files but drops every mutant in a file the diff ADDS (new-file hunks) — useless
 # for a feature whose PRs mostly add files. The merge below keeps only mutants on lines
 # `git diff -U0 <ref>` marks as added/changed under scope_dirs.
-phase2_config > "$BUILD/mull.yml"
+phase2_config "$CHANGED_DIRS" > "$BUILD/mull.yml"
 # Both halves of the diff per in-scope file (tools/mutate_ranges.py, tested from a real
 # `git diff` in tools/refimpl/test_tooling.py): the added/changed line ranges the gate scopes
 # survivors to (new files are whole-file ranges), and the deleted lines — each with the
@@ -330,13 +366,25 @@ for name in $ORACLE; do
     rc=1; continue
   fi
   # mull-runner exits non-zero whenever survivors exist, so its exit code is not a failure
-  # signal; a missing report is. (Every scope-dir mutant runs here; the diff scoping happens
-  # in the merge below, so per-binary survivor counts are NOT the gate's numbers.)
+  # signal; a missing report is. (Every mutant under the changed dirs runs here, on changed
+  # and unchanged lines alike; the diff's line scoping happens in the merge below, so
+  # per-binary survivor counts are NOT the gate's numbers.)
   # --no-output: kills are detected by exit status; the oracle's Catch2 stdout per mutant is
   # never read, so it is not captured.
+  # `--abort` goes to the oracle (the runner passes what follows the binary through to it:
+  # a bogus flag fails Mull's baseline run, measured on 0.34.0): Catch2 stops at its first
+  # failing assertion. The kill signal is the exit status, which Catch2 sets non-zero on any
+  # failure, so a killed mutant ends at the assertion that caught it instead of running the
+  # remaining test cases. A survivor is a run with no failure, which `--abort` leaves alone,
+  # and so is the unmutated baseline — so by construction the flag can turn no survivor into
+  # a kill or kill into a survivor, only shorten a kill (it can turn a Timeout into a Killed,
+  # both kills). Measured on PR #871's 448 core/ mutants, 12 cores (docs/OPEN-QUESTIONS.md
+  # 2026-10-07): 6m56s → 1m56s, the same 44 survivors, 75 of 77 Timeouts now Killed and no
+  # other difference (tools/mutate_diff_reports.py) — a mutant that stalls discovery fails
+  # the cold-boot case in its first second, and the flag spares it the stall-horizon cases.
   ( cd "$BUILD" && "$RUNNER" --reporters IDE --reporters Elements "${EXTRA[@]}" --report-dir reports \
       --report-name "$name" --ide-reporter-show-killed --timeout "$TIMEOUT_MS" --no-output \
-      --workers "${OMGP_MUTATE_WORKERS:-$(nproc)}" "./$name" > "$name.mull.log" 2>&1 ) || true
+      --workers "${OMGP_MUTATE_WORKERS:-$(nproc)}" "./$name" --abort > "$name.mull.log" 2>&1 ) || true
   if [ ! -f "$REPORTS/$name.json" ] && ! grep -q 'No mutants found' "$BUILD/$name.mull.log"; then
     echo "mutation: $name: runner produced no report — failing (see $BUILD/$name.mull.log):" >&2
     { grep -iE 'error' "$BUILD/$name.mull.log" || true; } | head -3 >&2

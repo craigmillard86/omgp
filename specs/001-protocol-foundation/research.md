@@ -132,8 +132,10 @@ remains from the Technical Context.
   every in-scope status unchanged, 14m30s → 43s for `test_link_master`; the build is also
   limited to the oracle targets); (5) Mull's `gitDiffRef` filter drops every mutant in files the diff
   **adds** (only modified-file hunks survive), so it is not used at all — `mutate.sh`
-  runs every scope-dir mutant (`--workers`) and scopes the report itself from `git diff -U0`,
-  new files included, restricted to `l3/ link/ core/`. Measured kill rate on the
+  runs every mutant under the scope dirs the diff changes (`--workers`; the run-time
+  `includePaths` listed every scope dir until 2026-10-07, see `docs/OPEN-QUESTIONS.md`
+  2026-10-07) and scopes the report itself from `git diff -U0`, new files included,
+  restricted to `l3/ link/ core/`. Measured kill rate on the
   descriptor commit with the unit binaries as oracle: **76.8 % (265/345)** — the ruling
   (2026-08-29, `docs/OPEN-QUESTIONS.md`) replaced the percentage with a per-survivor
   triage; the whole-`l3/` triage is recorded in PR #15. The "gate can fail" property is
