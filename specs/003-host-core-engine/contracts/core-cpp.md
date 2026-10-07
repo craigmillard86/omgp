@@ -183,9 +183,13 @@ check. Its rules, each labelled per CLAUDE.md rule 11:
    `Master` *accepts* but defers to honour `T_gap` IS recorded, at the accepting call, because it
    is an issued transaction (`link/master.hpp:66`: `busy()` is already true). *Demonstrated by*
    `begin_request: a request the link refuses (transaction open) is not recorded as issued` and
-   the payload-limit half of the test named in 1. *Measured, not assumed*: a recorder that
-   emitted per transmission instead of per transaction was patched into `run_superframe()` and
-   failed AS2 and SC-005 as well as the test in 3 (#694, PR body).
+   the payload-limit half of the test named in 1. *Measured, not assumed, and only for SC-005*:
+   a recorder that emitted per transmission instead of per transaction was patched into
+   `run_superframe()` and failed SC-005 — the step-size criterion this second reason rests on —
+   as well as AS1 and the test in 3 (#694, PR body). AS2 did not fail and could not: it replays
+   one script at one cadence twice, so a per-transmission recorder adds the same extra lines to
+   both transcripts. The first reason (no `Status` field) is an argument from the four-field
+   entry, not a measurement.
    This is the ruling on issue #694's open AC3, taken on 2026-10-07 against the shipped,
    tested behaviour; the alternative (record refusals too) was rejected for the two reasons above
    and would need a fifth field to be meaningful, which is a tasks.md amendment.

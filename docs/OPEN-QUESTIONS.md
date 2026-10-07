@@ -6107,10 +6107,13 @@ the transcript exists for (spec SC-001/AS2). Distinguishing them means a fifth f
 that is a tasks.md amendment, not a quiet addition here. (2) Whether a call is refused
 depends on wire state at the instant of the call, and the caller chooses how often
 `run_superframe()` is called — so a transcript that recorded refusals would vary with
-clock-advance granularity, which spec SC-005 denies. Measured, not argued: a recorder
-emitting per transmission rather than per accepted transaction was patched into
-`run_superframe()` and failed AS2 and SC-005 immediately (2 lines where 1 was expected),
-alongside the new trunk §7 retry case. A `begin()` the `Master` ACCEPTS but defers to
+clock-advance granularity, which spec SC-005 denies. Measured for reason (2), not argued: a
+recorder emitting per transmission rather than per accepted transaction was patched into
+`run_superframe()` and failed SC-005 immediately — the step-size criterion this reason rests
+on — alongside AS1 and the new trunk §7 retry case (2 lines where 1 was expected). AS2 did
+not fail and could not: it replays one script at one cadence twice, so a per-transmission
+recorder adds the same extra lines to both transcripts; reason (1) is an argument from the
+four-field entry rather than from that run. A `begin()` the `Master` ACCEPTS but defers to
 honour `T_gap` is recorded, at the accepting call — it is an issued transaction (`busy()`
 is already true).
 
