@@ -411,9 +411,36 @@ TEST_CASE("set_param: the queued item carries every field the caller passed, and
     CHECK(item.param_id == 7u);
     CHECK(item.scope == 3u);
     CHECK(item.value == 1234u);
-    // data-model.md §6: a Set carries no request id, so nothing was taken from R-10's pool —
-    // the property the "every id outstanding" case below relies on to keep Sets admissible.
+    // data-model.md §6: a Set carries no request id, so this field holds its default. NOT
+    // evidence that the pool was untouched: claim_request_id() hands out the FIRST free id,
+    // which is 0, and ParamOpItem::request_id's default is also 0 — the check reads identically
+    // either way, and identical evidence supports nothing (CLAUDE.md). The section below
+    // discriminates; the "every id outstanding" case further down relies on the same property.
     CHECK(item.request_id == 0u);
+
+    SECTION("and the Set took nothing from R-10's pool: the next get_param still gets id 0") {
+        // The discriminating form of the check above. If set_param() had claimed an id, the
+        // pool's first free id would now be 1 and this would fail — which is what makes the
+        // "a set_param is still accepted" assertion in the pool-exhaustion case mean anything.
+        ParamRequestId id = 0xA5;
+        REQUIRE(rig.engine().get_param(node, 7, 3, id) == CoreStatus::Ok);
+        CHECK(id == 0u);
+    }
+
+    SECTION("scope is passed through verbatim, including module scope 0xFF (protocol-l3 §7)") {
+        // #698's scope criterion, enqueue half: the engine validates no scope at the API
+        // boundary (docs/OPEN-QUESTIONS.md 2026-10-08, ruling pending), so what it must do is
+        // carry the caller's byte unaltered — module scope and a channel scope alike. The wire
+        // round-trip half of that criterion belongs to T029/T030, which encode the item.
+        REQUIRE(rig.engine().set_param(node, 7, 0xFF, 1234) == CoreStatus::Ok);
+        ParamRequestId id = 0xA5;
+        REQUIRE(rig.engine().get_param(node, 7, 0xFF, id) == CoreStatus::Ok);
+        ParamOpItem module_set{}, module_get{};
+        REQUIRE(Bk::pop_param(rig.engine(), module_set));
+        REQUIRE(Bk::pop_param(rig.engine(), module_get));
+        CHECK(module_set.scope == 0xFFu);
+        CHECK(module_get.scope == 0xFFu);
+    }
 
     SECTION("two identical calls queue two identically-encoding items (CLAUDE.md rule 2)") {
         // L3 sets are ABSOLUTE: the queued value is the caller's, never a delta computed from a

@@ -6128,3 +6128,60 @@ which converts a synchronous caller error into an asynchronous, uncorrelated rep
 **Ruling:** pending — human. **Amends:** `specs/003-host-core-engine/contracts/core-cpp.md`'s
 `CoreStatus` block in place, with a dated marker. **Supersedes:** none. **Related:** #697, #698,
 spec FR-023/FR-024, R-10, protocol-l3 §7.
+
+## 2026-10-08 — T027 (#697/#698): which condition `CoreStatus::RequestIdReused` reports
+
+**Context:** `specs/003-host-core-engine/contracts/core-cpp.md`'s `CoreStatus` block has
+carried, since the contract landed, `RequestIdReused,  // GetParam called with the parameter
+FIFO already at capacity (R-10)` — and `core/core_types.hpp` copied that wording verbatim.
+`get_param()` has two independent failure conditions, not one: the demand ring
+(`param_queue_`, R-07) can be at capacity, and R-10's request-id pool can have every id
+outstanding. The contract's sentence names the FIRST and assigns it to `RequestIdReused`,
+while `QueueFull`'s own line two above already claims "a demand-item ring (R-07) had no room".
+With nothing drained from `param_queue_` and no id ever released, before T027 neither
+condition was reachable and the overlap was invisible; implementing `get_param()` makes both
+reachable in the same call, so one of the two readings had to be chosen. *Verified by reading
+both artefacts at 88177d7, before this change.*
+
+**The three options.** (a) Follow the contract's words: report `RequestIdReused` for the
+at-capacity ring. This leaves pool exhaustion with no status of its own — it would have to
+return `QueueFull`, naming the wrong resource, and the application's remedy differs (wait for
+a superframe to drain the ring vs. deliver outstanding results through `drain_callbacks()` to
+free ids). It also makes `QueueFull`'s own documented meaning false for this one ring.
+(b) Add a sixth value, e.g. `RequestIdsExhausted`, and leave `RequestIdReused` for the ring.
+Honest, but it spends an enum value on renaming a condition `QueueFull` already describes, and
+`RequestIdReused`'s NAME then describes nothing any path returns. (c) Read `RequestIdReused`
+as what its name says — the pool, not the ring — treat the contract comment as the error, and
+keep `QueueFull` for every ring-at-capacity refusal including this one.
+
+**What was done:** (c). `get_param()` checks `param_queue_.full()` FIRST and returns
+`QueueFull`, then claims an id and returns `RequestIdReused` only when `claim_request_id()`
+finds no free id (`core/core_engine.cpp`). The order is deliberate and is the reason (c) costs
+nothing: claiming an id for an operation the ring then refuses would leak it, because an id is
+released only when its result is delivered and a refused operation produces no result. The
+comment is corrected in `core/core_types.hpp` and in the contract's block in the same change,
+each citing this entry and quoting the superseded sentence. Demonstrated by `get_param: a ring
+that is full of gets is refused as QueueFull, not RequestIdReused` and `get_param: a request
+id is released when its result is delivered, and only then` in
+`tests/unit/test_core_params.cpp` — the first occupies the one state where both resources are
+exhausted together, which is where (a) and (c) differ observably.
+
+**What this does NOT settle.** Whether a sixth status (option b) is still wanted for
+readability once F5's CLI surfaces these to a user is a naming call for the human ruling, not
+a behaviour change: under (c) the two conditions are already distinguishable by the caller.
+Nor does it settle the id-leak exposure the two-check order protects against on the DRAIN side
+— a `Kind::Get` popped from `param_queue_` that never yields a `ParamResult` holds its id
+forever, since `release_request_id()` is called from one site only. Unreachable at this head
+*by construction* (nothing drains `param_queue_`, and the one drain path returns early on
+`health_.bus_fault()`; T029 owns the loop), and recorded here so T029/T030 inherit it as a
+stated obligation rather than rediscovering it. **Assumed**, not demonstrated, for their
+bodies.
+
+**Recommendation:** ratify (c). It is the reading `RequestIdReused`'s own name carries, it
+keeps `QueueFull` true for every R-07 ring, and it needs no new enum value.
+
+**Ruling:** pending — human. **Amends:** `specs/003-host-core-engine/contracts/core-cpp.md`'s
+`CoreStatus` block in place, with a dated marker, replacing the sentence quoted verbatim in
+**Context** above. **Supersedes:** none; sibling to the 2026-10-08 `InvalidValue` entry
+immediately above, which amends the same block. **Related:** #697, #698, #700, #701, R-07,
+R-10, spec FR-024.

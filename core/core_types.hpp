@@ -92,18 +92,25 @@ static_assert(LIMIT_max_descriptor_bytes <= UINT16_MAX,
 // L2 and codec outcomes; this one is the host-core's own.
 enum class CoreStatus : uint8_t {
     Ok = 0,
-    NoFreeNodeId,    // research.md R-06 id pool exhausted for a newly-occupied slot
-    QueueFull,       // a demand-item ring (R-07) had no room; the caller's operation was
-                     // refused, nothing partially queued
-    NotDiscovered,   // a parameter/channel operation named a node_id not yet Discovered
-    RequestIdReused, // GetParam called with the parameter FIFO already at capacity (R-10)
+    NoFreeNodeId,  // research.md R-06 id pool exhausted for a newly-occupied slot
+    QueueFull,     // a demand-item ring (R-07) had no room; the caller's operation was
+                   // refused, nothing partially queued
+    NotDiscovered, // a parameter/channel operation named a node_id not yet Discovered
+    // GetParam with R-10's request-id pool exhausted: every id the pool can hold is outstanding
+    // (claimed by a Get whose ParamResult has not been delivered yet), so no opaque id is left
+    // to correlate another one. NOT the at-capacity FIFO — that is QueueFull, and it is checked
+    // FIRST, so this value is only ever observed with room in the ring and none in the pool.
+    // Reworded 2026-10-08 (T027): the comment here and in contracts/core-cpp.md previously said
+    // the reverse ("GetParam called with the parameter FIFO already at capacity"), which is the
+    // condition QueueFull reports. See docs/OPEN-QUESTIONS.md 2026-10-08 (two statuses).
+    RequestIdReused,
     // A SetParam value the protocol cannot carry (above LIMIT_param_value_max, the YAML's own
     // `max` on SET_PARAM's u16 value). Refused at the API boundary with nothing queued: an item
     // queued with such a value could only fail where l3::encode_set_param refuses it, at issue
     // time, and the sole report channel there is FR-023's ParamSetFailed — a report about the
     // caller's own programming error, delivered superframes later. NOT in
-    // contracts/core-cpp.md's CoreStatus block before 2026-10-07; added there in the same
-    // change, with the reasoning in docs/OPEN-QUESTIONS.md (2026-10-07).
+    // contracts/core-cpp.md's CoreStatus block before 2026-10-08; added there in the same
+    // change, with the reasoning in docs/OPEN-QUESTIONS.md (2026-10-08).
     InvalidValue,
 };
 

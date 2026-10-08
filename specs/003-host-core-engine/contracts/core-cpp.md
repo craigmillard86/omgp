@@ -17,7 +17,11 @@ enum class CoreStatus : uint8_t {
     QueueFull,        // a demand-item ring (R-07) had no room; caller's operation was refused,
                        // nothing partially queued
     NotDiscovered,    // a parameter/channel operation named a node_id not yet Discovered
-    RequestIdReused,  // GetParam called with the parameter FIFO already at capacity (R-10)
+    RequestIdReused,  // amended 2026-10-08 (T027): GetParam with R-10's request-id POOL
+                       // exhausted — every id is outstanding, so none is left to correlate
+                       // another Get. This line previously read "GetParam called with the
+                       // parameter FIFO already at capacity", which is QueueFull's condition
+                       // and is checked first; see docs/OPEN-QUESTIONS.md 2026-10-08.
     InvalidValue,     // added 2026-10-08 (T027): a SetParam value above LIMIT_param_value_max,
                        // refused at the API boundary with nothing queued. See
                        // docs/OPEN-QUESTIONS.md 2026-10-08 — the block above had no status for
