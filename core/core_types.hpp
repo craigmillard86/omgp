@@ -97,6 +97,14 @@ enum class CoreStatus : uint8_t {
                      // refused, nothing partially queued
     NotDiscovered,   // a parameter/channel operation named a node_id not yet Discovered
     RequestIdReused, // GetParam called with the parameter FIFO already at capacity (R-10)
+    // A SetParam value the protocol cannot carry (above LIMIT_param_value_max, the YAML's own
+    // `max` on SET_PARAM's u16 value). Refused at the API boundary with nothing queued: an item
+    // queued with such a value could only fail where l3::encode_set_param refuses it, at issue
+    // time, and the sole report channel there is FR-023's ParamSetFailed — a report about the
+    // caller's own programming error, delivered superframes later. NOT in
+    // contracts/core-cpp.md's CoreStatus block before 2026-10-07; added there in the same
+    // change, with the reasoning in docs/OPEN-QUESTIONS.md (2026-10-07).
+    InvalidValue,
 };
 
 // --- §2 Discovery state (per module) -------------------------------------------------------

@@ -6128,3 +6128,50 @@ now assert the transcript is untouched rather than only the engine's outstanding
 state. No `core/` behaviour changed under this ruling.
 **Supersedes:** none — first entry on the transcript's contract. **Related:** #694 (T023),
 #688 (T017), tasks.md T023, `contracts/core-cpp.md`.
+
+## 2026-10-08 — T027 (#698): `CoreStatus` has no value for a `SetParam` the protocol cannot carry
+
+**Context:** `protocol/omgp-protocol.yaml` gives `SET_PARAM`'s request value `max: 4095`
+(`LIMIT_param_value_max`), and `l3::encode_set_param` refuses above it with
+`Status::OutOfRange` (`l3/l3_payload.cpp:206`). T027's issue body (#698) asks that "a value above
+4095 is rejected at the API boundary; nothing enqueued, nothing on the wire". But
+`contracts/core-cpp.md`'s `CoreStatus` block — `Ok`, `NoFreeNodeId`, `QueueFull`,
+`NotDiscovered`, `RequestIdReused` — has no value that says so, and `set_param()` returns
+`CoreStatus`. *Verified by reading both artefacts at 20440ac.*
+
+**The three options.** (a) Queue it anyway and let the encoder refuse it at issue time. The only
+report channel there is FR-023's `ParamSetFailed`, delivered through `drain_callbacks()`
+superframes later — and a `Set` carries no `ParamRequestId` (data-model.md §6), so the
+application learns that *a* set failed with a reason it must map back to its own call by
+`param_id` alone. For a caller error detectable synchronously that is a worse answer than a
+return value, and it spends a demand slot and a wire transaction to deliver it. (b) Clamp to
+`LIMIT_param_value_max`. Rejected outright: it writes a parameter value the caller did not ask
+for, and L3 sets are absolute (CLAUDE.md rule 2), so the clamped value would be the module's
+new state with nothing reported. (c) Add a `CoreStatus` value and refuse at the boundary.
+
+**What was done:** (c). `CoreStatus::InvalidValue` is added to `core/core_types.hpp` and to
+`contracts/core-cpp.md`'s block in the same change, each citing this entry; `set_param()`
+checks `value > LIMIT_param_value_max` after the `NotDiscovered` check and before touching the
+ring. Demonstrated by `set_param: a value the protocol cannot carry is refused at the API
+boundary, not queued to fail later` in `tests/unit/test_core_params.cpp`, whose second section
+accepts `LIMIT_param_value_max` itself so the bound is not off by one; the bound is the
+generated symbol, never the literal 4095 (CLAUDE.md rule 4), so a YAML change moves both.
+
+**What this does NOT settle.** `GET_PARAM` carries no value, so it needs no such check, and
+`scope` is NOT validated here: protocol-l3 §7 gives module scope `0xFF` and channel scopes, but
+no artefact in this repository enumerates the legal set for a given module — the descriptor
+does, per parameter, and reading it to validate at the API boundary is work no task owns. An
+out-of-range `scope` is therefore passed through to the module, which answers
+`ERR_UNKNOWN_TARGET` (0x03, the YAML's own "unknown param/channel"), and that answer reaches
+the application as
+FR-023's report. Stated as the **assumed** division of labour, not a demonstrated one. Nor does
+this entry settle whether `InvalidValue` should also cover a `param_id` above
+`LIMIT_max_params` (256 — every `uint8_t` is inside it today, so the check would be
+unreachable and is not written; *proved by construction* while that limit holds).
+
+**Recommendation:** ratify (c). The alternative that keeps the contract's five statuses is (a),
+which converts a synchronous caller error into an asynchronous, uncorrelated report.
+
+**Ruling:** pending — human. **Amends:** `specs/003-host-core-engine/contracts/core-cpp.md`'s
+`CoreStatus` block in place, with a dated marker. **Supersedes:** none. **Related:** #697, #698,
+spec FR-023/FR-024, R-10, protocol-l3 §7.

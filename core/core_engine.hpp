@@ -197,11 +197,51 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     // counting — stated, not enforced.
     uint32_t dropped_deliveries() const;
 
+    // --- parameters (spec FR-023/FR-024, R-10) ----------------------------------------------
+
+    // Queues a parameter set for `node_id` and does NOTHING else: no transport I/O happens here
+    // (spec FR-024's "returns immediately" — demonstrated by `get_param: the request id is
+    // returned by the call itself…` in tests/unit/test_core_params.cpp, which takes MockL3Node's
+    // request count either side of the call). The operation's own failure, once issued, is
+    // reported as LifecycleKind::ParamSetFailed through drain_callbacks() (spec FR-023); this
+    // return value is only about whether it was accepted for scheduling.
+    //
+    // Refusals, each leaving the queue exactly as it was: NotDiscovered (the id is outside
+    // ADDR_module_min..ADDR_module_max, or names a node that has not reached Discovered),
+    // InvalidValue (above LIMIT_param_value_max), QueueFull (the R-07 ring is at capacity —
+    // refused, never a silent drop, which is what keeps FR-023's "never dropped" true before
+    // the operation has reached the wire at all).
+    CoreStatus set_param(uint8_t node_id, uint8_t param_id, uint8_t scope, uint16_t value);
+
+    // Queues a parameter get and hands back its correlation tag through `out_id` on Ok (R-10).
+    // The value, or its failure, arrives later through CoreCallbacks::on_param_result tagged
+    // with that same id. `out_id` is written ONLY on Ok: a refusal leaves the caller's variable
+    // untouched and claims no id, because an id claimed and then abandoned is one the pool
+    // never gets back — ids are released on delivery (drain_callbacks()), nowhere else.
+    //
+    // Refusals: NotDiscovered and QueueFull as above, plus RequestIdReused when every id in the
+    // pool is outstanding. The pool is the ring's own capacity, so that is reachable only once
+    // items have LEFT the ring with their results still undelivered — the state T029's drain
+    // loop creates, and which tests/unit/test_core_params.cpp reaches through the seam.
+    CoreStatus get_param(uint8_t node_id, uint8_t param_id, uint8_t scope, ParamRequestId& out_id);
+
     // link::HealthListener (R-03).
     void on_notice(link::Notice notice, uint8_t addr) override;
 
   private:
     friend struct CoreEngineTestSeam;
+
+    // R-10's id pool. One flag per id, indexed by the id itself; the id space IS the parameter
+    // ring's capacity (core_types.hpp's static_assert ties ParamRequestId's width to it), so a
+    // fixed array is the whole pool and claiming is a first-free scan — no counter that could
+    // hand out an id already outstanding, and no allocation (CLAUDE.md rule 5). An id is
+    // claimed by get_param() and released only when its result is DELIVERED, which is why
+    // drain_callbacks() starving the param ring would wedge the pool (the alternation there
+    // exists partly for this).
+    bool claim_request_id(ParamRequestId& out_id);
+    void release_request_id(ParamRequestId id);
+    // Shared admission check for both parameter calls: the node must be in use and Discovered.
+    bool param_target_ready(uint8_t node_id) const;
 
     // data-model.md §8a: the two enqueue points. Both are drop-NEWEST — a full ring refuses this
     // item, leaves every queued item untouched, and counts the refusal in dropped_deliveries_,
@@ -310,6 +350,11 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     Ring<EventDrainItem, LIMIT_max_nodes> event_queue_;
     Ring<DescChunkItem, LIMIT_max_nodes> desc_queue_;
     Ring<ParamOpItem, LIMIT_max_nodes> param_queue_;
+
+    // R-10's id pool, one flag per ParamRequestId: in use from get_param() until the result is
+    // delivered. Sized by the ring's capacity, which is also the id space (core_types.hpp's
+    // static_assert), so every id a first-free scan can return is addressable here.
+    bool request_id_used_[LIMIT_max_nodes];
 
     // Pending-delivery rings (data-model.md §8a, R-04 correction): run_superframe()'s producers
     // enqueue, drain_callbacks() is the only reader.
