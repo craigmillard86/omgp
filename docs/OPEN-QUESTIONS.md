@@ -6283,3 +6283,59 @@ double's contract is to stay complete — not done here, since the contract is T
 
 **Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** #696, T012,
 the 2026-09-06 "#110 F2c" entry, spec SC-007.
+
+## 2026-10-08 — T028 (#699): node-level demotion IS charged after all, against the same share
+
+**Supersedes** this same day's "T028/T029 (#699, #700): the fair share, the demotion threshold and
+the demoted-item rotation are all undefined", point 2 only. Points 1, 3 and 4 of that entry (the
+share, the threshold, the rotation bound) stand unchanged and are still pending — human.
+
+**Context:** that entry's point 2 reduced FR-028 to its backplane half — only a backplane's own
+`GET_STATUS` was charged against the fair share, and nothing set `nodes_[].demoted`. The reason
+given was comparability: MEASURED on the benchmark rig, one node's `READ_DESC` costs ~760 us
+against a `SET_PARAM`'s ~390, so charging both against one 500 us share demotes a node for merely
+reading a descriptor. The reduction was disclosed, but it diverges from artefacts that say the
+opposite in three places — spec FR-028 ("a node, **or** of the modules behind a backplane"),
+`tasks.md` T028 ("per backplane/node", and "or of a demoted node itself") and SC-007 ("a backplane
+**or node** whose transactions cost several times an honest transaction's duration"). A pending
+recommendation is not a ruling, so the code could not stand on it.
+
+**What was done:** the node half is implemented. `account_overrun()` charges a node for its own
+DEMAND transactions — `EventDrain`, `ReadDesc`, `ParamSet`, `ParamGet` — against the same
+`fair_share_us()` a backplane's poll is charged against, and demotes or clears through the same
+`set_demoted()`. `IDENTIFY`, `BP_SLOT_MAP` and the enrolment probe stay charged to nobody: the
+probe because FR-003 makes it unconditional, `BP_SLOT_MAP` for the measured parity reason the
+superseded entry gave (which was about the BACKPLANE and still holds), and `IDENTIFY` because a
+node not yet Discovered has no demand item to deprioritise. Charged at most ONCE per node per
+superframe (`NodeRecord::overrun_charged_superframe`), which is what keeps the counter beside it
+counting superframes and not transactions — the budget can admit two demand items in one
+superframe and both may belong to the same node.
+
+**The comparability cost, restated as what it actually is.** A node whose descriptor runs to more
+than two chunks will be demoted while reading it, and that is now accepted rather than avoided: it
+genuinely is consuming more than its share, FR-028's remedy is to reduce demand PRIORITY, and
+`rotate_past_demoted()` still serves a demoted item — last, never not at all — with the demotion
+clearing on the node's next transaction inside the share. The honest-rig control holds:
+`FR-027: the fair share is derived from the period and the enrolled count, so a healthy rig
+demotes nothing` and the whole US1 discovery suite are green with the node half live, so on the
+rigs this repo exercises the churn the superseded entry feared does not occur. That is a control
+on those rigs' descriptor sizes, not a guarantee for every rig (CLAUDE.md rule 11).
+
+*Demonstrated by* `FR-028: a node whose own demand transactions consistently exceed the share is
+demoted in its own right` in `tests/unit/test_core_scheduler.cpp` — the node's measured cost is
+asserted over the share, `LifecycleKind::Demoted` is delivered with `demoted_is_backplane ==
+false`, every enrolled backplane keeps its three status polls throughout (FR-002), and
+`DemotionCleared` follows once the cost returns to normal.
+
+**What this does NOT settle.** Whether a node's share should be per-opcode-class rather than one
+number — the question the superseded entry raised, which this change answers with "one number,
+and accept the descriptor-read case" rather than resolves. An artefact-level answer would be a
+per-class baseline in `data-model.md` §9.
+
+**Recommendation:** ratify, and record in `data-model.md` §9 both the share and which transaction
+kinds each target is charged for, so the next reader does not have to read `account_overrun()` to
+find out.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** point 2 of the 2026-10-08
+"T028/T029 (#699, #700)" entry. **Related:** #696, #699, #700, PR #907 red-team finding 2, spec
+FR-028, SC-007, `tasks.md` T028.

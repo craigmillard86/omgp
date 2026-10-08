@@ -564,36 +564,52 @@ CoreEngine::Resume CoreEngine::drain_events(uint64_t now_us) {
     // One pass, so a ring holding only nodes that already had their turn ends the phase instead
     // of spinning. `remaining_count` is read nowhere here, which is R-07's "MUST NOT size a
     // buffer or bound a loop" kept by construction rather than by review.
-    // The bound is the ring's own length: every pass either returns, or re-queues an item it
-    // has already inspected, so a LARGER bound only repeats inspections and still ends at the
-    // same answer — and pop() failing on an emptied ring returns Nothing below whatever the
-    // bound says. A smaller one (the decrement mutant leaves exactly one pass) is a real
+    // The bound is the ring's own length: every pass either returns, drops an item, or re-queues
+    // one it has already inspected, so a LARGER bound only repeats inspections and still ends at
+    // the same answer — and the emptiness test inside the loop returns Nothing below whatever
+    // the bound says. A smaller one (the decrement mutant leaves exactly one pass) is a real
     // difference, killed by `one node's queued events do not delay another node's`.
     // mutant-ok(equivalent, cxx_replace_scalar_call): a larger bound repeats spent passes.
     const size_t passes = event_queue_.size();
     // mutant-ok(equivalent, cxx_lt_to_le): one extra pass repeats a spent one; see above.
     for (size_t i = 0; i < passes; ++i) {
-        EventDrainItem item{};
-        if (!event_queue_.pop(item)) {
-            return Resume::Nothing;
+        // A SECOND bound, as in drain_params() below: `passes` is the ring's own length and the
+        // drop path consumes at most one item per pass, so the ring cannot empty before the last
+        // pass. Kept because reading a popped item's stale storage through at(0) would address a
+        // ghost node rather than fail visibly.
+        // mutant-ok(equivalent, cxx_replace_scalar_call): unreachable while passes == size().
+        if (event_queue_.empty()) {
+            return Resume::Nothing; // every item was dropped by the check below
         }
+        // Peeked, not popped, for drain_params()'s reason and FR-005's: an item this superframe
+        // cannot afford must keep its PLACE in the ring (carry-over BY IDENTITY), and popping it
+        // merely to look at it would put it behind every item queued after it. Only the two
+        // paths that deliberately move an item — the drop and K = 1's "had its turn" — pop.
+        const EventDrainItem item = event_queue_.at(0);
         const size_t idx = node_index(item.node_id);
         if (idx == kNoNodeIndex || !nodes_[idx].in_use ||
             nodes_[idx].discovery != DiscoveryState::Discovered) {
+            EventDrainItem dropped{};
+            (void)event_queue_.pop(dropped);
             continue; // the slot emptied (FR-010), or was never discovered: drop, never address
         }
         NodeRecord& node = nodes_[idx];
         if (node.event_drained_superframe == superframe_) {
-            (void)event_queue_.push(item); // had its turn: behind every other node's event
+            // Had its turn: this is the ONE reordering FR-025 asks for — the item goes behind
+            // every OTHER node's event (R-07's correction), not behind this node's own next one.
+            EventDrainItem spent{};
+            (void)event_queue_.pop(spent);
+            (void)event_queue_.push(spent);
             continue;
         }
         if (!admit_demand(cost_estimate(node.last_measured_duration_us))) {
-            (void)event_queue_.push(item); // FR-005: carried over, keeping its place
-            return Resume::Refused;
+            return Resume::Refused; // FR-005: carried over at the head, keeping its place
         }
         node.event_drained_superframe = superframe_;
         if (begin_request(node.backplane_addr, item.node_id, OP_GET_EVENT, nullptr, 0,
                           TxKind::EventDrain, now_us)) {
+            EventDrainItem issued{};
+            (void)event_queue_.pop(issued); // removed only once it is actually on the wire
             // Disarms admit_demand()'s first-item exception for the rest of this superframe.
             // Without it every item looks like the first one, the whole ring is admitted into
             // one superframe, and FR-005's budget bounds nothing at all.
@@ -601,17 +617,16 @@ CoreEngine::Resume CoreEngine::drain_events(uint64_t now_us) {
             return Resume::Issued;
         }
         // link::Master refused a well-formed request: this node keeps its turn for a later
-        // superframe rather than spending it on a transaction that never happened.
+        // superframe rather than spending it on a transaction that never happened. The item is
+        // still at the head, never having been popped, so only the turn marker is undone.
         //
-        // NOT REACHABLE from this engine's own API, which is why both statements carry labels:
+        // NOT REACHABLE from this engine's own API, which is why the statement carries a label:
         // link::Master::begin() refuses a malformed request or a busy wire, and issue_next()
         // has already tested busy() while begin_request() builds the request from a Discovered
         // node's own record. Kept because "the item keeps its turn" is the correct answer if it
         // ever becomes reachable, and losing a turn silently would be invisible.
         // mutant-ok(equivalent, cxx_assign_const): unreachable branch; see above.
         node.event_drained_superframe = 0u;
-        // mutant-ok(equivalent, cxx_replace_scalar_call): unreachable branch; see above.
-        (void)event_queue_.push(item);
         return Resume::Refused;
     }
     return Resume::Nothing;
@@ -777,50 +792,91 @@ void CoreEngine::set_demoted(uint8_t id, bool is_backplane, uint8_t& consecutive
 }
 
 void CoreEngine::account_overrun(uint64_t duration_us, TxKind kind) {
-    // ONE target per transaction, so "consecutive superframes" counts superframes and not
-    // transactions: a backplane is charged for its own status poll (one per superframe, FR-002)
-    // and a node for its own demand item (one per node per superframe — K = 1 for events, one
-    // chunk per node for reads). A probe is charged to nobody, because FR-003 makes it
-    // unconditional and its target is by definition not a competing, enrolled one.
+    // ONE target per transaction: a backplane for its own status poll, a node for its own
+    // demand item, nobody for the rest. Never both, so the two counters stay independent —
+    // data-model.md §4's "measured and demoted independently", since a slow module bus does not
+    // mean a slow backplane-level poll.
     //
-    // ONLY a backplane's own status poll is charged, and that is a SCOPE STATEMENT, not an
-    // oversight (docs/OPEN-QUESTIONS.md 2026-10-08). A status poll is the one transaction every
-    // superframe performs for every enrolled backplane, with the same payload shape every time,
-    // so its measured cost is comparable across superframes and across backplanes — which is
-    // what "consistently exceeds its fair share" needs to mean something. A node's demand
-    // transactions are not comparable that way: MEASURED on the benchmark rig, one node's
-    // READ_DESC costs ~760 us against a SET_PARAM's ~390, because a descriptor chunk carries 56
-    // payload bytes and a parameter set carries four. Charging both against one share would
-    // demote every node that was merely reading a descriptor. SC-007, the only acceptance
-    // scenario for demotion, is a backplane case; node-level demotion has none, so the
-    // NodeRecord fields stay (and target_demoted() still honours nodes_[].demoted, so the
-    // rotation respects a node demoted by anything else) and nothing here sets them.
-    // GET_STATUS only, not BP_SLOT_MAP, and for the same comparability reason: the two poll
-    // kinds carry different payloads, so they cost different amounts. MEASURED on the benchmark
-    // rig, an honest GET_STATUS round trip is ~380-400 us where the slot map's is shorter, so a
-    // backplane charged for both alternates over and under any single share and
-    // `consecutive_overrun_superframes` never accumulates — the counter would be measuring the
-    // superframe parity, not the backplane. GET_STATUS is the uniform probe: every enrolled
-    // backplane answers one, with the same payload shape, on every other superframe (trunk §6).
-    // A standing overrun therefore takes 2 x kDemoteAfterOverrunSuperframes superframes to
-    // demote, which is the "bounded number of superframes" SC-007 asks for.
-    if (kind != TxKind::StatusPoll) {
+    // FR-028 names TWO independent targets — "a node, or ... the modules behind a backplane" —
+    // and tasks.md T028 repeats both ("per backplane/node", "or of a demoted node itself"), so
+    // both halves are charged here. Which TRANSACTIONS each is charged for is this engine's
+    // choice, and it is made for comparability, since "consistently exceeds its fair share"
+    // needs a cost that means the same thing from one superframe to the next:
+    //
+    //   * A backplane is charged for its own GET_STATUS and NOT for BP_SLOT_MAP. The two poll
+    //     kinds carry different payloads, so they cost different amounts: MEASURED on the
+    //     benchmark rig an honest GET_STATUS round trip is ~380-400 us where the slot map's is
+    //     shorter, so a backplane charged for both alternates over and under any single share
+    //     and `consecutive_overrun_superframes` never accumulates — the counter would be
+    //     measuring the superframe parity, not the backplane. GET_STATUS is the uniform probe:
+    //     every enrolled backplane answers one, with the same payload shape, on every other
+    //     superframe (trunk §6). A standing overrun therefore takes
+    //     2 x kDemoteAfterOverrunSuperframes superframes to demote, which is the "bounded
+    //     number of superframes" SC-007 asks for.
+    //   * A node is charged for its own DEMAND transactions — the event drain, the descriptor
+    //     chunk and the two parameter operations — because those are exactly the traffic FR-028
+    //     demotes, and a node's fair share is the same share its backplane's poll is measured
+    //     against. They are NOT comparable with each other: MEASURED on the benchmark rig one
+    //     node's READ_DESC costs ~760 us against a SET_PARAM's ~390, because a chunk carries 56
+    //     payload bytes where a parameter set carries four. That is a real consequence and not
+    //     an argument against charging them — a node reading an expensive descriptor does
+    //     consume more than its share, and FR-028's answer to that is to reduce its demand
+    //     PRIORITY, which rotate_past_demoted() does while still serving it (so a demoted node
+    //     is served last, never starved) and which clears on its next transaction inside the
+    //     share. Recorded, with the alternative that was tried first, in
+    //     docs/OPEN-QUESTIONS.md (2026-10-08, superseding the same day's earlier entry).
+    //   * IDENTIFY, BP_SLOT_MAP and the enrolment probe are charged to NOBODY. The probe
+    //     because FR-003 makes it unconditional and its target is by definition not a
+    //     competing, enrolled one; IDENTIFY because a node that is not yet Discovered has no
+    //     demand item to deprioritise, so demoting it would report a fault for the cost of
+    //     being discovered at all.
+    const uint64_t share = fair_share_us();
+    switch (kind) {
+    case TxKind::StatusPoll: {
+        const size_t bp = backplane_index(tx_addr_);
+        if (bp == kNoNodeIndex || !backplanes_[bp].enrolled) {
+            return;
+        }
+        // `>` and `>=` differ only where a poll measures EXACTLY its share. On the benchmark rig
+        // the measurements are 380-400 us honest and 530 expensive against a 500 us share, so
+        // the two forms agree on every measurement this suite produces — a control on those
+        // costs, not a guarantee, and the strict form is the one FR-028's "exceed" names.
+        // mutant-ok(equivalent, cxx_gt_to_ge): differs only at duration == share; see above.
+        const bool over = duration_us > share;
+        set_demoted(tx_addr_, true, backplanes_[bp].consecutive_overrun_superframes,
+                    backplanes_[bp].demoted, over);
         return;
     }
-    const size_t bp = backplane_index(tx_addr_);
-    if (bp == kNoNodeIndex || !backplanes_[bp].enrolled) {
+    case TxKind::EventDrain:
+    case TxKind::ReadDesc:
+    case TxKind::ParamSet:
+    case TxKind::ParamGet: {
+        const size_t idx = node_index(tx_node_);
+        if (idx == kNoNodeIndex || !nodes_[idx].in_use) {
+            return;
+        }
+        // ONCE per node per superframe, which is what keeps the counter beside it counting
+        // SUPERFRAMES rather than transactions (NodeRecord::overrun_charged_superframe): the
+        // budget admits two demand items in a superframe and both may belong to one node, and a
+        // counter advanced twice would reach the threshold in two superframes while claiming
+        // three. K = 1 already gives events one per superframe and desc_stalled_superframe gives
+        // reads one, so this marker binds only on the parameter rings — and on a mixture.
+        if (nodes_[idx].overrun_charged_superframe == superframe_) {
+            return;
+        }
+        nodes_[idx].overrun_charged_superframe = superframe_;
+        // mutant-ok(equivalent, cxx_gt_to_ge): differs only at duration == share; see above.
+        const bool over = duration_us > share;
+        set_demoted(tx_node_, false, nodes_[idx].consecutive_overrun_superframes,
+                    nodes_[idx].demoted, over);
         return;
     }
-    // `>` and `>=` differ only where a poll measures EXACTLY its share. On the benchmark rig
-    // the measurements are 380-400 us honest and 530 expensive against a 500 us share, so the
-    // two forms agree on every measurement this suite produces — a control on those costs, not
-    // a guarantee, and the strict form is the one FR-028's "exceed" names. On its own line so
-    // the label can sit directly above it: a wrapped call puts the comparison on a
-    // continuation line, which no label can reach.
-    // mutant-ok(equivalent, cxx_gt_to_ge): differs only at duration == share; see above.
-    const bool over = duration_us > fair_share_us();
-    set_demoted(tx_addr_, true, backplanes_[bp].consecutive_overrun_superframes,
-                backplanes_[bp].demoted, over);
+    case TxKind::None:
+    case TxKind::SlotMap:
+    case TxKind::Probe:
+    case TxKind::Identify:
+        return; // charged to nobody; see above
+    }
 }
 
 bool CoreEngine::admit_demand(uint64_t estimate) const {

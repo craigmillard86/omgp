@@ -2,7 +2,7 @@
 // pass by T028's budget accounting and T029's drain loop). Driven against a real CoreEngine over
 // the real link::Master and link::HealthTracker it owns, answered by MockL3Node (R-08) on a
 // FakeClock: no hand-built frames, no wall clock (CLAUDE.md rule 3).
-// Spec: spec.md US2 Acceptance Scenarios 1-3, SC-002, SC-003, SC-007, FR-002 (every enrolled
+// Spec: spec.md US2 Acceptance Scenarios 1-3, SC-003, SC-007, FR-002 (every enrolled
 // backplane's status poll before any other traffic of that superframe), FR-003 (exactly one
 // enrolment probe), FR-004/FR-005 (demand traffic into the remaining budget; carry-over, never
 // truncation), FR-020 (events drain ahead of descriptor chunks ahead of parameter operations),
@@ -19,6 +19,11 @@
 //     head and tasks.md gives `event_pending` tracking to T039 (US4), so nothing in production
 //     fills `event_queue_`. Every event case below pushes its items through CoreEngineTestSeam,
 //     which makes those cases assertions about the DRAIN, not about FR-015's detection half.
+//   * It is therefore NOT an oracle for SC-002's latency bound, which is measured from the
+//     module event OCCURRING: tasks.md gives that assertion, in both the isolated and the
+//     concurrent-load cases, to T040. AS3 is asserted below for the part of it this file can
+//     settle — that a parameter burst in flight neither delays nor reorders a concurrent event
+//     drain — and says so in its own header.
 //   * It is NOT an oracle for what a parameter answer means. T030 owns decoding a GetParamResp
 //     and reporting FR-023's ParamSetFailed; here a parameter transaction's answer is consumed
 //     for its timing alone, which is what the budget needs.
@@ -926,9 +931,10 @@ TEST_CASE("FR-028: a demoted backplane's modules lose their PLACE in a ring, not
 
 TEST_CASE("FR-028: a demoted node's own event item is deprioritised the same way "
           "[scheduler][us2]") {
-    // target_demoted() reads the NODE's flag as well as its backplane's. Nothing sets the node
-    // flag at this head (docs/OPEN-QUESTIONS.md 2026-10-08 records why), so the rotation's
-    // node-level half would otherwise go unexercised until a later task.
+    // target_demoted() reads the NODE's flag as well as its backplane's. Set here from the seam
+    // rather than earned through a measured overrun, so this case is about the ROTATION alone;
+    // the case below that demotes a node for its own measured cost is where production's own
+    // path into this flag is asserted.
     Rig rig;
     bring_up_rig(rig);
     const std::vector<uint8_t> ids = rig.discovered_ids();
@@ -1211,4 +1217,156 @@ TEST_CASE("FR-010: a dropped parameter operation does not cost the item behind i
         CHECK(e.node_id != gone); // the dropped one was never addressed
     }
     CHECK(alive_served);
+}
+
+TEST_CASE("FR-005: a burst of events drains in the order it was queued, however many superframes "
+          "the budget spreads it over [scheduler][us2]") {
+    // FR-005's carry-over is BY IDENTITY and keeps an item's PLACE in its ring — the property
+    // AS2 above asserts for the parameter ring, asserted here for the event ring, where the
+    // carry-over path is taken on every superframe of any burst larger than one budget. A drain
+    // that popped the head to inspect it and pushed it back on a refusal would send that item to
+    // the ring's TAIL, reordering the most common path there is, and every assertion phrased as
+    // a count of events or of superframes would still pass.
+    Rig rig;
+    bring_up_rig(rig);
+    const std::vector<uint8_t> ids = rig.discovered_ids();
+    std::vector<uint8_t> queued;
+    for (size_t i = 0; i < 8u; ++i) {
+        REQUIRE(Bk::push_event(rig.engine(), ids[i]));
+        queued.push_back(ids[i]);
+    }
+    rig.run_until([&] { return Bk::event_queued(rig.engine()) == 0u; }, 60u);
+
+    std::vector<uint8_t> served;
+    for (const TranscriptEntry& e : rig.transcript().lines) {
+        if (e.opcode == omgp::OP_GET_EVENT) {
+            served.push_back(e.node_id);
+        }
+    }
+    CHECK(served == queued);
+}
+
+TEST_CASE("FR-028: a node whose own demand transactions consistently exceed the share is demoted "
+          "in its own right [scheduler][us2]") {
+    // FR-028 and tasks.md T028 both name TWO independent targets — "a node, or ... the modules
+    // behind a backplane" — and this is the node's half: a node's own demand transaction is
+    // charged against the same fair share its backplane's status poll is, so a node that answers
+    // expensively has its own demand priority reduced and the demotion is reported with
+    // demoted_is_backplane == false. The node reaches the threshold first because it is charged
+    // on every superframe that serves one of its items, where a backplane's GET_STATUS is
+    // issued on alternate superframes only.
+    Rig rig;
+    bring_up_rig(rig);
+    const std::vector<uint8_t> ids = rig.discovered_ids();
+    const uint8_t victim = ids[0];
+    const uint8_t victim_bp = Bk::node(rig.engine(), victim).backplane_addr;
+    rig.engine().drain_callbacks(256);
+    rig.recorder().lifecycle.clear();
+    REQUIRE(Bk::node(rig.engine(), victim).demoted == false);
+
+    rig.make_expensive(victim_bp);
+    for (size_t i = 0; i < 12u; ++i) {
+        REQUIRE(rig.engine().set_param(victim, static_cast<uint8_t>(i), 0, 1) == CoreStatus::Ok);
+    }
+    rig.run_until([&] { return Bk::node(rig.engine(), victim).demoted; }, 40u);
+
+    const omgp::core::NodeRecord& n = Bk::node(rig.engine(), victim);
+    // The cost is MEASURED and over the share, so this is FR-027's path and not a stipulation.
+    INFO("victim measured " << n.last_measured_duration_us << " us, share "
+                            << Bk::fair_share_us(rig.engine()) << " us");
+    CHECK(n.last_measured_duration_us > Bk::fair_share_us(rig.engine()));
+    CHECK(n.consecutive_overrun_superframes >= 3u);
+
+    rig.engine().drain_callbacks(256);
+    const LifecycleEvent* node_demotion = nullptr;
+    for (const LifecycleEvent& e : rig.recorder().lifecycle) {
+        if (e.kind == LifecycleKind::Demoted && !e.demoted_is_backplane) {
+            node_demotion = &e;
+            break;
+        }
+    }
+    REQUIRE(node_demotion != nullptr);
+    CHECK(node_demotion->node_id == victim);
+
+    SECTION("FR-002 is unaffected: every enrolled backplane still gets its own status poll") {
+        // The point of demoting demand traffic rather than the mandatory polls. Read over the
+        // superframes the demotion took, excluding the one the run stopped inside.
+        const uint32_t last = rig.transcript().last_superframe();
+        for (uint32_t sf = last - 3u; sf < last; ++sf) {
+            size_t polls = 0;
+            for (const uint8_t op : rig.transcript().opcodes_in(sf)) {
+                if (is_status_poll(op)) {
+                    ++polls;
+                }
+            }
+            INFO("superframe " << sf);
+            CHECK(polls == 3u);
+        }
+    }
+
+    SECTION("FR-028: it clears once the node's own measured cost returns to normal") {
+        rig.make_honest(victim_bp);
+        rig.recorder().lifecycle.clear();
+        rig.run_until([&] { return !Bk::node(rig.engine(), victim).demoted; }, 40u);
+        rig.engine().drain_callbacks(256);
+        const LifecycleEvent* cleared = nullptr;
+        for (const LifecycleEvent& e : rig.recorder().lifecycle) {
+            if (e.kind == LifecycleKind::DemotionCleared && !e.demoted_is_backplane) {
+                cleared = &e;
+                break;
+            }
+        }
+        REQUIRE(cleared != nullptr);
+        CHECK(cleared->node_id == victim);
+    }
+}
+
+TEST_CASE("AS3/FR-020: a concurrent event burst drains ahead of a parameter burst already in "
+          "flight [scheduler][us2]") {
+    // spec US2 AS3, scoped to what this file can be an oracle for (CLAUDE.md rule 11): SC-002's
+    // own bound is measured from the module event OCCURRING, and nothing in production fills
+    // event_queue_ at this head — T039 owns `event_pending` tracking and T040 owns the SC-002
+    // latency assertion in both the isolated and the concurrent-load cases. What AS3 asks of the
+    // SCHEDULER is assertable now and is what this case asserts: a 40-operation parameter burst
+    // in flight neither delays nor reorders the concurrent event drain, which still completes
+    // within one superframe per node (FR-025's K = 1) while the parameter burst is unfinished.
+    Rig rig;
+    bring_up_rig(rig);
+    const std::vector<uint8_t> ids = rig.discovered_ids();
+    for (size_t i = 0; i < 40u; ++i) {
+        REQUIRE(rig.engine().set_param(ids[i % ids.size()], static_cast<uint8_t>(i), 0,
+                                       static_cast<uint16_t>(100u + i)) == CoreStatus::Ok);
+    }
+    for (size_t i = 0; i < 8u; ++i) {
+        REQUIRE(Bk::push_event(rig.engine(), ids[i]));
+    }
+    REQUIRE(Bk::param_queued(rig.engine()) == 40u);
+
+    const uint32_t queued_in = rig.transcript().last_superframe();
+    rig.run_until([&] { return Bk::event_queued(rig.engine()) == 0u; }, 60u);
+    const uint32_t drained_by = rig.transcript().last_superframe();
+
+    CHECK(rig.transcript().count(omgp::OP_GET_EVENT) == 8u);
+    // Eight distinct nodes at K = 1 each need eight turns; the budget never makes them wait
+    // longer than one superframe per node. A bound, not a formality: a drain that let the
+    // parameter ring take the demand slot would need far more.
+    INFO("queued in superframe " << queued_in << ", drained by " << drained_by);
+    CHECK(drained_by - queued_in <= 8u);
+    // The parameter burst is demonstrably still in flight, so the bound above is the event
+    // ring's own and not an artefact of an otherwise idle rig.
+    CHECK(Bk::param_queued(rig.engine()) > 0u);
+
+    // FR-020 under concurrent load: while any event is queued, no superframe spends a demand
+    // slot on a parameter operation — and within a superframe no parameter operation precedes
+    // that superframe's event.
+    for (uint32_t sf = queued_in + 1u; sf < drained_by; ++sf) {
+        bool saw_param = false;
+        for (const uint8_t op : rig.transcript().opcodes_in(sf)) {
+            INFO("superframe " << sf);
+            CHECK(!(op == omgp::OP_GET_EVENT && saw_param));
+            if (is_param_op(op)) {
+                saw_param = true;
+            }
+        }
+    }
 }

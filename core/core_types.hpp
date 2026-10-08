@@ -194,6 +194,12 @@ struct NodeRecord {
     // Transaction cost / demotion (spec FR-027/FR-028, research.md R-11 correction):
     uint64_t last_measured_duration_us = 0; // 0 = never measured; seeded conservatively on use
     uint8_t consecutive_overrun_superframes = 0;
+    // The superframe this node was last charged against its fair share in, 0 for never — the
+    // same once-per-superframe-per-node marker event_drained_superframe and
+    // desc_stalled_superframe above are. It is what makes the counter beside it count
+    // SUPERFRAMES and not transactions: the budget can admit two demand items in one
+    // superframe, and both may belong to the same node. Added by T028.
+    uint32_t overrun_charged_superframe = 0;
     bool demoted = false; // demand items drop to the back of their FIFO (R-07)
 };
 
@@ -460,9 +466,10 @@ template <typename T, size_t N> class Ring {
 
     // The i-th item from the front, in insertion order; i < size(). Read-only and index-safe
     // by its own bound: an out-of-range index returns the front rather than reading past the
-    // buffer, because the one caller (CoreEngine::competing_targets(), which counts the
-    // distinct targets with queued demand) must not be able to turn a counting slip into an
-    // out-of-bounds read. Added by T029; no mutation, so it cannot reorder a FIFO.
+    // buffer, because its callers inspect the head of a ring they are mid-pass over
+    // (CoreEngine::rotate_past_demoted(), drain_events() and drain_params()) and must not be
+    // able to turn a counting slip into an out-of-bounds read. Added by T029; no mutation, so
+    // it cannot reorder a FIFO.
     const T& at(size_t i) const {
         return storage_[(head_ + (i < count_ ? i : 0)) % N];
     }
