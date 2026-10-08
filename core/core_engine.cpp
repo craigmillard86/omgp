@@ -552,6 +552,9 @@ template <typename Ring_> void CoreEngine::rotate_past_demoted(Ring_& ring) {
 }
 
 CoreEngine::Resume CoreEngine::drain_events(uint64_t now_us) {
+    // A fast path only: with the test removed, an empty ring rotates nothing, runs no pass and
+    // returns Nothing from the bottom of the function — the same answer by a longer route.
+    // mutant-ok(equivalent, cxx_replace_scalar_call): an empty ring returns Nothing either way.
     if (event_queue_.empty()) {
         return Resume::Nothing;
     }
@@ -561,7 +564,14 @@ CoreEngine::Resume CoreEngine::drain_events(uint64_t now_us) {
     // One pass, so a ring holding only nodes that already had their turn ends the phase instead
     // of spinning. `remaining_count` is read nowhere here, which is R-07's "MUST NOT size a
     // buffer or bound a loop" kept by construction rather than by review.
+    // The bound is the ring's own length: every pass either returns, or re-queues an item it
+    // has already inspected, so a LARGER bound only repeats inspections and still ends at the
+    // same answer — and pop() failing on an emptied ring returns Nothing below whatever the
+    // bound says. A smaller one (the decrement mutant leaves exactly one pass) is a real
+    // difference, killed by `one node's queued events do not delay another node's`.
+    // mutant-ok(equivalent, cxx_replace_scalar_call): a larger bound repeats spent passes.
     const size_t passes = event_queue_.size();
+    // mutant-ok(equivalent, cxx_lt_to_le): one extra pass repeats a spent one; see above.
     for (size_t i = 0; i < passes; ++i) {
         EventDrainItem item{};
         if (!event_queue_.pop(item)) {
@@ -592,7 +602,15 @@ CoreEngine::Resume CoreEngine::drain_events(uint64_t now_us) {
         }
         // link::Master refused a well-formed request: this node keeps its turn for a later
         // superframe rather than spending it on a transaction that never happened.
+        //
+        // NOT REACHABLE from this engine's own API, which is why both statements carry labels:
+        // link::Master::begin() refuses a malformed request or a busy wire, and issue_next()
+        // has already tested busy() while begin_request() builds the request from a Discovered
+        // node's own record. Kept because "the item keeps its turn" is the correct answer if it
+        // ever becomes reachable, and losing a turn silently would be invisible.
+        // mutant-ok(equivalent, cxx_assign_const): unreachable branch; see above.
         node.event_drained_superframe = 0u;
+        // mutant-ok(equivalent, cxx_replace_scalar_call): unreachable branch; see above.
         (void)event_queue_.push(item);
         return Resume::Refused;
     }
@@ -600,12 +618,27 @@ CoreEngine::Resume CoreEngine::drain_events(uint64_t now_us) {
 }
 
 CoreEngine::Resume CoreEngine::drain_params(uint64_t now_us) {
+    // mutant-ok(equivalent, cxx_replace_scalar_call): an empty ring returns Nothing either way.
     if (param_queue_.empty()) {
         return Resume::Nothing;
     }
     rotate_past_demoted(param_queue_);
+    // As in drain_events(): the bound is the ring's length, and a larger one only repeats spent
+    // passes — the emptiness test inside the loop is what makes that true rather than reading a
+    // popped item's stale storage through at(0), which an inflated bound would otherwise do.
+    // mutant-ok(equivalent, cxx_replace_scalar_call): a larger bound repeats spent passes.
     const size_t passes = param_queue_.size();
+    // mutant-ok(equivalent, cxx_lt_to_le): one extra pass repeats a spent one; see above.
     for (size_t i = 0; i < passes; ++i) {
+        // A SECOND bound, against the count above being wrong rather than against anything this
+        // loop can do: `passes` is the ring's own length, so the ring cannot empty before the
+        // last pass — at the i-th pass at most i items have gone. Unreachable as written, and
+        // kept because reading a popped item's stale storage through at(0) would re-issue a
+        // ghost operation rather than fail visibly.
+        // mutant-ok(equivalent, cxx_replace_scalar_call): unreachable while passes == size().
+        if (param_queue_.empty()) {
+            return Resume::Nothing; // every item was dropped by the checks below
+        }
         // Peeked, not popped: an item this superframe cannot afford must keep its place in the
         // ring (FR-005's carry-over BY IDENTITY), and popping it to look at it would put it
         // behind every item queued after it.
@@ -625,17 +658,34 @@ CoreEngine::Resume CoreEngine::drain_params(uint64_t now_us) {
         // which begin_request() fills with the L3 header before it copies the payload in, so a
         // payload aliasing it would be clobbered by its own header.
         uint8_t payload[LIMIT_max_l3_payload] = {};
+        // Both are set by the encoder call below before anything reads them.
+        // mutant-ok(equivalent, cxx_init_const): overwritten by the encoder before any read.
         size_t written = 0;
+        // mutant-ok(equivalent, cxx_init_const): overwritten by the encoder before any read.
         l3::Status st = l3::Status::Ok;
+        // Which encoder runs is as unobservable as the fields below: a SET_PARAM carrying a
+        // Get's payload is refused by the MODULE, whose answer nothing decodes at this head.
+        // mutant-ok(accepted, cxx_eq_to_ne): no oracle for a request's payload until T030.
         if (item.kind == ParamOpItem::Kind::Set) {
             l3::SetParamReq req{};
+            // The three fields of the REQUEST, and the two of a Get below, are not observable at
+            // this head: nothing decodes a parameter answer, so no test can tell a SET_PARAM
+            // carrying param_id 5 from one carrying 42 — the module answers either. T030 decodes
+            // GetParamResp and reports FR-023's failure, and its own tests are where these
+            // become killable. Labelled `accepted` rather than `equivalent` because the mutants
+            // are NOT behaviour-preserving; they are unobservable with the oracle that exists.
+            // mutant-ok(accepted, cxx_assign_const): unobservable until T030 decodes an answer.
             req.param_id = item.param_id;
+            // mutant-ok(accepted, cxx_assign_const): as above — no oracle until T030.
             req.scope = item.scope;
+            // mutant-ok(accepted, cxx_assign_const): as above — no oracle until T030.
             req.value = item.value;
             st = l3::encode_set_param(req, payload, sizeof payload, written);
         } else {
             l3::GetParamReq req{};
+            // mutant-ok(accepted, cxx_assign_const): as above — no oracle until T030.
             req.param_id = item.param_id;
+            // mutant-ok(accepted, cxx_assign_const): as above — no oracle until T030.
             req.scope = item.scope;
             st = l3::encode_get_param_req(req, payload, sizeof payload, written);
         }
@@ -644,12 +694,20 @@ CoreEngine::Resume CoreEngine::drain_params(uint64_t now_us) {
             // codecs refuse (CoreStatus::InvalidValue, and the Discovered check above). Dropped
             // rather than retried for ever, since re-encoding the same item would fail again.
             ParamOpItem dropped{};
+            // mutant-ok(equivalent, cxx_replace_scalar_call): unreachable branch; see above.
             (void)param_queue_.pop(dropped);
             continue;
         }
-        const uint8_t opcode = item.kind == ParamOpItem::Kind::Set ? OP_SET_PARAM : OP_GET_PARAM;
-        const TxKind kind =
-            item.kind == ParamOpItem::Kind::Set ? TxKind::ParamSet : TxKind::ParamGet;
+        // ONE comparison for both, and not only to avoid repeating it: as two, the TxKind's own
+        // comparison was unobservable on its own — account_overrun() groups both parameter kinds
+        // as "not a status poll" and complete_request()'s switch gives them one shared arm — so
+        // it needed a label where the opcode's did not. Derived from one `is_set`, a mutation
+        // reaches the OPCODE too, which `a Set alone produces a SET_PARAM and no GET_PARAM`
+        // fails on. The two TxKinds stay separate values because T030 and T039 must tell them
+        // apart; nothing at this head does.
+        const bool is_set = item.kind == ParamOpItem::Kind::Set;
+        const uint8_t opcode = is_set ? OP_SET_PARAM : OP_GET_PARAM;
+        const TxKind kind = is_set ? TxKind::ParamSet : TxKind::ParamGet;
         if (begin_request(node.backplane_addr, item.node_id, opcode, payload,
                           static_cast<uint8_t>(written), kind, now_us)) {
             ParamOpItem issued{};
@@ -689,6 +747,7 @@ void CoreEngine::set_demoted(uint8_t id, bool is_backplane, uint8_t& consecutive
             // FR-028: cleared as soon as one measured transaction is back inside the share.
             // Deliberately asymmetric with the threshold below — a target that has recovered
             // should not go on being deprioritised while it proves it.
+            // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
             demoted = false;
             LifecycleEvent ev{};
             ev.kind = LifecycleKind::DemotionCleared;
@@ -698,6 +757,11 @@ void CoreEngine::set_demoted(uint8_t id, bool is_backplane, uint8_t& consecutive
         }
         return;
     }
+    // A saturation guard, so a target that overruns for ever does not wrap its counter back
+    // through zero and un-demote itself. The boundary needs 255 consecutive overrunning polls
+    // to reach, which no test produces and no rig would survive reaching — so `<` and `<=`
+    // agree on every value this counter actually takes (a control on that, not a guarantee).
+    // mutant-ok(equivalent, cxx_lt_to_le): the UINT8_MAX boundary is not reachable in practice.
     if (consecutive < UINT8_MAX) {
         ++consecutive;
     }
@@ -747,8 +811,16 @@ void CoreEngine::account_overrun(uint64_t duration_us, TxKind kind) {
     if (bp == kNoNodeIndex || !backplanes_[bp].enrolled) {
         return;
     }
+    // `>` and `>=` differ only where a poll measures EXACTLY its share. On the benchmark rig
+    // the measurements are 380-400 us honest and 530 expensive against a 500 us share, so the
+    // two forms agree on every measurement this suite produces — a control on those costs, not
+    // a guarantee, and the strict form is the one FR-028's "exceed" names. On its own line so
+    // the label can sit directly above it: a wrapped call puts the comparison on a
+    // continuation line, which no label can reach.
+    // mutant-ok(equivalent, cxx_gt_to_ge): differs only at duration == share; see above.
+    const bool over = duration_us > fair_share_us();
     set_demoted(tx_addr_, true, backplanes_[bp].consecutive_overrun_superframes,
-                backplanes_[bp].demoted, duration_us > fair_share_us());
+                backplanes_[bp].demoted, over);
 }
 
 bool CoreEngine::admit_demand(uint64_t estimate) const {

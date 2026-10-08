@@ -114,6 +114,15 @@ struct CoreEngineTestSeam {
     static uint64_t fair_share_us(CoreEngine& engine) {
         return engine.fair_share_us();
     }
+    static bool& demand_issued(CoreEngine& engine) {
+        return engine.demand_issued_;
+    }
+    static const EventDrainItem& event_at(CoreEngine& engine, size_t i) {
+        return engine.event_queue_.at(i);
+    }
+    static const ParamOpItem& param_at(CoreEngine& engine, size_t i) {
+        return engine.param_queue_.at(i);
+    }
 };
 } // namespace omgp::core
 
@@ -773,8 +782,11 @@ TEST_CASE("SC-007/FR-027/FR-028: a backplane whose answers cost several times an
 
     // Bounded, and the bound is named: the threshold is consecutive superframes of overrun, so
     // the demotion cannot take more than a handful of them once the cost is standing.
+    // TIGHT on purpose: GET_STATUS is issued on alternate superframes, so three consecutive
+    // overrunning polls land six superframes after the cost becomes standing. A threshold one
+    // larger takes eight and fails here, which is what makes this a bound and not a formality.
     INFO("demoted at superframe " << demoted_at << ", cost became expensive after " << from);
-    CHECK(demoted_at - from <= 8u);
+    CHECK(demoted_at - from <= 6u);
 
     rig.engine().drain_callbacks(256);
     const LifecycleEvent* ev = rig.recorder().first(LifecycleKind::Demoted);
@@ -865,4 +877,338 @@ TEST_CASE("CLAUDE.md rule 5: a superframe under demand load allocates nothing [s
         }
         rig.engine().drain_callbacks(16);
     });
+}
+
+TEST_CASE("FR-028: a demoted backplane's modules lose their PLACE in a ring, not their turn "
+          "[scheduler][us2]") {
+    // The half of demotion that nothing else here observes: what it DOES. Two nodes queue a
+    // parameter operation each, the first behind a backplane that is demoted and the second not,
+    // so plain arrival order and demoted-last order disagree — the second must be served first,
+    // and the first must still be served afterwards (FR-028 demotes priority, not existence).
+    Rig rig;
+    bring_up_rig(rig);
+    const std::vector<uint8_t> ids = rig.discovered_ids();
+    // ids are assigned ascending across backplanes, so the first and last discovered modules sit
+    // on different backplanes — asserted rather than assumed, since the whole case rests on it.
+    const uint8_t demoted_node = ids.front();
+    const uint8_t normal_node = ids.back();
+    const uint8_t demoted_bp = Bk::node(rig.engine(), demoted_node).backplane_addr;
+    REQUIRE(demoted_bp != Bk::node(rig.engine(), normal_node).backplane_addr);
+
+    Bk::backplane(rig.engine(), demoted_bp).demoted = true;
+    REQUIRE(rig.engine().set_param(demoted_node, 11, 0, 1) == CoreStatus::Ok);
+    REQUIRE(rig.engine().set_param(normal_node, 22, 0, 2) == CoreStatus::Ok);
+    // Arrival order: the demoted node's operation is at the head.
+    REQUIRE(Bk::param_at(rig.engine(), 0).node_id == demoted_node);
+
+    rig.run_until([&] { return Bk::param_queued(rig.engine()) < 2u; }, 20u);
+    // After one is served, the one LEFT is the demoted node's — so the other went first.
+    REQUIRE(Bk::param_queued(rig.engine()) == 1u);
+    CHECK(Bk::param_at(rig.engine(), 0).node_id == demoted_node);
+    CHECK(Bk::param_at(rig.engine(), 0).param_id == 11u);
+
+    SECTION("and it is served once the demotion clears, so demotion is priority not exclusion") {
+        Bk::backplane(rig.engine(), demoted_bp).demoted = false;
+        rig.run_until([&] { return Bk::param_queued(rig.engine()) == 0u; }, 20u);
+        CHECK(Bk::param_queued(rig.engine()) == 0u);
+    }
+
+    SECTION("a ring whose every item is demoted still serves its head") {
+        // One full rotation finds no servable item and leaves the ring as it was, rather than
+        // refusing to serve anyone — the bound that makes the rotation terminate at all.
+        REQUIRE(rig.engine().set_param(demoted_node, 33, 0, 3) == CoreStatus::Ok);
+        REQUIRE(Bk::param_queued(rig.engine()) == 2u);
+        rig.run_until([&] { return Bk::param_queued(rig.engine()) < 2u; }, 20u);
+        CHECK(Bk::param_queued(rig.engine()) == 1u);
+        CHECK(Bk::param_at(rig.engine(), 0).param_id == 33u); // the head went first, in FIFO
+    }
+}
+
+TEST_CASE("FR-028: a demoted node's own event item is deprioritised the same way "
+          "[scheduler][us2]") {
+    // target_demoted() reads the NODE's flag as well as its backplane's. Nothing sets the node
+    // flag at this head (docs/OPEN-QUESTIONS.md 2026-10-08 records why), so the rotation's
+    // node-level half would otherwise go unexercised until a later task.
+    Rig rig;
+    bring_up_rig(rig);
+    const std::vector<uint8_t> ids = rig.discovered_ids();
+    const uint8_t slow = ids[0], quick = ids[1];
+    Bk::node(rig.engine(), slow).demoted = true;
+
+    REQUIRE(Bk::push_event(rig.engine(), slow));
+    REQUIRE(Bk::push_event(rig.engine(), quick));
+    REQUIRE(Bk::event_at(rig.engine(), 0).node_id == slow);
+
+    rig.run_until([&] { return Bk::event_queued(rig.engine()) < 2u; }, 20u);
+    REQUIRE(Bk::event_queued(rig.engine()) == 1u);
+    CHECK(Bk::event_at(rig.engine(), 0).node_id == slow);
+}
+
+TEST_CASE("FR-005/FR-027: an item whose own measured cost will not fit is refused, and the "
+          "estimate is the target's own [scheduler][us2]") {
+    // admit_demand() is consulted with cost_estimate(this target's last_measured_duration_us),
+    // which is what makes the budget a MEASURED bound (FR-027) rather than a per-item constant.
+    // The first-item exception is spent deliberately, so the second item faces the real test:
+    // with a target whose measured cost exceeds the whole period, it cannot be admitted.
+    Rig rig;
+    bring_up_rig(rig);
+    const std::vector<uint8_t> ids = rig.discovered_ids();
+    const uint8_t cheap = ids[0], ruinous = ids[1];
+    Bk::node(rig.engine(), ruinous).last_measured_duration_us = omgp::TRUNK_T_poll_us * 4u;
+
+    REQUIRE(rig.engine().set_param(cheap, 1, 0, 1) == CoreStatus::Ok);
+    REQUIRE(rig.engine().set_param(ruinous, 2, 0, 2) == CoreStatus::Ok);
+
+    // It IS eventually issued — admit_demand()'s first-item exception exists precisely so a
+    // target nothing can afford does not livelock the rig (run_superframe()'s header note). The
+    // property the estimate buys is narrower and is the one asserted: such an item is never
+    // admitted as the SECOND demand item of a superframe, so it cannot be issued alongside
+    // another. With the estimate replaced by a small constant it would be.
+    const uint32_t first = rig.transcript().last_superframe() + 1u;
+    rig.run_until([&] { return Bk::param_queued(rig.engine()) == 0u; }, 30u);
+    const uint32_t last = rig.transcript().last_superframe();
+
+    bool saw_ruinous = false;
+    for (uint32_t sf = first; sf <= last; ++sf) {
+        size_t demand_before_ruinous = 0;
+        for (const TranscriptEntry& e : rig.transcript().entries_in(sf)) {
+            if (!is_param_op(e.opcode)) {
+                continue;
+            }
+            if (e.node_id == ruinous) {
+                saw_ruinous = true;
+                INFO("superframe " << sf);
+                CHECK(demand_before_ruinous == 0u); // it was this superframe's FIRST demand item
+            }
+            ++demand_before_ruinous;
+        }
+    }
+    CHECK(saw_ruinous); // so the check above was reached
+}
+
+TEST_CASE("FR-004/FR-005: one superframe admits ONE demand item beyond the first-item exception "
+          "[scheduler][us2]") {
+    // The budget's whole purpose, asserted against the rig's real costs: three mandatory polls
+    // leave less than one more transaction's worth of the period, so a superframe issues the one
+    // item its exception admits and no more. A drain that ignored the budget, or an estimate
+    // replaced by a small constant, would empty the ring in a superframe or two instead.
+    Rig rig;
+    bring_up_rig(rig);
+    const std::vector<uint8_t> ids = rig.discovered_ids();
+    for (size_t i = 0; i < 8u; ++i) {
+        REQUIRE(Bk::push_event(rig.engine(), ids[i]));
+    }
+    const uint32_t first = rig.transcript().last_superframe() + 1u;
+    rig.run_until([&] { return Bk::event_queued(rig.engine()) == 0u; }, 40u);
+    const uint32_t last = rig.transcript().last_superframe();
+
+    // Eight items do NOT go out in one or two superframes: three mandatory polls leave well
+    // under eight transactions' worth of the period, so the budget spreads them. The bound is
+    // deliberately loose — what it discriminates is a drain that ignored the budget, or an
+    // estimate replaced by a small constant, either of which empties the ring at once.
+    INFO("first " << first << " last " << last);
+    CHECK(last - first + 1u >= 4u);
+
+    SECTION("and no superframe's accounted demand traffic exceeded the period") {
+        const omgp::core::SuperframeBudget& b = Bk::budget(rig.engine());
+        CHECK(b.remaining_us <= b.period_us);
+    }
+}
+
+TEST_CASE("protocol-l3 §3.1: a queued Set is issued as SET_PARAM and a queued Get as GET_PARAM "
+          "[scheduler][us2]") {
+    // The ParamOpItem's kind selects the opcode and the transaction kind. Asserted on the
+    // transcript, which records what the trunk was actually asked to carry.
+    Rig rig;
+    bring_up_rig(rig);
+    const std::vector<uint8_t> ids = rig.discovered_ids();
+    const uint8_t node = ids[0];
+    const size_t sets_before = rig.transcript().count(omgp::OP_SET_PARAM);
+    const size_t gets_before = rig.transcript().count(omgp::OP_GET_PARAM);
+
+    // ONE kind per section. Queuing both at once cannot discriminate: a drain that swapped
+    // the two opcodes would still leave one of each in the transcript.
+    SECTION("a Set alone produces a SET_PARAM and no GET_PARAM") {
+        REQUIRE(rig.engine().set_param(node, 5, 0, 7) == CoreStatus::Ok);
+        rig.run_until([&] { return Bk::param_queued(rig.engine()) == 0u; }, 30u);
+        CHECK(rig.transcript().count(omgp::OP_SET_PARAM) == sets_before + 1u);
+        CHECK(rig.transcript().count(omgp::OP_GET_PARAM) == gets_before);
+    }
+
+    SECTION("a Get alone produces a GET_PARAM and no SET_PARAM") {
+        ParamRequestId id = 0;
+        REQUIRE(rig.engine().get_param(node, 6, 0, id) == CoreStatus::Ok);
+        rig.run_until([&] { return Bk::param_queued(rig.engine()) == 0u; }, 30u);
+        CHECK(rig.transcript().count(omgp::OP_GET_PARAM) == gets_before + 1u);
+        CHECK(rig.transcript().count(omgp::OP_SET_PARAM) == sets_before);
+    }
+}
+
+TEST_CASE("FR-010: a parameter operation whose node leaves Discovered is dropped, never "
+          "addressed [scheduler][us2]") {
+    // The drop path in the parameter drain: a slot that empties under a queued operation takes
+    // the operation with it, rather than the engine addressing a node id that no longer names
+    // what queued it.
+    Rig rig;
+    bring_up_rig(rig);
+    const std::vector<uint8_t> ids = rig.discovered_ids();
+    const uint8_t node = ids[0];
+    REQUIRE(rig.engine().set_param(node, 9, 0, 1) == CoreStatus::Ok);
+    REQUIRE(Bk::param_queued(rig.engine()) == 1u);
+
+    const size_t sets_before = rig.transcript().count(omgp::OP_SET_PARAM);
+    Bk::node(rig.engine(), node).discovery = DiscoveryState::Undiscovered;
+    rig.run_until([&] { return Bk::param_queued(rig.engine()) == 0u; }, 20u);
+
+    CHECK(Bk::param_queued(rig.engine()) == 0u);
+    CHECK(rig.transcript().count(omgp::OP_SET_PARAM) == sets_before); // dropped, not issued
+}
+
+TEST_CASE("FR-028: the overrun counter is CONSECUTIVE — an intermittent overrun never demotes "
+          "[scheduler][us2]") {
+    // What "consistently exceed their fair share" means, and the one thing a counter that never
+    // reset would get wrong: a backplane that alternates expensive and honest answers is never
+    // demoted, however long it runs.
+    Rig rig;
+    bring_up_rig(rig);
+    const uint8_t bp = omgp::ADDR_backplane_min;
+    rig.engine().drain_callbacks(256);
+    rig.recorder().lifecycle.clear();
+
+    for (int cycle = 0; cycle < 6; ++cycle) {
+        rig.make_expensive(bp);
+        rig.run_superframes(2);
+        rig.make_honest(bp);
+        rig.run_superframes(2);
+    }
+
+    CHECK(Bk::backplane(rig.engine(), bp).demoted == false);
+    rig.engine().drain_callbacks(256);
+    CHECK(rig.recorder().count(LifecycleKind::Demoted) == 0u);
+}
+
+TEST_CASE("FR-028: the descriptor-chunk ring is deprioritised the same way as the other two "
+          "[scheduler][us2]") {
+    // rotate_past_demoted() is one template used on all three rings; this is the chunk ring's
+    // own case, so removing its call is not invisible. Two nodes still reading a descriptor, the
+    // head one behind a demoted backplane: the other must be served first.
+    Rig rig;
+    bring_up_rig(rig);
+    const std::vector<uint8_t> ids = rig.discovered_ids();
+    const uint8_t demoted_node = ids.front();
+    const uint8_t normal_node = ids.back();
+    const uint8_t demoted_bp = Bk::node(rig.engine(), demoted_node).backplane_addr;
+    REQUIRE(demoted_bp != Bk::node(rig.engine(), normal_node).backplane_addr);
+
+    Bk::node(rig.engine(), demoted_node).discovery = DiscoveryState::ReadingDescriptor;
+    Bk::node(rig.engine(), normal_node).discovery = DiscoveryState::ReadingDescriptor;
+    Bk::backplane(rig.engine(), demoted_bp).demoted = true;
+    REQUIRE(Bk::push_desc(rig.engine(), demoted_node, 0));
+    REQUIRE(Bk::push_desc(rig.engine(), normal_node, 0));
+
+    const size_t before = rig.transcript().count(omgp::OP_READ_DESC);
+    rig.run_until([&] { return rig.transcript().count(omgp::OP_READ_DESC) > before; }, 20u);
+
+    // The first READ_DESC issued after the demotion went to the node that is NOT demoted.
+    uint8_t first_node = 0;
+    size_t seen = 0;
+    for (const TranscriptEntry& e : rig.transcript().lines) {
+        if (e.opcode != omgp::OP_READ_DESC) {
+            continue;
+        }
+        if (++seen == before + 1u) {
+            first_node = e.node_id;
+            break;
+        }
+    }
+    CHECK(first_node == normal_node);
+}
+
+TEST_CASE("FR-025: a node that has had its turn does not block a node queued behind it in the "
+          "SAME superframe [scheduler][us2]") {
+    // R-07's correction, in the form that discriminates a drain making only ONE pass over the
+    // ring: the head node has already been drained this superframe, so it must be moved aside
+    // and the node behind it served in this same superframe — not in the next one.
+    Rig rig;
+    bring_up_rig(rig);
+    const std::vector<uint8_t> ids = rig.discovered_ids();
+    const uint8_t first_node = ids[0], second_node = ids[1];
+
+    // Give the head node its turn in whatever superframe the engine is in, then queue a second
+    // item for it plus one for another node — so the ring's head is a node already drained.
+    REQUIRE(Bk::push_event(rig.engine(), first_node));
+    rig.run_until([&] { return rig.transcript().count(omgp::OP_GET_EVENT) > 0u; }, 20u);
+    const uint32_t turn = rig.transcript().last_superframe();
+    REQUIRE(Bk::node(rig.engine(), first_node).event_drained_superframe == turn);
+
+    REQUIRE(Bk::push_event(rig.engine(), first_node));
+    REQUIRE(Bk::push_event(rig.engine(), second_node));
+    const size_t before = rig.transcript().count(omgp::OP_GET_EVENT);
+
+    // Drive within this same superframe only: one more GET_EVENT must appear, and it must be
+    // the second node's, reached by stepping PAST the head rather than by waiting a superframe.
+    rig.run_until(
+        [&] {
+            return rig.transcript().count(omgp::OP_GET_EVENT) > before ||
+                   rig.transcript().last_superframe() > turn;
+        },
+        4u);
+    bool served_in_turn = false;
+    for (const TranscriptEntry& e : rig.transcript().lines) {
+        if (e.opcode == omgp::OP_GET_EVENT && e.superframe == turn && e.node_id == second_node) {
+            served_in_turn = true;
+        }
+    }
+    CHECK(served_in_turn);
+}
+
+TEST_CASE("FR-028: the fair share counts every enrolled backplane, including the last address "
+          "[scheduler][us2]") {
+    // The share's divisor is `enrolled + 1`, enumerated over the whole backplane address range.
+    // A sweep that stopped one address short would miss a backplane enrolled AT
+    // ADDR_backplane_max — the one address an inclusive bound and an exclusive one disagree
+    // about — and compute too large a share, demoting nothing.
+    Rig rig;
+    for (uint8_t i = 0; i < 3u; ++i) {
+        rig.install(static_cast<uint8_t>(omgp::ADDR_backplane_min + i), 4, 0x0Fu);
+    }
+    rig.run_until([&] { return rig.discovered_count() == 12u; }, 200u);
+    const uint64_t three = Bk::fair_share_us(rig.engine());
+
+    rig.install(omgp::ADDR_backplane_max, 1, 0x01u);
+    rig.run_until([&] { return rig.engine().backplane_enrolled(omgp::ADDR_backplane_max); }, 60u);
+    const uint64_t four = Bk::fair_share_us(rig.engine());
+
+    INFO("share with three enrolled " << three << ", with four " << four);
+    CHECK(four < three);
+}
+
+TEST_CASE("FR-010: a dropped parameter operation does not cost the item behind it a superframe "
+          "[scheduler][us2]") {
+    // The drop path continues the pass rather than ending it, so an operation whose node has
+    // left Discovered is skipped and the next one is served in the SAME superframe. A drain that
+    // made only one pass would serve nothing and make the survivor wait.
+    Rig rig;
+    bring_up_rig(rig);
+    const std::vector<uint8_t> ids = rig.discovered_ids();
+    const uint8_t gone = ids[0], alive = ids[1];
+
+    REQUIRE(rig.engine().set_param(gone, 1, 0, 1) == CoreStatus::Ok);
+    REQUIRE(rig.engine().set_param(alive, 2, 0, 2) == CoreStatus::Ok);
+    Bk::node(rig.engine(), gone).discovery = DiscoveryState::Undiscovered;
+    const size_t before = rig.transcript().count(omgp::OP_SET_PARAM);
+
+    // One superframe's demand slot is enough for both: one dropped, one issued.
+    rig.run_until([&] { return rig.transcript().count(omgp::OP_SET_PARAM) > before; }, 8u);
+    const uint32_t served = rig.transcript().last_superframe();
+
+    CHECK(Bk::param_queued(rig.engine()) == 0u); // both gone: one dropped, one issued
+    bool alive_served = false;
+    for (const TranscriptEntry& e : rig.transcript().entries_in(served)) {
+        if (e.opcode == omgp::OP_SET_PARAM && e.node_id == alive) {
+            alive_served = true;
+        }
+        CHECK(e.node_id != gone); // the dropped one was never addressed
+    }
+    CHECK(alive_served);
 }
