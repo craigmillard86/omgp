@@ -197,6 +197,14 @@ struct CoreEngineTestSeam {
     static omgp::link::HealthTracker& health(CoreEngine& engine) {
         return engine.health_;
     }
+    // link::Master's own attempt counter for the transaction currently open (trunk §7: a retry
+    // re-sends the same seq, so attempts() > 1 is a RETRANSMISSION and not a second
+    // transaction). The only reason this seam reaches the engine's Master at all, and read-only:
+    // "an L2 retry adds no transcript line" is a claim about what L2 did underneath a single
+    // core/ decision, and nothing on the core/ side of the boundary can witness it.
+    static uint8_t master_attempts(const CoreEngine& engine) {
+        return engine.master_.attempts();
+    }
     // Puts the engine in the state begin_request() leaves it in for a transaction of `kind`
     // (CoreEngine::TxKind is private: 0 None, 1 StatusPoll, 2 SlotMap, 3 Probe, 4 Identify, 5
     // ReadDesc), so complete_request() can be driven for any of them without a wire.
@@ -859,6 +867,33 @@ TEST_CASE("AS1: past the fixed point nothing further is discoverable — no node
         REQUIRE((e.opcode == omgp::OP_GET_STATUS || e.opcode == omgp::OP_BP_SLOT_MAP ||
                  e.opcode == omgp::OP_PING));
     }
+}
+
+// --- T023 / trunk §7: one transcript line per TRANSACTION, not per transmission ----------------
+
+TEST_CASE("trunk §7: an L2 retry of an already-begun transaction adds no further transcript line "
+          "[discovery][us1]") {
+    // Every trunk address is scripted {SilenceStep} by Rig's own constructor, so the first
+    // enrolment probe (trunk §6) is never answered and link::Master retransmits it with the same
+    // seq (trunk §7, contracts/link-cpp.md: up to three transmissions per transaction).
+    Rig rig;
+    // MockL3Node counts every REQUEST FRAME it decodes, retransmissions included
+    // (tests/support/mock_l3_node.cpp `++requests_seen_`, before any step dispatch, so a silent
+    // node still counts the frame). Two frames reached the double; link::Master runs one
+    // transaction at a time (trunk §3) and begin_request() is the engine's only begin() call
+    // site, so with attempts() == 2 below the second frame is a retry of the FIRST transaction
+    // and not a second one.
+    rig.run_until([&] { return rig.node().requests_seen() >= 2u; }, 4, byte_us());
+
+    REQUIRE(rig.node().requests_seen() == 2u);
+    // The retry demonstrably happened — without this the line-count assertion below would hold
+    // vacuously on an engine that had simply issued nothing twice.
+    REQUIRE(omgp::core::CoreEngineTestSeam::master_attempts(rig.engine()) == 2u);
+    // …and the probe is still the open transaction.
+    REQUIRE(omgp::core::CoreEngineTestSeam::tx_kind(rig.engine()) == 3);
+    // …and it added nothing: one begin() call, one line, whatever L2 did underneath it.
+    REQUIRE(rig.transcript().lines.size() == 1u);
+    REQUIRE(rig.transcript().lines[0].opcode == omgp::OP_PING);
 }
 
 // --- AS2 / SC-001: determinism -----------------------------------------------------------------
@@ -2434,6 +2469,13 @@ TEST_CASE("begin_request: the transmitted L3 message is the header and payload v
 
     // One byte past the L3 payload limit is refused by the encoder before anything is begun.
     Seam4 other;
+    std::vector<TranscriptEntry> none;
+    Bk::set_transcript(
+        other.engine,
+        [](void* ctx, const TranscriptEntry& e) {
+            static_cast<std::vector<TranscriptEntry>*>(ctx)->push_back(e);
+        },
+        &none);
     uint8_t too_long[omgp::LIMIT_max_l3_payload + 1u] = {};
     Bk::l3_seq(other.engine) = 3;
     REQUIRE_FALSE(Bk::begin_request(other.engine, omgp::ADDR_backplane_min, 0x10,
@@ -2441,15 +2483,28 @@ TEST_CASE("begin_request: the transmitted L3 message is the header and payload v
     REQUIRE(Bk::l3_seq(other.engine) == 3u);
     REQUIRE(Bk::tx_idle(other.engine));
     REQUIRE(other.wire.sent.empty());
+    REQUIRE(none.empty()); // nothing was issued, so nothing is transcribed
 }
 
 TEST_CASE("begin_request: a request the link refuses (transaction open) is not recorded as issued "
           "[discovery][mutation]") {
     Seam4 rig;
     uint8_t payload[3] = {1, 2, 3};
+    // The transcript (T023) records REQUESTS ISSUED, not calls attempted: a begin() link::Master
+    // refuses put nothing on the wire and nothing in the engine's outstanding-transaction state,
+    // so there is no transaction for a line to describe and the four fields carry no Status that
+    // could distinguish one (contracts/core-cpp.md §Operation transcript; ruling on #694).
+    std::vector<TranscriptEntry> seen;
+    Bk::set_transcript(
+        rig.engine,
+        [](void* ctx, const TranscriptEntry& e) {
+            static_cast<std::vector<TranscriptEntry>*>(ctx)->push_back(e);
+        },
+        &seen);
     REQUIRE(Bk::begin_request(rig.engine, omgp::ADDR_backplane_min, 0x10, omgp::OP_READ_DESC,
                               payload, sizeof payload, 10));
     REQUIRE(Bk::l3_seq(rig.engine) == 1u);
+    REQUIRE(seen.size() == 1u);
     // link::Master runs one transaction at a time (trunk §3): a second begin() is refused.
     REQUIRE_FALSE(
         Bk::begin_request(rig.engine, 0x02, 0x11, omgp::OP_READ_DESC, payload, sizeof payload, 20));
@@ -2457,6 +2512,9 @@ TEST_CASE("begin_request: a request the link refuses (transaction open) is not r
     REQUIRE(Bk::tx_addr(rig.engine) == omgp::ADDR_backplane_min);
     REQUIRE(Bk::tx_node(rig.engine) == 0x10);
     REQUIRE(Bk::tx_issued_us(rig.engine) == 10u);
+    REQUIRE(seen.size() == 1u); // the refused call left the transcript exactly as it was
+    REQUIRE(seen[0].dst == omgp::ADDR_backplane_min);
+    REQUIRE(seen[0].node_id == 0x10);
 }
 
 TEST_CASE("complete_request: with nothing outstanding a terminal event changes nothing "
