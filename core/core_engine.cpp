@@ -782,6 +782,11 @@ uint64_t CoreEngine::fair_share_us() const {
     // with enrolment until the floor binds, which is what keeps the share a share: three
     // enrolled backplanes give 500 us, four 450, and every count from five to protocol-l3 §2's
     // maximum of fifteen gives the floor.
+    // At share == kMinFairShareUs both forms return kMinFairShareUs, so `<` and `<=` agree on
+    // every value this quotient takes; `>` is killed by the honest-rig case at five enrolled
+    // (the share goes back to 333 us and five healthy backplanes demote), and a replaced constant
+    // by that case in one direction and SC-007's expensive backplane in the other.
+    // mutant-ok(equivalent, cxx_lt_to_le): differs only at share == kMinFairShareUs; see above.
     return share < kMinFairShareUs ? kMinFairShareUs : share;
 }
 
