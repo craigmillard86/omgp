@@ -861,9 +861,19 @@ void CoreEngine::account_overrun(uint64_t duration_us, TxKind kind) {
         // counter advanced twice would reach the threshold in two superframes while claiming
         // three. K = 1 already gives events one per superframe and desc_stalled_superframe gives
         // reads one, so this marker binds only on the parameter rings — and on a mixture.
+        //
+        // The TEST is killable (with `!=` the marker is never written, so no node is ever
+        // charged and the node-demotion case fails); the WRITE below is not, with the oracle
+        // this rig gives. Producing two overrunning demand transactions for ONE node in one
+        // superframe is not possible here: a transaction that exceeds the share also exceeds
+        // what the three mandatory polls leave of the period (MEASURED: ~420 us left against a
+        // 500 us share), so the second item of such a superframe is refused by admit_demand()
+        // before it is issued. The guard is kept because it makes the field's own name true by
+        // construction on a rig where that is not so, not because a test here can see it.
         if (nodes_[idx].overrun_charged_superframe == superframe_) {
             return;
         }
+        // mutant-ok(accepted, cxx_assign_const): no oracle — see the paragraph above.
         nodes_[idx].overrun_charged_superframe = superframe_;
         // mutant-ok(equivalent, cxx_gt_to_ge): differs only at duration == share; see above.
         const bool over = duration_us > share;

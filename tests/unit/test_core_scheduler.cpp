@@ -1246,6 +1246,37 @@ TEST_CASE("FR-005: a burst of events drains in the order it was queued, however 
     CHECK(served == queued);
 }
 
+TEST_CASE("FR-010: an event item whose node leaves Discovered is dropped, never addressed, and "
+          "does not cost the item behind it a superframe [scheduler][us2]") {
+    // The event ring's own version of the parameter ring's drop path. Two properties in one
+    // case, because they are the two ways the drop can go wrong: the dead node is never
+    // addressed, and the item behind it is served in the SAME superframe rather than waiting —
+    // a drop that left the item in the ring would stall the ring behind it for ever.
+    Rig rig;
+    bring_up_rig(rig);
+    const std::vector<uint8_t> ids = rig.discovered_ids();
+    const uint8_t gone = ids[0], alive = ids[1];
+
+    REQUIRE(Bk::push_event(rig.engine(), gone));
+    REQUIRE(Bk::push_event(rig.engine(), alive));
+    REQUIRE(Bk::event_at(rig.engine(), 0).node_id == gone);
+    Bk::node(rig.engine(), gone).discovery = DiscoveryState::Undiscovered;
+    const size_t before = rig.transcript().count(omgp::OP_GET_EVENT);
+
+    rig.run_until([&] { return rig.transcript().count(omgp::OP_GET_EVENT) > before; }, 8u);
+    const uint32_t served = rig.transcript().last_superframe();
+
+    CHECK(Bk::event_queued(rig.engine()) == 0u); // both gone: one dropped, one issued
+    bool alive_served = false;
+    for (const TranscriptEntry& e : rig.transcript().entries_in(served)) {
+        if (e.opcode == omgp::OP_GET_EVENT && e.node_id == alive) {
+            alive_served = true;
+        }
+        CHECK(e.node_id != gone); // the dropped one was never addressed
+    }
+    CHECK(alive_served);
+}
+
 TEST_CASE("FR-028: a node whose own demand transactions consistently exceed the share is demoted "
           "in its own right [scheduler][us2]") {
     // FR-028 and tasks.md T028 both name TWO independent targets — "a node, or ... the modules
