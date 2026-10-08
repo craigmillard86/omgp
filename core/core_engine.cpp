@@ -33,6 +33,31 @@ constexpr uint8_t kDescChunkMax = static_cast<uint8_t>(LIMIT_max_l3_payload - 3)
 // restating a spec constant, which this is not).
 constexpr uint8_t kDemoteAfterOverrunSuperframes = 3;
 
+// The floor under fair_share_us(), and the same kind of constant as the threshold above: this
+// engine's scheduling policy, not a protocol value, so it is not a YAML limit either.
+//
+// WHY A FLOOR IS NEEDED AT ALL. The share is a quotient of the FIXED period by the enrolled
+// count, while a transaction's cost does not fall as more backplanes enrol — an honest
+// GET_STATUS round trip costs the same whatever else is on the trunk. protocol-l3 §2 allows 15
+// backplanes (ADDR_backplane_min..max), so without a floor the quotient drops below an honest
+// poll from five enrolled on, and every HEALTHY backplane is then demoted for answering
+// normally: FR-028's demand-priority ordering degenerates to a no-op and SC-007's `Demoted`
+// stops distinguishing an expensive backplane from any backplane — on exactly the rigs big
+// enough to need both (red team round 3 on PR #907, ATTACK A1).
+//
+// WHY THIS VALUE. MEASURED at TRUNK_bit_rate on the benchmark rigs: an honest poll costs
+// 340-410 us (the spread is the slot map's payload against the status block's), and SC-007's
+// protocol-legal expensive answer costs 530. The floor is set between those two — it has to be
+// above the first, or honest traffic demotes, and below the second, or nothing demotes at all.
+// It is CALIBRATED to measurements rather than derived from a spec symbol, which is a real
+// weakness and is why both sides of it are pinned by cases instead of argued here: `FR-027/
+// FR-028: a wholly HONEST rig demotes no backplane at any legal enrolled count` fails if an
+// honest poll ever reaches it, and `SC-007: an expensive backplane is demoted` fails if an
+// expensive one does not exceed it. A drift in either cost turns a case red rather than
+// quietly stopping the share from discriminating. Recorded, with the question of whether the
+// share should instead scale with the wire rate, in docs/OPEN-QUESTIONS.md (2026-10-08).
+constexpr uint64_t kMinFairShareUs = 450;
+
 // data-model.md §9 / R-11: the conservative seed for a target never yet measured — one
 // worst-case frame each way at the rate now in use, plus trunk §9's turnaround and inter-frame
 // gap. Deliberately pessimistic: it is what a target costs if it behaves as badly as trunk §4
@@ -739,9 +764,10 @@ CoreEngine::Resume CoreEngine::drain_params(uint64_t now_us) {
 
 uint64_t CoreEngine::fair_share_us() const {
     // One status poll per enrolled backplane (FR-002) plus the demand slot (FR-004) is what a
-    // superframe must fit, so each target's fair share of the period is period / (enrolled + 1).
-    // Enrolment alone, so the share does not move with what happens to be queued or with the
-    // order this superframe's traffic went out in.
+    // superframe must fit, so each target's fair share of the period is period / (enrolled + 1),
+    // floored at kMinFairShareUs because that quotient shrinks with enrolment and a transaction's
+    // cost does not. Enrolment alone, so the share does not move with what happens to be queued
+    // or with the order this superframe's traffic went out in.
     size_t enrolled = 0;
     for (uint8_t addr = ADDR_backplane_min; addr <= ADDR_backplane_max; ++addr) {
         const size_t idx = backplane_index(addr);
@@ -750,8 +776,13 @@ uint64_t CoreEngine::fair_share_us() const {
         }
     }
     const uint64_t share = budget_.period_us / (static_cast<uint64_t>(enrolled) + 1u);
-    // Never zero: a share of zero would make every transaction an overrun.
-    return share == 0u ? 1u : share;
+    // Floored, so the share cannot shrink below what an honest transaction costs and demote a
+    // healthy rig for its size (kMinFairShareUs above; this subsumes the old "never zero" guard,
+    // since a share of zero would make every transaction an overrun). The quotient still FALLS
+    // with enrolment until the floor binds, which is what keeps the share a share: three
+    // enrolled backplanes give 500 us, four 450, and every count from five to protocol-l3 §2's
+    // maximum of fifteen gives the floor.
+    return share < kMinFairShareUs ? kMinFairShareUs : share;
 }
 
 void CoreEngine::set_demoted(uint8_t id, bool is_backplane, uint8_t& consecutive, bool& demoted,
@@ -1080,10 +1111,6 @@ void CoreEngine::complete_request(const link::MasterEvent& ev, uint64_t now_us) 
     if (node_idx != kNoNodeIndex) {
         nodes_[node_idx].last_measured_duration_us = duration_us;
     }
-    // spec FR-027/FR-028: charged against the fair share, which demotes or recovers the target.
-    // After the measurements above, because the share and the charge both read what this
-    // transaction actually cost, not what it was estimated to cost.
-    account_overrun(duration_us, kind);
     if (!answered) {
         // trunk §7 already retried this inside link::Master. Nothing is re-queued here: a node
         // still Identifying is picked up again by the next superframe's own scan, and an
@@ -1102,6 +1129,25 @@ void CoreEngine::complete_request(const link::MasterEvent& ev, uint64_t now_us) 
         }
         return;
     }
+    // spec FR-027/FR-028: charged against the fair share, which demotes or recovers the target.
+    // After the measurements above, because the share and the charge both read what this
+    // transaction actually cost, not what it was estimated to cost.
+    //
+    // And only for a transaction that ANSWERED, which is why this sits below the branch above
+    // rather than beside the measurement. FR-028 demotes a target "whose measured transaction
+    // durations consistently exceed their fair share"; a transaction that got no answer measured
+    // no duration of that target's — what elapsed is link::Master's own retry and timeout window
+    // (trunk §7, MEASURED at ~1270 us against a 500 us share), which is a property of the retry
+    // policy and not of the silent target's cost. Charging it demoted a silent node, and its
+    // backplane, after three failures and reported a BUDGET overrun for a trunk fault, stacked on
+    // top of the SUSPECT/OFFLINE transitions health_ already reports for the same silence (red
+    // team round 3 on PR #907, ATTACK A2). The two signals stay distinct. Neither charged nor
+    // CLEARED: a failure leaves consecutive_overrun_superframes exactly as it was, so silence
+    // cannot launder an outstanding demotion either. Both halves are pinned by `FR-028: a
+    // transaction that never ANSWERS is a trunk fault, not a budget overrun`.
+    // budget_.remaining_us is still debited above: the superframe really did spend that time,
+    // which is a separate question from whose fault it is.
+    account_overrun(duration_us, kind);
     switch (kind) {
     case TxKind::StatusPoll:
         // on_status_block() is empty today (it only discards now_us), so removing the call changes

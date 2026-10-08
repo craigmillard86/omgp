@@ -371,9 +371,16 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     // leave ~420 us of the 2000 us period, so that divisor puts the share at ~35 us with twelve
     // targets queued — below every transaction this trunk can perform, which would demote the
     // whole rig for being busy. Argued in docs/OPEN-QUESTIONS.md 2026-10-08, with the numbers.
+    //
+    // FLOORED at kMinFairShareUs (core_engine.cpp): the quotient shrinks with enrolment where a
+    // transaction's cost does not, so below the floor a HEALTHY rig of five or more backplanes
+    // demotes every one of them for answering normally. Same entry, superseded by the later
+    // 2026-10-08 one that records the floor.
     uint64_t fair_share_us() const;
-    // Charges one completed transaction's measured duration against the share in force for
-    // the superframe that issued it, and demotes or recovers the target accordingly.
+    // Charges one completed, ANSWERED transaction's measured duration against the share in force
+    // for the superframe that issued it, and demotes or recovers the target accordingly. Not
+    // called for a transaction that failed: what elapsed then is trunk §7's retry and timeout
+    // window, not that target's cost (see complete_request()).
     void account_overrun(uint64_t duration_us, TxKind kind);
     void set_demoted(uint8_t id, bool is_backplane, uint8_t& consecutive, bool& demoted, bool over);
 

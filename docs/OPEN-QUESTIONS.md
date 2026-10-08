@@ -6398,3 +6398,91 @@ satisfies, and (b)'s horizon is one more undefined constant.
 silent; the amendment is what (a) proposes). **Supersedes:** the one quoted clause of the
 2026-10-08 "T028 (#699): node-level demotion IS charged after all" entry. **Related:** #696,
 #699, PR #907 review round 2 finding 1, spec FR-028, SC-007, R-11, `tasks.md` T028.
+
+## 2026-10-08 — T028 (#699): the fair share needs a FLOOR, because a quotient of the period demotes a healthy rig for its size
+
+**Supersedes** the second sentence of point 1 of this same day's "T028/T029 (#699, #700): the
+fair share, the demotion threshold and the demoted-item rotation are all undefined" entry — "On
+the benchmark rig that is 500 us: an honest poll (380-400) is inside it and an expensive one
+(530, measured) is not." That is true of the benchmark rig's THREE backplanes and of no larger
+rig. The share is now `period_us / (enrolled + 1)` **floored at 450 us**; the rest of that
+entry's point 1, and points 2-4, are unaffected.
+
+**Context:** `period_us / (enrolled + 1)` shrinks with enrolment while a transaction's cost does
+not — an honest `GET_STATUS` round trip costs what it costs whatever else is enrolled.
+protocol-l3 §2 makes `ADDR_backplane_min..ADDR_backplane_max` (0x01..0x0F) **fifteen** legal
+backplanes, so the unfloored quotient crosses an honest poll's cost between four enrolled and
+five. MEASURED at this head, on honest rigs with no expensive answer scripted anywhere:
+
+| enrolled backplanes | unfloored share | worst honest poll | backplanes demoted |
+|---|---|---|---|
+| 3 | 500 us | 400 us | 0 |
+| 4 | 400 us | 400 us | 0 |
+| 5 | 333 us | 400 us | 5 |
+| 6 | 285 us | 400 us | 6 |
+| 15 | 125 us | 410 us | 15 |
+
+Every one of those backplanes answered normally. The consequences are worse than a spurious
+report: with every target demoted, `rotate_past_demoted()` finds nothing servable and serves the
+head, so FR-028's demand-priority ordering is a no-op exactly on the rigs large enough to need
+it, and SC-007's `Demoted` stops distinguishing an expensive backplane from any backplane. This
+is the same failure mode the entry above rejects the artefacts' literal share for ("below *every*
+transaction this trunk can perform, so every target overruns and the whole rig is demoted for
+being busy") — the replacement had it too, two backplanes later. *Found by* red team round 3 on
+PR #907 (ATTACK A1), *reproduced by* the case `FR-027/FR-028: a wholly HONEST rig demotes no
+backplane at any legal enrolled count`, which was RED at `daaec39` for 5, 6, 9 and 15 enrolled
+and green for 3 and 4.
+
+**What was done:** `kMinFairShareUs = 450` in `core/core_engine.cpp`, a floor under the quotient.
+The quotient still falls with enrolment until the floor binds (500 at three enrolled, 450 at
+four, the floor from five to fifteen), so the share is still a share and the enumeration bound
+is still observable — `FR-028: the fair share counts every enrolled backplane, including the
+last address` still reads a strictly smaller share at four than at three.
+
+**What is honest about 450 and what is not.** It is CALIBRATED, not derived: MEASURED, an honest
+poll costs 340-410 us (the spread is `BP_SLOT_MAP`'s payload against `GET_STATUS`'s, and the slot
+count) and SC-007's protocol-legal expensive answer costs 530, so the floor has to sit between
+them and 450 is the midpoint. No spec symbol lands in that window — `T_resp + T_turn + T_gap` is
+270, and one worst-case frame each way is 2910, larger than the whole period. The window is as
+narrow as it is because `MockL3Node`'s expensive answer is only ~1.3x an honest one (a
+turnaround delay bounded by `T_resp`, per this day's "`MockL3Node` cannot express '#110 F2c''s
+padded `ERROR.detail`" entry) where SC-007's own wording is "several times an honest
+transaction's duration". Both sides are therefore pinned by cases rather than argued: the honest
+case above fails if an honest poll ever reaches the floor, and SC-007's case fails if an
+expensive one does not exceed the share. A drift in either cost turns a case red rather than
+quietly stopping the share from discriminating.
+
+**Also corrected in code, and NOT a question:** a transaction that never answered is no longer
+charged. FR-028 demotes on "measured transaction durations"; what elapses on a failure is
+`link::Master`'s retry and timeout window (trunk §7, MEASURED ~1270 us against a 500 us share),
+so three silent transactions demoted the target and reported a budget overrun for a trunk fault,
+on top of the SUSPECT/OFFLINE transitions `health_` already reports for the same silence. The
+charge now sits below `complete_request()`'s `!answered` branch. *Found by* red team round 3
+(ATTACK A2), *demonstrated by* `FR-028: a transaction that never ANSWERS is a trunk fault, not a
+budget overrun`. Recorded here only because it narrows what point 2 of the entry above means by
+"charged", not because anything is undecided.
+
+**What this does NOT settle.** Whether the share should scale with the WIRE RATE. At
+`TRUNK_bit_rate_fallback` an honest round trip is ~3100 us — longer than the whole `T_poll`
+period — so at the fallback rate every transaction exceeds every share and the whole rig demotes,
+floor or no floor. That is pre-existing and unchanged by this entry, and it is a property of an
+absolute share rather than of the floor: a share expressed in microseconds cannot be right at two
+rates that differ by 8.7x (trunk §7). No test covers it, because nothing in US2 drives the
+scheduler at the fallback rate.
+
+**Recommendation:** rule on one of three. (a) Ratify the floor and record both it and the share
+in `data-model.md` §9 beside the threshold — the smallest change, and what the code now
+documents. (b) Define the share in units of a transaction rather than of the period — "a target
+is demoted when its measured cost exceeds N times the cheapest honest transaction measured on
+this trunk" — which is SC-007's own wording, needs no calibrated constant and is rate-independent,
+but needs `MockL3Node` to be able to script an answer several times an honest one before any case
+can discriminate N. (c) Scale the share with `master_.bit_rate()`. (a) is recommended now and
+(b) as the follow-up it implies, because (b) changes what FR-028 measures and (c) alone leaves
+the calibration problem where it is.
+
+**Ruling:** pending — human. **Amends:** none (FR-028 says "fair share" and no artefact defines
+it; the floor is this implementation's choice, like the share it floors). **Supersedes:** the
+second sentence of point 1 of the 2026-10-08 "T028/T029 (#699, #700): the fair share, the
+demotion threshold and the demoted-item rotation are all undefined" entry. **Related:** #699,
+#700, PR #907 red team round 3 findings 1 and 2, spec FR-027/FR-028, SC-007, R-11, `tasks.md`
+T028.
