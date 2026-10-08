@@ -416,6 +416,34 @@ void bring_up_rig(Rig& rig) {
     REQUIRE(rig.discovered_count() == 12u);
 }
 
+// `n` honest backplanes with ONE occupied slot each (protocol-l3 §2: ADDR_backplane_min ..
+// ADDR_backplane_max is 0x01..0x0F, so 15 is the largest legal enrolment). One slot apiece keeps
+// the discovery traffic proportional to the thing being varied — the ENROLLED COUNT, which is
+// fair_share_us()'s only input — rather than to four modules per backplane.
+void bring_up_n(Rig& rig, uint8_t n) {
+    for (uint8_t i = 0; i < n; ++i) {
+        rig.install(static_cast<uint8_t>(omgp::ADDR_backplane_min + i), 1, 0x01u);
+    }
+    rig.run_until([&] { return rig.discovered_count() == static_cast<size_t>(n); },
+                  60u * static_cast<uint32_t>(n) + 200u);
+    REQUIRE(rig.discovered_count() == static_cast<size_t>(n));
+}
+
+// The backplane-level demotions an application was actually told about, which is what SC-007's
+// signal is. Counted apart from the node-level ones because this file's node arm has its own,
+// separately recorded consequence (an honest READ_DESC can exceed the share on a rig whose
+// descriptor runs to several chunks — docs/OPEN-QUESTIONS.md 2026-10-08), and a case about the
+// SHARE must not be made green or red by that.
+size_t backplane_demotions(const Recorder& recorder) {
+    size_t n = 0;
+    for (const LifecycleEvent& e : recorder.lifecycle) {
+        if (e.kind == LifecycleKind::Demoted && e.demoted_is_backplane) {
+            ++n;
+        }
+    }
+    return n;
+}
+
 } // namespace
 
 TEST_CASE("AS1/SC-003/FR-002: a 40-operation parameter burst never delays a superframe's status "
@@ -837,11 +865,14 @@ TEST_CASE("SC-007/FR-027/FR-028: a backplane whose answers cost several times an
 TEST_CASE("FR-027: the fair share is derived from the period and the enrolled count, so a "
           "healthy rig demotes nothing [scheduler][us2]") {
     // The share is this engine's own definition where the artefacts are silent
-    // (docs/OPEN-QUESTIONS.md 2026-10-08): the superframe period divided by the number of
-    // enrolled backplanes plus one. Asserted through BEHAVIOUR and through the seam's own
-    // reader rather than by restating the arithmetic: on the benchmark rig it must leave an
-    // honest poll comfortably inside the share, which is what keeps SC-007 a test of a real
-    // overrun rather than of the definition.
+    // (docs/OPEN-QUESTIONS.md 2026-10-08, and the later entry of the same day for the floor
+    // under it): the superframe period divided by the number of enrolled backplanes plus one,
+    // never below kMinFairShareUs. Asserted through BEHAVIOUR and through the seam's own reader
+    // rather than by restating the arithmetic: on the benchmark rig it must leave an honest poll
+    // comfortably inside the share, which is what keeps SC-007 a test of a real overrun rather
+    // than of the definition. The case below carries the other half — that the share stays above
+    // an honest poll at every legal enrolled count, which THIS case's three backplanes cannot
+    // see.
     Rig rig;
     bring_up_rig(rig);
     const uint64_t share = Bk::fair_share_us(rig.engine());
@@ -856,6 +887,91 @@ TEST_CASE("FR-027: the fair share is derived from the period and the enrolled co
         CHECK(Bk::backplane(rig.engine(), addr).last_measured_duration_us < share);
     }
     CHECK(rig.recorder().count(LifecycleKind::Demoted) == 0u);
+}
+
+TEST_CASE("FR-027/FR-028: a wholly HONEST rig demotes no backplane at any legal enrolled count "
+          "[scheduler][us2]") {
+    // The case above runs on the SC-001 rig's THREE backplanes, where the share is 500 us and an
+    // honest poll ~360 — so it cannot see what the share does as the divisor grows. The period is
+    // fixed at TRUNK_T_poll_us and an honest GET_STATUS round trip costs the same whatever the
+    // enrolled count is, so a share of period/(enrolled + 1) alone falls BELOW an honest poll
+    // from five enrolled backplanes on, and every healthy backplane on the rig is then demoted
+    // for answering normally (red team round 3 @ daaec39, ATTACK A1). That makes SC-007's
+    // `Demoted` stop distinguishing an expensive backplane from any backplane, and FR-028's
+    // demand-priority ordering a no-op, exactly on the rigs large enough to need it.
+    //
+    // 15 is the largest legal enrolment (ADDR_backplane_min..max). The premise asserted here is
+    // the one the case above asserts for three: every honest poll is INSIDE the share. Both
+    // halves matter — the measurement under the share is why no demotion is the right outcome,
+    // rather than a demotion the counter happened not to reach.
+    const uint8_t enrolled = static_cast<uint8_t>(GENERATE(3, 4, 5, 6, 9, 15));
+    Rig rig;
+    bring_up_n(rig, enrolled);
+    const uint64_t share = Bk::fair_share_us(rig.engine());
+
+    rig.run_superframes(24u);
+    rig.engine().drain_callbacks(512);
+    uint64_t worst = 0;
+    for (uint8_t i = 0; i < enrolled; ++i) {
+        const uint8_t addr = static_cast<uint8_t>(omgp::ADDR_backplane_min + i);
+        const auto& bp = Bk::backplane(rig.engine(), addr);
+        worst = bp.last_measured_duration_us > worst ? bp.last_measured_duration_us : worst;
+        INFO("backplane " << static_cast<unsigned>(addr) << " measured "
+                          << bp.last_measured_duration_us << " us against a share of " << share);
+        CHECK(bp.last_measured_duration_us < share);
+        CHECK(bp.demoted == false);
+    }
+    INFO("enrolled " << static_cast<unsigned>(enrolled) << ", share " << share
+                     << " us, worst honest poll " << worst << " us");
+    CHECK(backplane_demotions(rig.recorder()) == 0u);
+}
+
+TEST_CASE("FR-028: a transaction that never ANSWERS is a trunk fault, not a budget overrun "
+          "[scheduler][us2]") {
+    // FR-028 demotes a target whose "measured transaction durations consistently exceed their
+    // fair share". A transaction that got no answer measured no duration: what elapsed is
+    // link::Master's retry and timeout window (trunk §7), ~1270 us against a 500 us share, so
+    // charging it demotes a silent target after three failures and reports a BUDGET overrun for
+    // a trunk fault (red team round 3 @ daaec39, ATTACK A2). Silence is already reported, as the
+    // SUSPECT/OFFLINE transitions the health table owns; the two signals must stay distinct, or
+    // an application cannot tell an expensive talker from an absent one.
+    Rig rig;
+    bring_up_rig(rig);
+    const std::vector<uint8_t> ids = rig.discovered_ids();
+    const uint8_t victim = ids[0];
+    const uint8_t victim_bp = Bk::node(rig.engine(), victim).backplane_addr;
+
+    // From a clean slate, so what is asserted is this case's own charges and not discovery's.
+    Bk::node(rig.engine(), victim).consecutive_overrun_superframes = 0u;
+    Bk::node(rig.engine(), victim).demoted = false;
+    Bk::backplane(rig.engine(), victim_bp).consecutive_overrun_superframes = 0u;
+    Bk::backplane(rig.engine(), victim_bp).demoted = false;
+    rig.engine().drain_callbacks(256);
+    rig.recorder().lifecycle.clear();
+
+    L3Step silence = L3Step::of(SilenceStep{});
+    rig.node().set_script(victim_bp, &silence, 1);
+    for (int i = 0; i < 4; ++i) {
+        REQUIRE(rig.engine().set_param(victim, 1, 0, static_cast<uint16_t>(i)) == CoreStatus::Ok);
+        rig.run_superframes(10u);
+    }
+    rig.engine().drain_callbacks(256);
+
+    const auto& n = Bk::node(rig.engine(), victim);
+    INFO("node " << static_cast<unsigned>(victim) << ": consecutive "
+                 << static_cast<unsigned>(n.consecutive_overrun_superframes) << ", last measured "
+                 << n.last_measured_duration_us << " us against a share of "
+                 << Bk::fair_share_us(rig.engine()) << " us");
+    CHECK(n.consecutive_overrun_superframes == 0u);
+    CHECK(n.demoted == false);
+    CHECK(Bk::backplane(rig.engine(), victim_bp).demoted == false);
+    CHECK(rig.recorder().count(LifecycleKind::Demoted) == 0u);
+    // And not vacuously: the failures really happened and really elapsed longer than the share,
+    // so this case would be green on an engine that charged them only if it charged nothing at
+    // all. (last_measured_duration_us is recorded for every terminal outcome, answered or not —
+    // it is the budget's measurement of what the superframe spent, which is a separate question
+    // from whether a target is to blame for it.)
+    CHECK(n.last_measured_duration_us > Bk::fair_share_us(rig.engine()));
 }
 
 TEST_CASE("CLAUDE.md rule 5: a superframe under demand load allocates nothing [scheduler][us2]") {
@@ -1174,6 +1290,12 @@ TEST_CASE("FR-028: the fair share counts every enrolled backplane, including the
     // A sweep that stopped one address short would miss a backplane enrolled AT
     // ADDR_backplane_max — the one address an inclusive bound and an exclusive one disagree
     // about — and compute too large a share, demoting nothing.
+    // Three enrolled and four are the counts at which fair_share_us() still returns two
+    // DIFFERENT numbers (500 us, and 450 — the quotient is 400 at four, so what it returns there
+    // is kMinFairShareUs), which is what keeps this oracle able to see the missed address: a
+    // sweep that stopped short would read three enrolled both times and 500 twice. From five
+    // enrolled on the floor binds at both counts and the comparison would go blind, which is why
+    // the second count here is four and not a larger one.
     Rig rig;
     for (uint8_t i = 0; i < 3u; ++i) {
         rig.install(static_cast<uint8_t>(omgp::ADDR_backplane_min + i), 4, 0x0Fu);
