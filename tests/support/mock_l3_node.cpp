@@ -486,7 +486,7 @@ void MockL3Node::answer(uint8_t node, const omgp::l3::Header& req, const omgp::l
         return;
     }
     schedule_answer(frame, req, is_error ? omgp::OP_ERROR : req.opcode, is_error, out, n,
-                    tx_end + omgp::TRUNK_T_turn_min_us);
+                    tx_end + omgp::TRUNK_T_turn_min_us + nodes_[frame.dst].answer_delay_us);
 }
 
 void MockL3Node::schedule_answer(const omgp::link::FrameFields& frame, const omgp::l3::Header& req,
@@ -670,6 +670,14 @@ void MockL3Node::advance_to(uint64_t t) {
     // already-due RX bytes future again.
     REQUIRE(t >= clock_.now_us());
     clock_.set(t);
+}
+
+void MockL3Node::set_answer_delay(uint8_t node, uint64_t extra_us) {
+    if (node >= omgp::link::kAddrCount) {
+        record_fault("MockL3Node::set_answer_delay: address outside kAddrCount");
+        return;
+    }
+    nodes_[node].answer_delay_us = extra_us;
 }
 
 size_t MockL3Node::requests_seen() const {

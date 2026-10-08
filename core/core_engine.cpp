@@ -22,6 +22,17 @@ namespace {
 // once (61 -> 56) when max_l3_payload split from max_l3_message.
 constexpr uint8_t kDescChunkMax = static_cast<uint8_t>(LIMIT_max_l3_payload - 3);
 
+// spec FR-028 / research.md R-11 say "a configured number of consecutive superframes" and no
+// artefact gives the number, so this is THIS ENGINE's choice, argued in docs/OPEN-QUESTIONS.md
+// (2026-10-08): a core/ constant rather than a YAML limit, because it is a scheduling policy
+// with no protocol meaning — nothing on the wire depends on it and no other implementation has
+// to agree about it (CLAUDE.md rule 1 governs the protocol, not this). Three, by analogy with
+// trunk §7's TRUNK_suspect_after_failures: long enough that one expensive answer does not
+// deprioritise a target, short enough that a standing overrun is acted on within a handful of
+// superframes. Not a spec symbol, so it is NOT read from the generated header (rule 4 forbids
+// restating a spec constant, which this is not).
+constexpr uint8_t kDemoteAfterOverrunSuperframes = 3;
+
 // data-model.md §9 / R-11: the conservative seed for a target never yet measured — one
 // worst-case frame each way at the rate now in use, plus trunk §9's turnaround and inter-frame
 // gap. Deliberately pessimistic: it is what a target costs if it behaves as badly as trunk §4
@@ -225,15 +236,28 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
         return false;
     }
     // R-07's fixed order is event drains, then descriptor chunks, then parameter operations.
-    // User Story 1 owns only the middle one; the event queue (US4) and the parameter queue
-    // (US2) are drained by T029's loop, which lands with their own stories. The IDENTIFY scan
-    // below is discovery traffic with no ring of its own (R-07 names three kinds, not four) and
-    // sits after the descriptor chunks deliberately: finishing a descriptor read already in
-    // flight releases a node to Discovered, while starting another node's identity does not.
+    // FR-020 itself only requires events ahead of the other two and is silent on desc-vs-param,
+    // so the order between those two rests on R-07 alone. The IDENTIFY scan below is discovery
+    // traffic with no ring of its own (R-07 names three kinds, not four) and sits after the
+    // descriptor chunks deliberately: finishing a descriptor read already in flight releases a
+    // node to Discovered, while starting another node's identity does not.
+    const Resume ev_outcome = drain_events(now_us);
+    if (ev_outcome == Resume::Issued) {
+        return true;
+    }
+    if (ev_outcome == Resume::Refused) {
+        return false; // FR-005: the budget is spent; every unsent item carries over
+    }
     // Iterative, not recursive: the queue holds up to LIMIT_max_nodes items and a stale-item
     // chain must not become that many stack frames on a target with a fixed task stack
     // (CLAUDE.md rule 5's fixed-size reading). Terminates because every pass either returns or
     // consumes one item from a finite ring.
+    // FR-028: a demoted target's item loses its PLACE in the ring, not its turn. Only when
+    // nothing is already held — an item at the head mid-carry-over keeps the place FR-005 gave
+    // it, which is what "carry-over, not truncation" means.
+    if (!desc_held_) {
+        rotate_past_demoted(desc_queue_);
+    }
     while (desc_held_ || desc_queue_.pop(desc_hold_)) {
         desc_held_ = true;
         const size_t idx = node_index(desc_hold_.node_id);
@@ -275,6 +299,16 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
             desc_held_ = false;
             return true;
         }
+        return false;
+    }
+    // R-07's third ring, after the chunks and before the discovery passes: a parameter
+    // operation is the lowest-priority demand item, and a descriptor read already in flight
+    // releases a node to Discovered where a parameter set changes nothing another node waits on.
+    const Resume param_outcome = drain_params(now_us);
+    if (param_outcome == Resume::Issued) {
+        return true;
+    }
+    if (param_outcome == Resume::Refused) {
         return false;
     }
     // Recovery sweep, reached only with the chunk ring EMPTY. A node in ReadingDescriptor with
@@ -479,6 +513,244 @@ uint64_t CoreEngine::cost_estimate(uint64_t last_measured_us) const {
     return last_measured_us != 0 ? last_measured_us : worst_case_transaction_us(wire_rate_);
 }
 
+// --- the demand rings (spec FR-004/FR-005/FR-020/FR-025, R-07) ---------------------------------
+
+bool CoreEngine::target_demoted(uint8_t node_id) const {
+    const size_t idx = node_index(node_id);
+    if (idx == kNoNodeIndex || !nodes_[idx].in_use) {
+        return false;
+    }
+    if (nodes_[idx].demoted) {
+        return true;
+    }
+    // data-model.md §4: a backplane's demotion demotes its MODULES' demand items — a backplane
+    // has no demand item of its own, so this is the only place its own flag bites.
+    const size_t bp = backplane_index(nodes_[idx].backplane_addr);
+    return bp != kNoNodeIndex && backplanes_[bp].demoted;
+}
+
+template <typename Ring_> void CoreEngine::rotate_past_demoted(Ring_& ring) {
+    // At most one full pass, so this terminates whatever the ring holds: the bound is the item
+    // count read once, and nothing here can grow the ring.
+    const size_t passes = ring.size();
+    for (size_t i = 0; i < passes; ++i) {
+        if (!target_demoted(ring.at(0).node_id)) {
+            return; // the head is servable; FIFO among the not-demoted is untouched
+        }
+        auto item = ring.at(0);
+        decltype(item) popped{};
+        if (!ring.pop(popped)) {
+            return; // unreachable while passes <= size(): defensive, not a known path
+        }
+        // Order among the demoted is preserved too: each goes to the back in the order it was
+        // met, so a standing demotion does not reshuffle one target's own items.
+        (void)ring.push(popped);
+    }
+    // Every item is demoted, so the ring is back where it started and its original head is
+    // served this superframe anyway: FR-028 demotes PRIORITY, and a ring that served nobody
+    // would be starvation — the thing demotion exists to avoid.
+}
+
+CoreEngine::Resume CoreEngine::drain_events(uint64_t now_us) {
+    if (event_queue_.empty()) {
+        return Resume::Nothing;
+    }
+    rotate_past_demoted(event_queue_);
+    // FR-025's K = 1 per node per superframe TURN, with R-07's correction: the remainder
+    // re-queues behind every OTHER node's pending event, not behind this node's own next one.
+    // One pass, so a ring holding only nodes that already had their turn ends the phase instead
+    // of spinning. `remaining_count` is read nowhere here, which is R-07's "MUST NOT size a
+    // buffer or bound a loop" kept by construction rather than by review.
+    const size_t passes = event_queue_.size();
+    for (size_t i = 0; i < passes; ++i) {
+        EventDrainItem item{};
+        if (!event_queue_.pop(item)) {
+            return Resume::Nothing;
+        }
+        const size_t idx = node_index(item.node_id);
+        if (idx == kNoNodeIndex || !nodes_[idx].in_use ||
+            nodes_[idx].discovery != DiscoveryState::Discovered) {
+            continue; // the slot emptied (FR-010), or was never discovered: drop, never address
+        }
+        NodeRecord& node = nodes_[idx];
+        if (node.event_drained_superframe == superframe_) {
+            (void)event_queue_.push(item); // had its turn: behind every other node's event
+            continue;
+        }
+        if (!admit_demand(cost_estimate(node.last_measured_duration_us))) {
+            (void)event_queue_.push(item); // FR-005: carried over, keeping its place
+            return Resume::Refused;
+        }
+        node.event_drained_superframe = superframe_;
+        if (begin_request(node.backplane_addr, item.node_id, OP_GET_EVENT, nullptr, 0,
+                          TxKind::EventDrain, now_us)) {
+            // Disarms admit_demand()'s first-item exception for the rest of this superframe.
+            // Without it every item looks like the first one, the whole ring is admitted into
+            // one superframe, and FR-005's budget bounds nothing at all.
+            demand_issued_ = true;
+            return Resume::Issued;
+        }
+        // link::Master refused a well-formed request: this node keeps its turn for a later
+        // superframe rather than spending it on a transaction that never happened.
+        node.event_drained_superframe = 0u;
+        (void)event_queue_.push(item);
+        return Resume::Refused;
+    }
+    return Resume::Nothing;
+}
+
+CoreEngine::Resume CoreEngine::drain_params(uint64_t now_us) {
+    if (param_queue_.empty()) {
+        return Resume::Nothing;
+    }
+    rotate_past_demoted(param_queue_);
+    const size_t passes = param_queue_.size();
+    for (size_t i = 0; i < passes; ++i) {
+        // Peeked, not popped: an item this superframe cannot afford must keep its place in the
+        // ring (FR-005's carry-over BY IDENTITY), and popping it to look at it would put it
+        // behind every item queued after it.
+        const ParamOpItem item = param_queue_.at(0);
+        const size_t idx = node_index(item.node_id);
+        if (idx == kNoNodeIndex || !nodes_[idx].in_use ||
+            nodes_[idx].discovery != DiscoveryState::Discovered) {
+            ParamOpItem dropped{};
+            (void)param_queue_.pop(dropped);
+            continue; // the slot emptied under a queued operation: drop rather than misaddress
+        }
+        NodeRecord& node = nodes_[idx];
+        if (!admit_demand(cost_estimate(node.last_measured_duration_us))) {
+            return Resume::Refused;
+        }
+        // A LOCAL payload buffer, the idiom begin_desc_chunk() uses — never request_buf_,
+        // which begin_request() fills with the L3 header before it copies the payload in, so a
+        // payload aliasing it would be clobbered by its own header.
+        uint8_t payload[LIMIT_max_l3_payload] = {};
+        size_t written = 0;
+        l3::Status st = l3::Status::Ok;
+        if (item.kind == ParamOpItem::Kind::Set) {
+            l3::SetParamReq req{};
+            req.param_id = item.param_id;
+            req.scope = item.scope;
+            req.value = item.value;
+            st = l3::encode_set_param(req, payload, sizeof payload, written);
+        } else {
+            l3::GetParamReq req{};
+            req.param_id = item.param_id;
+            req.scope = item.scope;
+            st = l3::encode_get_param_req(req, payload, sizeof payload, written);
+        }
+        if (st != l3::Status::Ok) {
+            // Not a path the API can create: set_param()/get_param() already refuse what these
+            // codecs refuse (CoreStatus::InvalidValue, and the Discovered check above). Dropped
+            // rather than retried for ever, since re-encoding the same item would fail again.
+            ParamOpItem dropped{};
+            (void)param_queue_.pop(dropped);
+            continue;
+        }
+        const uint8_t opcode = item.kind == ParamOpItem::Kind::Set ? OP_SET_PARAM : OP_GET_PARAM;
+        const TxKind kind =
+            item.kind == ParamOpItem::Kind::Set ? TxKind::ParamSet : TxKind::ParamGet;
+        if (begin_request(node.backplane_addr, item.node_id, opcode, payload,
+                          static_cast<uint8_t>(written), kind, now_us)) {
+            ParamOpItem issued{};
+            (void)param_queue_.pop(issued); // removed only once it is actually on the wire
+            demand_issued_ = true;          // as in drain_events(): one demand item per budget
+            return Resume::Issued;
+        }
+        return Resume::Refused;
+    }
+    return Resume::Nothing;
+}
+
+// --- the fair share and demotion (spec FR-027/FR-028, R-11) ------------------------------------
+
+uint64_t CoreEngine::fair_share_us() const {
+    // One status poll per enrolled backplane (FR-002) plus the demand slot (FR-004) is what a
+    // superframe must fit, so each target's fair share of the period is period / (enrolled + 1).
+    // Enrolment alone, so the share does not move with what happens to be queued or with the
+    // order this superframe's traffic went out in.
+    size_t enrolled = 0;
+    for (uint8_t addr = ADDR_backplane_min; addr <= ADDR_backplane_max; ++addr) {
+        const size_t idx = backplane_index(addr);
+        if (idx != kNoNodeIndex && backplanes_[idx].enrolled) {
+            ++enrolled;
+        }
+    }
+    const uint64_t share = budget_.period_us / (static_cast<uint64_t>(enrolled) + 1u);
+    // Never zero: a share of zero would make every transaction an overrun.
+    return share == 0u ? 1u : share;
+}
+
+void CoreEngine::set_demoted(uint8_t id, bool is_backplane, uint8_t& consecutive, bool& demoted,
+                             bool over) {
+    if (!over) {
+        consecutive = 0u;
+        if (demoted) {
+            // FR-028: cleared as soon as one measured transaction is back inside the share.
+            // Deliberately asymmetric with the threshold below — a target that has recovered
+            // should not go on being deprioritised while it proves it.
+            demoted = false;
+            LifecycleEvent ev{};
+            ev.kind = LifecycleKind::DemotionCleared;
+            ev.node_id = id;
+            ev.demoted_is_backplane = is_backplane;
+            (void)enqueue_lifecycle(ev);
+        }
+        return;
+    }
+    if (consecutive < UINT8_MAX) {
+        ++consecutive;
+    }
+    if (demoted || consecutive < kDemoteAfterOverrunSuperframes) {
+        return;
+    }
+    demoted = true;
+    LifecycleEvent ev{};
+    ev.kind = LifecycleKind::Demoted;
+    ev.node_id = id;
+    ev.demoted_is_backplane = is_backplane;
+    (void)enqueue_lifecycle(ev);
+}
+
+void CoreEngine::account_overrun(uint64_t duration_us, TxKind kind) {
+    // ONE target per transaction, so "consecutive superframes" counts superframes and not
+    // transactions: a backplane is charged for its own status poll (one per superframe, FR-002)
+    // and a node for its own demand item (one per node per superframe — K = 1 for events, one
+    // chunk per node for reads). A probe is charged to nobody, because FR-003 makes it
+    // unconditional and its target is by definition not a competing, enrolled one.
+    //
+    // ONLY a backplane's own status poll is charged, and that is a SCOPE STATEMENT, not an
+    // oversight (docs/OPEN-QUESTIONS.md 2026-10-08). A status poll is the one transaction every
+    // superframe performs for every enrolled backplane, with the same payload shape every time,
+    // so its measured cost is comparable across superframes and across backplanes — which is
+    // what "consistently exceeds its fair share" needs to mean something. A node's demand
+    // transactions are not comparable that way: MEASURED on the benchmark rig, one node's
+    // READ_DESC costs ~760 us against a SET_PARAM's ~390, because a descriptor chunk carries 56
+    // payload bytes and a parameter set carries four. Charging both against one share would
+    // demote every node that was merely reading a descriptor. SC-007, the only acceptance
+    // scenario for demotion, is a backplane case; node-level demotion has none, so the
+    // NodeRecord fields stay (and target_demoted() still honours nodes_[].demoted, so the
+    // rotation respects a node demoted by anything else) and nothing here sets them.
+    // GET_STATUS only, not BP_SLOT_MAP, and for the same comparability reason: the two poll
+    // kinds carry different payloads, so they cost different amounts. MEASURED on the benchmark
+    // rig, an honest GET_STATUS round trip is ~380-400 us where the slot map's is shorter, so a
+    // backplane charged for both alternates over and under any single share and
+    // `consecutive_overrun_superframes` never accumulates — the counter would be measuring the
+    // superframe parity, not the backplane. GET_STATUS is the uniform probe: every enrolled
+    // backplane answers one, with the same payload shape, on every other superframe (trunk §6).
+    // A standing overrun therefore takes 2 x kDemoteAfterOverrunSuperframes superframes to
+    // demote, which is the "bounded number of superframes" SC-007 asks for.
+    if (kind != TxKind::StatusPoll) {
+        return;
+    }
+    const size_t bp = backplane_index(tx_addr_);
+    if (bp == kNoNodeIndex || !backplanes_[bp].enrolled) {
+        return;
+    }
+    set_demoted(tx_addr_, true, backplanes_[bp].consecutive_overrun_superframes,
+                backplanes_[bp].demoted, duration_us > fair_share_us());
+}
+
 bool CoreEngine::admit_demand(uint64_t estimate) const {
     // The first-item exception (see run_superframe()'s header note): without it, three
     // backplanes' mandatory status polls alone can leave less than one unmeasured target's
@@ -658,6 +930,10 @@ void CoreEngine::complete_request(const link::MasterEvent& ev, uint64_t now_us) 
     if (node_idx != kNoNodeIndex) {
         nodes_[node_idx].last_measured_duration_us = duration_us;
     }
+    // spec FR-027/FR-028: charged against the fair share, which demotes or recovers the target.
+    // After the measurements above, because the share and the charge both read what this
+    // transaction actually cost, not what it was estimated to cost.
+    account_overrun(duration_us, kind);
     if (!answered) {
         // trunk §7 already retried this inside link::Master. Nothing is re-queued here: a node
         // still Identifying is picked up again by the next superframe's own scan, and an
@@ -691,6 +967,15 @@ void CoreEngine::complete_request(const link::MasterEvent& ev, uint64_t now_us) 
         break;
     case TxKind::ReadDesc:
         on_desc_chunk(ev, now_us);
+        break;
+    case TxKind::EventDrain:
+    case TxKind::ParamSet:
+    case TxKind::ParamGet:
+        // T029 ISSUES these; T030 and T039 read their answers. Until then the answer's whole
+        // contribution is its timing, already taken above for the budget and the demotion
+        // accounting (FR-027) — a GetParamResp is not decoded, no FR-023 report is made, and no
+        // event detail is delivered. Named here rather than left to a default, so that adding a
+        // kind cannot silently fall through this switch (-Werror=switch is what enforces it).
         break;
     case TxKind::Probe:
     case TxKind::None:

@@ -183,6 +183,11 @@ struct NodeRecord {
     uint8_t switch_channel = 0;
     uint64_t switch_deadline_us = 0; // set from the descriptor's l3::SwitchingRec::settle_ms
     // Event-rate / flood defence (spec FR-025/FR-026, research.md R-07 correction):
+    // FR-025's K = 1: the superframe in which this node's last GET_EVENT was ISSUED, 0 for
+    // never. The same once-per-superframe-per-node marker desc_stalled_superframe above is,
+    // and for the same reason — "per superframe turn" is a property of the plan's number, not
+    // of a count or a clock reading (CLAUDE.md rule 3). Added by T029.
+    uint32_t event_drained_superframe = 0;
     uint8_t events_drained_this_window = 0; // count within event_rate_window_start_us
     uint64_t event_rate_window_start_us = 0;
     bool event_faulted = false; // true once the rate budget is exceeded; stops draining
@@ -451,6 +456,15 @@ template <typename T, size_t N> class Ring {
         head_ = (head_ + 1) % N;
         --count_;
         return true;
+    }
+
+    // The i-th item from the front, in insertion order; i < size(). Read-only and index-safe
+    // by its own bound: an out-of-range index returns the front rather than reading past the
+    // buffer, because the one caller (CoreEngine::competing_targets(), which counts the
+    // distinct targets with queued demand) must not be able to turn a counting slip into an
+    // out-of-bounds read. Added by T029; no mutation, so it cannot reorder a FIFO.
+    const T& at(size_t i) const {
+        return storage_[(head_ + (i < count_ ? i : 0)) % N];
     }
 
     size_t size() const {

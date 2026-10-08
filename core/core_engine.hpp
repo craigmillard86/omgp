@@ -269,7 +269,21 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     enum class Phase : uint8_t { Poll, Demand, Probe, Closed };
     // What the transaction currently outstanding at link::Master IS, so its terminal
     // MasterEvent can be attributed. One at a time (trunk §3), so one value, not a table.
-    enum class TxKind : uint8_t { None, StatusPoll, SlotMap, Probe, Identify, ReadDesc };
+    // ParamSet/ParamGet are T029's: a queued ParamOpItem's transaction. Their ANSWER is not
+    // decoded here — T030 owns GetParamResp decoding and FR-023's ParamSetFailed report — so
+    // at this head a parameter transaction's terminal event is consumed for its timing alone,
+    // which is what the budget (FR-027) and the demotion accounting need from it.
+    enum class TxKind : uint8_t {
+        None,
+        StatusPoll,
+        SlotMap,
+        Probe,
+        Identify,
+        ReadDesc,
+        EventDrain,
+        ParamSet,
+        ParamGet
+    };
 
     void open_superframe(uint64_t now_us);
     // Issues the next request this superframe's plan calls for; false when the plan is spent.
@@ -331,6 +345,37 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     // Whether a demand item costing `estimate` may be scheduled into what is left of this
     // superframe. See run_superframe()'s note for the first-item exception.
     bool admit_demand(uint64_t estimate) const;
+    // --- demand drain and demotion (spec FR-004/FR-005/FR-020/FR-025/FR-027/FR-028) -------
+
+    // One pass of one ring, in R-07's order. Each returns the same tri-state the discovery
+    // passes use: nothing queued for it, a request issued, or the budget / link::Master
+    // refusing — which ends the demand phase and carries every unsent item over.
+    Resume drain_events(uint64_t now_us);
+    Resume drain_params(uint64_t now_us);
+    // Rotates `ring` until its head is an item whose target is not demoted, at most one full
+    // pass, and leaves it there. Demotion is PRIORITY, not exclusion (FR-028): a ring whose
+    // every item is demoted makes one pass and keeps its original head, so the target is
+    // served late rather than never. Bounded by construction — the artefacts do not bound
+    // "skipped to the back of that ring" at all (docs/OPEN-QUESTIONS.md 2026-10-08).
+    template <typename Ring_> void rotate_past_demoted(Ring_& ring);
+    // True while this node, or the backplane bridging for it, is demoted.
+    bool target_demoted(uint8_t node_id) const;
+    // spec FR-028's "fair share of the superframe budget": the superframe PERIOD divided by
+    // the number of targets a superframe must serve — one status poll per enrolled backplane
+    // (FR-002) plus the demand slot (FR-004), so `enrolled + 1`. Depends on enrolment alone, so
+    // it is the same number whatever order this superframe's traffic went out in and whatever
+    // cadence the caller used, which SC-005's determinism needs.
+    //
+    // NOT tasks.md's parenthetical "the remaining demand budget divided by the number of
+    // targets currently competing for it": MEASURED on the benchmark rig, three mandatory polls
+    // leave ~420 us of the 2000 us period, so that divisor puts the share at ~35 us with twelve
+    // targets queued — below every transaction this trunk can perform, which would demote the
+    // whole rig for being busy. Argued in docs/OPEN-QUESTIONS.md 2026-10-08, with the numbers.
+    uint64_t fair_share_us() const;
+    // Charges one completed transaction's measured duration against the share in force for
+    // the superframe that issued it, and demotes or recovers the target accordingly.
+    void account_overrun(uint64_t duration_us, TxKind kind);
+    void set_demoted(uint8_t id, bool is_backplane, uint8_t& consecutive, bool& demoted, bool over);
 
     link::Master master_;
     link::HealthTracker health_; // constructed with (clock, *this) — R-03
