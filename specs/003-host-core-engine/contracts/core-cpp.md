@@ -18,6 +18,11 @@ enum class CoreStatus : uint8_t {
                        // nothing partially queued
     NotDiscovered,    // a parameter/channel operation named a node_id not yet Discovered
     RequestIdReused,  // GetParam called with the parameter FIFO already at capacity (R-10)
+    InvalidValue,     // added 2026-10-08 (T027): a SetParam value above LIMIT_param_value_max,
+                       // refused at the API boundary with nothing queued. See
+                       // docs/OPEN-QUESTIONS.md 2026-10-08 — the block above had no status for
+                       // a value the protocol cannot carry, and the only alternative report
+                       // channel was FR-023's ParamSetFailed at issue time.
 };
 ```
 
