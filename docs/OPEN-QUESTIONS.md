@@ -6128,3 +6128,42 @@ which converts a synchronous caller error into an asynchronous, uncorrelated rep
 **Ruling:** pending — human. **Amends:** `specs/003-host-core-engine/contracts/core-cpp.md`'s
 `CoreStatus` block in place, with a dated marker. **Supersedes:** none. **Related:** #697, #698,
 spec FR-023/FR-024, R-10, protocol-l3 §7.
+
+## 2026-10-08 — T023 (#694): the transcript records ACCEPTED `begin()` calls, where its AC asked for every call
+
+**Context:** T023's acceptance criteria (#694) ask for one transcript line per
+`link::Master::begin()` call, including a call the link REFUSES, plus a case showing an L2 retry
+adds no line, plus — if the sink were fixed-capacity — an overrun case. The shipped behaviour
+(PR #871, merged 904acdf) records a line only for an ACCEPTED call, and
+`begin_request: a request the link refuses is not recorded as issued` in
+`tests/unit/test_core_discovery.cpp` pins it that way, so the AC and a named test disagreed.
+The audit of #694 against `main` found the disagreement, and `contracts/core-cpp.md` mentioned
+neither `TranscriptEntry`, `TranscriptFn` nor `CoreEngineTestSeam` at all — the contract was
+behind the code from T023 onwards. *Verified by reading all three at 20440ac.*
+
+**The two readings.** (a) Record every call. The transcript then shows what the engine ATTEMPTED,
+and a reader can see a refusal and the retry that followed as two lines. But a refusal carried
+nothing on the trunk, so the transcript stops being a record of trunk traffic, and the
+determinism cases (AS2, SC-005) would then be asserting over the engine's own retry pattern as
+well as its plan — a strictly larger claim than "the same script produces the same transcript".
+(b) Record accepted calls only, which is what shipped: the transcript is the record of what the
+trunk was asked to carry. A refused call is still observable to a test, through `begin_request`'s
+own return value, and the engine's response to a refusal shows up as the later line that
+carries the retried or carried-over request.
+
+**What was done:** (b), and `contracts/core-cpp.md` is amended in place (dated 2026-10-08) with
+`TranscriptEntry`, `TranscriptFn`, the `CoreEngineTestSeam` declaration, the two engine members,
+and this decision stated as the contract's own rule. The remaining two ACs are settled with it,
+both *proved by construction* rather than by new tests: an L2 retry adds no line because retries
+live inside `link::Master`, below `begin_request()`, which is the only site that records; and
+there is no fixed-capacity overrun case because `core/` holds no transcript storage — two
+pointers and one null test — so capacity and overrun belong to whichever sink a test installs,
+which the AC's own "either mechanism" wording allows.
+
+**Recommendation:** ratify (b). (a) is still available and would need the refusal line added at
+`begin_request()`'s refusal return, that pinning test inverted, and the AS2/SC-005 determinism
+claims restated over attempts rather than traffic.
+
+**Ruling:** pending — human. **Amends:** `specs/003-host-core-engine/contracts/core-cpp.md` in
+place, twice (the Types and Engine blocks). **Supersedes:** none. **Related:** #694, T023, PR
+#871, spec SC-005, US1 AS2.

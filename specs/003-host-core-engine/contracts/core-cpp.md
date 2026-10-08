@@ -26,6 +26,40 @@ enum class CoreStatus : uint8_t {
 };
 ```
 
+Added 2026-10-08 (T023/#694 — the code carried these from T023 and this contract did not):
+the test-only operation transcript. A plain function pointer plus one opaque context, the shape
+R-04 chose for `CoreCallbacks` and for the same reasons; installed only through
+`CoreEngineTestSeam`, so it is not part of the application-facing API and costs the production
+build nothing when no test defines that seam.
+
+```cpp
+struct TranscriptEntry {
+    uint32_t superframe;  // the plan this request belonged to, not a wall-clock instant
+    uint8_t opcode;       // protocol-l3 §3.1
+    uint8_t dst;          // the trunk address the frame went to (trunk §5: always a backplane)
+    uint8_t node_id;      // the L3 node id inside it (a backplane's own address, or a module's)
+};
+
+using TranscriptFn = void (*)(void* ctx, const TranscriptEntry& entry);
+
+struct CoreEngineTestSeam;  // declared, never defined in core/; each test binary defines the
+                             // accessors it needs (core_engine.hpp's own note)
+```
+
+**One line per ACCEPTED `link::Master::begin()` call, and none for a refused one.** T023's
+acceptance criteria asked for a line per `begin()` call including refusals; the shipped
+behaviour records only calls `link::Master` accepted, and `begin_request: a request the link
+refuses is not recorded as issued` in `tests/unit/test_core_discovery.cpp` pins it that way.
+Settled here in favour of the shipped behaviour: a transcript is the record of what the trunk
+was asked to carry, and a refusal carried nothing — the engine's own retry or carry-over is
+what a later line shows. A refused call is still observable to a test through `begin_request`'s
+return value. An L2 retry adds no line either, by construction: retries live inside
+`link::Master`, below the only call site that records (`docs/OPEN-QUESTIONS.md` 2026-10-08).
+
+Storage is the SINK's, not the engine's: `core/` holds two pointers and makes one null test per
+`begin_request()`. A fixed-capacity sink and its overrun behaviour are therefore a property of
+whichever test installs one, not of this contract.
+
 ## Engine (`core_engine.hpp`)
 
 ```cpp
@@ -108,6 +142,11 @@ class CoreEngine {
     uint32_t dropped_deliveries_ = 0;
 
     SuperframeBudget budget_;
+
+    // The transcript sink (T023, added to this contract 2026-10-08): two null pointers until a
+    // test installs one through CoreEngineTestSeam, and one null test per begin_request().
+    TranscriptFn transcript_ = nullptr;
+    void* transcript_ctx_ = nullptr;
 
     // link::HealthListener:
     void on_notice(link::Notice notice, uint8_t addr) override;  // R-03: forwards
