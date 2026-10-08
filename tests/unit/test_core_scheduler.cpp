@@ -1352,6 +1352,86 @@ TEST_CASE("FR-028: a node whose own demand transactions consistently exceed the 
     }
 }
 
+TEST_CASE("FR-028: a node's overrun counter advances once per CHARGED TRANSACTION, however far "
+          "apart in time, and only another charged transaction clears it [scheduler][us2]") {
+    // The node half's counter is NOT a count of consecutive superframes, which is what
+    // research.md R-11 says ("more than a configured number of consecutive superframes") and
+    // what the backplane half gives: a backplane answers a GET_STATUS on alternate superframes
+    // (trunk §6), so its counter advances or resets on a fixed cadence. A node is charged only
+    // when it COMPLETES a demand transaction, and a superframe in which it has no demand item
+    // neither advances nor resets the counter — so for a node the threshold counts charged
+    // transactions, whatever the gap between them. This case pins that, because it is the
+    // divergence from R-11 and the thing the field's own name does not say; the recommendation
+    // for an artefact-level answer is docs/OPEN-QUESTIONS.md 2026-10-08.
+    Rig rig;
+    bring_up_rig(rig);
+    const std::vector<uint8_t> ids = rig.discovered_ids();
+    const uint8_t victim = ids[0];
+    const uint8_t victim_bp = Bk::node(rig.engine(), victim).backplane_addr;
+    rig.engine().drain_callbacks(256);
+    rig.recorder().lifecycle.clear();
+    // Discovery's own READ_DESC has already charged this node once: a 56-byte chunk costs
+    // ~760 us against the 500 us share, which is the conceded consequence of charging a node's
+    // demand transactions against one share (docs/OPEN-QUESTIONS.md 2026-10-08). Zero the
+    // counter through the seam so this case counts only the charges it makes itself.
+    Bk::node(rig.engine(), victim).consecutive_overrun_superframes = 0u;
+    REQUIRE(Bk::node(rig.engine(), victim).demoted == false);
+
+    rig.make_expensive(victim_bp);
+    uint32_t charged_in[3] = {0, 0, 0};
+    for (unsigned charge = 1; charge <= 3u; ++charge) {
+        // ONE parameter operation, so exactly one of this node's demand transactions is
+        // charged, and nothing of its is queued for the superframes that follow.
+        REQUIRE(rig.engine().set_param(victim, 1, 0, static_cast<uint16_t>(charge)) ==
+                CoreStatus::Ok);
+        rig.run_until(
+            [&] {
+                return Bk::node(rig.engine(), victim).consecutive_overrun_superframes == charge;
+            },
+            20u);
+        charged_in[charge - 1u] = Bk::superframe(rig.engine());
+        // Superframes in which this node has NO demand item at all: the counter neither
+        // advances (nothing is charged) nor resets (nothing is measured inside the share).
+        rig.run_superframes(4u);
+        INFO("after charge " << charge);
+        CHECK(Bk::node(rig.engine(), victim).consecutive_overrun_superframes == charge);
+        CHECK(Bk::node(rig.engine(), victim).demoted == (charge >= 3u));
+    }
+    // The three charges that demoted it are spread over far more than
+    // kDemoteAfterOverrunSuperframes superframes — so the demotion rests on three charged
+    // transactions, not on three consecutive superframes.
+    INFO("charged in superframes " << charged_in[0] << ", " << charged_in[1] << ", "
+                                   << charged_in[2]);
+    CHECK(charged_in[2] - charged_in[0] > 3u);
+
+    SECTION("with no further demand item for it, the demotion does not clear on its own") {
+        // set_demoted()'s not-over branch is reached only by another CHARGED transaction, so a
+        // node that goes quiet keeps `demoted` — and its reported state stays Demoted — however
+        // long the rig runs honestly. Harmless in the scheduler (demotion only reduces demand
+        // priority, and this node has no demand item), visible to an application reading the
+        // lifecycle stream. Recorded in docs/OPEN-QUESTIONS.md 2026-10-08.
+        rig.make_honest(victim_bp);
+        rig.engine().drain_callbacks(256);
+        rig.recorder().lifecycle.clear();
+        rig.run_superframes(12u);
+        rig.engine().drain_callbacks(256);
+        for (const LifecycleEvent& e : rig.recorder().lifecycle) {
+            CHECK(!(e.kind == LifecycleKind::DemotionCleared && !e.demoted_is_backplane));
+        }
+        CHECK(Bk::node(rig.engine(), victim).demoted == true);
+    }
+
+    SECTION("one charged transaction back inside the share clears it") {
+        // The counterpart: the clear is driven by a charged transaction too, not by time.
+        rig.make_honest(victim_bp);
+        rig.engine().drain_callbacks(256);
+        rig.recorder().lifecycle.clear();
+        REQUIRE(rig.engine().set_param(victim, 1, 0, 7) == CoreStatus::Ok);
+        rig.run_until([&] { return !Bk::node(rig.engine(), victim).demoted; }, 40u);
+        CHECK(Bk::node(rig.engine(), victim).consecutive_overrun_superframes == 0u);
+    }
+}
+
 TEST_CASE("AS3/FR-020: a concurrent event burst drains ahead of a parameter burst already in "
           "flight [scheduler][us2]") {
     // spec US2 AS3, scoped to what this file can be an oracle for (CLAUDE.md rule 11): SC-002's
@@ -1387,17 +1467,47 @@ TEST_CASE("AS3/FR-020: a concurrent event burst drains ahead of a parameter burs
     // ring's own and not an artefact of an otherwise idle rig.
     CHECK(Bk::param_queued(rig.engine()) > 0u);
 
-    // FR-020 under concurrent load: while any event is queued, no superframe spends a demand
-    // slot on a parameter operation — and within a superframe no parameter operation precedes
-    // that superframe's event.
-    for (uint32_t sf = queued_in + 1u; sf < drained_by; ++sf) {
-        bool saw_param = false;
+    // FR-020 under concurrent load: while any of the eight events is still queued, no demand
+    // slot goes to a parameter operation at all — which subsumes "no parameter operation
+    // precedes that superframe's event" and is asserted as ONE ordered walk over the whole
+    // drain rather than per superframe. Per superframe it would go vacuous exactly when the
+    // drain finishes early (the loop body would never run), and the property is about the drain,
+    // not about any one superframe of it. The 40-operation burst is the falsifier: it is queued
+    // throughout and admissible throughout (asserted below, after the walk), so a drain that
+    // let the parameter ring take a demand slot would show up here as a non-zero count.
+    size_t events_seen = 0;
+    size_t params_before_last_event = 0;
+    uint32_t first_param_with_events_queued = 0;
+    for (uint32_t sf = queued_in; sf <= drained_by; ++sf) {
         for (const uint8_t op : rig.transcript().opcodes_in(sf)) {
-            INFO("superframe " << sf);
-            CHECK(!(op == omgp::OP_GET_EVENT && saw_param));
-            if (is_param_op(op)) {
-                saw_param = true;
+            if (op == omgp::OP_GET_EVENT) {
+                ++events_seen;
+            } else if (is_param_op(op) && events_seen < 8u) {
+                if (params_before_last_event == 0u) {
+                    first_param_with_events_queued = sf;
+                }
+                ++params_before_last_event;
             }
         }
     }
+    // The window read above holds the whole drain: all eight GET_EVENTs are inside it, so
+    // `events_seen < 8u` above really does mean "an event is still queued".
+    REQUIRE(events_seen == 8u);
+    INFO("first parameter operation issued with events still queued: superframe "
+         << first_param_with_events_queued << " (" << params_before_last_event << " of them)");
+    CHECK(params_before_last_event == 0u);
+    // And the walk is not vacuous for want of a parameter operation ABLE to take those slots:
+    // the ring was admissible all along and merely yielding, which the superframes right after
+    // the drain show by spending their demand slots on it. Without this, a parameter ring that
+    // was stuck for some unrelated reason would satisfy the check above for the wrong reason.
+    rig.run_superframes(2u);
+    size_t params_after_drain = 0;
+    for (uint32_t sf = drained_by + 1u; sf <= rig.transcript().last_superframe(); ++sf) {
+        for (const uint8_t op : rig.transcript().opcodes_in(sf)) {
+            if (is_param_op(op)) {
+                ++params_after_drain;
+            }
+        }
+    }
+    CHECK(params_after_drain > 0u);
 }

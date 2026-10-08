@@ -855,12 +855,24 @@ void CoreEngine::account_overrun(uint64_t duration_us, TxKind kind) {
         if (idx == kNoNodeIndex || !nodes_[idx].in_use) {
             return;
         }
-        // ONCE per node per superframe, which is what keeps the counter beside it counting
-        // SUPERFRAMES rather than transactions (NodeRecord::overrun_charged_superframe): the
-        // budget admits two demand items in a superframe and both may belong to one node, and a
+        // ONCE per node per superframe (NodeRecord::overrun_charged_superframe): the budget
+        // admits two demand items in a superframe and both may belong to one node, and a
         // counter advanced twice would reach the threshold in two superframes while claiming
         // three. K = 1 already gives events one per superframe and desc_stalled_superframe gives
         // reads one, so this marker binds only on the parameter rings — and on a mixture.
+        //
+        // What it does NOT do is make the counter a count of consecutive SUPERFRAMES. A node is
+        // charged only on COMPLETING a demand transaction, so a superframe in which it has no
+        // demand item neither advances nor resets the counter: for a node the threshold counts
+        // consecutive CHARGED TRANSACTIONS, and three charges hours apart demote exactly as
+        // three charges in six superframes do. research.md R-11 asks for consecutive
+        // SUPERFRAMES and the backplane arm above gives that, its GET_STATUS recurring on
+        // alternate superframes; matching it here needs a per-superframe charge or an aging
+        // rule, which is an artefact decision and not this task's — recorded, with the
+        // observable consequence (a node that goes quiet while demoted stays demoted, since
+        // only another charged transaction reaches set_demoted()'s not-over branch), in
+        // docs/OPEN-QUESTIONS.md 2026-10-08. Both halves are pinned by `FR-028: a node's
+        // overrun counter advances once per CHARGED TRANSACTION, however far apart in time`.
         //
         // The TEST is killable (with `!=` the marker is never written, so no node is ever
         // charged and the node-demotion case fails); the WRITE below is not, with the oracle

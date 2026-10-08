@@ -6339,3 +6339,62 @@ find out.
 **Ruling:** pending — human. **Amends:** none. **Supersedes:** point 2 of the 2026-10-08
 "T028/T029 (#699, #700)" entry. **Related:** #696, #699, #700, PR #907 red-team finding 2, spec
 FR-028, SC-007, `tasks.md` T028.
+
+## 2026-10-08 — T028 (#699): a node's demotion counter counts charged TRANSACTIONS, not consecutive superframes
+
+**Supersedes** one claim of this same day's "T028 (#699): node-level demotion IS charged after
+all, against the same share" — its sentence "Charged at most ONCE per node per superframe
+(`NodeRecord::overrun_charged_superframe`), which is what keeps the counter beside it counting
+superframes and not transactions — the budget can admit two demand items in one superframe and
+both may belong to the same node." The marker and the reason for it stand; the clause after the
+dash does not, and the rest of that entry is unaffected.
+
+**Context:** `research.md` R-11 says a target is demoted after "more than a configured number of
+**consecutive superframes**" over its share, and spec FR-028 says "**consistently** exceed". The
+backplane arm of `account_overrun()` satisfies that reading: every enrolled backplane answers a
+`GET_STATUS` on alternate superframes (trunk §6), so its counter advances or resets on a fixed
+cadence and a standing overrun demotes in `2 x kDemoteAfterOverrunSuperframes` superframes.
+
+The node arm does not, and `overrun_charged_superframe` does not make it. A node is charged only
+when it COMPLETES a demand transaction, and `set_demoted()` is reached from nowhere else, so a
+superframe in which the node has no demand item neither advances nor resets
+`consecutive_overrun_superframes`. `overrun_charged_superframe` bounds the charge to one per
+superframe — its own reason, so that one superframe cannot advance the counter twice — and says
+nothing about consecutiveness. For a node the threshold therefore counts consecutive CHARGED
+TRANSACTIONS, however far apart they fall: three `SET_PARAM`s over the share at superframes
+1 000, 2 800 000 and 5 600 000 demote the node exactly as three in six superframes do, on
+evidence spanning ~3 hours of uptime at `T_poll` = 2 ms. *Verified by reading*
+`account_overrun()` and `set_demoted()`, and *demonstrated by* the case `FR-028: a node's overrun
+counter advances once per CHARGED TRANSACTION, however far apart in time, and only another
+charged transaction clears it` in `tests/unit/test_core_scheduler.cpp`, whose three charges are
+asserted to be spread over more superframes than the threshold.
+
+**The second half of the same asymmetry:** the clear is transaction-driven too. A node demoted
+and then quiet keeps `demoted` for the process lifetime — only another charged transaction
+reaches `set_demoted()`'s not-over branch, and only an emptying slot (FR-010) resets the record.
+Harmless in the scheduler, since demotion reduces demand PRIORITY and a node with no demand item
+has none to reduce; visible to an application reading the lifecycle stream, which sees a
+`Demoted` with no matching `DemotionCleared`. Asserted as present behaviour in the case's first
+SECTION, so a later decision to age the flag out fails a test rather than passing silently.
+
+**What was done:** nothing in the mechanism. The two comments that claimed the counter counts
+superframes (`core/core_types.hpp` on the field, `core/core_engine.cpp` in the node arm) now say
+what it counts and name this entry; the behaviour is pinned by the case above rather than left to
+a comment. Matching R-11 literally would need either a per-superframe charge for every enrolled
+node (a measurement for a node with no transaction that superframe — there is none to make) or an
+aging rule that decays the counter over idle superframes with a configured horizon. Both change
+what FR-028 means, so both are artefact decisions.
+
+**Recommendation:** rule on one of three. (a) Ratify as-is and amend R-11 to say "consecutive
+charged transactions" for the node arm — the smallest change, and what the code now documents.
+(b) Add an aging rule: `consecutive_overrun_superframes` decays to 0 after N idle superframes,
+with N recorded in `data-model.md` §9 beside the threshold. (c) Charge a node per superframe it
+is served in rather than per transaction — which, given `overrun_charged_superframe`, is already
+what happens, so it is a third option only if the share itself becomes per-superframe. (a) is
+recommended: FR-028's own word is "consistently", which a count of charged transactions
+satisfies, and (b)'s horizon is one more undefined constant.
+
+**Ruling:** pending — human. **Amends:** none (R-11 is wrong about the node arm rather than
+silent; the amendment is what (a) proposes). **Supersedes:** the one quoted clause of the
+2026-10-08 "T028 (#699): node-level demotion IS charged after all" entry. **Related:** #696,
+#699, PR #907 review round 2 finding 1, spec FR-028, SC-007, R-11, `tasks.md` T028.

@@ -196,9 +196,17 @@ struct NodeRecord {
     uint8_t consecutive_overrun_superframes = 0;
     // The superframe this node was last charged against its fair share in, 0 for never — the
     // same once-per-superframe-per-node marker event_drained_superframe and
-    // desc_stalled_superframe above are. It is what makes the counter beside it count
-    // SUPERFRAMES and not transactions: the budget can admit two demand items in one
-    // superframe, and both may belong to the same node. Added by T028.
+    // desc_stalled_superframe above are. It bounds the GRANULARITY of the charge and nothing
+    // more: the budget can admit two demand items in one superframe and both may belong to the
+    // same node, and a counter advanced twice would reach the threshold in two superframes
+    // while claiming three. It does NOT make the counter above a count of consecutive
+    // SUPERFRAMES — a node is charged only when it completes a demand transaction, so a
+    // superframe in which it has no demand item neither advances nor resets the counter, and
+    // for a node the threshold therefore counts consecutive CHARGED TRANSACTIONS however far
+    // apart they fall. That diverges from research.md R-11's "consecutive superframes", which
+    // the backplane half does satisfy (its GET_STATUS recurs on alternate superframes);
+    // the divergence and the artefact-level options are in docs/OPEN-QUESTIONS.md 2026-10-08.
+    // Added by T028.
     uint32_t overrun_charged_superframe = 0;
     bool demoted = false; // demand items drop to the back of their FIFO (R-07)
 };

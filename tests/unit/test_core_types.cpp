@@ -213,7 +213,8 @@ TEST_CASE("Ring<ParamResultDelivery, LIMIT_max_nodes> is drop-newest at the §8a
 TEST_CASE("Ring::at reads the i-th item from the front, and clamps an out-of-range index "
           "[core][types]") {
     // Added with T029, whose demand drain peeks a ring's head without popping it (FR-005's
-    // carry-over by identity) and counts distinct targets across the rings. Three things matter
+    // carry-over by identity) — the real callers are CoreEngine::rotate_past_demoted(),
+    // drain_events() and drain_params(), none of which counts anything. Three things matter
     // and each is asserted: the index is from the FRONT and not from the buffer's base, so a
     // wrapped ring reads correctly; it is read-only, so it cannot reorder a FIFO; and an
     // out-of-range index returns the front rather than reading past the buffer.
