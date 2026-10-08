@@ -6082,6 +6082,53 @@ step 3 and `research.md` trap (5) in place — both said every scope-dir mutant 
 none; the 2026-09-15 entry's "left for an issue" is done here. **Related:** #140/#153 (gate
 budgets), #596, #599, #601, PR #593, PR #871.
 
+## 2026-10-07 — The operation transcript records requests ISSUED, not `Master::begin` calls attempted
+
+**Context:** tasks.md T023 (`specs/003-host-core-engine/`) says "one line per
+`Master::begin` call: superframe number, opcode, dst, node_id" and fixes those four fields
+and no fifth. It does not say what a *refused* call is. `link::Master::begin` can return
+`Busy` (a transaction is already open, trunk §3), `PayloadTooLong` or `ReservedAddress`
+(`link/master.hpp:66`), and `CoreEngine::begin_request()` can also refuse before reaching
+`Master` at all, when its own L3 encoder rejects the request. Issue #694's enriched
+acceptance criteria read the task text literally and required a line for every call
+including the refused ones ("the record is of calls made"); the shipped code records only
+accepted calls (`core/core_engine.cpp`, the sink invoked after `master_.begin() == Ok`), and
+`tests/unit/test_core_discovery.cpp`'s `begin_request: a request the link refuses
+(transaction open) is not recorded as issued` pins that. The repository owner's audit of
+#694 against `main` (904acdf, 2026-10-07) called this out as "a decision, not a bug" and
+asked for it to be settled either way.
+
+**Recommendation:** record accepted calls only — reconcile the criterion to the shipped
+behaviour rather than widen the record. Two reasons, both load-bearing rather than
+aesthetic. (1) A `TranscriptEntry` carries no `Status`, so a refused line is
+indistinguishable from an issued one; a reader comparing two transcripts could no longer
+tell "this request went out" from "this request did not", which weakens the very comparison
+the transcript exists for (spec SC-001/AS2). Distinguishing them means a fifth field, and
+that is a tasks.md amendment, not a quiet addition here. (2) Whether a call is refused
+depends on wire state at the instant of the call, and the caller chooses how often
+`run_superframe()` is called — so a transcript that recorded refusals would vary with
+clock-advance granularity, which spec SC-005 denies. Measured for reason (2), not argued: a
+recorder emitting per transmission rather than per accepted transaction was patched into
+`run_superframe()` and failed SC-005 immediately — the step-size criterion this reason rests
+on — alongside AS1 and the new trunk §7 retry case (2 lines where 1 was expected). AS2 did
+not fail and could not: it replays one script at one cadence twice, so a per-transmission
+recorder adds the same extra lines to both transcripts; reason (1) is an argument from the
+four-field entry rather than from that run. A `begin()` the `Master` ACCEPTS but defers to
+honour `T_gap` is recorded, at the accepting call — it is an issued transaction (`busy()`
+is already true).
+
+**Ruling:** accepted calls only — taken 2026-10-07 under the owner's explicit delegation on
+#694 ("Either reconcile the AC to the shipped, tested behaviour (accepted calls only) or add
+the refused-call line and change that test — a decision"), which is the human ruling this
+entry would otherwise be waiting for. Recorded in
+`specs/003-host-core-engine/contracts/core-cpp.md` §"Operation transcript" rule 2 as the
+transcript's contract, and pinned by the two refusal cases in
+`tests/unit/test_core_discovery.cpp` (`Busy` and the encoder's payload limit), both of which
+now assert the transcript is untouched rather than only the engine's outstanding-transaction
+state. No `core/` behaviour changed under this ruling.
+**Supersedes:** none — first entry on the transcript's contract. **Related:** #694 (T023),
+#688 (T017), tasks.md T023, `contracts/core-cpp.md`.
+
 ## 2026-10-08 — T027 (#698): `CoreStatus` has no value for a `SetParam` the protocol cannot carry
 
 **Context:** `protocol/omgp-protocol.yaml` gives `SET_PARAM`'s request value `max: 4095`
@@ -6128,45 +6175,6 @@ which converts a synchronous caller error into an asynchronous, uncorrelated rep
 **Ruling:** pending — human. **Amends:** `specs/003-host-core-engine/contracts/core-cpp.md`'s
 `CoreStatus` block in place, with a dated marker. **Supersedes:** none. **Related:** #697, #698,
 spec FR-023/FR-024, R-10, protocol-l3 §7.
-
-## 2026-10-08 — T023 (#694): the transcript records ACCEPTED `begin()` calls, where its AC asked for every call
-
-**Context:** T023's acceptance criteria (#694) ask for one transcript line per
-`link::Master::begin()` call, including a call the link REFUSES, plus a case showing an L2 retry
-adds no line, plus — if the sink were fixed-capacity — an overrun case. The shipped behaviour
-(PR #871, merged 904acdf) records a line only for an ACCEPTED call, and
-`begin_request: a request the link refuses is not recorded as issued` in
-`tests/unit/test_core_discovery.cpp` pins it that way, so the AC and a named test disagreed.
-The audit of #694 against `main` found the disagreement, and `contracts/core-cpp.md` mentioned
-neither `TranscriptEntry`, `TranscriptFn` nor `CoreEngineTestSeam` at all — the contract was
-behind the code from T023 onwards. *Verified by reading all three at 20440ac.*
-
-**The two readings.** (a) Record every call. The transcript then shows what the engine ATTEMPTED,
-and a reader can see a refusal and the retry that followed as two lines. But a refusal carried
-nothing on the trunk, so the transcript stops being a record of trunk traffic, and the
-determinism cases (AS2, SC-005) would then be asserting over the engine's own retry pattern as
-well as its plan — a strictly larger claim than "the same script produces the same transcript".
-(b) Record accepted calls only, which is what shipped: the transcript is the record of what the
-trunk was asked to carry. A refused call is still observable to a test, through `begin_request`'s
-own return value, and the engine's response to a refusal shows up as the later line that
-carries the retried or carried-over request.
-
-**What was done:** (b), and `contracts/core-cpp.md` is amended in place (dated 2026-10-08) with
-`TranscriptEntry`, `TranscriptFn`, the `CoreEngineTestSeam` declaration, the two engine members,
-and this decision stated as the contract's own rule. The remaining two ACs are settled with it,
-both *proved by construction* rather than by new tests: an L2 retry adds no line because retries
-live inside `link::Master`, below `begin_request()`, which is the only site that records; and
-there is no fixed-capacity overrun case because `core/` holds no transcript storage — two
-pointers and one null test — so capacity and overrun belong to whichever sink a test installs,
-which the AC's own "either mechanism" wording allows.
-
-**Recommendation:** ratify (b). (a) is still available and would need the refusal line added at
-`begin_request()`'s refusal return, that pinning test inverted, and the AS2/SC-005 determinism
-claims restated over attempts rather than traffic.
-
-**Ruling:** pending — human. **Amends:** `specs/003-host-core-engine/contracts/core-cpp.md` in
-place, twice (the Types and Engine blocks). **Supersedes:** none. **Related:** #694, T023, PR
-#871, spec SC-005, US1 AS2.
 
 ## 2026-10-08 — T028/T029 (#699, #700): the fair share, the demotion threshold and the demoted-item rotation are all undefined
 
