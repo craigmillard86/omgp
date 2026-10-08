@@ -6167,3 +6167,111 @@ claims restated over attempts rather than traffic.
 **Ruling:** pending — human. **Amends:** `specs/003-host-core-engine/contracts/core-cpp.md` in
 place, twice (the Types and Engine blocks). **Supersedes:** none. **Related:** #694, T023, PR
 #871, spec SC-005, US1 AS2.
+
+## 2026-10-08 — T028/T029 (#699, #700): the fair share, the demotion threshold and the demoted-item rotation are all undefined
+
+**Context:** FR-028 demotes a target that "consistently exceed[s] their fair share of the
+superframe budget", and `research.md` R-11 says "more than a configured number of consecutive
+superframes". Neither the share, the threshold, nor the rotation is defined anywhere this
+implementation could read it:
+
+- **The share.** The only definition in any artefact is `research.md`'s and `tasks.md`'s
+  identical parenthetical, "the remaining demand budget divided by the number of targets
+  currently competing for it". `data-model.md` §9 is silent; `spec.md` FR-028 says only "fair
+  share". Neither says what a competing target is, nor when the divisor is sampled.
+- **The threshold.** No constant exists in `protocol/omgp-protocol.yaml`, the generated header,
+  `data-model.md` or `research.md`. *Verified by grep.*
+- **The rotation.** `tasks.md` says a demoted target's item "is skipped to the back of that ring
+  for this superframe"; nothing bounds that, so a ring whose every item is demoted would rotate
+  for ever.
+
+**What the measurements showed, and why the literal reading was not taken.** On the SC-001
+benchmark rig (3 backplanes, 12 modules, all Discovered), measured at this head:
+
+| quantity | measured |
+|---|---|
+| an honest `GET_STATUS` round trip | 380-400 us |
+| `budget_.remaining_us` after the three mandatory polls | ~420 us of the 2000 us period |
+| one node's `READ_DESC` (56 payload bytes) | ~760 us |
+| one node's `SET_PARAM` (4 payload bytes) | ~390 us |
+
+Taken literally, "remaining demand budget / competing targets" is ~420/12 = **35 us** whenever a
+twelve-node burst is queued — below *every* transaction this trunk can perform, so every target
+overruns and the whole rig is demoted for being busy. That is not a tuning problem: the mandatory
+polls (FR-002) legitimately consume most of the period, so any share computed from what they
+leave, divided among queued targets, is smaller than a single transaction.
+
+**What was done.**
+
+1. **The share is `period_us / (enrolled + 1)`** — the targets a superframe must serve, being one
+   status poll per enrolled backplane (FR-002) plus the demand slot (FR-004). On the benchmark rig
+   that is 500 us: an honest poll (380-400) is inside it and an expensive one (530, measured) is
+   not. It depends on enrolment alone, so it does not move with what is queued or with the order
+   this superframe's traffic went out in — which SC-005's determinism needs, and which the
+   literal reading would not give. *Demonstrated* by `FR-027: the fair share is derived from the
+   period and the enrolled count...` and by SC-007's case in
+   `tests/unit/test_core_scheduler.cpp`.
+2. **Only a backplane's own `GET_STATUS` is charged**, and node-level demotion is not set at all.
+   Two reasons, both measured: the two poll kinds carry different payloads, so a backplane
+   charged for `GET_STATUS` and `BP_SLOT_MAP` alike alternates over and under any single share
+   and `consecutive_overrun_superframes` never accumulates — it measures superframe parity, not
+   the backplane; and a node's demand transactions are not comparable to each other at all
+   (READ_DESC ~760 us against SET_PARAM ~390 us), so charging them against one share demotes
+   every node that is merely reading a descriptor. SC-007, the only acceptance scenario for
+   demotion, is a backplane case. The `NodeRecord` fields stay and `target_demoted()` still
+   honours `nodes_[].demoted`, so a node demoted by any later task is respected by the rotation.
+   A standing overrun therefore takes `2 x kDemoteAfterOverrunSuperframes` superframes to demote,
+   because `GET_STATUS` is issued on alternate superframes — the "bounded number of superframes"
+   SC-007 asks for, *demonstrated* at 6 on the benchmark rig.
+3. **`kDemoteAfterOverrunSuperframes = 3`**, a `core/` constant and not a YAML limit: it is a
+   scheduling policy with no protocol meaning — nothing on the wire depends on it and no other
+   implementation has to agree about it, so CLAUDE.md rule 1 does not reach it and rule 4's "no
+   restated spec constants" does not either. Three by analogy with trunk §7's
+   `TRUNK_suspect_after_failures`.
+4. **The rotation makes at most one pass** and serves the original head when every item is
+   demoted. FR-028 demotes PRIORITY; a ring that served nobody would be starvation, which is the
+   thing demotion exists to avoid. Bounded by construction (the pass count is the size read once).
+
+**What this does NOT settle.** Whether the share should adapt to what a superframe actually
+served rather than to enrolment (it would then move with the traffic, and SC-005's determinism
+case is what makes that a real cost, not a hypothetical one); whether node-level demotion should
+exist at all, and if so against what per-opcode baseline; and whether the threshold belongs in
+`agent-config.yml`-style configuration rather than in `core/`. Each needs an artefact, not a
+code change.
+
+**Recommendation:** ratify 1-4 as the implementation's own definitions, and record the share and
+the threshold in `data-model.md` §9 so the next reader finds them where they are looked for.
+
+**Ruling:** pending — human. **Amends:** none (the artefacts are silent rather than wrong).
+**Supersedes:** none. **Related:** #696, #699, #700, spec FR-027/FR-028, SC-005, SC-007, R-07,
+R-11, `tasks.md` T028/T029.
+
+## 2026-10-08 — T025 (#696): `MockL3Node` cannot express "#110 F2c"'s padded `ERROR.detail`, so SC-007's cost is a delay
+
+**Context:** the ADOPTED 2026-09-06 entry "#110 F2c" names "the padded `ERROR.detail`
+amplification" as how a backplane's answers come to cost several times an honest poll's, and
+SC-007's demotion scenario is built on it. `MockL3Node` cannot produce that standing condition:
+`build_error()` encodes an empty detail (`tests/support/mock_l3_node.cpp`), an `ErrorStep` is a
+WILDCARD consumed by the first request of any class rather than a class's steady state
+(`contracts/mock-l3-node.md`), and a `StatusBlock`'s encoding is fixed — so there is no way to
+make one backplane's every status poll expensive by padding. *Verified by reading the double and
+its contract.*
+
+**The two options.** (a) Extend the double to pad a payload. It would then have to build that
+answer itself rather than through the real codecs, which is the one thing its own file header
+forbids ("Real codecs only"), and a padded `StatusBlock` is not a thing the codec can encode at
+all. (b) Give the double a per-address answer DELAY, so a backplane's answer is protocol-legal
+and simply late.
+
+**What was done:** (b). `MockL3Node::set_answer_delay(addr, extra_us)` adds to trunk §9's
+turnaround at the one place an answer's start instant is computed; every answer is still built by
+the real codecs and every byte is unchanged. The host measures elapsed time, so what reaches
+FR-027's budget is the same kind of fact either way — a target that costs more than its share.
+The delay is kept inside `T_resp` so the answer still ARRIVES: an expensive answer, not a lost
+one, which is what keeps SC-007 distinct from a timeout case.
+
+**Recommendation:** ratify (b), and amend `contracts/mock-l3-node.md` with the new helper if the
+double's contract is to stay complete — not done here, since the contract is T012's.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** #696, T012,
+the 2026-09-06 "#110 F2c" entry, spec SC-007.
