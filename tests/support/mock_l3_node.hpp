@@ -202,6 +202,18 @@ class MockL3Node : public omgp::link::ByteWire {
         return engine.poll(t);
     }
 
+    // Extra turnaround this address takes before its answer begins, on top of trunk §9's
+    // T_turn_min — spec SC-007's "answers that cost several times an honest poll". A protocol
+    // -legal slow answer, which is what the host's FR-027 budget measures; nothing about the
+    // bytes changes, so every answer is still built by the real codecs. Kept well inside
+    // T_resp by the caller, or the transaction times out instead of being merely expensive.
+    //
+    // Why a DELAY and not "#110 F2c"'s padded ERROR.detail: this double answers each opcode
+    // class from its own step, so a wildcard ErrorStep cannot make a standing condition out of
+    // one class's answers, and padding a StatusBlock is not expressible — its encoding is fixed
+    // (docs/OPEN-QUESTIONS.md 2026-10-08). The measured cost is the same thing either way.
+    void set_answer_delay(uint8_t node, uint64_t extra_us);
+
     // Test helper: how many L3 requests this double has processed (answered, errored or
     // deliberately left unanswered). A SilenceStep case asserts through this that the double
     // SAW the requests it did not answer, rather than never having been addressed.
@@ -240,6 +252,7 @@ class MockL3Node : public omgp::link::ByteWire {
     };
 
     struct NodeState {
+        uint64_t answer_delay_us = 0; // set_answer_delay(); 0 = trunk §9's turnaround alone
         const L3Step* steps = nullptr;
         size_t count = 0;
         bool consumed[kMaxScript] = {};

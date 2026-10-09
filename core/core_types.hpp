@@ -183,12 +183,31 @@ struct NodeRecord {
     uint8_t switch_channel = 0;
     uint64_t switch_deadline_us = 0; // set from the descriptor's l3::SwitchingRec::settle_ms
     // Event-rate / flood defence (spec FR-025/FR-026, research.md R-07 correction):
+    // FR-025's K = 1: the superframe in which this node's last GET_EVENT was ISSUED, 0 for
+    // never. The same once-per-superframe-per-node marker desc_stalled_superframe above is,
+    // and for the same reason — "per superframe turn" is a property of the plan's number, not
+    // of a count or a clock reading (CLAUDE.md rule 3). Added by T029.
+    uint32_t event_drained_superframe = 0;
     uint8_t events_drained_this_window = 0; // count within event_rate_window_start_us
     uint64_t event_rate_window_start_us = 0;
     bool event_faulted = false; // true once the rate budget is exceeded; stops draining
     // Transaction cost / demotion (spec FR-027/FR-028, research.md R-11 correction):
     uint64_t last_measured_duration_us = 0; // 0 = never measured; seeded conservatively on use
     uint8_t consecutive_overrun_superframes = 0;
+    // The superframe this node was last charged against its fair share in, 0 for never — the
+    // same once-per-superframe-per-node marker event_drained_superframe and
+    // desc_stalled_superframe above are. It bounds the GRANULARITY of the charge and nothing
+    // more: the budget can admit two demand items in one superframe and both may belong to the
+    // same node, and a counter advanced twice would reach the threshold in two superframes
+    // while claiming three. It does NOT make the counter above a count of consecutive
+    // SUPERFRAMES — a node is charged only when it completes a demand transaction, so a
+    // superframe in which it has no demand item neither advances nor resets the counter, and
+    // for a node the threshold therefore counts consecutive CHARGED TRANSACTIONS however far
+    // apart they fall. That diverges from research.md R-11's "consecutive superframes", which
+    // the backplane half does satisfy (its GET_STATUS recurs on alternate superframes);
+    // the divergence and the artefact-level options are in docs/OPEN-QUESTIONS.md 2026-10-08.
+    // Added by T028.
+    uint32_t overrun_charged_superframe = 0;
     bool demoted = false; // demand items drop to the back of their FIFO (R-07)
 };
 
@@ -451,6 +470,16 @@ template <typename T, size_t N> class Ring {
         head_ = (head_ + 1) % N;
         --count_;
         return true;
+    }
+
+    // The i-th item from the front, in insertion order; i < size(). Read-only and index-safe
+    // by its own bound: an out-of-range index returns the front rather than reading past the
+    // buffer, because its callers inspect the head of a ring they are mid-pass over
+    // (CoreEngine::rotate_past_demoted(), drain_events() and drain_params()) and must not be
+    // able to turn a counting slip into an out-of-bounds read. Added by T029; no mutation, so
+    // it cannot reorder a FIFO.
+    const T& at(size_t i) const {
+        return storage_[(head_ + (i < count_ ? i : 0)) % N];
     }
 
     size_t size() const {

@@ -6175,3 +6175,314 @@ which converts a synchronous caller error into an asynchronous, uncorrelated rep
 **Ruling:** pending — human. **Amends:** `specs/003-host-core-engine/contracts/core-cpp.md`'s
 `CoreStatus` block in place, with a dated marker. **Supersedes:** none. **Related:** #697, #698,
 spec FR-023/FR-024, R-10, protocol-l3 §7.
+
+## 2026-10-08 — T028/T029 (#699, #700): the fair share, the demotion threshold and the demoted-item rotation are all undefined
+
+**Context:** FR-028 demotes a target that "consistently exceed[s] their fair share of the
+superframe budget", and `research.md` R-11 says "more than a configured number of consecutive
+superframes". Neither the share, the threshold, nor the rotation is defined anywhere this
+implementation could read it:
+
+- **The share.** The only definition in any artefact is `research.md`'s and `tasks.md`'s
+  identical parenthetical, "the remaining demand budget divided by the number of targets
+  currently competing for it". `data-model.md` §9 is silent; `spec.md` FR-028 says only "fair
+  share". Neither says what a competing target is, nor when the divisor is sampled.
+- **The threshold.** No constant exists in `protocol/omgp-protocol.yaml`, the generated header,
+  `data-model.md` or `research.md`. *Verified by grep.*
+- **The rotation.** `tasks.md` says a demoted target's item "is skipped to the back of that ring
+  for this superframe"; nothing bounds that, so a ring whose every item is demoted would rotate
+  for ever.
+
+**What the measurements showed, and why the literal reading was not taken.** On the SC-001
+benchmark rig (3 backplanes, 12 modules, all Discovered), measured at this head:
+
+| quantity | measured |
+|---|---|
+| an honest `GET_STATUS` round trip | 380-400 us |
+| `budget_.remaining_us` after the three mandatory polls | ~420 us of the 2000 us period |
+| one node's `READ_DESC` (56 payload bytes) | ~760 us |
+| one node's `SET_PARAM` (4 payload bytes) | ~390 us |
+
+Taken literally, "remaining demand budget / competing targets" is ~420/12 = **35 us** whenever a
+twelve-node burst is queued — below *every* transaction this trunk can perform, so every target
+overruns and the whole rig is demoted for being busy. That is not a tuning problem: the mandatory
+polls (FR-002) legitimately consume most of the period, so any share computed from what they
+leave, divided among queued targets, is smaller than a single transaction.
+
+**What was done.**
+
+1. **The share is `period_us / (enrolled + 1)`** — the targets a superframe must serve, being one
+   status poll per enrolled backplane (FR-002) plus the demand slot (FR-004). On the benchmark rig
+   that is 500 us: an honest poll (380-400) is inside it and an expensive one (530, measured) is
+   not. It depends on enrolment alone, so it does not move with what is queued or with the order
+   this superframe's traffic went out in — which SC-005's determinism needs, and which the
+   literal reading would not give. *Demonstrated* by `FR-027: the fair share is derived from the
+   period and the enrolled count...` and by SC-007's case in
+   `tests/unit/test_core_scheduler.cpp`.
+2. **Only a backplane's own `GET_STATUS` is charged**, and node-level demotion is not set at all.
+   Two reasons, both measured: the two poll kinds carry different payloads, so a backplane
+   charged for `GET_STATUS` and `BP_SLOT_MAP` alike alternates over and under any single share
+   and `consecutive_overrun_superframes` never accumulates — it measures superframe parity, not
+   the backplane; and a node's demand transactions are not comparable to each other at all
+   (READ_DESC ~760 us against SET_PARAM ~390 us), so charging them against one share demotes
+   every node that is merely reading a descriptor. SC-007, the only acceptance scenario for
+   demotion, is a backplane case. The `NodeRecord` fields stay and `target_demoted()` still
+   honours `nodes_[].demoted`, so a node demoted by any later task is respected by the rotation.
+   A standing overrun therefore takes `2 x kDemoteAfterOverrunSuperframes` superframes to demote,
+   because `GET_STATUS` is issued on alternate superframes — the "bounded number of superframes"
+   SC-007 asks for, *demonstrated* at 6 on the benchmark rig.
+3. **`kDemoteAfterOverrunSuperframes = 3`**, a `core/` constant and not a YAML limit: it is a
+   scheduling policy with no protocol meaning — nothing on the wire depends on it and no other
+   implementation has to agree about it, so CLAUDE.md rule 1 does not reach it and rule 4's "no
+   restated spec constants" does not either. Three by analogy with trunk §7's
+   `TRUNK_suspect_after_failures`.
+4. **The rotation makes at most one pass** and serves the original head when every item is
+   demoted. FR-028 demotes PRIORITY; a ring that served nobody would be starvation, which is the
+   thing demotion exists to avoid. Bounded by construction (the pass count is the size read once).
+
+**What this does NOT settle.** Whether the share should adapt to what a superframe actually
+served rather than to enrolment (it would then move with the traffic, and SC-005's determinism
+case is what makes that a real cost, not a hypothetical one); whether node-level demotion should
+exist at all, and if so against what per-opcode baseline; and whether the threshold belongs in
+`agent-config.yml`-style configuration rather than in `core/`. Each needs an artefact, not a
+code change.
+
+**Recommendation:** ratify 1-4 as the implementation's own definitions, and record the share and
+the threshold in `data-model.md` §9 so the next reader finds them where they are looked for.
+
+**Ruling:** pending — human. **Amends:** none (the artefacts are silent rather than wrong).
+**Supersedes:** none. **Related:** #696, #699, #700, spec FR-027/FR-028, SC-005, SC-007, R-07,
+R-11, `tasks.md` T028/T029.
+
+## 2026-10-08 — T025 (#696): `MockL3Node` cannot express "#110 F2c"'s padded `ERROR.detail`, so SC-007's cost is a delay
+
+**Context:** the ADOPTED 2026-09-06 entry "#110 F2c" names "the padded `ERROR.detail`
+amplification" as how a backplane's answers come to cost several times an honest poll's, and
+SC-007's demotion scenario is built on it. `MockL3Node` cannot produce that standing condition:
+`build_error()` encodes an empty detail (`tests/support/mock_l3_node.cpp`), an `ErrorStep` is a
+WILDCARD consumed by the first request of any class rather than a class's steady state
+(`contracts/mock-l3-node.md`), and a `StatusBlock`'s encoding is fixed — so there is no way to
+make one backplane's every status poll expensive by padding. *Verified by reading the double and
+its contract.*
+
+**The two options.** (a) Extend the double to pad a payload. It would then have to build that
+answer itself rather than through the real codecs, which is the one thing its own file header
+forbids ("Real codecs only"), and a padded `StatusBlock` is not a thing the codec can encode at
+all. (b) Give the double a per-address answer DELAY, so a backplane's answer is protocol-legal
+and simply late.
+
+**What was done:** (b). `MockL3Node::set_answer_delay(addr, extra_us)` adds to trunk §9's
+turnaround at the one place an answer's start instant is computed; every answer is still built by
+the real codecs and every byte is unchanged. The host measures elapsed time, so what reaches
+FR-027's budget is the same kind of fact either way — a target that costs more than its share.
+The delay is kept inside `T_resp` so the answer still ARRIVES: an expensive answer, not a lost
+one, which is what keeps SC-007 distinct from a timeout case.
+
+**Recommendation:** ratify (b), and amend `contracts/mock-l3-node.md` with the new helper if the
+double's contract is to stay complete — not done here, since the contract is T012's.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** #696, T012,
+the 2026-09-06 "#110 F2c" entry, spec SC-007.
+
+## 2026-10-08 — T028 (#699): node-level demotion IS charged after all, against the same share
+
+**Supersedes** this same day's "T028/T029 (#699, #700): the fair share, the demotion threshold and
+the demoted-item rotation are all undefined", point 2 only. Points 1, 3 and 4 of that entry (the
+share, the threshold, the rotation bound) stand unchanged and are still pending — human.
+
+**Context:** that entry's point 2 reduced FR-028 to its backplane half — only a backplane's own
+`GET_STATUS` was charged against the fair share, and nothing set `nodes_[].demoted`. The reason
+given was comparability: MEASURED on the benchmark rig, one node's `READ_DESC` costs ~760 us
+against a `SET_PARAM`'s ~390, so charging both against one 500 us share demotes a node for merely
+reading a descriptor. The reduction was disclosed, but it diverges from artefacts that say the
+opposite in three places — spec FR-028 ("a node, **or** of the modules behind a backplane"),
+`tasks.md` T028 ("per backplane/node", and "or of a demoted node itself") and SC-007 ("a backplane
+**or node** whose transactions cost several times an honest transaction's duration"). A pending
+recommendation is not a ruling, so the code could not stand on it.
+
+**What was done:** the node half is implemented. `account_overrun()` charges a node for its own
+DEMAND transactions — `EventDrain`, `ReadDesc`, `ParamSet`, `ParamGet` — against the same
+`fair_share_us()` a backplane's poll is charged against, and demotes or clears through the same
+`set_demoted()`. `IDENTIFY`, `BP_SLOT_MAP` and the enrolment probe stay charged to nobody: the
+probe because FR-003 makes it unconditional, `BP_SLOT_MAP` for the measured parity reason the
+superseded entry gave (which was about the BACKPLANE and still holds), and `IDENTIFY` because a
+node not yet Discovered has no demand item to deprioritise. Charged at most ONCE per node per
+superframe (`NodeRecord::overrun_charged_superframe`), which is what keeps the counter beside it
+counting superframes and not transactions — the budget can admit two demand items in one
+superframe and both may belong to the same node.
+
+**The comparability cost, restated as what it actually is.** A node whose descriptor runs to more
+than two chunks will be demoted while reading it, and that is now accepted rather than avoided: it
+genuinely is consuming more than its share, FR-028's remedy is to reduce demand PRIORITY, and
+`rotate_past_demoted()` still serves a demoted item — last, never not at all — with the demotion
+clearing on the node's next transaction inside the share. The honest-rig control holds:
+`FR-027: the fair share is derived from the period and the enrolled count, so a healthy rig
+demotes nothing` and the whole US1 discovery suite are green with the node half live, so on the
+rigs this repo exercises the churn the superseded entry feared does not occur. That is a control
+on those rigs' descriptor sizes, not a guarantee for every rig (CLAUDE.md rule 11).
+
+*Demonstrated by* `FR-028: a node whose own demand transactions consistently exceed the share is
+demoted in its own right` in `tests/unit/test_core_scheduler.cpp` — the node's measured cost is
+asserted over the share, `LifecycleKind::Demoted` is delivered with `demoted_is_backplane ==
+false`, every enrolled backplane keeps its three status polls throughout (FR-002), and
+`DemotionCleared` follows once the cost returns to normal.
+
+**What this does NOT settle.** Whether a node's share should be per-opcode-class rather than one
+number — the question the superseded entry raised, which this change answers with "one number,
+and accept the descriptor-read case" rather than resolves. An artefact-level answer would be a
+per-class baseline in `data-model.md` §9.
+
+**Recommendation:** ratify, and record in `data-model.md` §9 both the share and which transaction
+kinds each target is charged for, so the next reader does not have to read `account_overrun()` to
+find out.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** point 2 of the 2026-10-08
+"T028/T029 (#699, #700)" entry. **Related:** #696, #699, #700, PR #907 red-team finding 2, spec
+FR-028, SC-007, `tasks.md` T028.
+
+## 2026-10-08 — T028 (#699): a node's demotion counter counts charged TRANSACTIONS, not consecutive superframes
+
+**Supersedes** one claim of this same day's "T028 (#699): node-level demotion IS charged after
+all, against the same share" — its sentence "Charged at most ONCE per node per superframe
+(`NodeRecord::overrun_charged_superframe`), which is what keeps the counter beside it counting
+superframes and not transactions — the budget can admit two demand items in one superframe and
+both may belong to the same node." The marker and the reason for it stand; the clause after the
+dash does not, and the rest of that entry is unaffected.
+
+**Context:** `research.md` R-11 says a target is demoted after "more than a configured number of
+**consecutive superframes**" over its share, and spec FR-028 says "**consistently** exceed". The
+backplane arm of `account_overrun()` satisfies that reading: every enrolled backplane answers a
+`GET_STATUS` on alternate superframes (trunk §6), so its counter advances or resets on a fixed
+cadence and a standing overrun demotes in `2 x kDemoteAfterOverrunSuperframes` superframes.
+
+The node arm does not, and `overrun_charged_superframe` does not make it. A node is charged only
+when it COMPLETES a demand transaction, and `set_demoted()` is reached from nowhere else, so a
+superframe in which the node has no demand item neither advances nor resets
+`consecutive_overrun_superframes`. `overrun_charged_superframe` bounds the charge to one per
+superframe — its own reason, so that one superframe cannot advance the counter twice — and says
+nothing about consecutiveness. For a node the threshold therefore counts consecutive CHARGED
+TRANSACTIONS, however far apart they fall: three `SET_PARAM`s over the share at superframes
+1 000, 2 800 000 and 5 600 000 demote the node exactly as three in six superframes do, on
+evidence spanning ~3 hours of uptime at `T_poll` = 2 ms. *Verified by reading*
+`account_overrun()` and `set_demoted()`, and *demonstrated by* the case `FR-028: a node's overrun
+counter advances once per CHARGED TRANSACTION, however far apart in time, and only another
+charged transaction clears it` in `tests/unit/test_core_scheduler.cpp`, whose three charges are
+asserted to be spread over more superframes than the threshold.
+
+**The second half of the same asymmetry:** the clear is transaction-driven too. A node demoted
+and then quiet keeps `demoted` for the process lifetime — only another charged transaction
+reaches `set_demoted()`'s not-over branch, and only an emptying slot (FR-010) resets the record.
+Harmless in the scheduler, since demotion reduces demand PRIORITY and a node with no demand item
+has none to reduce; visible to an application reading the lifecycle stream, which sees a
+`Demoted` with no matching `DemotionCleared`. Asserted as present behaviour in the case's first
+SECTION, so a later decision to age the flag out fails a test rather than passing silently.
+
+**What was done:** nothing in the mechanism. The two comments that claimed the counter counts
+superframes (`core/core_types.hpp` on the field, `core/core_engine.cpp` in the node arm) now say
+what it counts and name this entry; the behaviour is pinned by the case above rather than left to
+a comment. Matching R-11 literally would need either a per-superframe charge for every enrolled
+node (a measurement for a node with no transaction that superframe — there is none to make) or an
+aging rule that decays the counter over idle superframes with a configured horizon. Both change
+what FR-028 means, so both are artefact decisions.
+
+**Recommendation:** rule on one of three. (a) Ratify as-is and amend R-11 to say "consecutive
+charged transactions" for the node arm — the smallest change, and what the code now documents.
+(b) Add an aging rule: `consecutive_overrun_superframes` decays to 0 after N idle superframes,
+with N recorded in `data-model.md` §9 beside the threshold. (c) Charge a node per superframe it
+is served in rather than per transaction — which, given `overrun_charged_superframe`, is already
+what happens, so it is a third option only if the share itself becomes per-superframe. (a) is
+recommended: FR-028's own word is "consistently", which a count of charged transactions
+satisfies, and (b)'s horizon is one more undefined constant.
+
+**Ruling:** pending — human. **Amends:** none (R-11 is wrong about the node arm rather than
+silent; the amendment is what (a) proposes). **Supersedes:** the one quoted clause of the
+2026-10-08 "T028 (#699): node-level demotion IS charged after all" entry. **Related:** #696,
+#699, PR #907 review round 2 finding 1, spec FR-028, SC-007, R-11, `tasks.md` T028.
+
+## 2026-10-08 — T028 (#699): the fair share needs a FLOOR, because a quotient of the period demotes a healthy rig for its size
+
+**Supersedes** the second sentence of point 1 of this same day's "T028/T029 (#699, #700): the
+fair share, the demotion threshold and the demoted-item rotation are all undefined" entry — "On
+the benchmark rig that is 500 us: an honest poll (380-400) is inside it and an expensive one
+(530, measured) is not." That is true of the benchmark rig's THREE backplanes and of no larger
+rig. The share is now `period_us / (enrolled + 1)` **floored at 450 us**; the rest of that
+entry's point 1, and points 2-4, are unaffected.
+
+**Context:** `period_us / (enrolled + 1)` shrinks with enrolment while a transaction's cost does
+not — an honest `GET_STATUS` round trip costs what it costs whatever else is enrolled.
+protocol-l3 §2 makes `ADDR_backplane_min..ADDR_backplane_max` (0x01..0x0F) **fifteen** legal
+backplanes, so the unfloored quotient crosses an honest poll's cost between four enrolled and
+five. MEASURED at this head, on honest rigs with no expensive answer scripted anywhere:
+
+| enrolled backplanes | unfloored share | worst honest poll | backplanes demoted |
+|---|---|---|---|
+| 3 | 500 us | 400 us | 0 |
+| 4 | 400 us | 400 us | 0 |
+| 5 | 333 us | 400 us | 5 |
+| 6 | 285 us | 400 us | 6 |
+| 15 | 125 us | 410 us | 15 |
+
+Every one of those backplanes answered normally. The consequences are worse than a spurious
+report: with every target demoted, `rotate_past_demoted()` finds nothing servable and serves the
+head, so FR-028's demand-priority ordering is a no-op exactly on the rigs large enough to need
+it, and SC-007's `Demoted` stops distinguishing an expensive backplane from any backplane. This
+is the same failure mode the entry above rejects the artefacts' literal share for ("below *every*
+transaction this trunk can perform, so every target overruns and the whole rig is demoted for
+being busy") — the replacement had it too, two backplanes later. *Found by* red team round 3 on
+PR #907 (ATTACK A1), *reproduced by* the case `FR-027/FR-028: a wholly HONEST rig demotes no
+backplane at any legal enrolled count`, which was RED at `daaec39` for 5, 6, 9 and 15 enrolled
+and green for 3 and 4.
+
+**What was done:** `kMinFairShareUs = 450` in `core/core_engine.cpp`, a floor under the quotient.
+The quotient still falls with enrolment until the floor binds (500 at three enrolled, 450 at
+four, the floor from five to fifteen), so the share is still a share and the enumeration bound
+is still observable — `FR-028: the fair share counts every enrolled backplane, including the
+last address` still reads a strictly smaller share at four than at three.
+
+**What is honest about 450 and what is not.** It is CALIBRATED, not derived: MEASURED, an honest
+poll costs 340-410 us (the spread is `BP_SLOT_MAP`'s payload against `GET_STATUS`'s, and the slot
+count) and SC-007's protocol-legal expensive answer costs 530, so the floor has to sit between
+them and 450 is the midpoint. No spec symbol lands in that window — `T_resp + T_turn + T_gap` is
+270, and one worst-case frame each way is 2910, larger than the whole period. The window is as
+narrow as it is because `MockL3Node`'s expensive answer is only ~1.3x an honest one (a
+turnaround delay bounded by `T_resp`, per this day's "`MockL3Node` cannot express '#110 F2c''s
+padded `ERROR.detail`" entry) where SC-007's own wording is "several times an honest
+transaction's duration". Both sides are therefore pinned by cases rather than argued: the honest
+case above fails if an honest poll ever reaches the floor, and SC-007's case fails if an
+expensive one does not exceed the share. A drift in either cost turns a case red rather than
+quietly stopping the share from discriminating.
+
+**Also corrected in code, and NOT a question:** a transaction that never answered is no longer
+charged. FR-028 demotes on "measured transaction durations"; what elapses on a failure is
+`link::Master`'s retry and timeout window (trunk §7, MEASURED ~1270 us against a 500 us share),
+so three silent transactions demoted the target and reported a budget overrun for a trunk fault,
+on top of the SUSPECT/OFFLINE transitions `health_` already reports for the same silence. The
+charge now sits below `complete_request()`'s `!answered` branch. *Found by* red team round 3
+(ATTACK A2), *demonstrated by* `FR-028: a transaction that never ANSWERS is a trunk fault, not a
+budget overrun`. Recorded here only because it narrows what point 2 of the entry above means by
+"charged", not because anything is undecided.
+
+**What this does NOT settle.** Whether the share should scale with the WIRE RATE. At
+`TRUNK_bit_rate_fallback` an honest round trip is ~3100 us — longer than the whole `T_poll`
+period — so at the fallback rate every transaction exceeds every share and the whole rig demotes,
+floor or no floor. That is pre-existing and unchanged by this entry, and it is a property of an
+absolute share rather than of the floor: a share expressed in microseconds cannot be right at two
+rates that differ by 8.7x (trunk §7). No test covers it, because nothing in US2 drives the
+scheduler at the fallback rate.
+
+**Recommendation:** rule on one of three. (a) Ratify the floor and record both it and the share
+in `data-model.md` §9 beside the threshold — the smallest change, and what the code now
+documents. (b) Define the share in units of a transaction rather than of the period — "a target
+is demoted when its measured cost exceeds N times the cheapest honest transaction measured on
+this trunk" — which is SC-007's own wording, needs no calibrated constant and is rate-independent,
+but needs `MockL3Node` to be able to script an answer several times an honest one before any case
+can discriminate N. (c) Scale the share with `master_.bit_rate()`. (a) is recommended now and
+(b) as the follow-up it implies, because (b) changes what FR-028 measures and (c) alone leaves
+the calibration problem where it is.
+
+**Ruling:** pending — human. **Amends:** none (FR-028 says "fair share" and no artefact defines
+it; the floor is this implementation's choice, like the share it floors). **Supersedes:** the
+second sentence of point 1 of the 2026-10-08 "T028/T029 (#699, #700): the fair share, the
+demotion threshold and the demoted-item rotation are all undefined" entry. **Related:** #699,
+#700, PR #907 red team round 3 findings 1 and 2, spec FR-027/FR-028, SC-007, R-11, `tasks.md`
+T028.

@@ -209,3 +209,64 @@ TEST_CASE("Ring<ParamResultDelivery, LIMIT_max_nodes> is drop-newest at the §8a
     }
     REQUIRE(r.empty());
 }
+
+TEST_CASE("Ring::at reads the i-th item from the front, and clamps an out-of-range index "
+          "[core][types]") {
+    // Added with T029, whose demand drain peeks a ring's head without popping it (FR-005's
+    // carry-over by identity) — the real callers are CoreEngine::rotate_past_demoted(),
+    // drain_events() and drain_params(), none of which counts anything. Three things matter
+    // and each is asserted: the index is from the FRONT and not from the buffer's base, so a
+    // wrapped ring reads correctly; it is read-only, so it cannot reorder a FIFO; and an
+    // out-of-range index returns the front rather than reading past the buffer.
+    omgp::core::Ring<uint8_t, 4> ring;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        REQUIRE(ring.push(static_cast<uint8_t>(10u + i)));
+    }
+    CHECK(ring.at(0) == 10u);
+    CHECK(ring.at(1) == 11u);
+    CHECK(ring.at(3) == 13u);
+
+    SECTION("a WRAPPED ring still reads from the front") {
+        // head_ is no longer 0, which is what tells `head_ + i` from `head_ - i` and from a
+        // plain `i`: pop two and push two, so the front sits in the middle of the buffer.
+        uint8_t out = 0;
+        REQUIRE(ring.pop(out));
+        REQUIRE(out == 10u);
+        REQUIRE(ring.pop(out));
+        REQUIRE(out == 11u);
+        REQUIRE(ring.push(20u));
+        REQUIRE(ring.push(21u));
+        REQUIRE(ring.size() == 4u);
+        CHECK(ring.at(0) == 12u);
+        CHECK(ring.at(1) == 13u);
+        CHECK(ring.at(2) == 20u);
+        CHECK(ring.at(3) == 21u);
+    }
+
+    SECTION("an index at or past size() returns the front, and reads nothing out of range") {
+        CHECK(ring.at(4) == ring.at(0));
+        CHECK(ring.at(400) == ring.at(0));
+    }
+
+    SECTION("the clamp is at size(), not at capacity: a PARTLY filled ring clamps too") {
+        // A full ring cannot show this: at capacity, `head_ + count_` wraps back to the front
+        // anyway, so an index of exactly size() reads the right answer by accident. With two of
+        // four slots used, index 2 is a real out-of-range index whose slot holds something else.
+        omgp::core::Ring<uint8_t, 4> partial;
+        REQUIRE(partial.push(70u));
+        REQUIRE(partial.push(71u));
+        REQUIRE(partial.size() == 2u);
+        CHECK(partial.at(0) == 70u);
+        CHECK(partial.at(1) == 71u);
+        CHECK(partial.at(2) == 70u); // clamped to the front, not storage_[head_ + 2]
+        CHECK(partial.at(3) == 70u);
+    }
+
+    SECTION("at() does not consume: the front is unchanged and pop() still yields it") {
+        CHECK(ring.at(0) == 10u);
+        CHECK(ring.size() == 4u);
+        uint8_t out = 0;
+        REQUIRE(ring.pop(out));
+        CHECK(out == 10u);
+    }
+}
