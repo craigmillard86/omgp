@@ -935,19 +935,35 @@ TEST_CASE("FR-028: a transaction that never ANSWERS is a trunk fault, not a budg
     // a trunk fault (red team round 3 @ daaec39, ATTACK A2). Silence is already reported, as the
     // SUSPECT/OFFLINE transitions the health table owns; the two signals must stay distinct, or
     // an application cannot tell an expensive talker from an absent one.
+    //
+    // The failure path neither CHARGES nor CLEARS, and the two halves need DIFFERENT pre-state to
+    // be observable at all — so this case runs twice (review round 4 on PR #907):
+    //   * from a clean slate, which is an oracle for "not charged" only: at 0/false a clear
+    //     changes nothing, so that slate cannot fail on one;
+    //   * with a demotion already outstanding, which is an oracle for "not cleared" — silence
+    //     cannot launder a demotion. On this slate a clear would zero the counter and deliver
+    //     DemotionCleared, and a charge would carry the counter past where it started.
+    const bool pre_demoted = GENERATE(false, true);
+    // kDemoteAfterOverrunSuperframes, which core/ keeps private: the counter as it stands the
+    // moment a target has just been demoted, which is the state silence must not launder.
+    const uint8_t pre_consecutive = pre_demoted ? 3u : 0u;
     Rig rig;
     bring_up_rig(rig);
     const std::vector<uint8_t> ids = rig.discovered_ids();
     const uint8_t victim = ids[0];
     const uint8_t victim_bp = Bk::node(rig.engine(), victim).backplane_addr;
 
-    // From a clean slate, so what is asserted is this case's own charges and not discovery's.
-    Bk::node(rig.engine(), victim).consecutive_overrun_superframes = 0u;
-    Bk::node(rig.engine(), victim).demoted = false;
-    Bk::backplane(rig.engine(), victim_bp).consecutive_overrun_superframes = 0u;
-    Bk::backplane(rig.engine(), victim_bp).demoted = false;
+    // From a known slate, so what is asserted is this case's own charges and not discovery's.
+    // The demoted slate is STIPULATED through the seam rather than earned on an expensive rig:
+    // what is under test is what the failure path does to an outstanding demotion, and reaching
+    // it by charging would re-test the charge that the other two FR-028 cases already own.
+    Bk::node(rig.engine(), victim).consecutive_overrun_superframes = pre_consecutive;
+    Bk::node(rig.engine(), victim).demoted = pre_demoted;
+    Bk::backplane(rig.engine(), victim_bp).consecutive_overrun_superframes = pre_consecutive;
+    Bk::backplane(rig.engine(), victim_bp).demoted = pre_demoted;
     rig.engine().drain_callbacks(256);
     rig.recorder().lifecycle.clear();
+    const size_t before = rig.transcript().lines.size();
 
     L3Step silence = L3Step::of(SilenceStep{});
     rig.node().set_script(victim_bp, &silence, 1);
@@ -957,15 +973,33 @@ TEST_CASE("FR-028: a transaction that never ANSWERS is a trunk fault, not a budg
     }
     rig.engine().drain_callbacks(256);
 
+    // The transactions were really ISSUED, which the demoted slate needs said out loud: a node
+    // whose demand priority is reduced is served last (rotate_past_demoted()), so a case that
+    // asserted only "nothing changed" would also pass on an engine that never served it at all.
+    size_t attempts = 0;
+    for (size_t i = before; i < rig.transcript().lines.size(); ++i) {
+        const TranscriptEntry& e = rig.transcript().lines[i];
+        if (e.opcode == omgp::OP_SET_PARAM && e.node_id == victim) {
+            ++attempts;
+        }
+    }
+    INFO("pre_demoted " << pre_demoted << ": " << attempts << " SET_PARAM attempts into silence");
+    CHECK(attempts == 4u);
+
     const auto& n = Bk::node(rig.engine(), victim);
     INFO("node " << static_cast<unsigned>(victim) << ": consecutive "
                  << static_cast<unsigned>(n.consecutive_overrun_superframes) << ", last measured "
                  << n.last_measured_duration_us << " us against a share of "
                  << Bk::fair_share_us(rig.engine()) << " us");
-    CHECK(n.consecutive_overrun_superframes == 0u);
-    CHECK(n.demoted == false);
-    CHECK(Bk::backplane(rig.engine(), victim_bp).demoted == false);
+    // Exactly as the slate left them, on both slates: not charged (the counter has not advanced
+    // and nothing new is demoted) and not cleared (an outstanding demotion is still outstanding).
+    CHECK(n.consecutive_overrun_superframes == pre_consecutive);
+    CHECK(n.demoted == pre_demoted);
+    CHECK(Bk::backplane(rig.engine(), victim_bp).consecutive_overrun_superframes ==
+          pre_consecutive);
+    CHECK(Bk::backplane(rig.engine(), victim_bp).demoted == pre_demoted);
     CHECK(rig.recorder().count(LifecycleKind::Demoted) == 0u);
+    CHECK(rig.recorder().count(LifecycleKind::DemotionCleared) == 0u);
     // And not vacuously: the failures really happened and really elapsed longer than the share,
     // so this case would be green on an engine that charged them only if it charged nothing at
     // all. (last_measured_duration_us is recorded for every terminal outcome, answered or not —

@@ -1148,8 +1148,15 @@ void CoreEngine::complete_request(const link::MasterEvent& ev, uint64_t now_us) 
     // top of the SUSPECT/OFFLINE transitions health_ already reports for the same silence (red
     // team round 3 on PR #907, ATTACK A2). The two signals stay distinct. Neither charged nor
     // CLEARED: a failure leaves consecutive_overrun_superframes exactly as it was, so silence
-    // cannot launder an outstanding demotion either. Both halves are pinned by `FR-028: a
-    // transaction that never ANSWERS is a trunk fault, not a budget overrun`.
+    // cannot launder an outstanding demotion either.
+    //
+    // CLAUDE.md rule 11, the two halves separately (review round 4 on PR #907 — this attribution
+    // previously named one case for both, and the clean slate that case started from could not
+    // fail on a clear). The NO-CLEAR half is proved BY CONSTRUCTION: the !answered branch above
+    // returns before account_overrun() is reached, so neither arm of set_demoted() runs on a
+    // failure. Both halves are also DEMONSTRATED BY `FR-028: a transaction that never ANSWERS is
+    // a trunk fault, not a budget overrun`, which runs on two slates — a clean one for the charge
+    // and an already-demoted one for the clear.
     // budget_.remaining_us is still debited above: the superframe really did spend that time,
     // which is a separate question from whose fault it is.
     account_overrun(duration_us, kind);
