@@ -104,6 +104,22 @@ phase2_config() {
   for d in $SCOPE_DIRS; do
     case "$dirs" in *" $d "*) echo "  - ^$root_re/$d/.*" ;; esac
   done
+  # Mull's incremental mode (mutate.cfg's header: gitDiffRef + gitProjectRoot), which restricts
+  # execution to mutants on lines the diff CHANGED — exactly the set the merge below keeps, so
+  # it stops the runner doing work whose verdict is then discarded. MEASURED on PR #907:
+  # test_core_scheduler executed 595 core/ mutants where the gate read 111, and CI spent 40
+  # minutes of a 45-minute budget on that one binary without finishing it.
+  #
+  # Set only when DIFF_REF_FILTER is (see its assignment): never at COMPILE time, where the
+  # plugin's own git lookup runs from a build subdirectory and embeds no mutants at all
+  # (research.md trap 3), and never when the diff ADDS an in-scope source file, because this
+  # filter drops every mutant in a file with no pre-image — the reason the filter was rejected
+  # outright until now. The merge is still the gate and still counts only changed lines, so this
+  # can only ever REMOVE work, never widen what fails.
+  if [ -n "${DIFF_REF_FILTER:-}" ]; then
+    echo "gitDiffRef: $DIFF_REF_FILTER"
+    echo "gitProjectRoot: $ROOT"
+  fi
 }
 
 REF=""; REQUIRE=0; DRY=0; TREND_LOG=""; PRINT_PHASE2=0
@@ -174,6 +190,31 @@ if [ -n "$TEST_SCOPE" ]; then
   SCOPE=$(find $ATTEST_DIRS -type f \( "${FIND_EXT[@]}" \) 2>/dev/null | sort)
 fi
 if [ -n "$SCOPE" ]; then echo "mutation: scope: $(echo "$SCOPE" | tr '\n' ' ')"; fi
+
+# --- Mull's line-level filter, and the one case it is wrong for ---------------------------------
+# Only with a gating ref (an attestation's REPORT_REF is empty — it mutates whole dirs on
+# purpose), and only when this diff ADDS no in-scope source file. Mull's gitDiffRef keeps
+# mutants in MODIFIED files and drops every mutant in an added one, so a PR that adds a core/
+# file would otherwise execute nothing of it and pass vacuously; such a run takes the full path
+# instead and pays the time. Belt and braces: mutate_report.py's per-changed-dir rule already
+# fails a run that executed no mutant under a changed dir, so a filter that silently matched
+# nothing fails closed rather than passing green.
+DIFF_REF_FILTER=""
+if [ -n "$REPORT_REF" ]; then
+  # shellcheck disable=SC2086
+  ADDED_SCOPE=$(git diff --name-only --diff-filter=A "$REPORT_REF" -- $SCOPE_DIRS |
+    grep -E "$EXT_RE" || true)
+  if [ -n "$ADDED_SCOPE" ]; then
+    echo "mutation: line filter OFF — this diff adds $(oneline "$ADDED_SCOPE"), and Mull's gitDiffRef drops every mutant in a file with no pre-image; running every mutant under the changed dir(s) instead"
+  else
+    DIFF_REF_FILTER="$REPORT_REF"
+    echo "mutation: line filter ON (gitDiffRef=$REPORT_REF): the runner executes only mutants on changed lines, which is the set the gate reads"
+  fi
+fi
+if [ -n "${OMGP_MUTATE_NO_LINE_FILTER:-}" ]; then
+  DIFF_REF_FILTER=""
+  echo "mutation: line filter OFF by OMGP_MUTATE_NO_LINE_FILTER"
+fi
 
 # The whole-tree trend log records whole-tree scores; an attestation mutates one or two dirs,
 # so its numbers are not comparable with the log's and are never appended to it. Decided here,
