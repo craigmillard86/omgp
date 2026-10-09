@@ -213,7 +213,63 @@ for d in $CHANGED_DIRS; do
   ORACLE="$ORACLE $bins"
 done
 ORACLE=$(echo $ORACLE | tr ' ' '\n' | sort -u | tr '\n' ' ')
+# --- oracle ORDER, which the early stop below makes load-bearing -------------------------------
+# The gate is "0 unlabelled survivors on changed lines", and an oracle can only ever KILL a
+# mutant, never resurrect one, so once no unlabelled survivor is left NO further oracle can
+# change the verdict. The runner loop stops there, which makes the order matter — and the order
+# that pays is not cheapest-first: it is the binaries whose own test source THIS DIFF CHANGED.
+# This repo lands a write-first test and the code it covers as one dispatch unit
+# (docs/DEFINITION-OF-READY.md, ruling 2026-08-30), so a PR's own test is by construction the
+# oracle for that PR's own changed lines, and the siblings are the ones that mostly re-execute
+# mutants it has already killed.
+#
+# MEASURED on PR #907's 103 in-scope mutants (docs/OPEN-QUESTIONS.md 2026-10-09), per oracle,
+# kills / kills no other binary makes / CI time: test_core_scheduler (the test that diff adds)
+# 79 / 70 / ~28 min; test_core_types 4 / 3 / ~1 s; test_core_discovery 6 / 0 / ~24 min;
+# test_core_params 6 / 0 / ~3 min; test_core_callback_queue 4 / 0 / ~5 s. Ordered this way that
+# run stops after the first two with the gate already satisfied, and never spends the 24
+# minutes that killed nothing — which is what had been exceeding deep-verify's 45-minute budget.
+#
+# The one thing this COSTS, stated rather than left to be discovered: stale-label detection
+# weakens. mutate_report.py reports a label that covers no surviving mutant, and fewer oracles
+# leave more survivors, so a label that the full oracle would expose as stale can still be
+# covering a survivor here. OMGP_MUTATE_FULL_ORACLE=1 runs every binary for exactly that check;
+# the weekly whole-tree run has no --diff, so it never stops early and keeps that check whole.
+# Three classes, not two, because "the diff changed this test" is too coarse on its own:
+# MEASURED on this very branch, whose merge of main also touched tests/unit/test_core_discovery
+# .cpp, a two-class order led with that binary — 24 CI minutes for 6 kills and no unique one —
+# and saved nothing. A test file the diff ADDS is the sharper signal: a new test binary exists
+# because new source lines needed an oracle, which is the dispatch unit this repo mandates.
+#   0  its test source is ADDED by this diff
+#   1  its test source is MODIFIED by this diff
+#   2  untouched
+# Within a class, ascending measured cost (below, once the binaries exist) — so the cheap
+# sibling that holds the last few kills is reached before an expensive one that holds none.
+ADDED_TESTS=""
+CHANGED_TESTS=""
+if [ -n "$REF" ]; then
+  CHANGED_TESTS=$(git diff --name-only "$REF" -- tests/unit || true)
+  ADDED_TESTS=$(git diff --name-only --diff-filter=A "$REF" -- tests/unit || true)
+fi
+oracle_class() {
+  # The binary's own source, by the one extension list (mutate.cfg source_ext). A test HELPER
+  # that is not itself a registered binary matches nothing here and changes no order, which is
+  # right — it is the binaries that kill mutants.
+  if [ -n "$ADDED_TESTS" ] && echo "$ADDED_TESTS" | grep -qE "/$1$EXT_RE"; then
+    echo 0
+  elif [ -n "$CHANGED_TESTS" ] && echo "$CHANGED_TESTS" | grep -qE "/$1$EXT_RE"; then
+    echo 1
+  else
+    echo 2
+  fi
+}
+ORACLE=$(for b in $ORACLE; do echo "$(oracle_class "$b") $b"; done | sort -k1,1n -k2,2 |
+  cut -d' ' -f2 | tr '\n' ' ')
 echo "mutation: oracle: $ORACLE"
+ORACLE_LED=$(for b in $ORACLE; do [ "$(oracle_class "$b")" -lt 2 ] && printf ' %s' "$b"; done || true)
+if [ -n "$ORACLE_LED" ]; then
+  echo "mutation: oracle order: this diff's own test(s) first —$ORACLE_LED"
+fi
 # Attesting only, and after the oracle rule so that a dir with neither is reported as the
 # blind spot the source path already names: a dir holding no source file can produce no
 # mutant, so there is nothing for its changed tests to attest. Per attested DIR, never over
@@ -359,6 +415,49 @@ REPORTS="$BUILD/reports"
 rm -rf "$REPORTS" && mkdir -p "$REPORTS"
 EXTRA=()
 [ -n "${GITHUB_ACTIONS:-}" ] && EXTRA=(--reporters GitHubAnnotations)
+
+# Every oracle binary must EXIST before the first run, including ones the early stop may never
+# execute: "CMakeLists.txt names it but the instrumented build did not produce it" is a blind
+# spot whether or not this run needed that binary (#141's rule), and checking it only where the
+# loop reaches would let a skipped binary hide it.
+for name in $ORACLE; do
+  if [ ! -x "$BUILD/$name" ]; then
+    echo "mutation: oracle binary $name was not built — failing (blind spot: CMakeLists.txt names it but the instrumented build did not produce it)" >&2
+    rc=1
+  fi
+done
+
+# True when the reports collected SO FAR already satisfy the gate, so no further oracle can
+# change the verdict (see the oracle ORDER note above). Quiet, and deliberately not the run that
+# writes report.json: the real invocation below is the one that prints and the one the artefact
+# comes from. --trend-log is never passed here either — a probe per binary would append a trend
+# line per binary — and a trend run is excluded outright, since stopping early would understate
+# the kill rate that log exists to record.
+gate_satisfied() {
+  [ -n "$REPORT_REF" ] || return 1            # trend/attest mode: no gate to satisfy
+  [ "${#TREND[@]}" -eq 0 ] || return 1        # --trend-log: the kill rate must be the whole one
+  [ -z "${OMGP_MUTATE_FULL_ORACLE:-}" ] || return 1
+  python3 tools/mutate_report.py --reports "$REPORTS" --root "$ROOT" --scope-dirs "$SCOPE_DIRS" \
+    --ranges "$BUILD/scope_ranges.json" --removed "$BUILD/scope_removed.json" \
+    --source-ext "$SOURCE_EXT" --ref "$REPORT_REF" --out "$BUILD/probe.json" \
+    --max-unlabelled "$MAX_UNLABELLED" --categories "$CATEGORIES" > "$BUILD/probe.log" 2>&1
+}
+
+# Ascending measured cost WITHIN each class (see the oracle ORDER note): the mutant count is
+# the same for every binary — all of them execute every mutant under the changed dirs — so a
+# binary's mutation cost is proportional to its own unmutated runtime, and one timed run each
+# (tens of milliseconds to a few seconds) buys the order. Timed here because it needs the built
+# binaries; the class order above is what --dry-run can disclose without a build.
+if [ "$rc" -eq 0 ]; then
+  ORACLE=$(for name in $ORACLE; do
+    t0=$(date +%s%N)
+    ( cd "$BUILD" && "./$name" > /dev/null 2>&1 ) || true
+    echo "$(oracle_class "$name") $(( ($(date +%s%N) - t0) / 1000000 )) $name"
+  done | sort -k1,1n -k2,2n | awk '{print $3}' | tr '\n' ' ')
+  echo "mutation: oracle run order (class, then measured cost): $ORACLE"
+fi
+
+RAN=""
 for name in $ORACLE; do
   bin="$BUILD/$name"
   if [ ! -x "$bin" ]; then
@@ -391,6 +490,17 @@ for name in $ORACLE; do
     rc=1
   fi
   echo "mutation: $name: $(grep -oE 'Surviving mutants: [0-9]+|No mutants found' "$BUILD/$name.mull.log" | head -1 || echo 'ran')"
+  RAN="$RAN $name"
+  if [ "$rc" -eq 0 ] && gate_satisfied; then
+    REMAINING=""
+    for other in $ORACLE; do
+      case " $RAN " in *" $other "*) ;; *) REMAINING="$REMAINING $other" ;; esac
+    done
+    if [ -n "$REMAINING" ]; then
+      echo "mutation: gate already satisfied by$RAN — not running$REMAINING (an oracle only ever kills a mutant, never resurrects one, so none of those can change the verdict; OMGP_MUTATE_FULL_ORACLE=1 runs them all)"
+    fi
+    break
+  fi
 done
 
 # --- merge the Elements reports and apply the triage gate (tools/mutate_report.py) ---------------

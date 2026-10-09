@@ -475,9 +475,33 @@ def test_mutate_attestation_is_never_appended_to_the_whole_tree_trend_log(tmp_pa
     assert rc == 0 and "not appended" not in out, out
 
 
+def _without_oracle_order(out):
+    """The run's output with the oracle ORDER normalised away: the `oracle order:` line dropped
+    and the oracle line's binaries sorted. Everything else stays byte-comparable."""
+    kept = []
+    for line in out.splitlines():
+        if line.startswith("mutation: oracle order:"):
+            continue
+        if line.startswith("mutation: oracle:"):
+            line = "mutation: oracle: " + " ".join(sorted(line.split(":", 2)[2].split()))
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def test_mutate_source_change_scoping_is_unchanged(tmp_path):
     """Changing a test must never widen what can fail a PR: with a source in scope the run is
-    byte-identical whether or not the same diff also touches tests/unit."""
+    identical whether or not the same diff also touches tests/unit — everything except the
+    ORDER the oracle binaries run in.
+
+    The order is exempt, and only the order: since 2026-10-09 mutate.sh runs the binaries whose
+    own test source the diff changed FIRST, so that the early stop (the gate is "0 unlabelled
+    survivors", and an oracle only ever kills a mutant, never resurrects one) reaches it sooner.
+    That cannot widen what fails, which is this case's own subject: the oracle SET is asserted
+    unchanged below, so a full run executes exactly the same mutants in a different order, and
+    the gate's verdict is order-independent for the same reason the early stop is sound. What
+    the order CAN do is leave a stale-label warning undetected (fewer oracles, more survivors,
+    so a label still covers one); that is a disclosed cost of the early stop, carried by
+    OMGP_MUTATE_FULL_ORACLE=1 and by the weekly whole-tree run, not by this case."""
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
     src_only = shared_clone(tmp_path / "a", "link/zz_probe.cpp", "int zz_probe() { return 1; }\n")
@@ -488,8 +512,18 @@ def test_mutate_source_change_scoping_is_unchanged(tmp_path):
     assert rc_a == 0 and rc_b == 0, out_a + out_b
     assert "mode=attest" not in out_b and "mode=attest" not in out_a, out_b
     assert scope_line(out_a) == scope_line(out_b) == ["link/zz_probe.cpp"], (out_a, out_b)
-    assert oracle_line(out_a) == oracle_line(out_b), (out_a, out_b)
-    assert out_a.replace("HEAD~1", "<ref>") == out_b.replace("HEAD~2", "<ref>"), (out_a, out_b)
+    # The SET is what bounds the gate; the sequence is not.
+    assert sorted(oracle_line(out_a)) == sorted(oracle_line(out_b)), (out_a, out_b)
+    assert _without_oracle_order(out_a).replace("HEAD~1", "<ref>") == _without_oracle_order(
+        out_b
+    ).replace("HEAD~2", "<ref>"), (out_a, out_b)
+    # And the order really did change, so the normalisation above is not hiding a no-op: the
+    # changed test's own binary leads, where the source-only run leaves CMakeLists.txt's order.
+    assert oracle_line(out_b)[0] == "test_link_master", oracle_line(out_b)
+    assert "mutation: oracle order:" in out_b and "test_link_master" in out_b.split(
+        "mutation: oracle order:"
+    )[1].splitlines()[0], out_b
+    assert "mutation: oracle order:" not in out_a, out_a
 
 
 def test_mutate_test_only_scope_without_oracle_fails_closed(tmp_path):
