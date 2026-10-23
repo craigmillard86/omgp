@@ -336,7 +336,7 @@ jobs:
           # started, so the router never saw its own attempt's failure and attempt 2 could
           # not fire. Unpersisted, the push uses the Claude App token and chaining works.
           persist-credentials: false
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v6
         with: {python-version: '3.12'}
       - name: Toolchain (so the agent can run the pipeline)
         run: |
