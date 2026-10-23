@@ -158,7 +158,7 @@ jobs:
         if: steps.tier.outputs.deep != 'true'
         run: |
           echo "red-team: PR is ${{ steps.tier.outputs.label }} — attack pass runs for T2/T3 only"
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v6
         if: steps.tier.outputs.deep == 'true'
         with:
           python-version: '3.12'
@@ -358,7 +358,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v6
         with: {python-version: '3.12'}
       - name: Toolchain
         run: |
