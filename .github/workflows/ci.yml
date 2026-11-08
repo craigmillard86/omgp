@@ -278,7 +278,7 @@ jobs:
     # missing tool fails the job instead of passing silently.
     name: deep-verify-mutate (T2/T3 only)
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: ${{ fromJSON(needs.budgets.outputs.deep_verify_timeout_minutes) }}   # deep_verify_timeout_minutes, agent-config.yml on the default branch (budgets job above)
     steps:
       - uses: actions/checkout@v7
