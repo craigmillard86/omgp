@@ -35,7 +35,7 @@ jobs:
 
   mutation:
     name: mutation testing (weekly, Mondays)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && format('{0}', github.run_number) != '')
     steps:
