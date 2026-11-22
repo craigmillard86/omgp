@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
@@ -78,7 +78,7 @@ jobs:
 
       # Codegen runs on the host: the espressif/idf image has no Jinja2, and
       # build/gen/ is mounted into the container by the esp32 pipeline stage.
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
@@ -125,7 +125,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
@@ -254,7 +254,7 @@ jobs:
         if: steps.tier.outputs.deep != 'true'
         run: |
           echo "deep-verify: ${{ steps.tier.outputs.label }} — fuzz runs for T2/T3 only"
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v6
         if: steps.tier.outputs.deep == 'true'
         with:
           python-version: '3.12'
@@ -290,7 +290,7 @@ jobs:
         if: steps.tier.outputs.deep != 'true'
         run: |
           echo "deep-verify-mutate: ${{ steps.tier.outputs.label }} — mutation runs for T2/T3 only"
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v6
         if: steps.tier.outputs.deep == 'true'
         with:
           python-version: '3.12'

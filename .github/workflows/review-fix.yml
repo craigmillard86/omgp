@@ -210,7 +210,7 @@ jobs:
           # With credentials unpersisted the push uses the Claude App token, so the resulting
           # `synchronize` re-review and CI chaining actually fire.
           persist-credentials: false
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v6
         with: {python-version: '3.12'}
       - name: Toolchain (so the agent can run the pipeline)
         run: |
