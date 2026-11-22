@@ -475,9 +475,33 @@ def test_mutate_attestation_is_never_appended_to_the_whole_tree_trend_log(tmp_pa
     assert rc == 0 and "not appended" not in out, out
 
 
+def _without_oracle_order(out):
+    """The run's output with the oracle ORDER normalised away: the `oracle order:` line dropped
+    and the oracle line's binaries sorted. Everything else stays byte-comparable."""
+    kept = []
+    for line in out.splitlines():
+        if line.startswith("mutation: oracle order:"):
+            continue
+        if line.startswith("mutation: oracle:"):
+            line = "mutation: oracle: " + " ".join(sorted(line.split(":", 2)[2].split()))
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def test_mutate_source_change_scoping_is_unchanged(tmp_path):
     """Changing a test must never widen what can fail a PR: with a source in scope the run is
-    byte-identical whether or not the same diff also touches tests/unit."""
+    identical whether or not the same diff also touches tests/unit — everything except the
+    ORDER the oracle binaries run in.
+
+    The order is exempt, and only the order: since 2026-10-09 mutate.sh runs the binaries whose
+    own test source the diff changed FIRST, so that the early stop (the gate is "0 unlabelled
+    survivors", and an oracle only ever kills a mutant, never resurrects one) reaches it sooner.
+    That cannot widen what fails, which is this case's own subject: the oracle SET is asserted
+    unchanged below, so a full run executes exactly the same mutants in a different order, and
+    the gate's verdict is order-independent for the same reason the early stop is sound. What
+    the order CAN do is leave a stale-label warning undetected (fewer oracles, more survivors,
+    so a label still covers one); that is a disclosed cost of the early stop, carried by
+    OMGP_MUTATE_FULL_ORACLE=1 and by the weekly whole-tree run, not by this case."""
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
     src_only = shared_clone(tmp_path / "a", "link/zz_probe.cpp", "int zz_probe() { return 1; }\n")
@@ -488,8 +512,18 @@ def test_mutate_source_change_scoping_is_unchanged(tmp_path):
     assert rc_a == 0 and rc_b == 0, out_a + out_b
     assert "mode=attest" not in out_b and "mode=attest" not in out_a, out_b
     assert scope_line(out_a) == scope_line(out_b) == ["link/zz_probe.cpp"], (out_a, out_b)
-    assert oracle_line(out_a) == oracle_line(out_b), (out_a, out_b)
-    assert out_a.replace("HEAD~1", "<ref>") == out_b.replace("HEAD~2", "<ref>"), (out_a, out_b)
+    # The SET is what bounds the gate; the sequence is not.
+    assert sorted(oracle_line(out_a)) == sorted(oracle_line(out_b)), (out_a, out_b)
+    assert _without_oracle_order(out_a).replace("HEAD~1", "<ref>") == _without_oracle_order(
+        out_b
+    ).replace("HEAD~2", "<ref>"), (out_a, out_b)
+    # And the order really did change, so the normalisation above is not hiding a no-op: the
+    # changed test's own binary leads, where the source-only run leaves CMakeLists.txt's order.
+    assert oracle_line(out_b)[0] == "test_link_master", oracle_line(out_b)
+    assert "mutation: oracle order:" in out_b and "test_link_master" in out_b.split(
+        "mutation: oracle order:"
+    )[1].splitlines()[0], out_b
+    assert "mutation: oracle order:" not in out_a, out_a
 
 
 def test_mutate_test_only_scope_without_oracle_fails_closed(tmp_path):
@@ -1651,6 +1685,65 @@ def test_mutate_phase2_config_of_an_attestation_is_the_attested_dirs(tmp_path):
     assert "mode=attest" in out, out
     paths = phase2_paths(out)
     assert len(paths) == 1 and paths[0].endswith("/link/.*"), out
+
+
+def test_mutate_line_filter_is_on_for_a_modified_source(tmp_path):
+    """Mull's incremental mode (gitDiffRef + gitProjectRoot) restricts EXECUTION to mutants on
+    changed lines — the same set the merge keeps — so the runner stops doing work whose verdict
+    is then discarded. MEASURED on PR #907: test_core_scheduler executed 595 core/ mutants where
+    the gate read 111, and CI spent 40 of its 45 minutes on that one binary without finishing.
+    With the filter the whole run was 195s against 525s and the verdict was identical to the
+    unlabelled mutant: 111/87/24/0 and the same survivor set (docs/OPEN-QUESTIONS.md
+    2026-10-09).
+
+    Both keys are RUN-time only. At compile time the plugin's own git lookup runs from a build
+    subdirectory and embeds no mutants at all (research.md trap 3), which is why phase 1 never
+    carries them and this case reads phase 2."""
+    # ONLY a modification: an existing file's own content plus a line, so the one commit this
+    # fixture makes has a pre-image. A new path here would be an addition, which is the sibling
+    # case below and would (correctly) turn the filter off.
+    existing = (ROOT / "link" / "frame.cpp").read_text()
+    clone = shared_clone(tmp_path, "link/frame.cpp", existing + "\n// touched by test_tooling.py\n")
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--print-phase2-config")
+    assert rc == 0, out
+    assert "gitDiffRef: HEAD~1" in out, out
+    assert f"gitProjectRoot: {clone.resolve()}" in out, out
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 0 and "line filter ON (gitDiffRef=HEAD~1)" in out, out
+    assert "line filter OFF" not in out, out
+
+
+def test_mutate_line_filter_is_off_when_the_diff_adds_an_in_scope_source(tmp_path):
+    """The one case the filter is WRONG for, and the reason it was rejected outright before
+    this: Mull's gitDiffRef keeps mutants in modified files and drops every mutant in a file
+    with no pre-image, so a PR that ADDS a core/ or link/ source would execute nothing of it and
+    pass vacuously. Such a run takes the full path and pays the time instead.
+
+    Belt and braces, and deliberately not relied on alone: mutate_report.py's per-changed-dir
+    rule already fails a run that executed no mutant under a changed dir, so a filter that
+    silently matched nothing fails closed rather than passing green."""
+    clone = shared_clone(tmp_path, "link/zz_probe.cpp", "int zz_probe() { return 1; }\n")
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--print-phase2-config")
+    assert rc == 0, out
+    # The KEY, with its colon — the disclosure line names gitDiffRef in its own explanation of
+    # why it is absent, so a bare substring test would match the prose and pass vacuously.
+    assert "gitDiffRef:" not in out and "gitProjectRoot:" not in out, out
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 0, out
+    assert "line filter OFF" in out and "link/zz_probe.cpp" in out, out
+    assert "no pre-image" in out, out
+
+
+def test_mutate_line_filter_is_off_without_a_gating_ref(tmp_path):
+    """A whole-tree run and an ATTESTATION both mutate deliberately beyond the diff's own lines
+    — the first has no ref at all, the second sets REPORT_REF empty so no finding gates (#146).
+    Filtering either to changed lines would silently shrink what they report."""
+    rc, out, _ = run(MUTATE, "--print-phase2-config")
+    assert rc == 0 and "gitDiffRef:" not in out, out
+    clone = shared_clone(tmp_path, "tests/unit/test_link_master.cpp", TEST_EDIT)
+    rc, out, _ = run(clone / "tools" / "mutate.sh", "--diff", "HEAD~1", "--dry-run")
+    assert rc == 0 and "mode=attest" in out, out
+    assert "line filter ON" not in out, out
 
 
 # --- tools/mutate_diff_reports.py: the evidence tool for mutate.sh changes -----------------------
