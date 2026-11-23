@@ -356,7 +356,7 @@ measure simulated time to callback delivery against the calculable bound.
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T038 [P] [US4] Write `tests/unit/test_core_events.cpp` (write first, RED): spec's three
+- [x] T038 [P] [US4] Write `tests/unit/test_core_events.cpp` (write first, RED): spec's three
       Acceptance Scenarios — a nonzero `event_pending` count drains fully within the bound
       (AS1); multiple queued events for one node are delivered in module-queued order (AS2); a
       node that queues events faster than one drain cycle empties them is not abandoned —
@@ -372,7 +372,7 @@ measure simulated time to callback delivery against the calculable bound.
 
 ### Implementation for User Story 4
 
-- [ ] T039 [US4] Implement `event_pending` tracking from every status poll's decoded
+- [x] T039 [US4] Implement `event_pending` tracking from every status poll's decoded
       `StatusBlock` and `EventDrainItem` enqueueing (spec FR-015); `GET_EVENT` issuance and
       `GetEventResp` decode in the drain loop (T029), delivering
       `LifecycleKind::ModuleEvent` per drained event, re-enqueueing while
