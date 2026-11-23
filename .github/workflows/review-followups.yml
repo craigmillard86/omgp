@@ -153,6 +153,12 @@ jobs:
             };
             const open = await github.paginate(github.rest.issues.listForRepo, {owner, repo, state: 'open', labels: 'task', per_page: 100});
             const seen = open.filter(i => !i.pull_request).map(i => i.title);
+            // Also dedup against tasks a human closed as NOT PLANNED (#951): that is a ruling on the
+            // proposal, and a reviewer restating it each round would otherwise refile it. `completed`
+            // closures are deliberately not read — a done item raised again has regressed and is worth
+            // filing. `state_reason` is only on closed issues, so the filter is a no-op on open ones.
+            const closed = await github.paginate(github.rest.issues.listForRepo, {owner, repo, state: 'closed', labels: 'task', per_page: 100});
+            for (const i of closed) if (!i.pull_request && i.state_reason === 'not_planned') seen.push(i.title);
 
             let filed = 0;
             for (const item of items.slice(0, CAP)) {
