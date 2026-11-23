@@ -1551,6 +1551,20 @@ def test_round_budget_is_wired_into_both_verdict_prompts():
         assert "## FOLLOW-UPS" in prompt, f"{wfn} needs the section review-followups.yml consumes"
 
 
+def test_verdict_prompts_require_a_severity_tag_on_every_follow_up():
+    """#951: 471 of 487 bot-filed follow-ups were UNTAGGED, so review-followups.yml's [LOW]
+    filter (#134 guardrail 2) almost never fired — it can only drop what the reviewer tagged.
+    The filer still files an untagged bullet (a recorded judgement: fail toward filing), so the
+    lever is the prompt. Both verdict-emitting reviewers must demand a tag on every bullet and
+    say LOW is not filed. Presence pin only: whether a model obeys is measured on real traffic
+    (tag rate of filed issues), not proved here."""
+    for wfn, job in (("claude-review.yml", "review"), ("red-team.yml", "attack-pr")):
+        prompt = _verdict_prompt(wfn, job)
+        assert "[HIGH|MEDIUM|LOW]" in prompt, f"{wfn} does not require a severity tag"
+        assert "EVERY follow-up bullet" in prompt, f"{wfn} must say the tag is required on every bullet"
+        assert "[LOW]" in prompt and "not filed" in prompt, f"{wfn} must say [LOW] bullets are not filed"
+
+
 def test_round_budget_inputs_come_from_the_default_branch_not_the_pr():
     """red-team's checkout IS the PR's head (it must build and run the change), and the budget
     can only loosen — so a PR that edited tools/round_budget.py or agent-config.yml would be

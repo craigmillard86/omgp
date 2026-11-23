@@ -239,7 +239,11 @@ jobs:
             budget applied and name every finding it moved.
             List BLOCKING findings first (severity-ordered, file:line). Then
             a section headed exactly "## FOLLOW-UPS" — one bullet per
-            proposed issue as "TITLE — one line of why", or "none".
+            proposed issue as "[HIGH|MEDIUM|LOW] TITLE — one line of why",
+            or "none". Tag EVERY follow-up bullet: review-followups.yml
+            files each one as a task issue, but a [LOW] bullet (pure style
+            or nit) is noted and not filed, and it can only tell LOW from
+            real work if you say so. An untagged bullet is filed as MEDIUM.
             End with a required final section "NOT EXAMINED:" listing what
             was out of scope of this pass (files skipped, areas not checked).
             If nothing was excluded: "NOT EXAMINED: nothing excluded".
