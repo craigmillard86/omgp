@@ -16,7 +16,7 @@
 // SC-002 (the latency bound), SC-006 (a flooding node starves nobody); data-model.md §3
 // (NodeRecord's event-rate fields), §6 (EventDrainItem), §7 (LifecycleKind::ModuleEvent /
 // NodeEventFault / NodeEventFaultCleared), §8a (the pending-delivery rings); research.md R-07 and
-// its 2026-09-21 correction; docs/OPEN-QUESTIONS.md 2026-09-06 "#110 F6" and 2026-11-22.
+// its 2026-09-21 correction; docs/OPEN-QUESTIONS.md 2026-09-06 "#110 F6" and 2026-11-23.
 //
 // WHAT THIS FILE IS AN ORACLE FOR, AND WHAT IT IS NOT (CLAUDE.md rule 11).
 //   * It is an oracle for the END-TO-END event path at message level: a status poll's own
@@ -42,7 +42,15 @@
 //   * It is NOT an oracle for an unallocated event code reaching the application:
 //     l3::decode_get_event_resp refuses an event_type outside §3.4's own set, so such an answer
 //     is IGNORED one layer below core/ (asserted directly, and recorded in
-//     docs/OPEN-QUESTIONS.md 2026-11-22).
+//     docs/OPEN-QUESTIONS.md 2026-11-23).
+//   * The SC-002 cases below script FEWER events than kEventRateBudgetPerWindow, and that is a
+//     LIMIT on what they establish, not a calibration: measured at this head, K=1 paces a node at
+//     one event per ~1900 us, so the fifth event of any backlog is past SC-002's 8000 us bound by
+//     FR-025 alone and FR-026's budget then reports the node faulted. So this file is an oracle
+//     for SC-002 on backlogs up to the budget ONLY; beyond it the behaviour is the collision
+//     recorded in docs/OPEN-QUESTIONS.md 2026-11-23 ("FR-025's K=1, SC-002's bound and FR-026's
+//     rate budget cannot all hold ..."), with the measured run, awaiting a ruling. No case here
+//     asserts the breach as expected behaviour.
 //   * The event-rate window and budget are core/core_types.hpp constants, read from there by
 //     every case below and never restated as literals — the engine's own policy where FR-026 says
 //     only "a configured budget".
@@ -349,6 +357,25 @@ class Rig {
         node_.set_script(addr, steps.data(), steps.size());
     }
 
+    // The ONE exception to the one-module-per-backplane rule above, and only because nothing
+    // about it is scripted per module: `slots` occupied slots behind `addr`, every one of them
+    // answering IDENTIFY and READ_DESC from the same script, reporting `pending` in every status
+    // block and holding NO event at all — so every GET_EVENT the count provokes answers EVT_NONE
+    // (protocol-l3 §3.4) whichever module it was addressed to. That is exactly what the sibling
+    // fan-out case needs: it asserts about DISCOVERY traffic, never about whose event an event
+    // was. No ParamStep: nothing here sets a parameter.
+    void install_populated(uint8_t addr, uint8_t slots, uint8_t pending) {
+        std::vector<L3Step>& steps = scripts_[addr];
+        steps.clear();
+        const uint32_t occupied = (1u << slots) - 1u;
+        steps.push_back(L3Step::of(SlotMapStep{slots, occupied, occupied}));
+        steps.push_back(L3Step::of(StatusStep{ready_status(pending)}));
+        steps.push_back(L3Step::of(IdentifyStep{identify_for(descriptor_)}));
+        steps.push_back(L3Step::of(DescChunkStep{descriptor_.bytes.data(),
+                                                 static_cast<uint16_t>(descriptor_.bytes.size())}));
+        node_.set_script(addr, steps.data(), steps.size());
+    }
+
     // Brings `addr`'s single module all the way to Discovered with nothing to report, so that
     // every case can arm its events at a known instant on a settled rig.
     uint8_t bring_up(uint8_t addr) {
@@ -535,6 +562,19 @@ std::vector<ScriptedEvent> flood_script(bool big_detail) {
     return flood;
 }
 
+// Drives a FRESH rig whose one backplane has `slots` occupied slots and reports `pending` events
+// in every status block, and answers how many of those modules reached Discovered within
+// `horizon` superframes (plus, out-parameter, how many GET_EVENTs the run issued in total). Every
+// event queue behind that backplane is empty, so the count is the ONLY thing that differs between
+// the two arms of the case that uses this.
+size_t discovered_behind(uint8_t pending, uint8_t slots, uint32_t horizon, size_t& get_events) {
+    Rig rig;
+    rig.install_populated(omgp::ADDR_backplane_min, slots, pending);
+    rig.run_superframes(horizon);
+    get_events = rig.transcript().count(omgp::OP_GET_EVENT);
+    return rig.discovered_ids().size();
+}
+
 } // namespace
 
 TEST_CASE("AS1/FR-015/SC-002: a nonzero event_pending drains fully within the SC-002 bound "
@@ -701,7 +741,7 @@ TEST_CASE("FR-025: at most one GET_EVENT per node per superframe turn, whatever 
 TEST_CASE("protocol-l3 §3.4: EVT_NONE terminates draining — no ModuleEvent, no fault, no re-queue "
           "[events][us4]") {
     // A status block over-reporting what the module holds is the ordinary case for the fan-out a
-    // backplane's aggregate count forces (docs/OPEN-QUESTIONS.md 2026-11-22): a module with
+    // backplane's aggregate count forces (docs/OPEN-QUESTIONS.md 2026-11-23): a module with
     // nothing queued answers NONE, which must deliver nothing and charge nothing.
     Rig rig;
     const uint8_t bp = omgp::ADDR_backplane_min;
@@ -782,8 +822,13 @@ TEST_CASE("SC-006/FR-025: a flooding node never delays another node's event past
     // take the quiet node's place even uncapped. quickstart.md §6 expects the cap's removal to
     // fail the well-behaved node's latency assertion; on this rig it does not, and what it does
     // fail is the per-turn assertion in `AS1/FR-015/SC-002`, `AS3/FR-015` and `FR-025` — single
-    // -node rigs whose budget admits several drains per superframe. Recorded in the PR for #710
-    // with the run that shows it.
+    // -node rigs whose budget admits several drains per superframe — plus three cases in
+    // tests/unit/test_core_scheduler.cpp (`FR-025: one node's queued events do not delay another
+    // node's` among them). The run that shows it is quoted in this PR's description, under
+    // "Discriminating check (quickstart.md §6)"; it is reproduced by negating the
+    // `event_drained_superframe == superframe_` test in drain_events() and running
+    // `./pipeline.sh build unit`. quickstart.md §6's wording is a Spec Kit artefact this fix does
+    // not amend, so the mismatch is named here and in the PR rather than edited away there.
     rig.run_superframes(12u);
     const std::vector<uint32_t> flood_turns =
         rig.transcript().superframes_for(omgp::OP_GET_EVENT, flooder);
@@ -792,6 +837,44 @@ TEST_CASE("SC-006/FR-025: a flooding node never delays another node's event past
         INFO("flood drain " << i << " in superframe " << flood_turns[i]);
         CHECK(flood_turns[i] > flood_turns[i - 1]);
     }
+}
+
+TEST_CASE("SC-006/US1 AS3: a backplane's standing event_pending does not delay the discovery of "
+          "the modules behind it [events][us4]") {
+    // The cost of v1's missing per-slot event attribution (docs/OPEN-QUESTIONS.md 2026-11-23) is
+    // paid in DEMAND slots, which is where IDENTIFY and READ_DESC live — and events are drained
+    // ahead of both (FR-020). So the attribution sweep a backplane's aggregate count provokes has
+    // to be bounded per poll, not one GET_EVENT per sibling module per poll: US1 AS3 says a slot
+    // whose module misbehaves "does not block the discovery of any other slot or backplane", and
+    // SC-006 that a node whose status poll always reports events pending never prevents any other
+    // node's progress.
+    //
+    // Two arms differing in ONE byte of one status block, with every event queue behind the
+    // backplane empty — so every GET_EVENT either arm issues answers EVT_NONE and delivers
+    // nothing. The control arm is the whole of the evidence: if the count were free, both arms
+    // would discover the same number of modules.
+    constexpr uint8_t kSlots = static_cast<uint8_t>(omgp::LIMIT_max_slots_per_backplane);
+    constexpr uint32_t kHorizon = 400;
+    size_t quiet_drains = 0;
+    size_t liar_drains = 0;
+    const size_t quiet = discovered_behind(0u, kSlots, kHorizon, quiet_drains);
+    const size_t liar = discovered_behind(0xFFu, kSlots, kHorizon, liar_drains);
+    INFO("control (event_pending=0): " << quiet << "/" << static_cast<unsigned>(kSlots)
+                                       << " discovered in " << kHorizon
+                                       << " superframes, GET_EVENT=" << quiet_drains);
+    INFO("attack  (event_pending=255): " << liar << "/" << static_cast<unsigned>(kSlots)
+                                         << " discovered in " << kHorizon
+                                         << " superframes, GET_EVENT=" << liar_drains);
+    REQUIRE(quiet == static_cast<size_t>(kSlots)); // the arm the attack is measured against
+    CHECK(quiet_drains == 0u);                     // FR-015: no count, no GET_EVENT at all
+    CHECK(liar == quiet);
+    // It really did ask — an engine that ignored the count would pass the line above for the
+    // wrong reason. One sweep step per poll that reports a count, never one per sibling: the
+    // drains are bounded by the status polls of that backplane, not by its slot count times them.
+    CHECK(liar_drains >= 1u);
+    // MEASURED on this rig (stated, not claimed — CLAUDE.md rule 11): 16/16 discovered in both
+    // arms, 0 GET_EVENT in the control and 198 in the attack — one per status poll of the
+    // reporting backplane, where the fan-out-to-every-sibling form issued 980 and discovered 5.
 }
 
 TEST_CASE("FR-026: an over-budget node is reported NodeEventFault and stops being drained "
@@ -893,7 +976,7 @@ TEST_CASE("CLAUDE.md rule 7: a reserved or user-defined event type is passed thr
         // encoder, so MockL3Node cannot script one either) refuses an event_type outside §3.4's
         // own set, so an unallocated 0x05..0xEF code is ignored one layer BELOW core/ instead of
         // being delivered verbatim. Asserted here so a later l3/ change that widens the codec
-        // shows up as this file's business too (docs/OPEN-QUESTIONS.md 2026-11-22).
+        // shows up as this file's business too (docs/OPEN-QUESTIONS.md 2026-11-23).
         omgp::l3::GetEventResp resp{};
         resp.event_type = 0x05u;
         resp.remaining_count = 0;
