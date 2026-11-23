@@ -254,7 +254,11 @@ jobs:
               and OUTSIDE the linked issue's acceptance criteria — the
               attack found it, the change did not cause it. Still report it
               (falsification is your job), under a "## FOLLOW-UPS" section,
-              but it does NOT block; it is a proposed issue.
+              but it does NOT block; it is a proposed issue. Write each
+              bullet as "[HIGH|MEDIUM|LOW] TITLE — one line of why" and tag
+              EVERY follow-up bullet: a [LOW] bullet is noted and not filed
+              by review-followups.yml, and an untagged one is filed as
+              MEDIUM, so the tag is how you keep nits out of the backlog.
             NEVER route a weakness the change introduced, a security hole,
             a weakened test or a spec divergence to FOLLOW-UP. When unsure,
             BLOCK. List BLOCKING findings first; then "## FOLLOW-UPS".
