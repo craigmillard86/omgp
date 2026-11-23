@@ -629,6 +629,7 @@ CoreEngine::Resume CoreEngine::drain_events(uint64_t now_us) {
                 // returns to Discovered is offered again by the next poll that reports a count
                 // (FR-015). A node whose record was cleared by reconcile_slot_map() already has
                 // the flag false — this is for the one still in the table but out of Discovered.
+                // mutant-ok(equivalent, cxx_assign_const): 42 in a bool reads false (assumed).
                 nodes_[idx].event_drain_pending = false;
             }
             continue; // the slot emptied (FR-010), or was never discovered: drop, never address
@@ -1151,6 +1152,7 @@ void CoreEngine::complete_request(const link::MasterEvent& ev, uint64_t now_us) 
         // owed is decided by on_event_drain() below (a nonzero remaining_count) or by the next
         // status poll of its backplane that still reports a count (FR-015). Cleared BEFORE both
         // branches, so a failed drain leaves no node permanently marked as having one in flight.
+        // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
         nodes_[node_idx].event_drain_pending = false;
     }
     if (!answered) {
@@ -1313,10 +1315,12 @@ void CoreEngine::sweep_one_module_for_events(BackplaneRecord& backplane, uint8_t
     constexpr unsigned kSpan =
         static_cast<unsigned>(ADDR_module_max) - static_cast<unsigned>(ADDR_module_min) + 1u;
     unsigned start = static_cast<unsigned>(backplane.event_sweep_next_id);
+    // mutant-ok(equivalent, cxx_lt_to_le): start == ADDR_module_min resets to the same value.
     if (start < ADDR_module_min || start > ADDR_module_max) {
         start = ADDR_module_min; // a cursor outside the span (never written here) restarts it
     }
     const unsigned offset = start - static_cast<unsigned>(ADDR_module_min);
+    // mutant-ok(equivalent, cxx_lt_to_le): the extra pass repeats n == 0, already passed over.
     for (unsigned n = 0; n < kSpan; ++n) {
         const uint8_t id = static_cast<uint8_t>(ADDR_module_min + ((offset + n) % kSpan));
         NodeRecord& node = nodes_[node_index(id)];
@@ -1463,6 +1467,7 @@ void CoreEngine::roll_event_window(NodeRecord& node, uint8_t node_id, uint64_t n
     // the same, as complete_request() does — a caller that rewound now_us would otherwise open a
     // window of ~2^64 us that never closes.
     const uint64_t start = node.event_rate_window_start_us;
+    // mutant-ok(equivalent, cxx_ge_to_gt): at now_us == start both forms give elapsed 0.
     const uint64_t elapsed = now_us >= start ? now_us - start : 0u;
     if (elapsed < kEventRateWindowUs) {
         return;
@@ -1480,6 +1485,7 @@ void CoreEngine::roll_event_window(NodeRecord& node, uint8_t node_id, uint64_t n
     // spec FR-026: "MUST NOT have further events drained from it until its rate returns within
     // budget". A full window inside budget is that return, and draining resumes on this node's
     // next turn.
+    // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
     node.event_faulted = false;
     LifecycleEvent cleared{};
     cleared.kind = LifecycleKind::NodeEventFaultCleared;
