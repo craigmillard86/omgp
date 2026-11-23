@@ -313,10 +313,34 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
                        uint8_t len, TxKind kind, uint64_t now_us);
     // Applies one terminal MasterEvent to whatever begin_request() last sent.
     void complete_request(const link::MasterEvent& ev, uint64_t now_us);
-    void on_status_block(uint64_t now_us);
+    void on_status_block(const link::MasterEvent& ev, uint64_t now_us);
     void on_slot_map(const link::MasterEvent& ev, uint64_t now_us);
     void on_identify(const link::MasterEvent& ev, uint64_t now_us);
     void on_desc_chunk(const link::MasterEvent& ev, uint64_t now_us);
+    // One answered GET_EVENT (spec FR-015/FR-016/FR-025/FR-026, protocol-l3 §3.4): decodes the
+    // GetEventResp, delivers it as LifecycleKind::ModuleEvent with its detail copied into this
+    // engine's own arena, charges the node's event-rate window, and re-queues the node while it
+    // still reports events pending. EVT_NONE, an ERROR answer and an undecodable one each
+    // deliver nothing and re-queue nothing (CLAUDE.md rule 7).
+    void on_event_drain(const link::MasterEvent& ev, uint64_t now_us);
+
+    // --- event detection and the event-rate budget (spec FR-015/FR-026) ---------------------
+
+    // spec FR-015: queues one EventDrainItem for `node_id` unless one is already queued or a
+    // GET_EVENT for it is outstanding (NodeRecord::event_drain_pending). Idempotent, so a level
+    // re-observed by every status poll cannot fill the ring.
+    void queue_event_drain(NodeRecord& node, uint8_t node_id);
+    // spec FR-026: counts one drained event against this node's current rate window and raises
+    // LifecycleKind::NodeEventFault on the drain that takes it past kEventRateBudgetPerWindow.
+    void note_event_drained(NodeRecord& node, uint8_t node_id, uint64_t now_us);
+    // spec FR-026: closes a window whose kEventRateWindowUs has elapsed — judging the count it
+    // accumulated, starting a fresh one, and clearing a fault
+    // (LifecycleKind::NodeEventFaultCleared) when the window that just closed was within budget.
+    void roll_event_window(NodeRecord& node, uint8_t node_id, uint64_t now_us);
+    // Rolls every in-use node's window, once per superframe (open_superframe()). The only place a
+    // faulted node's recovery can be noticed: while faulted it is drained not at all, so no
+    // drain of its own could ever close its window.
+    void tick_event_windows(uint64_t now_us);
 
     // --- the descriptor cache (spec FR-008, R-12) -------------------------------------------
 
@@ -413,6 +437,24 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     Ring<LifecycleEvent, LIMIT_max_nodes> pending_lifecycle_;
     Ring<ParamResultDelivery, LIMIT_max_nodes> pending_param_results_;
     uint32_t dropped_deliveries_ = 0;
+
+    // The engine-owned detail arena LifecycleEvent::module_event_detail points into
+    // (core/core_types.hpp's LIFETIME block, docs/OPEN-QUESTIONS.md 2026-09-27's recommendation,
+    // implemented by T039). l3::GetEventResp::detail is a view into link::Master's receive buffer,
+    // valid only until the next poll() (link/master.hpp:16-23), while a queued ModuleEvent is
+    // delivered arbitrarily later by drain_callbacks() (FR-021) — so the bytes are COPIED here on
+    // enqueue, and only the copy is ever handed to the application.
+    //
+    // Sized to pending_lifecycle_'s own capacity and handed out round-robin, which is what makes
+    // "no live pending event's bytes can be overwritten" true BY CONSTRUCTION rather than by a
+    // rate argument: a slot is consumed only by an enqueue that SUCCEEDED, and the bytes are
+    // written only when the ring is not full. For the cursor to return to a slot still held by a
+    // pending event, LIMIT_max_nodes successful ModuleEvent enqueues must have happened since that
+    // event's own, and since the ring is FIFO and that event is still queued, every one of them is
+    // queued too — so the ring holds LIMIT_max_nodes events, is full, and the write does not
+    // happen. The refusal is counted in dropped_deliveries_ like any other (§8a).
+    uint8_t event_detail_[LIMIT_max_nodes][kMaxEventDetailBytes] = {};
+    size_t event_detail_next_ = 0;
     // drain_callbacks() state, both of them flags rather than anything the application sets:
     // which ring the NEXT delivery comes from (carried across calls — a per-call reset would
     // re-starve the second ring whenever the budget is one), and whether a drain is already in

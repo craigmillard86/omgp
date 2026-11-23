@@ -85,6 +85,45 @@ static_assert(LIMIT_max_descriptor_bytes <= UINT16_MAX,
               "DescriptorCacheEntry::len is uint16_t: LIMIT_max_descriptor_bytes must fit it "
               "(data-model.md §5)");
 
+// --- Event-rate budget (spec FR-026, research.md R-07 correction) --------------------------
+// FR-026 says "a configured budget" and names neither a window nor a count, and there is no
+// such symbol in protocol/omgp-protocol.yaml to reference: an event-delivery rate budget is a
+// HOST policy with no wire meaning — nothing on the trunk depends on it and no module or other
+// implementation has to agree about it, so CLAUDE.md rule 1 does not reach it (the same
+// reasoning kDemoteAfterOverrunSuperframes and kMinFairShareUs are argued from in
+// core/core_engine.cpp). Declared HERE rather than in core_engine.cpp because
+// tests/unit/test_core_events.cpp asserts FR-026's behaviour against these two values rather
+// than against literals of its own (tasks.md T039, issue #710).
+//
+// WHAT THE TWO VALUES MEAN. The window is a span of SIMULATED time, measured from
+// NodeRecord::event_rate_window_start_us through the injected Clock only (CLAUDE.md rule 3), and
+// it is DERIVED from trunk §6's superframe period rather than restated in microseconds (rule 4):
+// eight superframes. The budget is how many events one node may have drained within one such
+// window before it is reported faulted — the (budget + 1)-th drain in a window raises
+// LifecycleKind::NodeEventFault.
+//
+// WHY THESE VALUES. FR-025's K = 1 already caps a node at one drained event per its own
+// superframe turn, so the budget only has to separate "a module reporting real events" from "a
+// module that answers every GET_EVENT with another event for ever". Four per eight superframes
+// is a sustained 250 events/s at TRUNK_T_poll_us, which no honest v1 module approaches — the
+// protocol gives it four event types (protocol-l3 §3.4), of which the only self-generated ones
+// are a settle completion and a fault raise/clear, all human- or hardware-paced — while a
+// flooding node drains at one per turn and crosses it within five turns. Both sides are pinned
+// by cases rather than argued here: `FR-026: an over-budget node is reported NodeEventFault and
+// stops being drained` fails if a flood does not cross the budget, and `AS1/SC-002: a nonzero
+// event_pending count drains fully within the bound` fails if an honest three-event drain does.
+constexpr uint32_t kEventRateWindowSuperframes = 8;
+constexpr uint64_t kEventRateWindowUs =
+    static_cast<uint64_t>(kEventRateWindowSuperframes) * static_cast<uint64_t>(TRUNK_T_poll_us);
+constexpr uint8_t kEventRateBudgetPerWindow = 4;
+
+// protocol-l3 §3.1/§3.4: a GET_EVENT response is `u8 event_type, u8 remaining_count, u8[] detail`,
+// so the longest detail an L3 payload can carry is what is left of LIMIT_max_l3_payload after
+// that two-byte head. Derived from the symbol, never restated (rule 4) — the same shape
+// core_engine.cpp's kDescChunkMax takes for READ_DESC. It sizes the engine-owned detail arena
+// that LifecycleEvent::module_event_detail points into (see the LIFETIME block below).
+constexpr uint8_t kMaxEventDetailBytes = static_cast<uint8_t>(LIMIT_max_l3_payload - 2);
+
 // --- §Types (contracts/core-cpp.md) --------------------------------------------------------
 
 // Result of the CoreEngine operations that can be refused at admission time. Errors by return
@@ -191,6 +230,17 @@ struct NodeRecord {
     uint8_t events_drained_this_window = 0; // count within event_rate_window_start_us
     uint64_t event_rate_window_start_us = 0;
     bool event_faulted = false; // true once the rate budget is exceeded; stops draining
+    // Whether this node already has an EventDrainItem queued, or a GET_EVENT outstanding for it.
+    // NOT a data-model.md §3 field: added by T039 because FR-015's own trigger is a LEVEL — "any
+    // node whose most recent status poll reported a nonzero event_pending count" — and a level
+    // re-observed by every poll of that node's backplane would push one item per poll into §6's
+    // ring until it refused, which is drop-NEWEST and would then refuse the re-enqueue of a node
+    // that really does have a backlog. The alternative, scanning the ring for an existing item on
+    // every enqueue decision, is LIMIT_max_nodes comparisons per candidate node per poll; this is
+    // one bool. Set when an item is queued, cleared when that item leaves the ring (issued,
+    // dropped) and when the GET_EVENT it became concludes — so the only thing it can over-report
+    // is a drain that is genuinely still in flight.
+    bool event_drain_pending = false;
     // Transaction cost / demotion (spec FR-027/FR-028, research.md R-11 correction):
     uint64_t last_measured_duration_us = 0; // 0 = never measured; seeded conservatively on use
     uint8_t consecutive_overrun_superframes = 0;

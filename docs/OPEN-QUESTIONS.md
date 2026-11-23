@@ -6486,3 +6486,120 @@ second sentence of point 1 of the 2026-10-08 "T028/T029 (#699, #700): the fair s
 demotion threshold and the demoted-item rotation are all undefined" entry. **Related:** #699,
 #700, PR #907 red team round 3 findings 1 and 2, spec FR-027/FR-028, SC-007, R-11, `tasks.md`
 T028.
+
+---
+
+## 2026-11-23 — T039 (#710): WHOSE events a status poll's `event_pending` count is, when only backplanes are polled
+
+**Context:** FR-015 makes "a nonzero `event_pending` count" the trigger for draining a node's
+queued events, and FR-002 requires the engine to collect that count "for every node it reports
+on". Three facts in the artefacts do not meet:
+
+- `protocol-l3` §3.3's status block carries exactly ONE `event_pending` byte, for the node that
+  answered. There is no per-slot count and no per-slot event mask anywhere in the v1 wire
+  format.
+- `protocol-l3` §3.1 addresses `GET_STATUS` to any node, but trunk §6's superframe — and FR-002
+  itself — give a status poll to every enrolled BACKPLANE and to no module. `CoreEngine` has
+  never issued a `GET_STATUS` to a module id, and no task in `tasks.md` adds one.
+- `EventDrainItem` (`data-model.md` §6) names a MODULE: `core/`'s event ring is indexed into the
+  `NodeRecord` table, and T029's drain loop drops an item whose `node_id` is not a Discovered
+  module. So a backplane address cannot be the subject of an event drain even in principle.
+
+Read together, the only count the host can actually observe is a BACKPLANE's, and the only thing
+it can drain is a MODULE. Nothing in the artefacts bridges the two. The nearest statement is the
+2026-09-03 "Bridged replies after ERR_BUSY" entry, which already assumes the bridge-side reading:
+"a backplane that answers event reads from its own prefetch cache (which the `event_pending`
+status summary already gestures at)". The hardware side agrees — `docs/omgp-spec-v0.7.md` A12's
+IRQ# is an SMBALERT-style per-module alert line the backplane aggregates — but IRQ# sampling,
+per-slot masking and backplane event caching are all F4/firmware matters, not L3 ones.
+
+**What T039 implemented, and what it costs.** A backplane's count is read as a SUMMARY over the
+modules it bridges for: a `GET_STATUS` answer with `event_pending > 0` enqueues one
+`EventDrainItem` for every Discovered module on that backplane, and WHICH module actually had
+events is resolved by asking them — a module with nothing queued answers `EVT_NONE` (§3.4), which
+terminates its own drain with nothing delivered and nothing re-queued. A poll naming a module id
+directly (no path produces one today) enqueues for that module alone, so a later story that polls
+modules needs no change here.
+
+Bounded and idempotent: at most one item per node at a time (`NodeRecord::event_drain_pending`),
+at most one `GET_EVENT` per node per superframe turn (FR-025), and `GET_EVENT` is the protocol's
+own drain-one-repeat-until-empty operation (CLAUDE.md rule 2). The cost of the missing
+attribution is one `GET_EVENT` per SIBLING module per poll that reports a count — paid in demand
+slots only, never in a status poll's or the enrolment probe's place (FR-028) — and, for a
+backplane that reports a standing count it cannot justify, one such sweep per status-poll period
+for ever. Measured on a one-module rig at this head: 5 `GET_EVENT`s to reach FR-026's budget, one
+per superframe turn.
+
+**Alternatives considered.** (a) Treat the count as the polled node's own and enqueue only when
+the polled id is a module — rejected: nothing in production ever polls a module, so FR-015 would
+be dead code and US4 unimplementable without a second scheduler change no task owns. (b) Add
+module-level `GET_STATUS` polling to the superframe — rejected as speculative scope: it changes
+FR-002's own traffic, costs one transaction per module per period, and belongs to a human ruling
+on the superframe plan, not to T039. (c) Wait for a per-slot event mask in `BP_SLOT_MAP` or a new
+backplane opcode — the cleanest answer and a T3 protocol change (rule 1), outside this task.
+
+**Recommendation:** ratify (the implemented reading) by stating in `protocol-l3` §3.3 that a
+BACKPLANE's `event_pending` is a summary count over the modules it bridges for, with no per-slot
+attribution in v1, and in `spec.md` FR-002/FR-015 that the host resolves attribution by draining
+each Discovered module behind a reporting backplane. If per-slot attribution is wanted instead,
+(c) is the shape to rule on — a slot bitmap alongside `BP_SLOT_MAP`'s own, which would make the
+fan-out above exact and is a YAML + docs change in one commit.
+
+**Also recorded, and NOT questions** (both are this implementation's choices where the artefacts
+are silent, in the shape `kMinFairShareUs` and `kDemoteAfterOverrunSuperframes` already took):
+
+1. **FR-026's "configured budget"** is `kEventRateWindowSuperframes = 8` (the window, derived
+   from `TRUNK_T_poll_us`, never restated in microseconds) and `kEventRateBudgetPerWindow = 4`
+   events, both in `core/core_types.hpp` and both read from there by
+   `tests/unit/test_core_events.cpp` rather than restated as literals. No YAML symbol names an
+   event-rate budget and none should: it is a host policy with no wire meaning. Reasoning and the
+   two cases that pin either side of it are at the declaration.
+2. **`NodeRecord::event_drain_pending`** is a new field, not a `data-model.md` §3 one, appended
+   for the reason given at its declaration: FR-015's trigger is a LEVEL re-observed by every
+   poll, and without the flag one item per poll would fill §6's drop-newest ring and then refuse
+   the re-enqueue of a node that really does have a backlog.
+
+**Ruling:** pending — human. **Amends:** nothing yet; the recommendation above would amend
+`protocol-l3` §3.3 and `spec.md` FR-002/FR-015, both human-ruling artefacts. **Supersedes:**
+none. **Related:** #709, #710, the 2026-09-03 "Bridged replies after ERR_BUSY" entry (same
+prefetch-cache reading), 2026-09-06 "#110 F6", spec FR-002/FR-015/FR-025/FR-026, SC-002, SC-006,
+`data-model.md` §3/§6, R-07's 2026-09-21 correction, `tasks.md` T039.
+
+---
+
+## 2026-11-23 — T039 (#710): an UNALLOCATED event type never reaches `core/` — the L3 codec refuses it
+
+**Context:** CLAUDE.md rule 7 and `protocol-l3` §4.2 require unknown event types to be IGNORED,
+and #710's own acceptance criteria asked for one step more than that: that "any unallocated code"
+arrive at the application "as a plain `ModuleEvent` carrying the type verbatim". It cannot, and
+the obstacle is one layer below `core/`: `l3::decode_get_event_resp` returns `OutOfRange` for any
+`event_type` outside §3.4's own set (`l3/l3_payload.cpp`'s `valid_event()` — the allocated codes
+plus `EVT_USER_DEFINED_MIN..MAX`), and `l3::encode_get_event_resp` refuses to build one, so
+`MockL3Node` cannot even script such an answer. An unallocated `0x05..0xEF` code is therefore
+dropped by the codec and `core/` sees an undecodable answer, which it ignores.
+
+**Why T039 left it there.** Ignoring is exactly what rule 7 mandates ("unknown event types are
+ignored"), nothing crashes, over-reads or hangs, and the node stays enrolled — *demonstrated by*
+`CLAUDE.md rule 7: a reserved or user-defined event type is passed through uninterpreted`, whose
+own section asserts both codec refusals so that a later widening of the codec shows up as that
+file's business too. Delivering such a code verbatim would mean widening an `l3/` codec and its
+golden vectors and Python reference — F1 ground truth, named Out of scope on #710, and arguably a
+rule-1 question about what `events:` in the YAML means.
+
+**What is genuinely undecided.** Whether a strictly forward-compatible host should distinguish
+"an event type I do not know" (deliver it, let the application decide) from "a malformed GET_EVENT
+answer" (ignore it). Today both are the same outcome. The reserved and user-defined codes the
+codec DOES accept — `EVT_PARAM_CHANGED_LOCALLY` and the whole `0xF0..0xFF` range — are already
+delivered verbatim with no per-type branch, so the question only bites for codes the YAML has not
+allocated at all.
+
+**Recommendation:** leave the codec as it is for v1 and record the narrowing in `protocol-l3`
+§3.4 ("a host MAY ignore an event type outside this set; the codecs refuse it"), OR — if
+forward compatibility is to be strict — widen `valid_event()` to accept any code and let the
+consumer decide, with the golden vector and Python reference moved in the same commit. The first
+is recommended: an unallocated code on a v1 wire is a protocol violation, and the second spends a
+T3 change on a case no conforming module can produce.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** #709, #710,
+CLAUDE.md rule 7, `protocol-l3` §3.4/§4.2, `l3/l3_payload.cpp` `valid_event()`,
+`protocol/omgp-protocol.yaml` `events:`.
