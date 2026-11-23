@@ -60,6 +60,7 @@
 #include "fake_clock.hpp"
 #include "heap_guard.hpp"
 #include "l3/l3_descriptor.hpp"
+#include "l3/l3_header.hpp"
 #include "l3/l3_payload.hpp"
 #include "l3/l3_types.hpp"
 #include "link/link_types.hpp"
@@ -68,6 +69,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -113,6 +115,55 @@ struct CoreEngineTestSeam {
     }
     static uint32_t superframe(CoreEngine& engine) {
         return engine.superframe_;
+    }
+    // --- white-box access for the mutation-kill cases at the end of this file ------------------
+    // These call the engine's own private steps directly. They add no behaviour: a friend
+    // declaration emits no code (core_engine.hpp), and each accessor only forwards.
+    static BackplaneRecord& backplane(CoreEngine& engine, uint8_t addr) {
+        return engine.backplanes_[CoreEngine::backplane_index(addr)];
+    }
+    static void sweep(CoreEngine& engine, uint8_t addr) {
+        engine.sweep_one_module_for_events(backplane(engine, addr), addr);
+    }
+    static void queue_drain(CoreEngine& engine, uint8_t node_id) {
+        engine.queue_event_drain(node(engine, node_id), node_id);
+    }
+    static uint8_t queue_head(CoreEngine& engine) {
+        return engine.event_queue_.at(0).node_id;
+    }
+    static void drain_events(CoreEngine& engine, uint64_t now_us) {
+        (void)engine.drain_events(now_us);
+    }
+    static void note_drained(CoreEngine& engine, uint8_t node_id, uint64_t now_us) {
+        engine.note_event_drained(node(engine, node_id), node_id, now_us);
+    }
+    static void roll(CoreEngine& engine, uint8_t node_id, uint64_t now_us) {
+        engine.roll_event_window(node(engine, node_id), node_id, now_us);
+    }
+    static void tick(CoreEngine& engine, uint64_t now_us) {
+        engine.tick_event_windows(now_us);
+    }
+    static void set_tx(CoreEngine& engine, uint8_t addr, uint8_t node_id) {
+        engine.tx_addr_ = addr;
+        engine.tx_node_ = node_id;
+    }
+    static void on_status(CoreEngine& engine, const link::MasterEvent& ev, uint64_t now_us) {
+        engine.on_status_block(ev, now_us);
+    }
+    static void on_event_drain(CoreEngine& engine, const link::MasterEvent& ev, uint64_t now_us) {
+        engine.on_event_drain(ev, now_us);
+    }
+    static bool enqueue(CoreEngine& engine, const LifecycleEvent& ev) {
+        return engine.enqueue_lifecycle(ev);
+    }
+    static size_t arena_next(CoreEngine& engine) {
+        return engine.event_detail_next_;
+    }
+    static void set_arena_next(CoreEngine& engine, size_t row) {
+        engine.event_detail_next_ = row;
+    }
+    static uint8_t arena_byte(CoreEngine& engine, size_t row, size_t i) {
+        return engine.event_detail_[row][i];
     }
 };
 } // namespace omgp::core
@@ -1150,4 +1201,434 @@ TEST_CASE("CLAUDE.md rule 5: the event path allocates nothing [events][us4]") {
     CHECK(rig.recorder().count(LifecycleKind::ModuleEvent) >= 1u);
     CHECK(rig.recorder().count(LifecycleKind::NodeEventFault) == 1u);
     CHECK(Bk::node(rig.engine(), node).event_faulted);
+}
+
+// =================================================================================================
+// Mutation-kill cases (tools/mutate.sh gate on the T039 diff, Refs #710).
+//
+// WHAT THESE ARE: white-box cases that call the engine's own private steps through
+// CoreEngineTestSeam on a bare engine, so that each boundary the rig-level cases above cross only
+// by luck is crossed on purpose. They are an oracle for the arithmetic and comparison boundaries of
+// the event path (the sweep cursor, the detail arena, the FR-026 window) and for NOTHING at message
+// level — that stays the cases above. Every expectation is stated in terms of the spec constant or
+// the structure it comes from, never a number copied from the implementation.
+// =================================================================================================
+
+namespace {
+
+namespace l3 = omgp::l3;
+
+// A bare engine: no scripts, no superframe run. Modules are placed straight into the node table.
+class Bare {
+  public:
+    Bare() : node_(clock_) {
+        callbacks_.ctx = &recorder_;
+        callbacks_.on_lifecycle = &Recorder::on_lifecycle;
+        callbacks_.on_param_result = &Recorder::on_param_result;
+        engine_ = std::make_unique<CoreEngine>(node_, clock_, omgp::ADDR_host, callbacks_);
+    }
+    CoreEngine& engine() {
+        return *engine_;
+    }
+    Recorder& recorder() {
+        return recorder_;
+    }
+    void module(uint8_t id, uint8_t backplane_addr,
+                DiscoveryState state = DiscoveryState::Discovered) {
+        omgp::core::NodeRecord& n = Bk::node(*engine_, id);
+        n.in_use = true;
+        n.backplane_addr = backplane_addr;
+        n.discovery = state;
+    }
+    // The engine's own queue, which `sweep`/`queue_drain` push to, as a node-id list in order.
+    std::vector<uint8_t> queued() {
+        std::vector<uint8_t> out;
+        const size_t n = Bk::event_queued(*engine_);
+        // Read by popping through drain is not possible without issuing; the head is enough for
+        // every case here (each queues at most one item before asserting).
+        if (n > 0) {
+            out.push_back(Bk::queue_head(*engine_));
+        }
+        return out;
+    }
+
+  private:
+    FakeClock clock_;
+    MockL3Node node_;
+    Recorder recorder_;
+    CoreCallbacks callbacks_{};
+    std::unique_ptr<CoreEngine> engine_;
+};
+
+// One L3 message as link::Master would hand it up. The buffer is filled with a guard byte so a
+// read PAST the message — which a view into link::Master's buffer permits — is detectable.
+struct Msg {
+    uint8_t buf[128];
+    omgp::link::MasterEvent ev{};
+};
+
+void build_msg(Msg& m, uint8_t opcode, uint8_t node_id, const uint8_t* payload, size_t plen) {
+    std::memset(m.buf, 0xEE, sizeof m.buf);
+    l3::Header h{};
+    h.opcode = opcode;
+    h.node_id = node_id;
+    h.seq = 0;
+    h.flags = omgp::FLAG_response;
+    h.payload_len = static_cast<uint8_t>(plen);
+    size_t w = 0;
+    REQUIRE(l3::encode_header(h, m.buf, sizeof m.buf, w) == l3::Status::Ok);
+    if (plen > 0) {
+        std::memcpy(m.buf + w, payload, plen);
+    }
+    m.ev.kind = omgp::link::MasterEvent::Answered;
+    m.ev.response = {};
+    m.ev.response.payload = m.buf;
+    m.ev.response.len = static_cast<uint8_t>(w + plen);
+}
+
+void status_msg(Msg& m, uint8_t node_id, uint8_t pending) {
+    l3::StatusBlock b{};
+    b.state = omgp::STATE_READY;
+    b.event_pending = pending;
+    uint8_t p[16];
+    size_t w = 0;
+    REQUIRE(l3::encode_status_block(b, p, sizeof p, w) == l3::Status::Ok);
+    build_msg(m, omgp::OP_GET_STATUS, node_id, p, w);
+}
+
+void event_msg(Msg& m, uint8_t node_id, uint8_t remaining, const std::vector<uint8_t>& detail) {
+    l3::GetEventResp r{};
+    r.event_type = omgp::EVT_FAULT_RAISED;
+    r.remaining_count = remaining;
+    r.detail.data = detail.empty() ? nullptr : detail.data();
+    r.detail.len = static_cast<uint8_t>(detail.size());
+    uint8_t p[96];
+    size_t w = 0;
+    REQUIRE(l3::encode_get_event_resp(r, p, sizeof p, w) == l3::Status::Ok);
+    build_msg(m, omgp::OP_GET_EVENT, node_id, p, w);
+}
+
+constexpr uint8_t kBp = omgp::ADDR_backplane_min;
+constexpr uint8_t kMin = omgp::ADDR_module_min;
+constexpr uint8_t kMax = omgp::ADDR_module_max;
+
+// One sweep step over `modules` (all Discovered behind `kBp`) from `cursor`: the module it queued
+// (0 when none) and the cursor it left.
+struct SweepResult {
+    uint8_t queued;
+    uint8_t cursor;
+};
+SweepResult sweep_from(uint8_t cursor, const std::vector<uint8_t>& modules) {
+    Bare b;
+    for (const uint8_t id : modules) {
+        b.module(id, kBp);
+    }
+    Bk::backplane(b.engine(), kBp).event_sweep_next_id = cursor;
+    Bk::sweep(b.engine(), kBp);
+    const std::vector<uint8_t> q = b.queued();
+    return SweepResult{q.empty() ? uint8_t{0} : q[0], Bk::backplane(b.engine(), kBp).event_sweep_next_id};
+}
+
+} // namespace
+
+TEST_CASE("FR-015 attribution: the sweep resumes at its cursor, wraps once, and leaves the cursor "
+          "one past the module it queued [events][us4][mutation]") {
+    // The cursor is the rotation's only state; each expectation below is the rotation's own
+    // definition ("the first Discovered module from the cursor, wrapping once; the cursor then
+    // names the id after it, wrapping at the span's end").
+    SECTION("a cursor mid-span picks the next Discovered module at or after it, not an earlier one") {
+        const SweepResult r = sweep_from(0x50, {0x20, 0x60});
+        CHECK(r.queued == 0x60);
+        CHECK(r.cursor == 0x61);
+    }
+    SECTION("a cursor past every Discovered module wraps to the first one") {
+        const SweepResult r = sweep_from(0x50, {0x20, 0x40});
+        CHECK(r.queued == 0x20);
+        CHECK(r.cursor == 0x21);
+    }
+    SECTION("a cursor on the span's last id is a real position, not an out-of-span restart") {
+        const SweepResult r = sweep_from(kMax, {kMin, kMax});
+        CHECK(r.queued == kMax);
+        CHECK(r.cursor == kMin); // one past the last id wraps to the first
+    }
+    SECTION("a cursor on the span's first id starts there") {
+        const SweepResult r = sweep_from(kMin, {kMin, 0x30});
+        CHECK(r.queued == kMin);
+        CHECK(r.cursor == kMin + 1u);
+    }
+    SECTION("a cursor below the span restarts at the first id") {
+        const SweepResult r = sweep_from(0x00, {kMin, 0x30});
+        CHECK(r.queued == kMin);
+        CHECK(r.cursor == kMin + 1u);
+    }
+    SECTION("a cursor above the span restarts at the first id") {
+        const SweepResult r = sweep_from(0xFF, {kMin, 0x30});
+        CHECK(r.queued == kMin);
+        CHECK(r.cursor == kMin + 1u);
+    }
+    SECTION("the module found several steps past the cursor is queued, and the cursor follows it") {
+        const SweepResult r = sweep_from(kMin, {0x12});
+        CHECK(r.queued == 0x12);
+        CHECK(r.cursor == 0x13);
+    }
+    SECTION("the last id in the span, found by walking to it, leaves the cursor wrapped") {
+        const SweepResult r = sweep_from(0x70, {kMax});
+        CHECK(r.queued == kMax);
+        CHECK(r.cursor == kMin);
+    }
+    SECTION("no Discovered module behind the backplane queues nothing and leaves the cursor") {
+        const SweepResult r = sweep_from(0x40, {});
+        CHECK(r.queued == 0);
+        CHECK(r.cursor == 0x40);
+    }
+}
+
+TEST_CASE("FR-015 attribution: a status poll's count sweeps the polled backplane, and only that "
+          "one [events][us4][mutation]") {
+    Msg m;
+    SECTION("a poll that names a Discovered MODULE queues that module's drain") {
+        Bare b;
+        b.module(0x20, kBp);
+        status_msg(m, 0x20, 1);
+        Bk::set_tx(b.engine(), kBp, 0x20);
+        Bk::on_status(b.engine(), m.ev, 0);
+        REQUIRE(Bk::event_queued(b.engine()) == 1);
+        CHECK(Bk::queue_head(b.engine()) == 0x20);
+    }
+    SECTION("a poll that names a module not yet Discovered queues nothing") {
+        Bare b;
+        b.module(0x20, kBp, DiscoveryState::Identifying);
+        status_msg(m, 0x20, 1);
+        Bk::set_tx(b.engine(), kBp, 0x20);
+        Bk::on_status(b.engine(), m.ev, 0);
+        CHECK(Bk::event_queued(b.engine()) == 0);
+    }
+    SECTION("a poll that names a module with no table entry queues nothing") {
+        Bare b;
+        status_msg(m, 0x20, 1);
+        Bk::set_tx(b.engine(), kBp, 0x20);
+        Bk::on_status(b.engine(), m.ev, 0);
+        CHECK(Bk::event_queued(b.engine()) == 0);
+    }
+    SECTION("a poll of a backplane advances THAT backplane's cursor and no other's") {
+        Bare b;
+        const uint8_t other = kBp + 2u;
+        b.module(0x20, other);
+        status_msg(m, 0, 1); // node id 0 is not a module: the count is a backplane summary
+        Bk::set_tx(b.engine(), other, 0);
+        Bk::on_status(b.engine(), m.ev, 0);
+        REQUIRE(Bk::event_queued(b.engine()) == 1);
+        CHECK(Bk::queue_head(b.engine()) == 0x20);
+        CHECK(Bk::backplane(b.engine(), other).event_sweep_next_id == 0x21);
+        CHECK(Bk::backplane(b.engine(), kBp).event_sweep_next_id == kMin); // untouched
+    }
+}
+
+TEST_CASE("FR-025/FR-026: the drain loop drops what is gone and keeps what is faulted "
+          "[events][us4][mutation]") {
+    SECTION("an item whose node left Discovered is dropped and its pending flag cleared") {
+        Bare b;
+        b.module(0x20, kBp);
+        Bk::queue_drain(b.engine(), 0x20);
+        REQUIRE(Bk::event_queued(b.engine()) == 1);
+        REQUIRE(Bk::node(b.engine(), 0x20).event_drain_pending);
+        Bk::node(b.engine(), 0x20).discovery = DiscoveryState::Identifying; // the slot re-identifies
+        Bk::drain_events(b.engine(), 0);
+        CHECK(Bk::event_queued(b.engine()) == 0);
+        CHECK_FALSE(Bk::node(b.engine(), 0x20).event_drain_pending);
+    }
+    SECTION("an item for a FAULTED node stays queued (rotated, not dropped, not issued)") {
+        Bare b;
+        b.module(0x20, kBp);
+        Bk::queue_drain(b.engine(), 0x20);
+        Bk::node(b.engine(), 0x20).event_faulted = true;
+        Bk::drain_events(b.engine(), 0);
+        REQUIRE(Bk::event_queued(b.engine()) == 1);
+        CHECK(Bk::queue_head(b.engine()) == 0x20);
+        CHECK(Bk::node(b.engine(), 0x20).event_drain_pending); // still owed
+    }
+}
+
+TEST_CASE("FR-016/FR-021: a delivered detail is copied exactly len bytes into the arena, which "
+          "advances one row per copied delivery and wraps [events][us4][mutation]") {
+    const size_t lens[] = {1u, 7u, static_cast<size_t>(kMaxEventDetailBytes)};
+    for (const size_t len : lens) {
+        DYNAMIC_SECTION("detail length " << len) {
+            Bare b;
+            b.module(0x20, kBp);
+            std::vector<uint8_t> detail(len);
+            for (size_t i = 0; i < len; ++i) {
+                detail[i] = static_cast<uint8_t>(0x41u + i);
+            }
+            Msg m;
+            event_msg(m, 0x20, 0, detail);
+            Bk::set_tx(b.engine(), kBp, 0x20);
+            Bk::on_event_drain(b.engine(), m.ev, 0);
+            CHECK(Bk::arena_next(b.engine()) == 1); // one row consumed
+            for (size_t i = 0; i < len; ++i) {
+                CHECK(Bk::arena_byte(b.engine(), 0, i) == detail[i]);
+            }
+            // The byte at [len] is whatever followed the detail in the buffer (the guard 0xEE
+            // here); the arena row must not have taken it. At the row's own end [len] is the
+            // NEXT row's first byte.
+            if (len < kMaxEventDetailBytes) {
+                CHECK(Bk::arena_byte(b.engine(), 0, len) == 0);
+            } else {
+                CHECK(Bk::arena_byte(b.engine(), 1, 0) == 0);
+            }
+            b.engine().drain_callbacks();
+            REQUIRE(b.recorder().deliveries.size() == 1);
+            CHECK(b.recorder().deliveries[0].detail_len == len);
+            // remaining_count 0: the node's backlog is over, nothing is re-queued (FR-015).
+            CHECK(Bk::event_queued(b.engine()) == 0);
+        }
+    }
+    SECTION("the arena wraps after its last row") {
+        Bare b;
+        b.module(0x20, kBp);
+        Bk::set_arena_next(b.engine(), omgp::LIMIT_max_nodes - 1u);
+        Msg m;
+        event_msg(m, 0x20, 0, {0x55});
+        Bk::set_tx(b.engine(), kBp, 0x20);
+        Bk::on_event_drain(b.engine(), m.ev, 0);
+        CHECK(Bk::arena_byte(b.engine(), omgp::LIMIT_max_nodes - 1u, 0) == 0x55);
+        CHECK(Bk::arena_next(b.engine()) == 0);
+    }
+    SECTION("an event with no detail consumes no arena row") {
+        Bare b;
+        b.module(0x20, kBp);
+        Msg m;
+        event_msg(m, 0x20, 0, {});
+        Bk::set_tx(b.engine(), kBp, 0x20);
+        Bk::on_event_drain(b.engine(), m.ev, 0);
+        CHECK(Bk::arena_next(b.engine()) == 0);
+        b.engine().drain_callbacks();
+        CHECK(b.recorder().deliveries.size() == 1);
+    }
+    SECTION("a full pending ring copies nothing into the arena and advances nothing") {
+        Bare b;
+        b.module(0x20, kBp);
+        LifecycleEvent filler{};
+        filler.kind = LifecycleKind::ModuleEvent;
+        filler.node_id = 0x30;
+        while (Bk::enqueue(b.engine(), filler)) {
+        }
+        Msg m;
+        event_msg(m, 0x20, 0, {0x77, 0x78});
+        Bk::set_tx(b.engine(), kBp, 0x20);
+        Bk::on_event_drain(b.engine(), m.ev, 0);
+        CHECK(Bk::arena_byte(b.engine(), 0, 0) == 0);
+        CHECK(Bk::arena_next(b.engine()) == 0);
+    }
+}
+
+TEST_CASE("FR-015/FR-025: remaining_count above zero re-queues the node, zero does not "
+          "[events][us4][mutation]") {
+    Bare b;
+    b.module(0x20, kBp);
+    Msg m;
+    event_msg(m, 0x20, 1, {});
+    Bk::set_tx(b.engine(), kBp, 0x20);
+    Bk::on_event_drain(b.engine(), m.ev, 0);
+    REQUIRE(Bk::event_queued(b.engine()) == 1);
+    CHECK(Bk::queue_head(b.engine()) == 0x20);
+}
+
+TEST_CASE("FR-026: the drained-event count saturates, a fresh window starts at the fault, and a "
+          "full window inside budget clears it [events][us4][mutation]") {
+    SECTION("the count saturates at 255 rather than wrapping to zero") {
+        Bare b;
+        b.module(0x20, kBp);
+        omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
+        n.event_faulted = true; // already faulted: the count is not reset by a new fault
+        n.events_drained_this_window = UINT8_MAX;
+        Bk::note_drained(b.engine(), 0x20, 0);
+        CHECK(n.events_drained_this_window == UINT8_MAX);
+    }
+    SECTION("the drain that takes a node over budget faults it and starts a fresh window") {
+        Bare b;
+        b.module(0x20, kBp);
+        omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
+        n.events_drained_this_window = kEventRateBudgetPerWindow; // the next one is over
+        const uint64_t now = 12345;
+        Bk::note_drained(b.engine(), 0x20, now);
+        CHECK(n.event_faulted);
+        CHECK(n.events_drained_this_window == 0);
+        CHECK(n.event_rate_window_start_us == now);
+        b.engine().drain_callbacks();
+        CHECK(b.recorder().count_for(LifecycleKind::NodeEventFault, 0x20) == 1);
+    }
+    SECTION("a window that has run exactly kEventRateWindowUs is closed") {
+        Bare b;
+        b.module(0x20, kBp);
+        omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
+        n.event_rate_window_start_us = 1000;
+        n.events_drained_this_window = 2;
+        Bk::roll(b.engine(), 0x20, 1000 + kEventRateWindowUs);
+        CHECK(n.events_drained_this_window == 0);
+        CHECK(n.event_rate_window_start_us == 1000 + kEventRateWindowUs);
+    }
+    SECTION("a window one microsecond short of kEventRateWindowUs is still open") {
+        Bare b;
+        b.module(0x20, kBp);
+        omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
+        n.event_rate_window_start_us = 1000;
+        n.events_drained_this_window = 2;
+        Bk::roll(b.engine(), 0x20, 1000 + kEventRateWindowUs - 1u);
+        CHECK(n.events_drained_this_window == 2);
+        CHECK(n.event_rate_window_start_us == 1000);
+    }
+    SECTION("a faulted node that drained exactly the budget is back within budget: cleared") {
+        Bare b;
+        b.module(0x20, kBp);
+        omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
+        n.event_faulted = true;
+        n.event_rate_window_start_us = 0;
+        n.events_drained_this_window = kEventRateBudgetPerWindow; // AT budget is within it
+        Bk::roll(b.engine(), 0x20, kEventRateWindowUs);
+        CHECK_FALSE(n.event_faulted);
+        b.engine().drain_callbacks();
+        CHECK(b.recorder().count_for(LifecycleKind::NodeEventFaultCleared, 0x20) == 1);
+    }
+    SECTION("a faulted node that drained OVER budget in the window stays faulted") {
+        Bare b;
+        b.module(0x20, kBp);
+        omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
+        n.event_faulted = true;
+        n.event_rate_window_start_us = 0;
+        n.events_drained_this_window = kEventRateBudgetPerWindow + 1u;
+        Bk::roll(b.engine(), 0x20, kEventRateWindowUs);
+        CHECK(n.event_faulted);
+    }
+    SECTION("every module id in the span has its window rolled, first to last") {
+        Bare b;
+        const uint8_t ids[] = {kMin, static_cast<uint8_t>(kMin + 1u), kMax};
+        for (const uint8_t id : ids) {
+            b.module(id, kBp);
+            omgp::core::NodeRecord& n = Bk::node(b.engine(), id);
+            n.event_faulted = true;
+            n.event_rate_window_start_us = 0;
+            n.events_drained_this_window = 0;
+        }
+        Bk::tick(b.engine(), kEventRateWindowUs);
+        for (const uint8_t id : ids) {
+            CHECK_FALSE(Bk::node(b.engine(), id).event_faulted);
+        }
+    }
+}
+
+TEST_CASE("FR-015: a node whose drain has completed can be drained again by a later burst "
+          "[events][us4][mutation]") {
+    // A completed GET_EVENT clears the node's in-flight flag (on_complete, whatever it answered);
+    // were it left set, the node would never be offered again and a second burst would be lost.
+    Rig rig;
+    const uint8_t id = rig.bring_up(omgp::ADDR_backplane_min);
+    rig.arm(omgp::ADDR_backplane_min, 1, {event_of(omgp::EVT_FAULT_RAISED, 0, {0x01})});
+    rig.run_until([&] { return rig.recorder().events_of(id).size() == 1; }, 200u);
+    rig.arm(omgp::ADDR_backplane_min, 1, {event_of(omgp::EVT_FAULT_RAISED, 0, {0x02})});
+    rig.run_until([&] { return rig.recorder().events_of(id).size() == 2; }, 200u);
+    const std::vector<Delivery> got = rig.recorder().events_of(id);
+    REQUIRE(got.size() == 2);
+    CHECK(got[1].detail_len == 1);
+    CHECK(got[1].detail[0] == 0x02);
 }
