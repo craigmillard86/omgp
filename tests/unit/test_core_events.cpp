@@ -1326,7 +1326,8 @@ SweepResult sweep_from(uint8_t cursor, const std::vector<uint8_t>& modules) {
     Bk::backplane(b.engine(), kBp).event_sweep_next_id = cursor;
     Bk::sweep(b.engine(), kBp);
     const std::vector<uint8_t> q = b.queued();
-    return SweepResult{q.empty() ? uint8_t{0} : q[0], Bk::backplane(b.engine(), kBp).event_sweep_next_id};
+    return SweepResult{q.empty() ? uint8_t{0} : q[0],
+                       Bk::backplane(b.engine(), kBp).event_sweep_next_id};
 }
 
 } // namespace
@@ -1336,7 +1337,8 @@ TEST_CASE("FR-015 attribution: the sweep resumes at its cursor, wraps once, and 
     // The cursor is the rotation's only state; each expectation below is the rotation's own
     // definition ("the first Discovered module from the cursor, wrapping once; the cursor then
     // names the id after it, wrapping at the span's end").
-    SECTION("a cursor mid-span picks the next Discovered module at or after it, not an earlier one") {
+    SECTION(
+        "a cursor mid-span picks the next Discovered module at or after it, not an earlier one") {
         const SweepResult r = sweep_from(0x50, {0x20, 0x60});
         CHECK(r.queued == 0x60);
         CHECK(r.cursor == 0x61);
@@ -1432,7 +1434,8 @@ TEST_CASE("FR-025/FR-026: the drain loop drops what is gone and keeps what is fa
         Bk::queue_drain(b.engine(), 0x20);
         REQUIRE(Bk::event_queued(b.engine()) == 1);
         REQUIRE(Bk::node(b.engine(), 0x20).event_drain_pending);
-        Bk::node(b.engine(), 0x20).discovery = DiscoveryState::Identifying; // the slot re-identifies
+        Bk::node(b.engine(), 0x20).discovery =
+            DiscoveryState::Identifying; // the slot re-identifies
         Bk::drain_events(b.engine(), 0);
         CHECK(Bk::event_queued(b.engine()) == 0);
         CHECK_FALSE(Bk::node(b.engine(), 0x20).event_drain_pending);
