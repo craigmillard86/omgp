@@ -112,6 +112,16 @@ static_assert(LIMIT_max_descriptor_bytes <= UINT16_MAX,
 // by cases rather than argued here: `FR-026: an over-budget node is reported NodeEventFault and
 // stops being drained` fails if a flood does not cross the budget, and `AS1/SC-002: a nonzero
 // event_pending count drains fully within the bound` fails if an honest three-event drain does.
+//
+// WHAT THESE VALUES DO NOT DO, measured rather than argued (CLAUDE.md rule 11). K = 1 paces a
+// settled one-module rig at one drained event per ~1900 us, so a node with budget + 1 genuinely
+// queued events crosses the budget and is reported NodeEventFault even though its backlog is
+// finite and its remaining_count is decrementing — and SC-002's own bound (4 x TRUNK_T_poll_us)
+// is already past by that event under K = 1 alone. No choice of these two constants removes that:
+// a budget above the achievable per-window rate would make FR-026's defence unreachable. The
+// collision is recorded, with the measured run and a recommendation, in docs/OPEN-QUESTIONS.md
+// 2026-11-23 ("FR-025's K=1, SC-002's bound and FR-026's rate budget cannot all hold ...");
+// ruling pending, and these values stay as they are until it lands.
 constexpr uint32_t kEventRateWindowSuperframes = 8;
 constexpr uint64_t kEventRateWindowUs =
     static_cast<uint64_t>(kEventRateWindowSuperframes) * static_cast<uint64_t>(TRUNK_T_poll_us);
@@ -296,6 +306,18 @@ struct BackplaneRecord {
     // slot_count. NOT a data-model.md §4 field — added with LifecycleKind::NodeIdPoolExhausted,
     // which cannot be reported at a bounded rate without it (docs/OPEN-QUESTIONS.md 2026-09-28).
     uint8_t exhaustion_reported[(LIMIT_bp_slot_map_max_slots + 7) / 8] = {};
+    // Where this backplane's next event-attribution sweep step resumes: the module id to start
+    // looking from, never a slot index. v1 carries no per-slot event attribution on the wire, so
+    // a backplane's nonzero `event_pending` is resolved by asking the modules behind it
+    // (docs/OPEN-QUESTIONS.md 2026-11-23) — and this field is what makes that ONE module per poll
+    // that reports a count, in rotation, instead of every sibling at once. NOT a data-model.md §4
+    // field, added for a measured reason: events are drained ahead of IDENTIFY and READ_DESC
+    // (FR-020), so a sweep of every sibling per poll lets one backplane's standing count hold its
+    // own slots' discovery indefinitely — 5 of 16 modules discovered in 400 superframes where a
+    // backplane reporting no events gets all 16. Pinned by `SC-006/US1 AS3: a backplane's standing
+    // event_pending does not delay the discovery of the modules behind it`, which fails without
+    // it. The same shape desc_stalled_superframe takes for the descriptor ring (core_engine.cpp).
+    uint8_t event_sweep_next_id = ADDR_module_min;
     // Transaction cost / demotion for this backplane's OWN status poll (spec FR-027/FR-028,
     // R-11 correction) — separate from any NodeRecord's own fields: a backplane's status poll
     // and its modules' demand traffic are measured and demoted independently, since a slow
@@ -444,9 +466,12 @@ enum class LifecycleKind : uint8_t {
 //     callback that needs the bytes afterwards copies them.
 // Where that engine-owned storage lives is not settled by §7 or §8a and is not decided here —
 // docs/OPEN-QUESTIONS.md, 2026-09-27 entry, recommends an owned detail arena alongside the §8a
-// rings, for ruling with T015 (#684). Until then this is an unproved precondition on T015, NOT
-// a property of the current repo: nothing in core/ copies detail bytes today, and nothing here
-// can make the compiler check it.
+// rings, for ruling with T015 (#684). T039 implemented that recommendation: CoreEngine owns the
+// arena (core/core_engine.hpp's event_detail_) and copies the decoder's bytes into it before the
+// enqueue, with the "no live pending event's bytes are overwritten" argument stated there and
+// exercised by `FR-016: detail is delivered verbatim and survives to drain_callbacks()`. It
+// remains a precondition on every OTHER enqueuer rather than a property this header establishes:
+// the field is still a raw non-owning pointer and nothing here can make the compiler check it.
 struct LifecycleEvent {
     LifecycleKind kind = LifecycleKind::NodeDiscovered;
     uint8_t node_id = 0; // module or backplane trunk address; 0 for BusFault/BusRecovered

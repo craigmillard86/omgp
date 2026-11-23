@@ -1257,7 +1257,7 @@ void CoreEngine::on_status_block(const link::MasterEvent& ev, uint64_t now_us) {
     }
     // WHOSE events a status poll's count is, and why the fan-out below (CLAUDE.md rule 11 — this
     // is a STATED reading of an under-specified artefact, recorded with its alternatives in
-    // docs/OPEN-QUESTIONS.md 2026-11-22, not a property proved here).
+    // docs/OPEN-QUESTIONS.md 2026-11-23, not a property proved here).
     //
     // FR-002 says the engine must collect that poll's event_pending count "for every node it
     // reports on", but protocol-l3 §3.3's block carries exactly ONE count and §3.1 addresses
@@ -1268,15 +1268,27 @@ void CoreEngine::on_status_block(const link::MasterEvent& ev, uint64_t now_us) {
     // So a backplane's count is read as a SUMMARY over the modules it bridges for — the reading
     // docs/OPEN-QUESTIONS.md's 2026-09-03 entry already assumes ("a backplane that answers event
     // reads from its own prefetch cache, which the event_pending status summary already gestures
-    // at") — and the host resolves WHICH module by asking each of them: an EventDrainItem per
-    // Discovered module on that backplane, each answered EVT_NONE by a module with nothing
+    // at") — and the host resolves WHICH module by asking them: ONE EventDrainItem per poll that
+    // reports a count, for the next Discovered module behind that backplane in rotation
+    // (BackplaneRecord::event_sweep_next_id), each answered EVT_NONE by a module with nothing
     // queued, which terminates its own drain (protocol-l3 §3.4, on_event_drain() below).
     //
+    // ONE PER POLL, not one per sibling, and this is the measured half rather than a stated
+    // reading: an EventDrainItem for every Discovered module on every poll that reports a count
+    // costs k GET_EVENTs per poll period for ever for a count the backplane cannot justify, and
+    // since events are drained ahead of the other demand kinds (FR-020) those sweeps hold the
+    // backplane's own slots out of discovery — 5 of 16 modules in 400 superframes against 16 of 16
+    // for a backplane reporting none, which is what US1 AS3 and SC-006 forbid. Demonstrated by
+    // `SC-006/US1 AS3: a backplane's standing event_pending does not delay the discovery of the
+    // modules behind it`, which fails on the fan-out-to-every-sibling form. The rotation costs a
+    // module behind a reporting backplane up to k polls to be ASKED, which is latency the missing
+    // attribution already owed and which no case can observe at k = 1.
+    //
     // Bounded, and idempotent (CLAUDE.md rule 2): at most one item per node (event_drain_pending),
-    // one GET_EVENT per node per superframe turn (FR-025), and GET_EVENT is the protocol's own
-    // "drain one, repeat until empty" operation. The cost of the missing attribution is one
-    // GET_EVENT per sibling module per poll that reports a count — paid in demand slots, never in
-    // a status poll's or the probe's place (FR-028).
+    // one GET_EVENT per node per superframe turn (FR-025), one sweep step per status poll here,
+    // and GET_EVENT is the protocol's own "drain one, repeat until empty" operation. The cost of
+    // the missing attribution is one GET_EVENT per poll that reports a count — paid in demand
+    // slots, never in a status poll's or the probe's place (FR-028).
     const size_t polled = node_index(tx_node_);
     if (polled != kNoNodeIndex) {
         // The poll named a MODULE id. Not a path trunk §6's plan creates today; written as the
@@ -1287,14 +1299,42 @@ void CoreEngine::on_status_block(const link::MasterEvent& ev, uint64_t now_us) {
         }
         return;
     }
-    for (uint8_t id = ADDR_module_min; id <= ADDR_module_max; ++id) {
+    const size_t bp = backplane_index(tx_addr_);
+    if (bp == kNoNodeIndex) {
+        return; // neither a module nor a backplane address: no record to sweep
+    }
+    sweep_one_module_for_events(backplanes_[bp], tx_addr_);
+}
+
+void CoreEngine::sweep_one_module_for_events(BackplaneRecord& backplane, uint8_t backplane_addr) {
+    // One step of the rotation described in on_status_block(): the first Discovered module behind
+    // `backplane_addr`, starting from where the last sweep left off and wrapping once. Bounded by
+    // the module-id span, allocation-free, and it queues at most one item (CLAUDE.md rule 5).
+    constexpr unsigned kSpan =
+        static_cast<unsigned>(ADDR_module_max) - static_cast<unsigned>(ADDR_module_min) + 1u;
+    unsigned start = static_cast<unsigned>(backplane.event_sweep_next_id);
+    if (start < ADDR_module_min || start > ADDR_module_max) {
+        start = ADDR_module_min; // a cursor outside the span (never written here) restarts it
+    }
+    const unsigned offset = start - static_cast<unsigned>(ADDR_module_min);
+    for (unsigned n = 0; n < kSpan; ++n) {
+        const uint8_t id = static_cast<uint8_t>(ADDR_module_min + ((offset + n) % kSpan));
         NodeRecord& node = nodes_[node_index(id)];
         // Discovered only: a node still being identified or read has no descriptor yet, and
-        // drain_events() drops an item for one rather than addressing it.
-        if (node.in_use && node.backplane_addr == tx_addr_ &&
-            node.discovery == DiscoveryState::Discovered) {
-            queue_event_drain(node, id);
+        // drain_events() drops an item for one rather than addressing it. A node that already has
+        // an item queued or a GET_EVENT outstanding is passed over rather than counted as this
+        // poll's step, so one busy module does not consume every sweep its siblings are owed.
+        if (!node.in_use || node.backplane_addr != backplane_addr ||
+            node.discovery != DiscoveryState::Discovered || node.event_drain_pending) {
+            continue;
         }
+        queue_event_drain(node, id);
+        // Advanced whether or not the ring accepted the push: a refusal is a latency cost the
+        // next poll pays for this module (queue_event_drain()), and holding the cursor still would
+        // spend every poll of a full ring on the same module.
+        backplane.event_sweep_next_id =
+            static_cast<uint8_t>(ADDR_module_min + ((offset + n + 1u) % kSpan));
+        return;
     }
 }
 
@@ -1341,7 +1381,7 @@ void CoreEngine::on_event_drain(const link::MasterEvent& ev, uint64_t now_us) {
         // an event_type outside protocol-l3 §3.4's own set (l3/l3_payload.cpp's valid_event),
         // so an unallocated 0x05..0xEF code is ignored HERE rather than delivered verbatim.
         // Ignoring it is exactly rule 7; delivering it would need an l3/ change, which is this
-        // task's own Out of scope (recorded in docs/OPEN-QUESTIONS.md 2026-11-22). Reserved and
+        // task's own Out of scope (recorded in docs/OPEN-QUESTIONS.md 2026-11-23). Reserved and
         // user-defined codes the codec DOES accept are passed through below untouched.
         return;
     }

@@ -6514,21 +6514,34 @@ IRQ# is an SMBALERT-style per-module alert line the backplane aggregates — but
 per-slot masking and backplane event caching are all F4/firmware matters, not L3 ones.
 
 **What T039 implemented, and what it costs.** A backplane's count is read as a SUMMARY over the
-modules it bridges for: a `GET_STATUS` answer with `event_pending > 0` enqueues one
-`EventDrainItem` for every Discovered module on that backplane, and WHICH module actually had
-events is resolved by asking them — a module with nothing queued answers `EVT_NONE` (§3.4), which
+modules it bridges for: a `GET_STATUS` answer with `event_pending > 0` enqueues ONE
+`EventDrainItem` for the next Discovered module behind that backplane in rotation
+(`BackplaneRecord::event_sweep_next_id`), and WHICH module actually had events is resolved by
+asking them over successive polls — a module with nothing queued answers `EVT_NONE` (§3.4), which
 terminates its own drain with nothing delivered and nothing re-queued. A poll naming a module id
 directly (no path produces one today) enqueues for that module alone, so a later story that polls
 modules needs no change here.
 
 Bounded and idempotent: at most one item per node at a time (`NodeRecord::event_drain_pending`),
-at most one `GET_EVENT` per node per superframe turn (FR-025), and `GET_EVENT` is the protocol's
-own drain-one-repeat-until-empty operation (CLAUDE.md rule 2). The cost of the missing
-attribution is one `GET_EVENT` per SIBLING module per poll that reports a count — paid in demand
-slots only, never in a status poll's or the enrolment probe's place (FR-028) — and, for a
-backplane that reports a standing count it cannot justify, one such sweep per status-poll period
-for ever. Measured on a one-module rig at this head: 5 `GET_EVENT`s to reach FR-026's budget, one
-per superframe turn.
+at most one `GET_EVENT` per node per superframe turn (FR-025), one sweep step per status poll, and
+`GET_EVENT` is the protocol's own drain-one-repeat-until-empty operation (CLAUDE.md rule 2). The
+cost of the missing attribution is one `GET_EVENT` per poll that reports a count — paid in demand
+slots only, never in a status poll's or the enrolment probe's place (FR-028) — plus up to k polls
+before the module that actually holds an event is the one asked, where k is the number of
+Discovered modules behind that backplane.
+
+**Why one per poll and not one per sibling** (this is the measured half, not a reading). The first
+implementation enqueued an item for every Discovered module on every poll that reported a count.
+Because events are drained ahead of the other demand kinds (FR-020), that lets a backplane
+reporting a standing count it cannot justify hold its own slots out of discovery: on a 16-slot
+rig, 5 of 16 modules discovered in 400 superframes and 980 `GET_EVENT`s issued, against 16 of 16
+and no `GET_EVENT` for the same rig reporting no events — the pathology
+`NodeRecord::desc_stalled_superframe` already records for `READ_DESC`, and what US1 AS3 ("does not
+block the discovery of any other slot or backplane") and SC-006 forbid. With one sweep step per
+poll the same two arms read 16 of 16 and 16 of 16, with 198 `GET_EVENT`s in the reporting arm —
+*demonstrated by* `SC-006/US1 AS3: a backplane's standing event_pending does not delay the
+discovery of the modules behind it`, which fails on the every-sibling form. Note that the reading
+ITSELF is unchanged by this and still wants a ruling; the rotation only bounds its cost.
 
 **Alternatives considered.** (a) Treat the count as the polled node's own and enqueue only when
 the polled id is a module — rejected: nothing in production ever polls a module, so FR-015 would
@@ -6603,3 +6616,59 @@ T3 change on a case no conforming module can produce.
 **Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** #709, #710,
 CLAUDE.md rule 7, `protocol-l3` §3.4/§4.2, `l3/l3_payload.cpp` `valid_event()`,
 `protocol/omgp-protocol.yaml` `events:`.
+
+---
+
+## 2026-11-23 — T039 (#710): FR-025's K=1, SC-002's bound and FR-026's rate budget cannot all hold for a backlog of five events or more
+
+**Context:** raised by the red-team pass on PR #952 (finding 2) and re-measured here. Three
+requirements meet at one number and disagree:
+
+- **FR-025** paces a node at one drained event per its own superframe turn (K=1). On a settled
+  one-module rig that is one event per status-poll period of its backplane — **measured 1900 µs**
+  per event at this head.
+- **SC-002** bounds delivery at "that node's backplane's poll period + two superframe periods" =
+  `4 × TRUNK_T_poll_us` = **8000 µs**. At 1900 µs per event only the first FOUR of a node's queued
+  events can ever meet it; the fifth lands at 9420 µs by K=1 alone.
+- **FR-026**'s budget, as this task configured it (`kEventRateBudgetPerWindow = 4` per
+  `kEventRateWindowSuperframes = 8`), then reports the FIFTH drain in a window as a flood:
+  `LifecycleKind::NodeEventFault`, after which the node is not drained for the rest of a window,
+  which pushes the sixth event to 26520 µs.
+
+Measured at this head (a scratch case, run and then deleted — it cannot be committed without
+asserting a spec breach as expected behaviour): six events queued on one module, each truthfully
+reporting its own `remaining_count` (5,4,3,2,1,0), status block reporting 6. All six are delivered
+(FR-015/FR-016 hold), `GET_EVENT` issued 17 times, `NodeEventFault` reported once, deliveries at
++1900, +3760, +5660, +7520, **+9420**, **+26520** µs against an 8000 µs bound.
+
+**What this is and is not.** Not a defect in the detection or drain code: every individual
+requirement is implemented as written, and the arithmetic above follows from FR-025 and SC-002
+alone for events 5 and beyond. What belongs to this task is the CONSTANT: with K=1 capping a
+node at ~4 drains per `kEventRateWindowUs`, any budget low enough for FR-026's defence to be
+reachable at all is also low enough to fault an honest module with budget+1 genuinely queued
+events — `note_event_drained()` counts drained events and has no way to tell a finite backlog from
+an unbounded flood (by construction: it reads neither `remaining_count` nor any finiteness
+signal). So no choice of the two constants fixes this; raising the budget above the achievable
+per-window rate would instead make FR-026 unreachable and is refused by
+`FR-026: an over-budget node is reported NodeEventFault and stops being drained`.
+
+**Alternatives considered.** (a) Raise `kEventRateBudgetPerWindow` — rejected above: unreachable
+defence, and it only moves where the honest backlog is faulted. (b) Charge the budget only while
+the node's reported `remaining_count` is NOT decreasing, so that a decrementing backlog is never a
+flood — plausible, and it makes the defence depend on a field FR-025 calls advisory and #110 F6
+says must size and bound nothing; a ruling, not an implementation detail. (c) Amend SC-002 to
+bound the FIRST event of a backlog rather than every event, which is what K=1 plus the bound can
+actually deliver. (d) Amend FR-026 to be a defence against a node that answers every `GET_EVENT`
+with another event for ever (unbounded), measured over a long window rather than a rate.
+
+**Recommendation:** (c) + (d) together — amend SC-002 to bound the first delivery of a backlog
+(every event, for backlogs within the window the bound can serve) and restate FR-026 as an
+unbounded-stream defence, then re-derive the two constants from the amended text. Until then the
+constants stay as they are, the behaviour above is the behaviour, and this PR should not be read
+as evidence that SC-002 holds for backlogs of five or more.
+
+**Ruling:** pending — human. **Amends:** nothing yet; the recommendation would amend `spec.md`
+SC-002 and FR-026, both human-ruling artefacts. **Supersedes:** none. **Related:** #709, #710, PR
+#952 red-team finding 2, spec FR-015/FR-016/FR-025/FR-026, SC-002, SC-006, R-07's 2026-09-21
+correction, the 2026-11-23 "WHOSE events a status poll's `event_pending` count is" entry,
+`tasks.md` T039/T040.

@@ -326,6 +326,12 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
 
     // --- event detection and the event-rate budget (spec FR-015/FR-026) ---------------------
 
+    // spec FR-015, with the attribution reading on_status_block() states: ONE step of a
+    // backplane's event-attribution rotation — queues an EventDrainItem for the next Discovered
+    // module behind `backplane_addr` that has none outstanding, and advances
+    // BackplaneRecord::event_sweep_next_id past it. One step per poll that reports a count, which
+    // is what keeps a count the backplane cannot justify from holding its own slots' discovery.
+    void sweep_one_module_for_events(BackplaneRecord& backplane, uint8_t backplane_addr);
     // spec FR-015: queues one EventDrainItem for `node_id` unless one is already queued or a
     // GET_EVENT for it is outstanding (NodeRecord::event_drain_pending). Idempotent, so a level
     // re-observed by every status poll cannot fill the ring.
