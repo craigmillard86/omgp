@@ -750,6 +750,10 @@ TEST_CASE("FR-024: a Get answered with a GET_PARAM response delivers that value 
     CHECK(rig.recorder().result_ids[0] == id);
     CHECK(rig.recorder().results[0].ok);
     CHECK(rig.recorder().results[0].value == 1234u);
+    // data-model.md §8's other half: `reason` is meaningful only when !ok, so a delivered value
+    // carries none. The mirror of `a failure never carries a value` (the TOTAL-decode case below):
+    // an application that reads both fields must not find a failure cause beside a good value.
+    CHECK(rig.recorder().results[0].reason == 0u);
     // A Get's outcome is a ParamResult, never a lifecycle event (data-model.md §7's own note on
     // ParamSetFailed: "Set only; a Get failure is a ParamResult").
     CHECK(rig.recorder().count(LifecycleKind::ParamSetFailed) == 0u);
@@ -1065,6 +1069,10 @@ TEST_CASE("CLAUDE.md rule 7: an answer that is not this request's own response y
     const ParamResult control = Bk::decode_get_answer(engine, good, good_len, 7, 2);
     REQUIRE(control.ok);
     REQUIRE(control.value == 1234u);
+    // data-model.md §8: `reason` is meaningful only when !ok. The decoder normalises it on the ok
+    // path for the same reason param_failure() clears `value` on every failure one — so neither
+    // field can be read as having come from the answer when it did not.
+    REQUIRE(control.reason == 0u);
 
     SECTION("an answer for a parameter or scope nobody asked about is not that request's value") {
         const ParamResult wrong_param = Bk::decode_get_answer(engine, good, good_len, 8, 2);
@@ -1098,7 +1106,15 @@ TEST_CASE("CLAUDE.md rule 7: an answer that is not this request's own response y
         h.payload_len = 0;
         REQUIRE(omgp::l3::encode_header(h, empty_set, sizeof empty_set, empty_len) ==
                 omgp::l3::Status::Ok);
-        CHECK(Bk::decode_set_answer(engine, empty_set, empty_len).ok);
+        // The positive control for the pair: an EMPTY SET_PARAM response IS the acceptance
+        // (protocol-l3 §3.1). Its whole shape is pinned, not just `ok` — a Set answer carries no
+        // value (data-model.md §8: `value` is meaningful only when a Get asked for one) and an
+        // acceptance carries no `reason`, so both read 0 and neither can arrive holding something
+        // from the message or from an earlier result.
+        const ParamResult accepted = Bk::decode_set_answer(engine, empty_set, empty_len);
+        CHECK(accepted.ok);
+        CHECK(accepted.value == 0u);
+        CHECK(accepted.reason == 0u);
         CHECK_FALSE(Bk::decode_get_answer(engine, empty_set, empty_len, 7, 2).ok);
     }
 
