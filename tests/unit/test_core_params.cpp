@@ -1114,6 +1114,43 @@ TEST_CASE("FR-024: a queued Get whose node leaves the rig before it is issued is
     }
 }
 
+TEST_CASE("FR-024: a dropped Get with a NON-ZERO request id is reported under its OWN id, not "
+          "under the outstanding transaction's [params][us2]") {
+    // The DISCRIMINATING version of the case above, whose `result_ids[0] == id` cannot fail on
+    // the obvious bug: `tx_request_id_` initialises to 0 and is never written when nothing is
+    // ever issued, and claim_request_id() hands out the first free index — so `id == 0` there
+    // too, and an implementation that read the stale tx_* correlation state instead of the item's
+    // own request id would pass. Here id 0 is PARKED on a live, undelivered operation first, so
+    // the dropped Get holds a different id and the two are separable. Red team, PR #973 round 4,
+    // F3 (raised as a follow-up; adopted because it strengthens an oracle this PR added).
+    Rig rig;
+    bring_up_quiet(rig);
+    CoreEngine& engine = rig.engine();
+    const uint8_t target = rig.a_discovered_node();
+    rig.arm_params(ParamStep{true, 1234, 0});
+
+    ParamRequestId parked = 0xFF;
+    REQUIRE(engine.get_param(target, 3, 0, parked) == CoreStatus::Ok);
+    ParamOpItem sunk{};
+    REQUIRE(Bk::pop_param(engine, sunk)); // off the ring, so it is never issued and never reported
+    REQUIRE(parked == 0u);                // the id the stale tx_request_id_ would read as
+
+    ParamRequestId id = 0xFF;
+    REQUIRE(engine.get_param(target, 7, 2, id) == CoreStatus::Ok);
+    REQUIRE(id != parked);
+    rig.unplug_slot(0);
+    REQUIRE(engine.discovery_state(target) != DiscoveryState::Discovered);
+
+    rig.run_until("the dropped Get to be reported",
+                  [&] { return Bk::results_pending(engine) == 1u; });
+    engine.drain_callbacks(kParamCapacity * 2u);
+    REQUIRE(rig.recorder().result_ids.size() == 1u);
+    CHECK(rig.recorder().result_ids[0] == id);     // its own id (R-10)
+    CHECK(rig.recorder().result_ids[0] != parked); // not the parked one, nor tx_request_id_'s 0
+    CHECK_FALSE(rig.recorder().results[0].ok);
+    CHECK(rig.recorder().results[0].reason == omgp::core::kParamFailureNoErrorCode);
+}
+
 TEST_CASE("FR-023: a queued Set whose node leaves the rig before it is issued is reported, not "
           "dropped in silence [params][us2]") {
     // The Set half of the case above: no request id to tag, so FR-023's report is the §7
