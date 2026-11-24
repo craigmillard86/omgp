@@ -769,7 +769,10 @@ CoreEngine::Resume CoreEngine::drain_params(uint64_t now_us) {
             // Reported for the same reason as the drop above, and by the same call: FR-023's
             // "never dropped" is about every drop of an accepted operation, not only the
             // reachable ones. Unreachable as argued above, so no case drives THIS call site —
-            // the property is by construction here, demonstrated at the site above.
+            // the property is by construction here, demonstrated at the site above. Which is
+            // also why no test can kill a mutation of this call: same argument, same branch,
+            // and the pop above it already carries the same label for the same reason.
+            // mutant-ok(equivalent, cxx_remove_void_call): unreachable branch; see above.
             report_param_dropped(dropped);
             continue;
         }
@@ -1642,6 +1645,25 @@ void CoreEngine::report_param_dropped(const ParamOpItem& item) {
     // of them wedge get_param()). Read from the ITEM, not from the tx_* correlation state, which
     // belongs to whatever transaction is outstanding and has nothing to do with this one.
     if (item.kind == ParamOpItem::Kind::Get) {
+        // The WHOLE ParamResult comes from this one call, so Mull's cxx_replace_scalar_call —
+        // which replaces a scalar-returning call with 42 — reaches all three of its fields at
+        // once. ParamResult is 6 bytes, so it comes back in a register rather than through
+        // memory (that is what makes this call scalar, and the survivor's existence is the
+        // evidence for it); 42 in that register lays down `ok` = 42, `value` = 0, `reason` = 0.
+        // All three read back as the real call's: `ok` is a bool clang reads by its low bit, so
+        // 42 is false — the argument already ratified on param_failure() itself, on
+        // link/health.cpp:700 and on link/responder.cpp:319 — and kParamFailureNoErrorCode IS
+        // 0x00, so `reason` and `value` coincide too.
+        //
+        // DEMONSTRATED, not assumed, by the run reporting this survivor (CI 45503179550): the
+        // case `FR-024: a queued Get whose node leaves the rig before it is issued is REPORTED,
+        // and its request id comes back` drives exactly this line and asserts the delivered id,
+        // ok, value and reason — every field a ParamResult has — and passes under the mutant.
+        // There is no fourth field left to assert, so this is a label and not a missing test.
+        // The equivalence rests on that constant being 0x00, which is a CONTROL and not a
+        // guarantee (CLAUDE.md rule 11): give kParamFailureNoErrorCode a non-zero value and the
+        // test above kills this mutant, at which point the label goes stale and is reported.
+        // mutant-ok(equivalent, cxx_replace_scalar_call): every field reads as the real call's.
         (void)enqueue_param_result(item.request_id, param_failure(kParamFailureNoErrorCode));
         return;
     }
