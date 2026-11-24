@@ -1562,6 +1562,14 @@ void CoreEngine::report_param_outcome(TxKind kind, const ParamResult& result) {
         // (R-10). The push can be REFUSED by a full ring, which §8a's drop-newest rule counts in
         // dropped_deliveries_ rather than evicting an older delivery — the one way an outcome
         // does not reach the application, and a counted one.
+        //
+        // A STATED CONSEQUENCE of that refusal, not a property this code establishes (CLAUDE.md
+        // rule 11): R-10 releases a request id when its result is DELIVERED, and a refused
+        // delivery never is, so this id is retired for the life of the engine. 128 such refusals
+        // (LIMIT_max_nodes) would leave get_param() answering RequestIdReused for ever. Left as
+        // §8a's literal behaviour rather than fixed here, because releasing the id on a refusal
+        // is a rule no artefact states; recorded with its recommendation in
+        // docs/OPEN-QUESTIONS.md (2026-11-24).
         (void)enqueue_param_result(tx_request_id_, result);
         return;
     }

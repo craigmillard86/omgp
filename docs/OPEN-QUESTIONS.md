@@ -6534,3 +6534,36 @@ follow-up if a host-side consumer ever needs the split.
 `contracts/core-cpp.md` does not define it; the constant is this implementation's choice).
 **Related:** #701, `tasks.md` T030, spec FR-023/FR-024, `data-model.md` §7/§8,
 `contracts/core-cpp.md`, `protocol/omgp-protocol.yaml` `error_codes`.
+
+## 2026-11-24 — T030 (#701): a `ParamResult` the §8a ring refuses retires its `ParamRequestId` for ever
+
+**Context:** found while implementing T030, and NOT a question T030 has to answer to land — the
+behaviour below is `data-model.md` §8a's own, applied literally. Two rules meet badly.
+`data-model.md` §8a is drop-NEWEST: a full pending-delivery ring refuses the arriving delivery,
+counts it in `dropped_deliveries_`, and never evicts a queued one. `research.md` R-10 releases a
+`ParamRequestId` when its result is DELIVERED, and `drain_callbacks()` is the only release point.
+A `GET_PARAM` outcome the ring refuses is therefore never delivered, so its id is never released:
+it is retired for the life of the engine. `LIMIT_max_nodes` (128) such refusals leave `get_param()`
+answering `CoreStatus::RequestIdReused` for ever, on a rig that is otherwise healthy. Nothing in
+spec FR-023/FR-024, §8 or §8a addresses the interaction; `contracts/core-cpp.md` does not either.
+
+**Reachability, stated precisely** (CLAUDE.md rule 11). This needs an application that calls
+`get_param()` and does not call `drain_callbacks()` often enough, 128 times over — so it is a
+consequence of an application-side fault, not of a trunk or module one, and it degrades quietly
+where that fault is otherwise merely latency. DEMONSTRATED only to the first step: the case
+`data-model.md §8a: a full result ring refuses the NEWEST arrival and counts it` shows the refusal
+and the count; nothing drives it 128 times, and nothing asserts the id's fate either way.
+
+**What was done:** nothing. The literal §8a behaviour is what T030 implements, with the
+consequence labelled at the enqueue site in `core/core_engine.cpp`.
+
+**Recommendation:** release the request id when `enqueue_param_result()` REFUSES the delivery.
+The request is over at that point — the outcome is lost and counted, and no queued record
+references the id — so reusing it cannot alias a live request, which is the whole property R-10
+exists for. It makes R-10's rule "released when its result is delivered, or when that delivery
+is refused", needs one case (fill the ring, complete a Get, show the id comes back) and turns a
+permanent degradation into a counted loss. The alternative — leave it — is defensible only if a
+host that drops 128 deliveries is considered already broken, which is a judgement for a human.
+
+**Ruling:** pending — human. **Amends:** none (neither §8a nor R-10 addresses the interaction).
+**Related:** #701, `tasks.md` T030, `data-model.md` §8/§8a, `research.md` R-10, spec FR-024.
