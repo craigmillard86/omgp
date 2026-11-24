@@ -6709,3 +6709,61 @@ or more events. **Amends:** nothing until ratified; on ratification, `spec.md` S
 (human-ruling artefacts — the amendment is human-authored or human-ratified). **Supersedes:** none.
 **Related:** the 2026-11-23 entry above, #709, #710, PR #952, spec FR-015/FR-016/FR-025/FR-026,
 SC-002, SC-006, `tasks.md` T039/T040.
+
+## 2026-11-24 — T039 (#710): PROPOSED ruling — FR-020's event priority gets a floor, so no steady event source can starve discovery
+
+**Status: PROPOSED, awaiting human ratification.** Drafted by an agent at the maintainer's request
+after PR #952's round-5 red team and review. It is not a ruling and amends nothing until a human
+marks it so (a later dated entry that references this one, or the same decision on PR #952).
+`spec.md` is unchanged.
+
+**The problem, as measured at `479bf34` (red team, ASan/UBSan, logged on #952).** FR-020 says event
+drains go ahead of descriptor-chunk reads and parameter sets; R-07 also puts the IDENTIFY scan after
+them. Read literally that is a strict priority, and a strict priority lets any steady source of
+events take every demand slot for ever. Two sources of it exist: (1) attribution PROBES — a
+backplane whose count is never justified queues one per poll (bounded since `479bf34` by the
+speculative-item alternation); (2) an endless HONEST backlog — two modules each answering every
+GET_EVENT with another event (`remaining_count > 0`), which `479bf34` deliberately leaves at full
+priority and which the red team shows starves ALL discovery. Any bound that is local to probes, or
+to one backplane, leaves (2). The rule that closes both is a floor on the non-event side.
+
+**Proposed rule (amends FR-020; R-07's order is otherwise unchanged).** In every superframe that has
+any non-event demand work pending (an IDENTIFY, a descriptor chunk, a parameter operation), at least
+every SECOND superframe's demand phase serves that work first, whatever the event ring holds;
+events keep FR-020's priority in the superframes between. Equivalently: the alternation `479bf34`
+applies to speculative items is applied to the event ring as a whole. Event items skipped by the
+floor are rotated, not dropped (the debt is kept, as for a faulted node).
+
+**What it costs, stated.** Event drains get at most one demand phase in two while non-event work is
+waiting, so a backlog's per-event latency can double in a superframe that has competing work — still
+bounded by FR-025's K = 1 and by the amended SC-002 of the 2026-11-24 entry above, and it does not
+apply when no non-event work is pending. FR-020's own justification (a parameter-set or descriptor
+burst must not push an event past SC-002's bound) still holds for the amended SC-002, because a
+single burst is finite; it was never true for an unbounded one.
+
+**Alternatives.** (a) Leave FR-020 strict and bound each source — rejected: every new source needs
+its own bound, and the red team has now found two. (b) A larger floor (one in N, N > 2) — a
+tuning choice for a later task once the amended SC-002 exists; two matches the alternation already
+used between the IDENTIFY scan and the stalled-read retry. (c) A floor for discovery only, not for
+descriptor/parameter work — rejected as inconsistent: a parameter burst has the same starvation
+shape in the other direction, though it is finite.
+
+**What this does not establish (CLAUDE.md rule 11).** That the floor closes the red team's finding 1
+is ASSUMED until a two-module endless-backlog case is written first (rule 8) and run — none exists
+yet. That the doubling is the only latency effect is ASSUMED. Nothing here changes behaviour until
+ratified.
+
+**Amends:** on ratification, `spec.md` FR-020 (a human-ruling artefact — human-authored or
+human-ratified). **Supersedes:** none. **Related:** the 2026-11-24 SC-002/FR-026 entry, #709, #710,
+PR #952 rounds 4-5, spec FR-015/FR-020/FR-025/FR-026, R-07.
+
+## 2026-11-24 — T039 (#710): RATIFIED — the FR-020 floor proposed in the entry above
+
+**Ruling: RATIFIED by the maintainer, in session ("Assume ratified"), 2026-11-24.** The rule is the
+one in the PROPOSED entry above, unchanged: while non-event demand work (IDENTIFY, descriptor chunk,
+parameter operation) is pending, at least every second superframe's demand phase serves it first;
+events keep FR-020's priority in the superframes between; skipped event items keep their place.
+**Not done by this entry:** `specs/003-host-core-engine/spec.md` FR-020 and the SC-002/FR-026 text
+are human-ruling artefacts and have NOT been edited by an agent — a human-authored amendment is
+still owed. **Implementation:** PR #952, tests first. **Supersedes:** the "PROPOSED" status of the
+entry above; **amends:** nothing in this file's history.
