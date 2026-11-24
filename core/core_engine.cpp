@@ -4,8 +4,8 @@
 // enrolment probe, in that order; trunk §7's retry/timeout/health rules live in link/, which
 // this file never reaches past (core/ sees no frame byte). protocol-l3 §3/§3.1 is the message
 // vocabulary encoded here; §4 the descriptor TLV bytes the cache holds verbatim.
-// Makes tests/unit/test_core_callback_queue.cpp (T014) and tests/unit/test_core_discovery.cpp
-// (T017) pass.
+// Makes tests/unit/test_core_callback_queue.cpp (T014), tests/unit/test_core_discovery.cpp
+// (T017) and tests/unit/test_core_params.cpp (T026) pass.
 #include "core/core_engine.hpp"
 
 #include "l3/l3_descriptor.hpp"
@@ -65,6 +65,17 @@ constexpr uint64_t kMinFairShareUs = 450;
 uint64_t worst_case_transaction_us(uint32_t bit_rate) {
     const uint64_t frame_us = static_cast<uint64_t>(link::kMaxWire) * link::byte_time_us(bit_rate);
     return 2u * frame_us + TRUNK_T_turn_min_us + TRUNK_T_gap_us;
+}
+
+// spec FR-023 / data-model.md §8: a not-ok ParamResult carrying `reason` and no value. One
+// constructor for every failure route, so a failure can never be reported with a value left in
+// it from anywhere — `value` is meaningful only when ok (§8).
+ParamResult param_failure(uint8_t reason) {
+    ParamResult r{};
+    r.ok = false;
+    r.value = 0;
+    r.reason = reason;
+    return r;
 }
 
 // protocol-l3 §3.1 / data-model.md §10: bit (i % 8) of byte i/8, LSB first, is slot i. Reads
@@ -703,29 +714,34 @@ CoreEngine::Resume CoreEngine::drain_params(uint64_t now_us) {
         size_t written = 0;
         // mutant-ok(equivalent, cxx_init_const): overwritten by the encoder before any read.
         l3::Status st = l3::Status::Ok;
-        // Which encoder runs is as unobservable as the fields below: a SET_PARAM carrying a
-        // Get's payload is refused by the MODULE, whose answer nothing decodes at this head.
-        // mutant-ok(accepted, cxx_eq_to_ne): no oracle for a request's payload until T030.
+        // Which encoder runs is observable from T030 on: a Get encoded as a SET_PARAM is answered
+        // with §3.1's empty acceptance, which decode_get_answer() reports as a failure, so
+        // `FR-024: a Get answered with a GET_PARAM response delivers that value` fails on this
+        // mutation.
         if (item.kind == ParamOpItem::Kind::Set) {
             l3::SetParamReq req{};
-            // The three fields of the REQUEST, and the two of a Get below, are not observable at
-            // this head: nothing decodes a parameter answer, so no test can tell a SET_PARAM
-            // carrying param_id 5 from one carrying 42 — the module answers either. T030 decodes
-            // GetParamResp and reports FR-023's failure, and its own tests are where these
-            // become killable. Labelled `accepted` rather than `equivalent` because the mutants
-            // are NOT behaviour-preserving; they are unobservable with the oracle that exists.
-            // mutant-ok(accepted, cxx_assign_const): unobservable until T030 decodes an answer.
+            // A SET_PARAM request's own three fields are STILL unobservable here, and the reason
+            // is the double rather than this engine: MockL3Node's ParamStep answers a set from a
+            // script and keeps no parameter state, so no test can read back what was written and
+            // a SET_PARAM carrying param_id 5 is answered exactly as one carrying 42. What T030
+            // made killable is the GET path below, where the module echoes the request's own
+            // param_id and scope back and decode_get_answer() checks them. Labelled `accepted`
+            // rather than `equivalent` because the mutants are NOT behaviour-preserving; they are
+            // unobservable with the oracle that exists. Killing them needs a double that
+            // remembers a written value (a MockL3Node contract change, #683/#684).
+            // mutant-ok(accepted, cxx_assign_const): no oracle reads a written parameter back.
             req.param_id = item.param_id;
-            // mutant-ok(accepted, cxx_assign_const): as above — no oracle until T030.
+            // mutant-ok(accepted, cxx_assign_const): as above — the double keeps no param state.
             req.scope = item.scope;
-            // mutant-ok(accepted, cxx_assign_const): as above — no oracle until T030.
+            // mutant-ok(accepted, cxx_assign_const): as above — the double keeps no param state.
             req.value = item.value;
             st = l3::encode_set_param(req, payload, sizeof payload, written);
         } else {
             l3::GetParamReq req{};
-            // mutant-ok(accepted, cxx_assign_const): as above — no oracle until T030.
+            // Killable from T030 on: the module echoes these two back (protocol-l3 §3.1) and
+            // decode_get_answer() refuses an answer whose param_id or scope disagrees with the
+            // request, so a mutation here turns the FR-024 case's ok result into a not-ok one.
             req.param_id = item.param_id;
-            // mutant-ok(accepted, cxx_assign_const): as above — no oracle until T030.
             req.scope = item.scope;
             st = l3::encode_get_param_req(req, payload, sizeof payload, written);
         }
@@ -738,13 +754,13 @@ CoreEngine::Resume CoreEngine::drain_params(uint64_t now_us) {
             (void)param_queue_.pop(dropped);
             continue;
         }
-        // ONE comparison for both, and not only to avoid repeating it: as two, the TxKind's own
-        // comparison was unobservable on its own — account_overrun() groups both parameter kinds
-        // as "not a status poll" and complete_request()'s switch gives them one shared arm — so
-        // it needed a label where the opcode's did not. Derived from one `is_set`, a mutation
-        // reaches the OPCODE too, which `a Set alone produces a SET_PARAM and no GET_PARAM`
-        // fails on. The two TxKinds stay separate values because T030 and T039 must tell them
-        // apart; nothing at this head does.
+        // ONE comparison for both, and not only to avoid repeating it: derived from one `is_set`,
+        // a mutation reaches the OPCODE too, which `a Set alone produces a SET_PARAM and no
+        // GET_PARAM` fails on. From T030 on the TxKind's own half is observable as well —
+        // complete_request() now gives the two kinds separate arms, so a Set reported as a Get
+        // would deliver a ParamResult under tx_request_id_ (0 for a Set) instead of a
+        // ParamSetFailed, which `FR-023: a Set answered ERROR enqueues exactly one
+        // ParamSetFailed` fails on.
         const bool is_set = item.kind == ParamOpItem::Kind::Set;
         const uint8_t opcode = is_set ? OP_SET_PARAM : OP_GET_PARAM;
         const TxKind kind = is_set ? TxKind::ParamSet : TxKind::ParamGet;
@@ -752,7 +768,14 @@ CoreEngine::Resume CoreEngine::drain_params(uint64_t now_us) {
                           static_cast<uint8_t>(written), kind, now_us)) {
             ParamOpItem issued{};
             (void)param_queue_.pop(issued); // removed only once it is actually on the wire
-            demand_issued_ = true;          // as in drain_events(): one demand item per budget
+            // The outstanding transaction's own correlation state (trunk §3: one at a time), so
+            // complete_request() can match the answer to the request that asked for it and
+            // report the outcome against the right request id (R-10, protocol-l3 §3.1). Taken
+            // from the POPPED item, which is the one that went out.
+            tx_param_id_ = issued.param_id;
+            tx_param_scope_ = issued.scope;
+            tx_request_id_ = issued.request_id;
+            demand_issued_ = true; // as in drain_events(): one demand item per budget
             return Resume::Issued;
         }
         return Resume::Refused;
@@ -1122,6 +1145,15 @@ void CoreEngine::complete_request(const link::MasterEvent& ev, uint64_t now_us) 
         // unfinished descriptor read re-queues its chunk below only on an answer — the node
         // stays in ReadingDescriptor and its leader's entry keeps what it has, so the read
         // resumes rather than restarting. AS3's "retried, not abandoned" is that scan.
+        // spec FR-023: link::Master has already spent trunk §7's retries on this transaction and
+        // given up, so the operation has FAILED and the application is told — "exhaustion of the
+        // link layer's own retry" is one of the three routes FR-023 names, and the only one with
+        // no answer to read a reason from. No core-level retry, backoff or expiry is applied: that
+        // policy is L2's (docs/OPEN-QUESTIONS.md 2026-09-06), and the item has already left the
+        // ring, so one failed transaction is exactly one report.
+        if (kind == TxKind::ParamGet || kind == TxKind::ParamSet) {
+            report_param_outcome(kind, param_failure(kParamFailureNoErrorCode));
+        }
         if (kind == TxKind::ReadDesc && node_idx != kNoNodeIndex) {
             // No progress was made, so this node has spent its one chunk attempt for this
             // superframe (NodeRecord::desc_stalled_superframe): the re-queued item below must not
@@ -1176,14 +1208,24 @@ void CoreEngine::complete_request(const link::MasterEvent& ev, uint64_t now_us) 
     case TxKind::ReadDesc:
         on_desc_chunk(ev, now_us);
         break;
-    case TxKind::EventDrain:
-    case TxKind::ParamSet:
     case TxKind::ParamGet:
-        // T029 ISSUES these; T030 and T039 read their answers. Until then the answer's whole
-        // contribution is its timing, already taken above for the budget and the demotion
-        // accounting (FR-027) — a GetParamResp is not decoded, no FR-023 report is made, and no
-        // event detail is delivered. Named here rather than left to a default, so that adding a
-        // kind cannot silently fall through this switch (-Werror=switch is what enforces it).
+        // spec FR-024: the answer is decoded and its value — or the failure it reports — is
+        // enqueued against the request id this transaction carried (R-10). Decoded here and not
+        // in a `case` of its own below, because a Get and a Set differ only in which answer
+        // shape counts as success (protocol-l3 §3.1).
+        report_param_outcome(kind, decode_get_answer(ev.response.payload, ev.response.len,
+                                                     tx_param_id_, tx_param_scope_));
+        break;
+    case TxKind::ParamSet:
+        // spec FR-023: only a FAILURE is reported, as LifecycleKind::ParamSetFailed; §3.1's
+        // empty acceptance payload is silent (a Set carries no request id — data-model.md §6).
+        report_param_outcome(kind, decode_set_answer(ev.response.payload, ev.response.len));
+        break;
+    case TxKind::EventDrain:
+        // T039 reads this answer. Until then its whole contribution is its timing, already taken
+        // above for the budget and the demotion accounting (FR-027) — no event detail is
+        // delivered. Named here rather than left to a default, so that adding a kind cannot
+        // silently fall through this switch (-Werror=switch is what enforces it).
         break;
     case TxKind::Probe:
     case TxKind::None:
@@ -1429,6 +1471,111 @@ void CoreEngine::on_desc_chunk(const link::MasterEvent& ev, uint64_t now_us) {
     }
     entry->complete = true;
     attach_descriptor(*entry);
+}
+
+// --- parameter reporting (spec FR-023/FR-024, protocol-l3 §3.1) --------------------------------
+
+bool CoreEngine::param_answer_payload(const uint8_t* resp, size_t len, uint8_t expect,
+                                      l3::Bytes& out_payload, ParamResult& out_result) const {
+    // Every byte below is read by an l3 codec, never indexed here (R-02: core/ decodes payloads
+    // only through l3/l3_payload.hpp and l3/l3_header.hpp). decode_message() validates the
+    // header AND that the message is exactly payload_len bytes long, so a truncated or
+    // over-long answer is refused before any payload byte is looked at (CLAUDE.md rule 7).
+    l3::Header hdr{};
+    if (l3::decode_message(resp, len, hdr, out_payload) != l3::Status::Ok) {
+        out_result = param_failure(kParamFailureNoErrorCode);
+        return false;
+    }
+    if (hdr.opcode == expect) {
+        return true;
+    }
+    // protocol-l3 §3.1: a failure arrives as OP_ERROR with flags.error set. Any OTHER opcode is
+    // an answer to a question this engine did not ask — a bridged answer that went astray, or a
+    // protocol version this host does not know — and is reported as a failure rather than
+    // interpreted (spec FR-030's forward-compatibility rule).
+    if (hdr.opcode != OP_ERROR) {
+        out_result = param_failure(kParamFailureNoErrorCode);
+        return false;
+    }
+    l3::ErrorResp err{};
+    if (l3::decode_error_resp(out_payload.data, out_payload.len, err) != l3::Status::Ok) {
+        // An ERROR whose code this protocol version does not allocate (l3::decode_error_resp
+        // range-checks against the generated ERROR_CODES table). Unknown is IGNORED, not
+        // guessed at: the failure is still reported, with no code of its own.
+        out_result = param_failure(kParamFailureNoErrorCode);
+        return false;
+    }
+    out_result = param_failure(err.code);
+    return false;
+}
+
+ParamResult CoreEngine::decode_get_answer(const uint8_t* resp, size_t len, uint8_t param_id,
+                                          uint8_t scope) const {
+    l3::Bytes payload{};
+    ParamResult result{};
+    if (!param_answer_payload(resp, len, OP_GET_PARAM, payload, result)) {
+        return result; // an ERROR's code, or no code at all — either way, not a value
+    }
+    l3::GetParamResp resp_body{};
+    if (l3::decode_get_param_resp(payload.data, payload.len, resp_body) != l3::Status::Ok) {
+        return param_failure(kParamFailureNoErrorCode);
+    }
+    // protocol-l3 §3.1: the GET_PARAM response echoes param_id and scope. A mismatch means this
+    // answer is about a DIFFERENT parameter, so delivering its value under this request's id
+    // would report a reading nobody asked for as if it were the one asked for. Not reachable
+    // from a conforming node — but seq correlation lives at L3/L2 and this is the only check
+    // that the ANSWER is about the request, so it is made here rather than assumed.
+    if (resp_body.param_id != param_id || resp_body.scope != scope) {
+        return param_failure(kParamFailureNoErrorCode);
+    }
+    ParamResult ok{};
+    ok.ok = true;
+    ok.value = resp_body.value;
+    ok.reason = 0;
+    return ok;
+}
+
+ParamResult CoreEngine::decode_set_answer(const uint8_t* resp, size_t len) const {
+    l3::Bytes payload{};
+    ParamResult result{};
+    if (!param_answer_payload(resp, len, OP_SET_PARAM, payload, result)) {
+        return result;
+    }
+    // protocol-l3 §3.1: "Responses to SELECT_CHANNEL, SET_BYPASS and SET_PARAM carry an empty
+    // payload (acceptance); failures arrive as ERROR." A SET_PARAM response carrying anything
+    // else is not an acceptance this engine can read as one, so it is reported rather than
+    // treated as success — FR-023 is about never ending a parameter operation in silence, and
+    // silently accepting an answer nobody can parse is the one outcome it rules out.
+    if (payload.len != 0) {
+        return param_failure(kParamFailureNoErrorCode);
+    }
+    ParamResult ok{};
+    ok.ok = true;
+    ok.value = 0;
+    ok.reason = 0;
+    return ok;
+}
+
+void CoreEngine::report_param_outcome(TxKind kind, const ParamResult& result) {
+    if (kind == TxKind::ParamGet) {
+        // spec FR-024: the value OR the failure, always, tagged with the id get_param() returned
+        // (R-10). The push can be REFUSED by a full ring, which §8a's drop-newest rule counts in
+        // dropped_deliveries_ rather than evicting an older delivery — the one way an outcome
+        // does not reach the application, and a counted one.
+        (void)enqueue_param_result(tx_request_id_, result);
+        return;
+    }
+    // A Set. Success is silent: it carries no request id to tag a ParamResult with (§6), and
+    // FR-023 asks for the FAILURE to be reported, not the acceptance.
+    if (result.ok) {
+        return;
+    }
+    LifecycleEvent ev{};
+    ev.kind = LifecycleKind::ParamSetFailed;
+    ev.node_id = tx_node_;
+    ev.failed_param_id = tx_param_id_;
+    ev.failed_reason = result.reason;
+    (void)enqueue_lifecycle(ev);
 }
 
 DescriptorCacheEntry* CoreEngine::find_descriptor(uint8_t module_type, uint16_t desc_len,

@@ -305,6 +305,42 @@ struct ParamResult {
                         // link/transaction-level failure (contracts/core-cpp.md)
 };
 
+// The `reason` a ParamResult, and the `failed_reason` a LifecycleKind::ParamSetFailed (§7),
+// carries for a failure that has NO protocol-l3 §3.1 error code of its own. Two kinds of
+// failure reach it: the transaction never answered at all (link::Master spent trunk §7's
+// retries and gave up), and the answer could not be read as an answer to the request that was
+// sent — undecodable, an unexpected opcode, an ERROR whose code this protocol version does not
+// allocate, or a GET_PARAM response echoing a parameter or scope nobody asked about (CLAUDE.md
+// rule 7: such an answer is refused, never followed).
+//
+// WHY 0x00, and what is and is not established about it (CLAUDE.md rule 11).
+// data-model.md §8 says `reason` carries "a protocol-l3 §3.1 error code, or a
+// link/transaction-level failure" and defers the second encoding to contracts/core-cpp.md,
+// which never defines it; this constant is therefore T030's own choice, recorded with its
+// alternatives in docs/OPEN-QUESTIONS.md (2026-11-24) for ruling. 0x00 is the value
+// `protocol/omgp-protocol.yaml`'s `error_codes` block leaves unallocated, which is what makes
+// it distinguishable from every code a module can report — PROVED BY CONSTRUCTION, twice over:
+// the static_assert below fails the build if a future YAML allocates it, and
+// l3::decode_error_resp refuses any code outside the generated ERROR_CODES table, so no
+// decoded ERROR can ever carry this value up to the application.
+constexpr uint8_t kParamFailureNoErrorCode = 0x00;
+
+// Whether `code` is one of the protocol's own error codes, read from the generated table rather
+// than from a restated list (CLAUDE.md rule 1). constexpr so the assert below is a build-time
+// fact and not a run-time check nobody runs.
+constexpr bool is_l3_error_code(uint8_t code) {
+    for (size_t i = 0; i < sizeof ERROR_CODES / sizeof ERROR_CODES[0]; ++i) {
+        if (ERROR_CODES[i] == code) {
+            return true;
+        }
+    }
+    return false;
+}
+static_assert(!is_l3_error_code(kParamFailureNoErrorCode),
+              "kParamFailureNoErrorCode must stay unallocated in the YAML's error_codes block: "
+              "a transaction-level failure that equals a module's own error code would make the "
+              "two indistinguishable to the application (data-model.md §8, spec FR-023)");
+
 // --- §6 Demand items (R-07) ----------------------------------------------------------------
 // Three fixed-capacity rings (LIMIT_max_nodes entries each), drained in this fixed order every
 // superframe after the status polls and the enrolment probe (spec FR-020, R-07).

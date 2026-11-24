@@ -6486,3 +6486,51 @@ second sentence of point 1 of the 2026-10-08 "T028/T029 (#699, #700): the fair s
 demotion threshold and the demoted-item rotation are all undefined" entry. **Related:** #699,
 #700, PR #907 red team round 3 findings 1 and 2, spec FR-027/FR-028, SC-007, R-11, `tasks.md`
 T028.
+
+## 2026-11-24 — T030 (#701): `ParamResult::reason` has no encoding for a failure that carries no L3 error code
+
+**Context:** spec FR-023 requires that a `SET_PARAM`/`GET_PARAM` failure reach the application
+"naming the operation and the reason", and names routes to one that carry no error response at
+all: exhaustion of the link layer's own retry, and — this task's addition, from CLAUDE.md rule 7
+— an answer that cannot be read as an answer to the request that was sent (undecodable, an
+unexpected opcode, an `ERROR` whose code this protocol version does not allocate, or a
+`GET_PARAM` response echoing a parameter or scope nobody asked about). `data-model.md` §8
+L169-171 says `ParamResult::reason` carries "a protocol-l3 §3.1 error code, or a
+link/transaction-level failure (contracts/core-cpp.md)" and defers that second encoding to
+`contracts/core-cpp.md`, which never defines it. `LifecycleEvent::failed_reason` (§7) has the
+same gap, since `ParamSetFailed` reports the same two failure classes. So there was no
+representable value for "this operation failed and no module said why", and `reason` is a
+`uint8_t` with no room for a tag bit.
+
+**What was done:** `kParamFailureNoErrorCode = 0x00` in `core/core_types.hpp`, ONE named
+constant for every failure with no L3 code of its own. `0x00` is the value
+`protocol/omgp-protocol.yaml`'s `error_codes` block leaves unallocated (the codes run
+`0x01`-`0x06`).
+
+**What makes it distinguishable from a module's own code, and what that does NOT establish**
+(CLAUDE.md rule 11). Proved BY CONSTRUCTION, on two independent legs: a `static_assert` in
+`core_types.hpp` reads the generated `ERROR_CODES` table and fails the build if a future YAML
+allocates `0x00`; and `l3::decode_error_resp` range-checks a received code against that same
+table, so an `ERROR` carrying `0x00` is refused by the codec and can never be reported up to the
+application as a module's own code. DEMONSTRATED BY the case `FR-023: a Get whose transaction
+never answers is delivered as a not-ok result, not left pending for ever`, which pins the value
+and its inequality with two allocated codes. What this does NOT establish is that an application
+can tell the failure classes above apart from one another: they all arrive as this single value,
+and only `ParamSetFailed`'s presence (versus a `ParamResult`) distinguishes a Set's failure from
+a Get's. That was a deliberate choice over several constants, because the artefacts define no
+vocabulary to name them in and FR-023 asks for the operation and A reason, not for a taxonomy.
+
+**Recommendation:** rule on one of three. (a) Ratify `0x00` and record it in `data-model.md` §8
+beside the `reason` field — the smallest change, and what the code now documents. (b) Allocate a
+distinct non-protocol range (e.g. `0xF0`-`0xFF`) in `core_types.hpp` and give those classes their
+own constants, which costs nothing on the wire (these values never leave the host) and makes
+"never answered" distinguishable from "answered unreadably" — worth doing if an application is
+expected to act differently on the two, and nothing in User Story 2 says it is. (c) Carry the
+distinction in a separate field rather than in `reason`, which widens `ParamResult` and
+`LifecycleEvent` for a case no requirement names. (a) is recommended now, with (b) as the
+follow-up if a host-side consumer ever needs the split.
+
+**Ruling:** pending — human. **Amends:** none (`data-model.md` §8 defers this encoding and
+`contracts/core-cpp.md` does not define it; the constant is this implementation's choice).
+**Related:** #701, `tasks.md` T030, spec FR-023/FR-024, `data-model.md` §7/§8,
+`contracts/core-cpp.md`, `protocol/omgp-protocol.yaml` `error_codes`.

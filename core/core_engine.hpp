@@ -269,10 +269,10 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     enum class Phase : uint8_t { Poll, Demand, Probe, Closed };
     // What the transaction currently outstanding at link::Master IS, so its terminal
     // MasterEvent can be attributed. One at a time (trunk §3), so one value, not a table.
-    // ParamSet/ParamGet are T029's: a queued ParamOpItem's transaction. Their ANSWER is not
-    // decoded here — T030 owns GetParamResp decoding and FR-023's ParamSetFailed report — so
-    // at this head a parameter transaction's terminal event is consumed for its timing alone,
-    // which is what the budget (FR-027) and the demotion accounting need from it.
+    // ParamSet/ParamGet are a queued ParamOpItem's transaction, and the two stay separate values
+    // because their ANSWERS differ: a GET_PARAM response carries a value for FR-024's
+    // on_param_result, where a SET_PARAM's success is empty and only its failure is reported
+    // (FR-023, as a LifecycleKind::ParamSetFailed) — see report_param_outcome().
     enum class TxKind : uint8_t {
         None,
         StatusPoll,
@@ -317,6 +317,34 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     void on_slot_map(const link::MasterEvent& ev, uint64_t now_us);
     void on_identify(const link::MasterEvent& ev, uint64_t now_us);
     void on_desc_chunk(const link::MasterEvent& ev, uint64_t now_us);
+
+    // --- parameter reporting (spec FR-023/FR-024, protocol-l3 §3.1) -------------------------
+
+    // Splits one answer to a parameter request into its payload. protocol-l3 §3.1: an answer is
+    // either that request's own opcode with FLAG_response set, or OP_ERROR. Returns true, with
+    // `out_payload` set, only for the former; for everything else it returns false and fills
+    // `out_result` with the not-ok ParamResult that answer means — an ERROR's own code, read
+    // only through l3::decode_error_resp, and kParamFailureNoErrorCode for an undecodable
+    // message, an unexpected opcode, or an ERROR whose code this protocol version does not
+    // allocate. TOTAL for any bytes: nothing here indexes a payload by hand (R-02 keeps every
+    // payload byte behind l3/l3_payload.hpp), so an arbitrary message cannot over-read.
+    bool param_answer_payload(const uint8_t* resp, size_t len, uint8_t expect,
+                              l3::Bytes& out_payload, ParamResult& out_result) const;
+    // The answer to a GET_PARAM for (`param_id`, `scope`) as the ParamResult FR-024 delivers:
+    // ok with the value only for a GET_PARAM response whose own param_id and scope MATCH the
+    // request (protocol-l3 §3.1 echoes both back), never for an answer to a different question.
+    ParamResult decode_get_answer(const uint8_t* resp, size_t len, uint8_t param_id,
+                                  uint8_t scope) const;
+    // The answer to a SET_PARAM. protocol-l3 §3.1: a success response carries an EMPTY payload
+    // (acceptance) and failures arrive as ERROR, so ok means "accepted" and carries no value.
+    ParamResult decode_set_answer(const uint8_t* resp, size_t len) const;
+    // FR-023/FR-024's single reporting point for a parameter transaction that has concluded,
+    // however it concluded: a Get's outcome is always a ParamResult tagged with its request id
+    // (R-10, data-model.md §8), a Set's FAILURE is a LifecycleKind::ParamSetFailed naming the
+    // parameter and the reason (§7), and a Set's success is silent — a Set carries no request
+    // id to tag anything with (§6). Reads the outstanding transaction's own correlation state
+    // (tx_param_id_/tx_request_id_ below), so it is called only from complete_request().
+    void report_param_outcome(TxKind kind, const ParamResult& result);
 
     // --- the descriptor cache (spec FR-008, R-12) -------------------------------------------
 
@@ -458,6 +486,14 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     uint16_t tx_offset_ = 0;    // ReadDesc only: the offset this chunk asked for (R-09)
     uint64_t tx_issued_us_ = 0; // for FR-027's measurement — never a wall clock (rule 3)
     uint8_t l3_seq_ = 0;        // protocol-l3 §3: request/response correlation tag
+    // ParamSet/ParamGet only: the operation this transaction carries, kept so its answer can be
+    // matched to the request that asked for it (protocol-l3 §3.1 echoes param_id and scope back)
+    // and so its outcome can be reported against the right request id (R-10). One transaction at
+    // a time (trunk §3), so one set of fields rather than a table; written by drain_params() when
+    // the request actually goes out, read by complete_request() when it concludes.
+    uint8_t tx_param_id_ = 0;
+    uint8_t tx_param_scope_ = 0;
+    ParamRequestId tx_request_id_ = 0;
     // The rate this engine last put on the wire, so a probe handed out at the SAME rate does
     // not call link::Master::set_bit_rate() and count a rate change that did not happen.
     uint32_t wire_rate_ = TRUNK_bit_rate;
