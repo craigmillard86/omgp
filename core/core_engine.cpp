@@ -271,12 +271,32 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
     // traffic with no ring of its own (R-07 names three kinds, not four) and sits after the
     // descriptor chunks deliberately: finishing a descriptor read already in flight releases a
     // node to Discovered, while starting another node's identity does not.
-    const Resume ev_outcome = drain_events(now_us);
-    if (ev_outcome == Resume::Issued) {
-        return true;
-    }
-    if (ev_outcome == Resume::Refused) {
-        return false; // FR-005: the budget is spent; every unsent item carries over
+    //
+    // FR-020 FLOOR (docs/OPEN-QUESTIONS.md 2026-11-24, ratified by the maintainer; spec.md still
+    // owes a human-authored amendment). Read as a strict priority, "events first" lets any steady
+    // source of events take every demand slot for ever: probes a backplane's unjustified count
+    // provokes, or an endless HONEST backlog (remaining_count > 0 on every answer). Both were
+    // measured on PR #952 — 5 of 32 and 0 of 4 modules discovered in 400 superframes. So when
+    // non-event work is pending, the superframe after one whose slot went to an event serves that
+    // work FIRST, which is at least every second superframe's demand phase; events keep FR-020's
+    // priority in the superframes between. Work-conserving: if the non-event passes issue nothing
+    // the event ring still gets the slot below, so the floor never idles the phase. A skipped event
+    // item keeps its place at the head (nothing is popped), so FR-005's carry-over by identity and
+    // FR-025's turn order are untouched.
+    //
+    // Demonstrated by `FR-020 floor: an endless honest event backlog does not starve discovery`
+    // (0 of 4 at three and four flooding backplanes before the floor) and `SC-006/US1 AS3:
+    // SEVERAL backplanes' ...` (5 of 32 before). NOT demonstrated: a bound in superframes on any
+    // one module's discovery under an arbitrary mix — the cases measure a horizon.
+    const bool floor = event_floor_defers();
+    if (!floor) {
+        const Resume ev_outcome = drain_events(now_us);
+        if (ev_outcome == Resume::Issued) {
+            return true;
+        }
+        if (ev_outcome == Resume::Refused) {
+            return false; // FR-005: the budget is spent; every unsent item carries over
+        }
     }
     // Iterative, not recursive: the queue holds up to LIMIT_max_nodes items and a stale-item
     // chain must not become that many stack frames on a target with a fixed task stack
@@ -402,7 +422,37 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
             return false;
         }
     }
+    if (floor) {
+        // The floor deferred the event ring and nothing else could be issued: the slot goes to it.
+        return drain_events(now_us) == Resume::Issued;
+    }
     return false;
+}
+
+bool CoreEngine::non_event_demand_pending() const {
+    if (desc_held_ || !desc_queue_.empty() || !param_queue_.empty()) {
+        return true;
+    }
+    for (uint8_t id = ADDR_module_min; id <= ADDR_module_max; ++id) {
+        const NodeRecord& node = nodes_[node_index(id)];
+        if (!node.in_use) {
+            continue;
+        }
+        // Owed IDENTIFY (Undiscovered, or Identifying: an unanswered module is retried, never
+        // abandoned — AS3) or a descriptor read. A module that never answers keeps this true for
+        // ever, which is the stated cost: events then get every second superframe's demand phase.
+        if (node.discovery == DiscoveryState::Undiscovered ||
+            node.discovery == DiscoveryState::Identifying ||
+            node.discovery == DiscoveryState::ReadingDescriptor) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool CoreEngine::event_floor_defers() const {
+    return event_issued_superframe_ != 0u && event_issued_superframe_ + 1u == superframe_ &&
+           non_event_demand_pending();
 }
 
 CoreEngine::Resume CoreEngine::scan_identify(uint64_t now_us) {
@@ -634,33 +684,6 @@ CoreEngine::Resume CoreEngine::drain_events(uint64_t now_us) {
             }
             continue; // the slot emptied (FR-010), or was never discovered: drop, never address
         }
-        if (item.speculative && event_probe_superframe_ != 0u &&
-            event_probe_superframe_ + 1u == superframe_) {
-            // US1 AS3 / SC-006, and the one bound that does not scale with the number of reporting
-            // backplanes. An attribution PROBE (EventDrainItem's own note) is a guess the missing
-            // per-slot attribution forces, and a backplane whose count is never justified produces
-            // one per poll FOR EVER; since this ring is drained ahead of every other demand kind
-            // (FR-020), B such backplanes take every demand slot of every superframe and no module
-            // anywhere is ever identified. Measured on the fan-out bounded only per (backplane,
-            // poll): 5 of 32 modules discovered in 400 superframes at two or more reporting
-            // backplanes, against 32 of 32 with none — demonstrated by `SC-006/US1 AS3: SEVERAL
-            // backplanes' standing event_pending does not delay the discovery of any other
-            // backplane's modules`, which fails without this test.
-            //
-            // So probes ALTERNATE with the rest of the demand phase, exactly as the IDENTIFY scan
-            // and the stalled-read retry alternate with each other (issue_demand()): the superframe
-            // after one is issued admits none, so neither side can be held off for more than one
-            // superframe however the other behaves. Rotated and not dropped — the probe is still
-            // owed, and the node keeps event_drain_pending, so no second item is queued for it.
-            // A drain of an event the host has been TOLD about is never passed over here: the
-            // continuation of a backlog (on_event_drain()'s remaining_count > 0) carries
-            // speculative == false and keeps FR-020's priority in every superframe, which is what
-            // leaves SC-002's bound where it was.
-            EventDrainItem deferred{};
-            (void)event_queue_.pop(deferred);
-            (void)event_queue_.push(deferred);
-            continue;
-        }
         NodeRecord& node = nodes_[idx];
         if (node.event_faulted) {
             // spec FR-026: a node over its event-rate budget "MUST NOT have further events
@@ -689,11 +712,10 @@ CoreEngine::Resume CoreEngine::drain_events(uint64_t now_us) {
                           TxKind::EventDrain, now_us)) {
             EventDrainItem issued{};
             (void)event_queue_.pop(issued); // removed only once it is actually on the wire
-            if (item.speculative) {
-                // Marks the superframe for the alternation above. Set only for a probe, so a
-                // backlog's continuations neither spend nor are spent by it.
-                event_probe_superframe_ = superframe_;
-            }
+            // Anchors the FR-020 floor in issue_demand(): the NEXT superframe serves pending
+            // non-event work first. Set for every event drain, a continuation of a known backlog
+            // included, because the backlog is exactly what the floor exists to bound.
+            event_issued_superframe_ = superframe_;
             // event_drain_pending stays TRUE across the transaction: the node has no item in the
             // ring any more but a GET_EVENT of its own outstanding, and a status poll landing in
             // between must not queue a second one. complete_request() clears it when the
@@ -1319,28 +1341,27 @@ void CoreEngine::on_status_block(const link::MasterEvent& ev, uint64_t now_us) {
     // attribution already owed and which no case can observe at k = 1.
     //
     // ONE PER POLL IS NOT THE WHOLE BOUND, and this too is measured. US1 AS3's subject is "any
-    // other slot or BACKPLANE": a bound that is per (backplane, poll) is still B sweeps per poll
-    // period at B reporting backplanes, which took every demand slot there was — 5 of 32 modules
-    // discovered in 400 superframes at B >= 2, against 32 of 32 at B = 0. The aggregate bound is
-    // drain_events()'s, where an item marked EventDrainItem::speculative alternates with the rest
-    // of the demand phase; this function's job is only to MARK the sweep's items as the guesses
-    // they are. Demonstrated by `SC-006/US1 AS3: SEVERAL backplanes' standing event_pending does
-    // not delay the discovery of any other backplane's modules`.
+    // other slot or BACKPLANE": a bound per (backplane, poll) is still B sweeps per poll period at
+    // B reporting backplanes, which took every demand slot there was — 5 of 32 modules discovered
+    // in 400 superframes at B >= 2, against 32 of 32 at B = 0 (demonstrated by `SC-006/US1 AS3:
+    // SEVERAL backplanes' ...`, red before the floor). The host-wide bound is issue_demand()'s
+    // FR-020 floor, which also covers an endless honest backlog that no sweep-side bound could.
     //
     // Bounded, and idempotent (CLAUDE.md rule 2): at most one item per node (event_drain_pending),
     // one GET_EVENT per node per superframe turn (FR-025), one sweep step per status poll here,
-    // one attribution PROBE issued per two superframes host-wide (drain_events()), and GET_EVENT is
-    // the protocol's own "drain one, repeat until empty" operation. The cost of the missing
-    // attribution is paid in demand slots, never in a status poll's or the probe's place (FR-028).
+    // and GET_EVENT is the protocol's own "drain one, repeat until empty" operation. While
+    // non-event work is pending, events get at least every second superframe's demand phase and
+    // that work gets the rest (issue_demand()); with none pending the floor is not engaged. That
+    // is demonstrated by the FR-020 floor cases for the numbers they measure and ASSUMED beyond
+    // them. The cost of the missing attribution is paid in demand slots, never in a status poll's
+    // or the probe's place (FR-028).
     const size_t polled = node_index(tx_node_);
     if (polled != kNoNodeIndex) {
         // The poll named a MODULE id. Not a path trunk §6's plan creates today; written as the
         // first case because it is the unambiguous one — a module's own count is its own — so a
         // later story that polls a module directly needs no change here.
         if (nodes_[polled].in_use && nodes_[polled].discovery == DiscoveryState::Discovered) {
-            // Not speculative: a module's own count is its own, so this is a drain of an event the
-            // host has been told exists and not an attribution guess (EventDrainItem's note).
-            queue_event_drain(nodes_[polled], tx_node_, false);
+            queue_event_drain(nodes_[polled], tx_node_);
         }
         return;
     }
@@ -1375,7 +1396,7 @@ void CoreEngine::sweep_one_module_for_events(BackplaneRecord& backplane, uint8_t
             node.discovery != DiscoveryState::Discovered || node.event_drain_pending) {
             continue;
         }
-        queue_event_drain(node, id, true); // a probe: the count names the backplane, not this slot
+        queue_event_drain(node, id); // a probe: the count names the backplane, not this slot
         // Advanced whether or not the ring accepted the push: a refusal is a latency cost the
         // next poll pays for this module (queue_event_drain()), and holding the cursor still would
         // spend every poll of a full ring on the same module.
@@ -1385,13 +1406,12 @@ void CoreEngine::sweep_one_module_for_events(BackplaneRecord& backplane, uint8_t
     }
 }
 
-void CoreEngine::queue_event_drain(NodeRecord& node, uint8_t node_id, bool speculative) {
+void CoreEngine::queue_event_drain(NodeRecord& node, uint8_t node_id) {
     if (node.event_drain_pending) {
         return; // already queued, or a GET_EVENT for it is outstanding
     }
     EventDrainItem item{};
     item.node_id = node_id;
-    item.speculative = speculative;
     if (event_queue_.push(item)) {
         node.event_drain_pending = true;
         return;
@@ -1475,9 +1495,7 @@ void CoreEngine::on_event_drain(const link::MasterEvent& ev, uint64_t now_us) {
         // spec FR-015/FR-025: the remainder is this node's NEXT turn, never a second GET_EVENT
         // inside this superframe — event_drained_superframe (set at issue time) is what makes
         // that true, so the re-queue here cannot shorten the turn it waits for.
-        // Not speculative: the node has just REPORTED a remainder, so its next drain is a drain of
-        // a known event and keeps FR-020's priority in every superframe (EventDrainItem's note).
-        queue_event_drain(node, tx_node_, false);
+        queue_event_drain(node, tx_node_);
     }
 }
 

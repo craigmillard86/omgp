@@ -125,11 +125,8 @@ struct CoreEngineTestSeam {
     static void sweep(CoreEngine& engine, uint8_t addr) {
         engine.sweep_one_module_for_events(backplane(engine, addr), addr);
     }
-    // `speculative` defaults to false: every case that uses this seam is about a drain of an
-    // event the host has been TOLD about, which is the kind EventDrainItem::speculative is
-    // false for. The sweep's own probes are queued by production code, never here.
-    static void queue_drain(CoreEngine& engine, uint8_t node_id, bool speculative = false) {
-        engine.queue_event_drain(node(engine, node_id), node_id, speculative);
+    static void queue_drain(CoreEngine& engine, uint8_t node_id) {
+        engine.queue_event_drain(node(engine, node_id), node_id);
     }
     static uint8_t queue_head(CoreEngine& engine) {
         return engine.event_queue_.at(0).node_id;
@@ -1017,17 +1014,17 @@ TEST_CASE("SC-006/US1 AS3: SEVERAL backplanes' standing event_pending does not d
     // It really did ask — an engine that ignored the count would pass the line above for
     // the wrong reason.
     CHECK(liar_drains >= 1u);
-    // MEASURED on this rig (stated, not claimed — CLAUDE.md rule 11): 32/32 discovered in
-    // every arm, and GET_EVENT = 198 at one, two and eight reporting backplanes alike, so
-    // the aggregate probe rate is INDEPENDENT of how many backplanes report. That is the
-    // property EventDrainItem::speculative exists for. Bounded only per (backplane, poll),
-    // the same arms gave 392 GET_EVENT and 5 of 32 discovered at two liars and above: the
-    // RED run this case was written from, quoted again in drain_events()'s own note.
+    // MEASURED on this rig (stated, not claimed — CLAUDE.md rule 11), at 479bf34 (the probe-only
+    // alternation this floor replaced): 32/32 discovered in every arm and GET_EVENT = 198 at one,
+    // two and eight reporting backplanes alike. Before any aggregate bound, the same arms gave 392
+    // GET_EVENT and 5 of 32 discovered at two liars and above — the RED run this case was written
+    // from. With the FR-020 floor (issue_demand()) the assertions above hold, i.e. 32/32 in every
+    // arm; the GET_EVENT counts were NOT re-measured under the floor, so none is claimed here.
 }
 
 TEST_CASE("FR-020 floor: an endless honest event backlog does not starve discovery [events][us4]") {
-    // #952 red team round 5, finding 1 [HIGH]. The speculative-item alternation bounds attribution
-    // PROBES only; a drain of an event the host was told about (on_event_drain()'s
+    // #952 red team round 5, finding 1 [HIGH]. The probe-only alternation of 479bf34 bounded
+    // attribution PROBES only; a drain of an event the host was told about (on_event_drain()'s
     // remaining_count > 0 continuation) keeps strict FR-020 priority, so enough nodes with an
     // endless backlog hold every demand slot and nothing is ever identified. The ratified floor
     // (OPEN-QUESTIONS 2026-11-24): while non-event demand work is pending, at least every second
