@@ -43,17 +43,17 @@
 //     l3::decode_get_event_resp refuses an event_type outside §3.4's own set, so such an answer
 //     is IGNORED one layer below core/ (asserted directly, and recorded in
 //     docs/OPEN-QUESTIONS.md 2026-11-23).
-//   * The SC-002 cases below script FEWER events than kEventRateBudgetPerWindow, and that is a
-//     LIMIT on what they establish, not a calibration: measured at this head, K=1 paces a node at
-//     one event per ~1900 us, so the fifth event of any backlog is past SC-002's 8000 us bound by
-//     FR-025 alone and FR-026's budget then reports the node faulted. So this file is an oracle
-//     for SC-002 on backlogs up to the budget ONLY; beyond it the behaviour is the collision
-//     recorded in docs/OPEN-QUESTIONS.md 2026-11-23 ("FR-025's K=1, SC-002's bound and FR-026's
-//     rate budget cannot all hold ..."), with the measured run, awaiting a ruling. No case here
-//     asserts the breach as expected behaviour.
-//   * The event-rate window and budget are core/core_types.hpp constants, read from there by
-//     every case below and never restated as literals — the engine's own policy where FR-026 says
-//     only "a configured budget".
+//   * The SC-002 cases below script a backlog of at most FOUR events, and that is a LIMIT on what
+//     they establish, not a calibration: measured at the earlier head the rate budget was
+//     written against, K=1 paces a node at one event per ~1900 us, so the fifth event of any
+//     backlog is past SC-002's 8000 us bound by FR-025 alone. So this file is an oracle for
+//     SC-002 on backlogs up to four events ONLY; beyond it the behaviour is the collision
+//     recorded in docs/OPEN-QUESTIONS.md 2026-11-23 and 2026-11-24 (SC-002's amendment is still
+//     only PROPOSED), awaiting a ruling. No case here asserts the breach as expected behaviour.
+//   * FR-026's fault threshold (a run of kEventRunFaultThreshold "more" answers, ruled 2026-11-24)
+//     and the fault's hold are core/core_types.hpp constants, read from there by every case
+//     below and never restated as literals — the engine's own policy where FR-026 says only
+//     "a configured budget" (retired; see docs/OPEN-QUESTIONS.md 2026-11-24, RATIFIED).
 #include "core/core_engine.hpp"
 
 #include "catch_amalgamated.hpp"
@@ -77,8 +77,8 @@ using omgp::core::CoreCallbacks;
 using omgp::core::CoreEngine;
 using omgp::core::CoreStatus;
 using omgp::core::DiscoveryState;
-using omgp::core::kEventRateBudgetPerWindow;
-using omgp::core::kEventRateWindowUs;
+using omgp::core::kEventFaultHoldUs;
+using omgp::core::kEventRunFaultThreshold;
 using omgp::core::kMaxEventDetailBytes;
 using omgp::core::LifecycleEvent;
 using omgp::core::LifecycleKind;
@@ -161,14 +161,14 @@ struct CoreEngineTestSeam {
     static void drain_events(CoreEngine& engine, uint64_t now_us) {
         (void)engine.drain_events(now_us);
     }
-    static void note_drained(CoreEngine& engine, uint8_t node_id, uint64_t now_us) {
-        engine.note_event_drained(node(engine, node_id), node_id, now_us);
+    static void note_drained(CoreEngine& engine, uint8_t node_id, uint64_t now_us, bool more) {
+        engine.note_event_drained(node(engine, node_id), node_id, now_us, more);
     }
     static void roll(CoreEngine& engine, uint8_t node_id, uint64_t now_us) {
-        engine.roll_event_window(node(engine, node_id), node_id, now_us);
+        engine.release_event_fault_after_hold(node(engine, node_id), node_id, now_us);
     }
     static void tick(CoreEngine& engine, uint64_t now_us) {
-        engine.tick_event_windows(now_us);
+        engine.tick_event_fault_holds(now_us);
     }
     static void set_tx(CoreEngine& engine, uint8_t addr, uint8_t node_id) {
         engine.tx_addr_ = addr;
@@ -637,8 +637,8 @@ omgp::l3::StatusBlock error_case_status() {
 }
 
 // A flood: as many events as one MockL3Node address can hold, every one of them claiming 255
-// more still pending — the shape issue #159 names, and more than kEventRateBudgetPerWindow by
-// construction (asserted where it matters, so a change to either constant is loud).
+// more still pending — the shape issue #159 names: every answer is a "more" answer, so a node
+// re-armed with it faults on its kEventRunFaultThreshold-th drain (FR-026).
 std::vector<ScriptedEvent> flood_script(bool big_detail) {
     std::vector<ScriptedEvent> flood;
     for (size_t i = 0; i < MockL3Node::kEventQueueCapacity; ++i) {
@@ -744,7 +744,8 @@ TEST_CASE("AS1/FR-015/SC-002: a nonzero event_pending drains fully within the SC
     REQUIRE(turns.size() >= 3u);
     CHECK(turns[0] < turns[1]);
     CHECK(turns[1] < turns[2]);
-    // No flood: three events are inside kEventRateBudgetPerWindow, so nothing is reported faulted.
+    // No flood: three events are far short of kEventRunFaultThreshold, so nothing is reported
+    // faulted.
     CHECK(rig.recorder().count(LifecycleKind::NodeEventFault) == 0u);
     CHECK_FALSE(Bk::node(rig.engine(), node).event_faulted);
 }
@@ -783,19 +784,21 @@ TEST_CASE("AS3/FR-015: a node that keeps reporting events pending is not abandon
           "[events][us4]") {
     // US4 AS3: a node queuing faster than one drain cycle empties it keeps being drained across
     // superframes, honouring the per-superframe budget — never dropped after the first drain.
-    // The scripted status block holds its count at kEventRateBudgetPerWindow for ever (an
+    // The scripted status block holds its count at kScriptedEvents for ever (an
     // exhausted MockL3Node class answers with its last step), so the count is still being
     // re-reported after the queue it describes has been drained.
     Rig rig;
     const uint8_t bp = omgp::ADDR_backplane_min;
     const uint8_t node = rig.bring_up(bp);
 
+    // Four events: the most this file's SC-002 cases script (see the header comment).
+    constexpr size_t kScriptedEvents = 4;
     std::vector<ScriptedEvent> scripted;
-    for (size_t i = 0; i < kEventRateBudgetPerWindow; ++i) {
+    for (size_t i = 0; i < kScriptedEvents; ++i) {
         scripted.push_back(
             event_of(omgp::EVT_FAULT_RAISED, 0xFFu, {static_cast<uint8_t>(0x50u + i)}));
     }
-    rig.arm(bp, kEventRateBudgetPerWindow, scripted);
+    rig.arm(bp, static_cast<uint8_t>(kScriptedEvents), scripted);
     rig.run_until([&] { return rig.recorder().events_of(node).size() == scripted.size(); }, 60u);
 
     const std::vector<Delivery> events = rig.recorder().events_of(node);
@@ -826,8 +829,9 @@ TEST_CASE("FR-025: at most one GET_EVENT per node per superframe turn, whatever 
     const uint8_t bp = omgp::ADDR_backplane_min;
     const uint8_t node = rig.bring_up(bp);
 
+    constexpr size_t kScriptedEvents = 4; // the most this file's SC-002 cases script
     std::vector<ScriptedEvent> scripted;
-    for (size_t i = 0; i < kEventRateBudgetPerWindow; ++i) {
+    for (size_t i = 0; i < kScriptedEvents; ++i) {
         scripted.push_back(event_of(omgp::EVT_FAULT_RAISED, 0xFFu, {static_cast<uint8_t>(i)}));
     }
     rig.arm(bp, 0xFFu, scripted);
@@ -1113,13 +1117,13 @@ TEST_CASE("FR-020 floor: an endless honest event backlog does not starve discove
 TEST_CASE("FR-020 floor: events keep making progress while non-event work is pending, and are not "
           "delayed when none is [events][us4]") {
     // The floor's other edge. It must not turn FR-020 into "discovery first": a finite honest
-    // backlog (within kEventRateBudgetPerWindow, so FR-026 does not engage) is drained at least
+    // backlog (far short of kEventRunFaultThreshold, so FR-026 does not engage) is drained at least
     // every SECOND superframe even while four other modules are being discovered, and with no
     // non-event work pending the floor is not engaged at all, so the drains are in CONSECUTIVE
     // superframes (FR-025's K = 1, undelayed). Both arms PASS at 479bf34 — strict priority gives
     // events every slot — so this is a guard on the implementation, not a RED case.
     constexpr uint8_t kBacklog = 4;
-    static_assert(kBacklog <= kEventRateBudgetPerWindow, "the backlog must stay inside FR-026");
+    static_assert(kBacklog < kEventRunFaultThreshold, "the backlog must stay inside FR-026");
     const std::vector<ScriptedEvent> backlog = {
         event_of(omgp::EVT_FAULT_RAISED, 3u, {1u}), event_of(omgp::EVT_FAULT_RAISED, 2u, {2u}),
         event_of(omgp::EVT_FAULT_RAISED, 1u, {3u}), event_of(omgp::EVT_FAULT_RAISED, 0u, {4u})};
@@ -1215,18 +1219,29 @@ TEST_CASE("FR-026: a flooder is faulted by its run of 'more' answers, at the 256
     CHECK(rig.recorder().count(LifecycleKind::NodeEventFault) == 1u); // once per episode
 }
 
-TEST_CASE("FR-026: an over-budget node is reported NodeEventFault and stops being drained "
-          "[events][us4]") {
-    // spec FR-026 / research.md R-07's correction: a node whose event-delivery rate exceeds the
-    // configured budget is reported faulted and MUST NOT have further events drained from it
-    // until its rate returns within budget, which is reported too. Budget and window are
-    // core/core_types.hpp's own constants — never literals here.
+TEST_CASE("FR-026: a node that answers a run of 'more' is reported NodeEventFault and stops being "
+          "drained [events][us4]") {
+    // spec FR-026 / research.md R-07's correction, as ruled 2026-11-24 (RATIFIED): a node that
+    // answers kEventRunFaultThreshold consecutive GET_EVENTs each reporting more events pending
+    // is reported faulted and MUST NOT have further events drained from it until the fault's hold
+    // (kEventFaultHoldUs) has run out, which is reported too. Re-derived from the retired "over
+    // the rate budget" case; every property it asserted that still exists is asserted here.
+    //
+    // SEEDED (stated, not claimed — CLAUDE.md rule 11): the node's run starts at N - 4 rather than
+    // at zero, so the fault arrives on the fourth drain instead of the 256th. The count from zero
+    // is demonstrated end to end, with the FR-020 floor engaged, by `FR-026: a flooder is faulted
+    // by its run of 'more' answers, at the 256th ...`, and at the bare-engine boundary by the
+    // run-length case below; this case exists for what happens AFTER the fault, and 256 drains
+    // here would be priced against the mutation oracle's per-mutant timeout for nothing.
+    constexpr size_t kSeedShort = 4;
     Rig rig;
     const uint8_t bp = omgp::ADDR_backplane_min;
     const uint8_t node = rig.bring_up(bp);
+    Bk::node(rig.engine(), node).event_more_run =
+        static_cast<uint16_t>(kEventRunFaultThreshold - kSeedShort);
 
     const std::vector<ScriptedEvent> flood = flood_script(false);
-    REQUIRE(flood.size() > static_cast<size_t>(kEventRateBudgetPerWindow));
+    REQUIRE(flood.size() > kSeedShort); // the backlog outlasts the fault
     rig.arm(bp, 0xFFu, flood);
 
     rig.run_until([&] { return rig.recorder().count(LifecycleKind::NodeEventFault) == 1u; }, 60u);
@@ -1234,14 +1249,14 @@ TEST_CASE("FR-026: an over-budget node is reported NodeEventFault and stops bein
     const Delivery faulted = rig.recorder().first(LifecycleKind::NodeEventFault);
     CHECK(faulted.ev.node_id == node);
     CHECK(Bk::node(rig.engine(), node).event_faulted);
-    // It took a flood to get here: the budget is not crossed by one event.
+    // It took the run to get here: exactly the four drains the seed left, no more and no fewer.
     const size_t drained_by_fault = rig.recorder().events_of(node).size();
-    CHECK(drained_by_fault > static_cast<size_t>(kEventRateBudgetPerWindow));
+    CHECK(drained_by_fault == kSeedShort);
 
     SECTION("no further GET_EVENT reaches it while it is faulted, and exactly one report is made") {
-        // Half a window after the fault: still faulted, and not addressed once in between.
+        // Half a hold after the fault: still faulted, and not addressed once in between.
         const uint64_t fault_us = faulted.at_us;
-        rig.run_for(kEventRateWindowUs / 2u);
+        rig.run_for(kEventFaultHoldUs / 2u);
         CHECK(Bk::node(rig.engine(), node).event_faulted);
         CHECK(rig.transcript().count_between(omgp::OP_GET_EVENT, node, fault_us, rig.now_us()) ==
               0u);
@@ -1257,7 +1272,7 @@ TEST_CASE("FR-026: an over-budget node is reported NodeEventFault and stops bein
         CHECK(rig.transcript().count_for(omgp::OP_GET_STATUS, bp) > polls_before);
     }
 
-    SECTION("a full window within budget clears the fault, exactly once, and draining resumes") {
+    SECTION("the hold ending clears the fault, exactly once, and draining resumes") {
         const auto cleared_once = [&] {
             return rig.recorder().count(LifecycleKind::NodeEventFaultCleared) == 1u;
         };
@@ -1265,9 +1280,8 @@ TEST_CASE("FR-026: an over-budget node is reported NodeEventFault and stops bein
         const Delivery cleared = rig.recorder().first(LifecycleKind::NodeEventFaultCleared);
         CHECK(cleared.ev.node_id == node);
         CHECK_FALSE(Bk::node(rig.engine(), node).event_faulted);
-        // A whole window passed under budget before it cleared — not a superframe, and not the
-        // next status poll.
-        CHECK(cleared.at_us - faulted.at_us >= kEventRateWindowUs);
+        // A whole hold passed before it cleared — not a superframe, and not the next status poll.
+        CHECK(cleared.at_us - faulted.at_us >= kEventFaultHoldUs);
         // Draining resumes, and the events the fault suspended are delivered after all.
         rig.run_until([&] { return rig.recorder().events_of(node).size() > drained_by_fault; },
                       60u);
@@ -1463,20 +1477,25 @@ TEST_CASE("trunk §8: an ERROR answer to a GET_EVENT delivers nothing and is ret
 
 TEST_CASE("CLAUDE.md rule 5: the event path allocates nothing [events][us4]") {
     // rule 5 for the embedded path: detection, the K=1 drain, the detail copy into the engine's
-    // own arena, the rate window and the flood fault all run inside the counting heap guard. The
+    // own arena, the run counter and the flood fault all run inside the counting heap guard. The
     // test's own instruments are detached or reserved first — the guard counts every allocation
     // on the thread, and a std::vector growing inside it would be charged to core/.
     Rig rig;
     const uint8_t bp = omgp::ADDR_backplane_min;
     const uint8_t node = rig.bring_up(bp);
+    // SEEDED (rule 11): the run starts at N - 4 so the fault is raised on the fourth drain, inside
+    // the scope; from zero it needs kEventRunFaultThreshold drains, which this case's few dozen
+    // steps cannot reach. The count from zero is the flooder case's, not this one's.
+    Bk::node(rig.engine(), node).event_more_run =
+        static_cast<uint16_t>(kEventRunFaultThreshold - 4u);
     rig.arm(bp, 0xFFu, flood_script(true));
     rig.set_drain_each_step(false);
     rig.detach_transcript();
     rig.recorder().deliveries.reserve(rig.recorder().deliveries.size() + 1024u);
 
-    // Fewer than one event-rate window of simulated time, so the flood fault raised inside the
-    // scope is still in force when it closes — the state the last two checks below read.
-    const int steps = static_cast<int>((kEventRateWindowUs / byte_us()) - 100u);
+    // Fewer than one fault hold of simulated time, so a flood fault raised inside the scope is
+    // still in force when it closes — the state the last two checks below read.
+    const int steps = static_cast<int>((kEventFaultHoldUs / byte_us()) - 100u);
     HEAP_FREE_SCOPE({
         for (int i = 0; i < steps; ++i) {
             rig.step_bare();
@@ -1916,86 +1935,144 @@ TEST_CASE("FR-015/FR-025: remaining_count above zero re-queues the node, zero do
     CHECK(Bk::queue_head(b.engine()) == 0x20);
 }
 
-TEST_CASE("FR-026: the drained-event count saturates, a fresh window starts at the fault, and a "
-          "full window inside budget clears it [events][us4][mutation]") {
-    SECTION("the count saturates at 255 rather than wrapping to zero") {
+TEST_CASE("FR-026: a run of 'more' answers faults at exactly N, resets on anything else, and the "
+          "hold ends at exactly kEventFaultHoldUs [events][us4][mutation]") {
+    // Re-derived from the retired rate-window case (ruled 2026-11-24, RATIFIED): the boundary now
+    // sits at kEventRunFaultThreshold, and the window's close is the fault's hold ending.
+    static_assert(kEventRunFaultThreshold == static_cast<uint16_t>(UINT8_MAX) + 1u,
+                  "N is the wire's remaining_count range plus one (core_types.hpp)");
+    SECTION("N - 1 consecutive 'more' answers do not fault; the N-th does, once") {
         Bare b;
         b.module(0x20, kBp);
         omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
-        n.event_faulted = true; // already faulted: the count is not reset by a new fault
-        n.events_drained_this_window = UINT8_MAX;
-        Bk::note_drained(b.engine(), 0x20, 0);
-        CHECK(n.events_drained_this_window == UINT8_MAX);
-    }
-    SECTION("the drain that takes a node over budget faults it and starts a fresh window") {
-        Bare b;
-        b.module(0x20, kBp);
-        omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
-        n.events_drained_this_window = kEventRateBudgetPerWindow; // the next one is over
+        for (uint16_t i = 1; i < kEventRunFaultThreshold; ++i) {
+            Bk::note_drained(b.engine(), 0x20, 0, true);
+            REQUIRE_FALSE(n.event_faulted);
+            REQUIRE(n.event_more_run == i);
+        }
         const uint64_t now = 12345;
-        Bk::note_drained(b.engine(), 0x20, now);
+        Bk::note_drained(b.engine(), 0x20, now, true);
         CHECK(n.event_faulted);
-        CHECK(n.events_drained_this_window == 0);
-        CHECK(n.event_rate_window_start_us == now);
+        CHECK(n.event_more_run == 0); // a fresh run starts with the fault
+        CHECK(n.event_fault_start_us == now);
         b.engine().drain_callbacks();
         CHECK(b.recorder().count_for(LifecycleKind::NodeEventFault, 0x20) == 1);
     }
-    SECTION("a window that has run exactly kEventRateWindowUs is closed") {
+    SECTION("an answer that is not 'more' ends the run: N - 1 more, one final, N - 1 more is no "
+            "fault") {
         Bare b;
         b.module(0x20, kBp);
         omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
-        n.event_rate_window_start_us = 1000;
-        n.events_drained_this_window = 2;
-        Bk::roll(b.engine(), 0x20, 1000 + kEventRateWindowUs);
-        CHECK(n.events_drained_this_window == 0);
-        CHECK(n.event_rate_window_start_us == 1000 + kEventRateWindowUs);
+        for (uint16_t i = 1; i < kEventRunFaultThreshold; ++i) {
+            Bk::note_drained(b.engine(), 0x20, 0, true);
+        }
+        Bk::note_drained(b.engine(), 0x20, 0, false); // remaining_count == 0
+        CHECK(n.event_more_run == 0);
+        for (uint16_t i = 1; i < kEventRunFaultThreshold; ++i) {
+            Bk::note_drained(b.engine(), 0x20, 0, true);
+        }
+        CHECK_FALSE(n.event_faulted);
     }
-    SECTION("a window one microsecond short of kEventRateWindowUs is still open") {
-        Bare b;
-        b.module(0x20, kBp);
-        omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
-        n.event_rate_window_start_us = 1000;
-        n.events_drained_this_window = 2;
-        Bk::roll(b.engine(), 0x20, 1000 + kEventRateWindowUs - 1u);
-        CHECK(n.events_drained_this_window == 2);
-        CHECK(n.event_rate_window_start_us == 1000);
-    }
-    SECTION("a faulted node that drained exactly the budget is back within budget: cleared") {
+    SECTION("an already-faulted node's run is not reported again") {
         Bare b;
         b.module(0x20, kBp);
         omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
         n.event_faulted = true;
-        n.event_rate_window_start_us = 0;
-        n.events_drained_this_window = kEventRateBudgetPerWindow; // AT budget is within it
-        Bk::roll(b.engine(), 0x20, kEventRateWindowUs);
+        n.event_more_run = kEventRunFaultThreshold; // a defensive caller: clamped, never wrapped
+        Bk::note_drained(b.engine(), 0x20, 0, true);
+        CHECK(n.event_more_run == kEventRunFaultThreshold);
+        b.engine().drain_callbacks();
+        CHECK(b.recorder().count_for(LifecycleKind::NodeEventFault, 0x20) == 0);
+    }
+    SECTION("a hold that has run exactly kEventFaultHoldUs ends the fault, once") {
+        Bare b;
+        b.module(0x20, kBp);
+        omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
+        n.event_faulted = true;
+        n.event_fault_start_us = 1000;
+        n.event_more_run = 7;
+        Bk::roll(b.engine(), 0x20, 1000 + kEventFaultHoldUs);
         CHECK_FALSE(n.event_faulted);
+        CHECK(n.event_more_run == 0); // the run starts again from zero
         b.engine().drain_callbacks();
         CHECK(b.recorder().count_for(LifecycleKind::NodeEventFaultCleared, 0x20) == 1);
     }
-    SECTION("a faulted node that drained OVER budget in the window stays faulted") {
+    SECTION("a hold one microsecond short of kEventFaultHoldUs is still in force") {
         Bare b;
         b.module(0x20, kBp);
         omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
         n.event_faulted = true;
-        n.event_rate_window_start_us = 0;
-        n.events_drained_this_window = kEventRateBudgetPerWindow + 1u;
-        Bk::roll(b.engine(), 0x20, kEventRateWindowUs);
+        n.event_fault_start_us = 1000;
+        Bk::roll(b.engine(), 0x20, 1000 + kEventFaultHoldUs - 1u);
         CHECK(n.event_faulted);
+        b.engine().drain_callbacks();
+        CHECK(b.recorder().count_for(LifecycleKind::NodeEventFaultCleared, 0x20) == 0);
     }
-    SECTION("every module id in the span has its window rolled, first to last") {
+    SECTION("a node that is not faulted is left alone by the hold's tick") {
+        Bare b;
+        b.module(0x20, kBp);
+        omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
+        n.event_more_run = 9;
+        Bk::roll(b.engine(), 0x20, kEventFaultHoldUs * 4u);
+        CHECK(n.event_more_run == 9);
+        b.engine().drain_callbacks();
+        CHECK(b.recorder().count_for(LifecycleKind::NodeEventFaultCleared, 0x20) == 0);
+    }
+    SECTION("every module id in the span has its hold checked, first to last") {
         Bare b;
         const uint8_t ids[] = {kMin, static_cast<uint8_t>(kMin + 1u), kMax};
         for (const uint8_t id : ids) {
             b.module(id, kBp);
             omgp::core::NodeRecord& n = Bk::node(b.engine(), id);
             n.event_faulted = true;
-            n.event_rate_window_start_us = 0;
-            n.events_drained_this_window = 0;
+            n.event_fault_start_us = 0;
         }
-        Bk::tick(b.engine(), kEventRateWindowUs);
+        Bk::tick(b.engine(), kEventFaultHoldUs);
         for (const uint8_t id : ids) {
             CHECK_FALSE(Bk::node(b.engine(), id).event_faulted);
         }
+    }
+}
+
+TEST_CASE("FR-026: the run is fed by on_event_drain(), and an EVT_NONE answer ends it "
+          "[events][us4][mutation]") {
+    SECTION("EVT_NONE resets the run") {
+        Bare b;
+        b.module(0x20, kBp);
+        omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
+        n.event_more_run = 100;
+        l3::GetEventResp none{};
+        none.event_type = omgp::EVT_NONE; // protocol-l3 §3.4: the queue is empty
+        uint8_t p[8];
+        size_t w = 0;
+        REQUIRE(l3::encode_get_event_resp(none, p, sizeof p, w) == l3::Status::Ok);
+        Msg m;
+        build_msg(m, omgp::OP_GET_EVENT, 0x20, p, w);
+        Bk::set_tx(b.engine(), kBp, 0x20);
+        Bk::on_event_drain(b.engine(), m.ev, 0);
+        CHECK(n.event_more_run == 0);
+    }
+    SECTION("an answer with remaining_count > 0 extends the run by one, through on_event_drain()") {
+        Bare b;
+        b.module(0x20, kBp);
+        omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
+        n.event_more_run = 5;
+        Msg m;
+        event_msg(m, 0x20, 3, {});
+        Bk::set_tx(b.engine(), kBp, 0x20);
+        Bk::on_event_drain(b.engine(), m.ev, 0);
+        CHECK(n.event_more_run == 6);
+    }
+    SECTION("an answer with remaining_count == 0 ends the run, through on_event_drain()") {
+        Bare b;
+        b.module(0x20, kBp);
+        omgp::core::NodeRecord& n = Bk::node(b.engine(), 0x20);
+        n.event_more_run = 5;
+        Msg m;
+        event_msg(m, 0x20, 0, {});
+        Bk::set_tx(b.engine(), kBp, 0x20);
+        Bk::on_event_drain(b.engine(), m.ev, 0);
+        CHECK(n.event_more_run == 0);
     }
 }
 
