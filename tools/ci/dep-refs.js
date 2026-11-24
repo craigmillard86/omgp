@@ -23,6 +23,14 @@
 const MAX_REFS = 500;
 const MAX_RANGE = 200;
 
+// A clause that is NOTHING BUT an excuse ("not blocking."), as the natural authoring shape
+// `- #N - why; not blocking.` leaves it: the ref is in clause 1 and the excuse alone in clause 2.
+// It excuses the clause directly before it (#964: #701 listed #702 and #703 that way, both were
+// counted as blocking, and #702 depends on #701 — a loop the parser created). Anchored on purpose:
+// prose around the excuse, or an excuse that carries its own ref, is not "pure" and excuses nothing
+// before it, so the only text that can drop a ref is a bare "not blocking" immediately after it.
+const PURE_EXCUSE = /^\s*(?:and\s+)?(?:(?:this\s+is|it\s+is|they\s+are)\s+)?(?:not\s+(?:a\s+)?(?:blocking|blocked|dependent)|non-blocking)\s*[.!]?\s*$/i;
+
 const NONBLOCK = /\bnot\s+(?:a\s+)?(?:blocking|blocked|dependent)\b|\bnon-blocking\b|\bno ordering dependency\b|\bexpected to remain (?:open|so)\b|\bsame PR\b|\bsiblings?\b/i;
 
 function depRefs(text) {
@@ -33,7 +41,11 @@ function depRefs(text) {
     else cur = null;
   }
   const sources = items.length
-    ? items.flatMap(i => i.join(' ').split(';').filter(clause => !NONBLOCK.test(clause)))
+    ? items.flatMap(i => {
+        const clauses = i.join(' ').split(';');
+        return clauses.filter((clause, k) =>
+          !NONBLOCK.test(clause) && !(k + 1 < clauses.length && PURE_EXCUSE.test(clauses[k + 1])));
+      })
     : [text || ''];
   const refs = new Set();
   let capped = false;

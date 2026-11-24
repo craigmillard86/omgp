@@ -59,7 +59,12 @@ sticks on a conforming story. Re-apply after fixing.
   A bullet can name more than one issue with different blocking status
   ("- #19 must land first; #20 is a sibling test, not blocking") — split the
   two on a semicolon so only the excused clause is ignored; a comma inside
-  one clause does not split it.
+  one clause does not split it. A clause that is **only** an excuse
+  ("- #20 — T031, runs after this unit; not blocking.") excuses the clause
+  directly before it, so the natural `ref — why; not blocking.` shape works
+  (#964: it used to leave the ref blocking, and two issues that each listed
+  the other that way could never be released). Prose around the excuse is not
+  a bare excuse and excuses nothing before it.
 - A section with **no** list items counts every ref in it (prose style).
 - A Dependencies section resolving to more than 500 distinct issue numbers
   (after range expansion) is treated as unresolved, not silently truncated —
