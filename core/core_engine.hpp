@@ -346,6 +346,13 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     // id to tag anything with (§6). Reads the outstanding transaction's own correlation state
     // (tx_param_id_/tx_request_id_ below), so it is called only from complete_request().
     void report_param_outcome(TxKind kind, const ParamResult& result);
+    // FR-023/FR-024's report for a queued operation the drain loop DISCARDS before it ever
+    // becomes a transaction — its node's slot emptied under it (FR-010), or its request would
+    // not encode. Same two shapes as report_param_outcome(), carried by the ITEM rather than by
+    // the tx_* state (which belongs to another transaction entirely), and always a failure with
+    // kParamFailureNoErrorCode: no node answered, so there is no L3 code to report. The Get arm
+    // is also what returns the item's request id to R-10's pool, via its delivery.
+    void report_param_dropped(const ParamOpItem& item);
 
     // --- the descriptor cache (spec FR-008, R-12) -------------------------------------------
 

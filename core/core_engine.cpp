@@ -707,7 +707,13 @@ CoreEngine::Resume CoreEngine::drain_params(uint64_t now_us) {
             nodes_[idx].discovery != DiscoveryState::Discovered) {
             ParamOpItem dropped{};
             (void)param_queue_.pop(dropped);
-            continue; // the slot emptied under a queued operation: drop rather than misaddress
+            // The slot emptied under a queued operation (FR-010): dropped rather than
+            // misaddressed — but REPORTED, never dropped in silence. FR-023 owes the
+            // application an outcome for every operation the engine accepted, and FR-024 owes
+            // this Get's request id back to R-10's pool; both are what report_param_dropped()
+            // does. Red team, PR #973 round 3, finding 1.
+            report_param_dropped(dropped);
+            continue;
         }
         NodeRecord& node = nodes_[idx];
         if (!admit_demand(cost_estimate(node.last_measured_duration_us))) {
@@ -760,6 +766,11 @@ CoreEngine::Resume CoreEngine::drain_params(uint64_t now_us) {
             ParamOpItem dropped{};
             // mutant-ok(equivalent, cxx_replace_scalar_call): unreachable branch; see above.
             (void)param_queue_.pop(dropped);
+            // Reported for the same reason as the drop above, and by the same call: FR-023's
+            // "never dropped" is about every drop of an accepted operation, not only the
+            // reachable ones. Unreachable as argued above, so no case drives THIS call site —
+            // the property is by construction here, demonstrated at the site above.
+            report_param_dropped(dropped);
             continue;
         }
         // ONE comparison for both, and not only to avoid repeating it: derived from one `is_set`,
@@ -1507,7 +1518,18 @@ bool CoreEngine::param_answer_payload(const uint8_t* resp, size_t len, uint8_t e
         return false;
     }
     if (hdr.opcode == expect) {
-        return true;
+        // protocol-l3 §3: flags bit1 is the ERROR bit, and §3.1's acceptance — an empty
+        // SET_PARAM response, or a GET_PARAM response's echoed reading — is not an error. A
+        // module that sets bit1 on a response carrying THIS REQUEST'S own opcode is declaring
+        // the operation failed, so reading that payload as a success would deliver the one
+        // outcome FR-023 rules out: a failure the module declared, reported as an acceptance.
+        // No code of its own, because the module named none — a code travels in an ERROR, read
+        // on the arm below, where bit1 is the opcode's own mark rather than a contradiction.
+        if ((hdr.flags & FLAG_error) == 0u) {
+            return true;
+        }
+        out_result = param_failure(kParamFailureNoErrorCode);
+        return false;
     }
     // protocol-l3 §3.1: a failure arrives as OP_ERROR with flags.error set. Any OTHER opcode is
     // an answer to a question this engine did not ask — a bridged answer that went astray, or a
@@ -1603,6 +1625,31 @@ void CoreEngine::report_param_outcome(TxKind kind, const ParamResult& result) {
     ev.node_id = tx_node_;
     ev.failed_param_id = tx_param_id_;
     ev.failed_reason = result.reason;
+    (void)enqueue_lifecycle(ev);
+}
+
+void CoreEngine::report_param_dropped(const ParamOpItem& item) {
+    // FR-023/FR-024 for an operation that never became a transaction: the drain loop discards a
+    // queued item whose node is gone (FR-010) rather than misaddress it, and discarding it in
+    // silence is what FR-023 forbids — "a failed parameter operation is REPORTED, never
+    // dropped". Reported with no L3 code, because no node ever answered: the same
+    // kParamFailureNoErrorCode every non-L3 failure class carries. Deliberately the SAME shapes
+    // report_param_outcome() produces, not a new kind of report: the application cannot act on
+    // the difference between a write the module refused and a write whose module left first.
+    //
+    // The Get's half is also what gives R-10 its id back — the id is released when its result is
+    // DELIVERED, so an unreported Get retires its id for the life of the engine (LIMIT_max_nodes
+    // of them wedge get_param()). Read from the ITEM, not from the tx_* correlation state, which
+    // belongs to whatever transaction is outstanding and has nothing to do with this one.
+    if (item.kind == ParamOpItem::Kind::Get) {
+        (void)enqueue_param_result(item.request_id, param_failure(kParamFailureNoErrorCode));
+        return;
+    }
+    LifecycleEvent ev{};
+    ev.kind = LifecycleKind::ParamSetFailed;
+    ev.node_id = item.node_id;
+    ev.failed_param_id = item.param_id;
+    ev.failed_reason = kParamFailureNoErrorCode;
     (void)enqueue_lifecycle(ev);
 }
 

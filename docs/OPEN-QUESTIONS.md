@@ -6567,3 +6567,43 @@ host that drops 128 deliveries is considered already broken, which is a judgemen
 
 **Ruling:** pending — human. **Amends:** none (neither §8a nor R-10 addresses the interaction).
 **Related:** #701, `tasks.md` T030, `data-model.md` §8/§8a, `research.md` R-10, spec FR-024.
+
+## 2026-11-24 — T030 (#701): does an `ERROR` carry flags bit0 (response) as well as bit1 (error)?
+
+**Context:** raised by the red team on PR #973 (round 3, follow-up 2), and a genuine artefact
+ambiguity rather than a defect in either reading. `docs/protocol-l3.md` §3 defines the flags byte
+as "bit0: response, bit1: error, bits 2–7 reserved". §3.1's `ERROR` row reads "`0x7F` | ERROR |
+N→H | flags.error set" — it names bit1 and says NOTHING about bit0, and `l3/l3_header.cpp` does
+not require bit0 on an `ERROR` either (direction is not an L3 header property). The reference
+implementation and the golden vectors do pin it: `tools/refimpl/genvectors.py:29` encodes every
+`ERROR` as `ERRF = FLAG_response | FLAG_error`, and `tools/refimpl/test_canonical.py:28`'s
+canonical `ERROR` carries both bits. So the only machine-readable artefacts say BOTH bits, while
+the prose says only bit1 — and the prose is the authoritative document.
+
+**Why it matters, precisely.** `CoreEngine::param_answer_payload()` requires bit0 on every answer
+(the hole closed at `68a0309`: without it, a request's own bytes echoing a `param_id`/`scope` are
+delivered as that request's value). Under that rule an `ERROR` whose flags are bit1 ALONE — which
+§3.1's prose permits — is refused, and the module's own error code is replaced by
+`kParamFailureNoErrorCode`. FR-023 still holds: the failure IS reported, under the one constant.
+What is lost is the REASON, which FR-023 asks to be carried. DEMONSTRATED by the existing case
+`CLAUDE.md rule 7: ... a message with the response flag CLEAR is not an answer, whatever its
+opcode`, whose third message is exactly this `ERROR` and asserts `kParamFailureNoErrorCode`.
+
+**What was done:** nothing changed — the strict reading is kept as the safe default, for two
+reasons. The golden vectors are immutable evidence and they encode bit0 on every `ERROR`, so no
+conforming node built against them emits the bit1-only form; and relaxing bit0 generally would
+re-open the request-bytes-as-an-answer hole, which is a correctness loss against a documentation
+loss. Only an `ERROR` that disagrees with the vectors is affected, and only in its reason field.
+
+**Recommendation:** amend `docs/protocol-l3.md` §3.1 to state that `ERROR`, being an N→H
+*response*, carries flags bit0 as well as bit1 — making the vectors' two-bit encoding normative
+and the current code right by the document. Alternatives: (b) exempt `OP_ERROR` alone from the
+bit0 check, since opcode `0x7F` is N→H only and so can never be a host request's bytes — this
+preserves the module's code under the prose's literal reading and costs one branch, but makes the
+host accept a form the vectors never produce; (c) police neither bit, which is the pre-`68a0309`
+hole and is rejected. (a) is recommended: it is a documentation change that matches every
+existing artefact, and a protocol-prose change is a human ruling by policy either way.
+
+**Ruling:** pending — human. **Amends:** proposes `docs/protocol-l3.md` §3.1 (human-authored;
+agents do not edit the three authoritative documents). **Related:** #701, `tasks.md` T030, spec
+FR-023, `docs/protocol-l3.md` §3/§3.1, `tools/refimpl/genvectors.py`, `tests/vectors/`.
