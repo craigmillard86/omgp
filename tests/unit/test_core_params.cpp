@@ -221,6 +221,8 @@ class Rig {
     // same descriptor — so every module reaches Discovered and is a legal parameter target.
     void install(uint8_t addr, uint8_t slot_count, uint32_t occupied) {
         bp_addr_ = addr;
+        slot_count_ = slot_count;
+        occupied_ = occupied;
         std::vector<L3Step>& steps = scripts_[addr];
         steps.clear();
         steps.push_back(L3Step::of(SlotMapStep{slot_count, occupied, occupied}));
@@ -260,6 +262,35 @@ class Rig {
     void go_silent() {
         scripts_[bp_addr_].assign(1, L3Step::of(SilenceStep{}));
         node_.set_script(bp_addr_, scripts_[bp_addr_].data(), 1);
+    }
+
+    // Empties one slot UNDER whatever is queued for its module (spec FR-010). Two halves,
+    // because either alone leaves the rig in a state no hardware reaches: the backplane's own
+    // scripted slot-map answer is rewritten in place — leaving arm_params()' answers and the
+    // discovery steps alone — so no later BP_SLOT_MAP poll re-reports the slot occupied and
+    // re-discovers the module; and the engine is handed that same map AT ONCE, rather than at
+    // the next T_poll, so the demand drain cannot issue the queued operation first. Calling
+    // reconcile_slot_map() directly is what contracts/core-cpp.md makes it public for.
+    void unplug_slot(uint8_t slot) {
+        std::vector<L3Step>& steps = scripts_[bp_addr_];
+        REQUIRE(!steps.empty());
+        occupied_ &= ~(1u << slot);
+        steps[0] = L3Step::of(SlotMapStep{slot_count_, occupied_, occupied_});
+        node_.set_script(bp_addr_, steps.data(), steps.size());
+
+        uint8_t bits[4] = {};
+        const uint8_t bitmap_len = static_cast<uint8_t>((slot_count_ + 7u) / 8u);
+        REQUIRE(bitmap_len <= sizeof bits);
+        for (uint8_t i = 0; i < bitmap_len; ++i) {
+            bits[i] = static_cast<uint8_t>((occupied_ >> (8u * i)) & 0xFFu);
+        }
+        omgp::l3::BpSlotMapResp resp{};
+        resp.slot_count = slot_count_;
+        resp.occupied.data = bits;
+        resp.occupied.len = bitmap_len;
+        resp.changed.data = bits;
+        resp.changed.len = bitmap_len;
+        engine_->reconcile_slot_map(bp_addr_, resp, now_us_);
     }
 
     // Drives superframes until `done()`, failing by NAME at the budget rather than leaving a
@@ -393,6 +424,8 @@ class Rig {
     L3Step absent_[omgp::link::kAddrCount];
     uint64_t now_us_ = 0;
     uint8_t bp_addr_ = omgp::ADDR_backplane_min; // the one install() scripted
+    uint8_t slot_count_ = 0;                     // install()'s own, so unplug_slot() can rebuild
+    uint32_t occupied_ = 0;                      // the scripted map's current occupancy
 };
 
 // One backplane, four modules, all Discovered — the parameter target of every case below.
@@ -1030,6 +1063,95 @@ TEST_CASE("data-model.md §8a: a full result ring refuses the NEWEST arrival and
     CHECK(rig.recorder().results[0].value == 0x100u);
 }
 
+TEST_CASE("FR-024: a queued Get whose node leaves the rig before it is issued is REPORTED, and "
+          "its request id comes back [params][us2]") {
+    // The drain loop (T029) DROPS a queued item whose node is no longer Discovered rather than
+    // misaddress it — correct, and the one route to an operation that never becomes a
+    // transaction at all. FR-024 still owes the caller the value "or its failure per FR-023",
+    // and R-10 still owes the pool the id: an operation the engine accepted and then discarded
+    // in silence is exactly what FR-023 forbids, and the id it holds would be retired for the
+    // life of the engine (LIMIT_max_nodes of them wedge get_param() for ever). Ordinary
+    // hardware behaviour — a module unplugged while one parameter op is queued — not a
+    // hostile-input case. Red team, PR #973 round 3, finding 1.
+    Rig rig;
+    bring_up_quiet(rig);
+    CoreEngine& engine = rig.engine();
+    const uint8_t target = rig.a_discovered_node();
+    rig.arm_params(ParamStep{true, 1234, 0}); // the module WOULD answer normally, were it there
+
+    ParamRequestId id = 0xFF;
+    REQUIRE(engine.get_param(target, 7, 2, id) == CoreStatus::Ok);
+    rig.unplug_slot(0);
+    REQUIRE(engine.discovery_state(target) != DiscoveryState::Discovered);
+
+    rig.run_until("the dropped Get to be reported",
+                  [&] { return Bk::results_pending(engine) == 1u; });
+    CHECK(Bk::param_queued(engine) == 0u); // dropped, not left to be re-tried for ever
+
+    engine.drain_callbacks(kParamCapacity * 2u);
+    REQUIRE(rig.recorder().results.size() == 1u);
+    CHECK(rig.recorder().result_ids[0] == id); // under the id get_param() returned (R-10)
+    CHECK_FALSE(rig.recorder().results[0].ok);
+    CHECK(rig.recorder().results[0].value == 0u);
+    CHECK(rig.recorder().results[0].reason == omgp::core::kParamFailureNoErrorCode);
+    // Reported, so not counted as a delivery the application never gets (§8a).
+    CHECK(engine.dropped_deliveries() == 0u);
+
+    SECTION("and the id is back in the pool: the whole id space is claimable again") {
+        // R-10 releases an id when its result is DELIVERED, which the drain above did. If the
+        // dropped Get had leaked its id instead, the pool would be one short and the last claim
+        // below would be refused RequestIdReused. The three surviving modules are the targets;
+        // each claim is popped through the seam so the ring (same depth as the pool) is never
+        // what refuses.
+        const uint8_t other = rig.a_discovered_node();
+        REQUIRE(other != target);
+        for (size_t i = 0; i < kParamCapacity; ++i) {
+            ParamRequestId fresh = 0xFF;
+            REQUIRE(engine.get_param(other, 3, 0, fresh) == CoreStatus::Ok);
+            ParamOpItem item{};
+            REQUIRE(Bk::pop_param(engine, item));
+        }
+    }
+}
+
+TEST_CASE("FR-023: a queued Set whose node leaves the rig before it is issued is reported, not "
+          "dropped in silence [params][us2]") {
+    // The Set half of the case above: no request id to tag, so FR-023's report is the §7
+    // LifecycleKind::ParamSetFailed naming the parameter and a reason — the same shape a Set
+    // that was issued and failed produces, because the application cannot act on the difference
+    // between "the module refused this write" and "the module was gone before it was sent".
+    Rig rig;
+    bring_up_quiet(rig);
+    CoreEngine& engine = rig.engine();
+    const uint8_t target = rig.a_discovered_node();
+    rig.arm_params(ParamStep{true, 0, 0});
+
+    REQUIRE(engine.set_param(target, 7, 2, 100) == CoreStatus::Ok);
+    rig.unplug_slot(0);
+    REQUIRE(engine.discovery_state(target) != DiscoveryState::Discovered);
+
+    rig.run_until("the dropped Set to be reported", [&] {
+        return Bk::lifecycle_pending(engine, LifecycleKind::ParamSetFailed) == 1u;
+    });
+    CHECK(Bk::param_queued(engine) == 0u);
+
+    engine.drain_callbacks(kParamCapacity * 2u);
+    CHECK(rig.recorder().count(LifecycleKind::ParamSetFailed) == 1u);
+    const LifecycleEvent* ev = rig.recorder().first(LifecycleKind::ParamSetFailed);
+    REQUIRE(ev != nullptr);
+    CHECK(ev->node_id == target);
+    CHECK(ev->failed_param_id == 7u);
+    CHECK(ev->failed_reason == omgp::core::kParamFailureNoErrorCode);
+
+    SECTION("and exactly one: no later superframe reports it again") {
+        for (int i = 0; i < 200; ++i) {
+            rig.step(byte_us());
+        }
+        engine.drain_callbacks(kParamCapacity * 2u);
+        CHECK(rig.recorder().count(LifecycleKind::ParamSetFailed) == 1u);
+    }
+}
+
 TEST_CASE("CLAUDE.md rule 7: an answer that is not this request's own response yields a not-ok "
           "result, never a fabricated value [params][us2]") {
     // TOTAL for any bytes (spec FR-030's forward-compatibility rule): the decoders below are
@@ -1197,6 +1319,62 @@ TEST_CASE("CLAUDE.md rule 7: an answer that is not this request's own response y
         const ParamResult err_got = Bk::decode_get_answer(engine, err_shaped, err_len, 7, 2);
         CHECK_FALSE(err_got.ok);
         CHECK(err_got.reason == omgp::core::kParamFailureNoErrorCode);
+    }
+
+    SECTION("a response with the ERROR flag SET is a failure, whatever its own opcode says") {
+        // protocol-l3 §3: flags bit1 is the error bit. A response carrying this REQUEST's own
+        // opcode with bit1 set is a module declaring the operation FAILED, so reading §3.1's
+        // empty SET_PARAM payload as the acceptance — or a GET_PARAM echo as a reading — would
+        // deliver the one outcome FR-023 rules out: a failure the module declared, reported to
+        // the application as a success. Each message below differs from one that decodes to an
+        // ok result ONLY in that flags byte. Red team, PR #973 round 3, finding 2.
+        uint8_t flagged[omgp::LIMIT_max_l3_message] = {};
+        size_t flagged_len = 0;
+        const uint8_t both = static_cast<uint8_t>(omgp::FLAG_response | omgp::FLAG_error);
+        {
+            omgp::l3::GetParamResp r{};
+            r.param_id = 7;
+            r.scope = 2;
+            r.value = 1234;
+            uint8_t payload[omgp::LIMIT_max_l3_payload] = {};
+            size_t plen = 0;
+            REQUIRE(omgp::l3::encode_get_param_resp(r, payload, sizeof payload, plen) ==
+                    omgp::l3::Status::Ok);
+            omgp::l3::Header h{};
+            h.opcode = omgp::OP_GET_PARAM;
+            h.node_id = rig.a_discovered_node();
+            h.seq = 1;
+            h.flags = both; // the only difference from `good`, whose result is the control above
+            h.payload_len = static_cast<uint8_t>(plen);
+            REQUIRE(omgp::l3::encode_header(h, flagged, sizeof flagged, flagged_len) ==
+                    omgp::l3::Status::Ok);
+            for (size_t i = 0; i < plen; ++i) {
+                flagged[flagged_len + i] = payload[i];
+            }
+            flagged_len += plen;
+        }
+        const ParamResult got = Bk::decode_get_answer(engine, flagged, flagged_len, 7, 2);
+        CHECK_FALSE(got.ok);
+        CHECK(got.value == 0u); // the flagged reading is not delivered
+        // No code of its own: the module set the error bit but named no error code, and an
+        // ERROR is where a code travels. core/ does not invent one (FR-023's reason field).
+        CHECK(got.reason == omgp::core::kParamFailureNoErrorCode);
+
+        // The Set side: §3.1's empty acceptance payload with the error bit set is not an
+        // acceptance, otherwise a write the module refused is reported as having been made.
+        uint8_t set_flagged[omgp::LIMIT_max_l3_message] = {};
+        size_t set_len = 0;
+        omgp::l3::Header hs{};
+        hs.opcode = omgp::OP_SET_PARAM;
+        hs.node_id = rig.a_discovered_node();
+        hs.seq = 2;
+        hs.flags = both;
+        hs.payload_len = 0;
+        REQUIRE(omgp::l3::encode_header(hs, set_flagged, sizeof set_flagged, set_len) ==
+                omgp::l3::Status::Ok);
+        const ParamResult set_got = Bk::decode_set_answer(engine, set_flagged, set_len);
+        CHECK_FALSE(set_got.ok);
+        CHECK(set_got.reason == omgp::core::kParamFailureNoErrorCode);
     }
 
     SECTION("an ERROR answer carries its own code through, and an unallocated one does not") {
