@@ -320,14 +320,15 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
 
     // --- parameter reporting (spec FR-023/FR-024, protocol-l3 §3.1) -------------------------
 
-    // Splits one answer to a parameter request into its payload. protocol-l3 §3.1: an answer is
-    // either that request's own opcode with FLAG_response set, or OP_ERROR. Returns true, with
-    // `out_payload` set, only for the former; for everything else it returns false and fills
-    // `out_result` with the not-ok ParamResult that answer means — an ERROR's own code, read
-    // only through l3::decode_error_resp, and kParamFailureNoErrorCode for an undecodable
-    // message, an unexpected opcode, or an ERROR whose code this protocol version does not
-    // allocate. TOTAL for any bytes: nothing here indexes a payload by hand (R-02 keeps every
-    // payload byte behind l3/l3_payload.hpp), so an arbitrary message cannot over-read.
+    // Splits one answer to a parameter request into its payload. protocol-l3 §3/§3.1: an answer
+    // is a RESPONSE (flags bit0 set) carrying either that request's own opcode or OP_ERROR.
+    // Returns true, with `out_payload` set, only for the former; for everything else it returns
+    // false and fills `out_result` with the not-ok ParamResult that answer means — an ERROR's
+    // own code, read only through l3::decode_error_resp, and kParamFailureNoErrorCode for an
+    // undecodable message, a message that is not a response, an unexpected opcode, or an ERROR
+    // whose code this protocol version does not allocate. TOTAL for any bytes: nothing here
+    // indexes a payload by hand (R-02 keeps every payload byte behind l3/l3_payload.hpp), so an
+    // arbitrary message cannot over-read.
     bool param_answer_payload(const uint8_t* resp, size_t len, uint8_t expect,
                               l3::Bytes& out_payload, ParamResult& out_result) const;
     // The answer to a GET_PARAM for (`param_id`, `scope`) as the ParamResult FR-024 delivers:

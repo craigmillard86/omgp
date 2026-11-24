@@ -1486,6 +1486,18 @@ bool CoreEngine::param_answer_payload(const uint8_t* resp, size_t len, uint8_t e
         out_result = param_failure(kParamFailureNoErrorCode);
         return false;
     }
+    // protocol-l3 §3: flags bit0 is the response bit, and an answer to a host-initiated request
+    // is a response — on both arms below, this request's own opcode and OP_ERROR alike (§3.1
+    // gives ERROR flags.error on an N→H response). A message with it CLEAR is a request's bytes,
+    // not an answer, and core/ is the only layer that can say so: l3::decode_message validates
+    // the header's length, not its direction, and L2 is opaque to L3 by architecture invariant.
+    // Refused as a failure with no code rather than ignored, so FR-023 still reports an outcome.
+    // Reserved bits 2-7 are NOT policed here: §4's skip-the-unknown rule applies to them, so a
+    // future flag does not turn a conforming answer into a failure (CLAUDE.md rule 7).
+    if ((hdr.flags & FLAG_response) == 0u) {
+        out_result = param_failure(kParamFailureNoErrorCode);
+        return false;
+    }
     if (hdr.opcode == expect) {
         return true;
     }
