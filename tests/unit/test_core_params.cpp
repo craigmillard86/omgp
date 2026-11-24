@@ -1152,6 +1152,71 @@ TEST_CASE("FR-023: a queued Set whose node leaves the rig before it is issued is
     }
 }
 
+TEST_CASE("FR-023: a WHOLE RING of queued Sets whose node leaves is reported to the last one, "
+          "none lost to a full lifecycle ring [params][us2]") {
+    // The case above with the ring FULL, which is where reporting a drop and §8a's drop-newest
+    // rule meet. drain_params() discards every item whose node has gone in ONE pass (passes ==
+    // ring size, no demand-budget cost), so a single departure can push up to LIMIT_max_nodes
+    // ParamSetFailed events at pending_lifecycle_ inside one run_superframe() call — and that
+    // ring is LIMIT_max_nodes deep and SHARED with the health/discovery stream, which the same
+    // departure has already put its own NodeRemoved into. Unlike the §8a case at :1033, no drain
+    // cadence the application can choose creates room mid-burst, so a refused push here is an
+    // accepted operation ending in silence: exactly what FR-023 forbids. The drop must therefore
+    // be BOUNDED by the room there is, with the unreportable item keeping its place in the ring
+    // (FR-005's carry-over by identity, as admit_demand()'s own refusal already does).
+    // Red team, PR #973 round 4, finding F1.
+    Rig rig;
+    bring_up_quiet(rig);
+    CoreEngine& engine = rig.engine();
+    const uint8_t target = rig.a_discovered_node();
+    rig.arm_params(ParamStep{true, 0, 0}); // the module WOULD answer, were it there
+
+    size_t queued = 0;
+    for (size_t i = 0; i < kParamCapacity; ++i) {
+        // Distinct param_ids, so a report names the operation it belongs to rather than being
+        // indistinguishable from its neighbours.
+        if (engine.set_param(target, static_cast<uint8_t>(i & 0x7Fu), 0, 100) != CoreStatus::Ok) {
+            break;
+        }
+        ++queued;
+    }
+    REQUIRE(queued == kParamCapacity);
+    REQUIRE(Bk::param_queued(engine) == kParamCapacity);
+
+    rig.unplug_slot(0);
+    REQUIRE(engine.discovery_state(target) != DiscoveryState::Discovered);
+
+    // PHASE 1 — the burst, with NO drain interleaved, which is the real path's own timing rather
+    // than a slack application: on hardware the slot map arrives INSIDE run_superframe(), so the
+    // departure's own NodeRemoved event and every drop it causes are enqueued by ONE call and no
+    // drain cadence, however tight, can create room between them. unplug_slot() hands the engine
+    // that map directly (so a case can be written at all), which is why the drain is withheld
+    // here instead: with it, the departure event is gone before the burst and all 128 reports
+    // happen to fit, and the case would assert nothing.
+    rig.run_until("the drop burst to start", [&] {
+        return Bk::lifecycle_pending(engine, LifecycleKind::ParamSetFailed) > 0u;
+    });
+    for (int i = 0; i < 64; ++i) { // every pass the burst can make, run to a standstill
+        rig.step(byte_us());
+    }
+    // Nothing was refused: a report the shared ring has no room for leaves its operation IN the
+    // ring (FR-005's carry-over by identity) rather than being counted away under §8a.
+    CHECK(engine.dropped_deliveries() == 0u);
+
+    // PHASE 2 — the application drains, which is the only thing that can make room, and the
+    // superframes that follow finish the ring off.
+    for (uint64_t i = 0; i < 4000u && Bk::param_queued(engine) != 0u; ++i) {
+        engine.drain_callbacks(kParamCapacity * 4u);
+        rig.step(byte_us());
+    }
+    REQUIRE(Bk::param_queued(engine) == 0u); // every item left the ring, reported
+    engine.drain_callbacks(kParamCapacity * 4u);
+
+    // One report per accepted operation, and no outcome counted as undeliverable.
+    CHECK(rig.recorder().count(LifecycleKind::ParamSetFailed) == queued);
+    CHECK(engine.dropped_deliveries() == 0u);
+}
+
 TEST_CASE("CLAUDE.md rule 7: an answer that is not this request's own response yields a not-ok "
           "result, never a fabricated value [params][us2]") {
     // TOTAL for any bytes (spec FR-030's forward-compatibility rule): the decoders below are
@@ -1375,6 +1440,64 @@ TEST_CASE("CLAUDE.md rule 7: an answer that is not this request's own response y
         const ParamResult set_got = Bk::decode_set_answer(engine, set_flagged, set_len);
         CHECK_FALSE(set_got.ok);
         CHECK(set_got.reason == omgp::core::kParamFailureNoErrorCode);
+
+        // AND when that response's payload is itself a well-formed ERROR body, the code it
+        // carries is still NOT read back as this request's reason. Pinned, not inherited: this is
+        // a DELIBERATE refusal to interpret an undefined shape, and the cost is real — a bridge
+        // answering ERR_BUSY this way (golden rule 6) loses the one reason a host most wants.
+        // protocol-l3 §3.1 defines no own-opcode-plus-bit1 message at all, so what its payload
+        // holds is undefined, and reading byte 0 as an error code is a guess that MISREPORTS on
+        // the Get side: a GET_PARAM response body starts with param_id, so `param_id ==
+        // ERR_BUSY` would deliver a reason the module never named — the fabrication this whole
+        // case exists to rule out. The failure is reported either way (FR-023); only the reason
+        // is withheld. Recorded for ruling in docs/OPEN-QUESTIONS.md (2026-11-24, fourth entry).
+        // Red team, PR #973 round 4, finding F2.
+        uint8_t coded[omgp::LIMIT_max_l3_message] = {};
+        size_t coded_len = 0;
+        uint8_t coded_payload[omgp::LIMIT_max_l3_payload] = {};
+        size_t coded_plen = 0;
+        omgp::l3::ErrorResp busy{};
+        busy.code = omgp::ERR_BUSY;
+        busy.detail.data = nullptr;
+        busy.detail.len = 0;
+        REQUIRE(omgp::l3::encode_error_resp(busy, coded_payload, sizeof coded_payload,
+                                            coded_plen) == omgp::l3::Status::Ok);
+        omgp::l3::Header hc{};
+        hc.opcode = omgp::OP_SET_PARAM; // this request's OWN opcode, not OP_ERROR
+        hc.node_id = rig.a_discovered_node();
+        hc.seq = 4;
+        hc.flags = both;
+        hc.payload_len = static_cast<uint8_t>(coded_plen);
+        REQUIRE(omgp::l3::encode_header(hc, coded, sizeof coded, coded_len) ==
+                omgp::l3::Status::Ok);
+        for (size_t i = 0; i < coded_plen; ++i) {
+            coded[coded_len + i] = coded_payload[i];
+        }
+        coded_len += coded_plen;
+        const ParamResult coded_got = Bk::decode_set_answer(engine, coded, coded_len);
+        CHECK_FALSE(coded_got.ok);
+        CHECK(coded_got.reason == omgp::core::kParamFailureNoErrorCode);
+        // The CONFORMING way to say the same thing — OP_ERROR, flags response|error — does
+        // deliver the code, so nothing above withholds a reason a module stated per §3.1. The
+        // section below asserts that route in full; this is the contrast that makes the refusal
+        // above a shape decision rather than a lost capability.
+        uint8_t proper[omgp::LIMIT_max_l3_message] = {};
+        size_t proper_len = 0;
+        omgp::l3::Header hp{};
+        hp.opcode = omgp::OP_ERROR;
+        hp.node_id = rig.a_discovered_node();
+        hp.seq = 5;
+        hp.flags = both;
+        hp.payload_len = static_cast<uint8_t>(coded_plen);
+        REQUIRE(omgp::l3::encode_header(hp, proper, sizeof proper, proper_len) ==
+                omgp::l3::Status::Ok);
+        for (size_t i = 0; i < coded_plen; ++i) {
+            proper[proper_len + i] = coded_payload[i];
+        }
+        proper_len += coded_plen;
+        const ParamResult proper_got = Bk::decode_set_answer(engine, proper, proper_len);
+        CHECK_FALSE(proper_got.ok);
+        CHECK(proper_got.reason == omgp::ERR_BUSY);
     }
 
     SECTION("an ERROR answer carries its own code through, and an unallocated one does not") {
