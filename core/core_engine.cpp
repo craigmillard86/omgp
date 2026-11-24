@@ -705,14 +705,28 @@ CoreEngine::Resume CoreEngine::drain_params(uint64_t now_us) {
         const size_t idx = node_index(item.node_id);
         if (idx == kNoNodeIndex || !nodes_[idx].in_use ||
             nodes_[idx].discovery != DiscoveryState::Discovered) {
-            ParamOpItem dropped{};
-            (void)param_queue_.pop(dropped);
             // The slot emptied under a queued operation (FR-010): dropped rather than
             // misaddressed — but REPORTED, never dropped in silence. FR-023 owes the
             // application an outcome for every operation the engine accepted, and FR-024 owes
             // this Get's request id back to R-10's pool; both are what report_param_dropped()
             // does. Red team, PR #973 round 3, finding 1.
-            report_param_dropped(dropped);
+            //
+            // REPORTED FIRST, POPPED ONLY THEN, and the order is the whole point: this loop
+            // drops EVERY item a departure stranded in one pass, at no demand-budget cost, so
+            // one unplug can aim LIMIT_max_nodes reports at a §8a ring that is LIMIT_max_nodes
+            // deep and SHARED with the health stream — which the same departure has already put
+            // its own NodeRemoved into. Popping first would hand the surplus to a refused push
+            // and lose it, and no application drain cadence could prevent that: the departure
+            // event and the whole burst are enqueued by this one run_superframe() call. So the
+            // burst is bounded by the room there is. The item keeps its place in the ring, as
+            // admit_demand()'s refusal below already does (FR-005's carry-over BY IDENTITY),
+            // and the next superframe after the application has drained reports it.
+            // Red team, PR #973 round 4, finding F1.
+            if (!report_param_dropped(item)) {
+                return Resume::Refused;
+            }
+            ParamOpItem dropped{};
+            (void)param_queue_.pop(dropped);
             continue;
         }
         NodeRecord& node = nodes_[idx];
@@ -772,8 +786,12 @@ CoreEngine::Resume CoreEngine::drain_params(uint64_t now_us) {
             // the property is by construction here, demonstrated at the site above. Which is
             // also why no test can kill a mutation of this call: same argument, same branch,
             // and the pop above it already carries the same label for the same reason.
+            //
+            // The report's refusal is NOT carried over here, unlike the drop above: this item can
+            // never be issued, so holding it for room would hold the ring for ever. One item at
+            // most, and only on a branch argued unreachable.
             // mutant-ok(equivalent, cxx_remove_void_call): unreachable branch; see above.
-            report_param_dropped(dropped);
+            (void)report_param_dropped(dropped);
             continue;
         }
         // ONE comparison for both, and not only to avoid repeating it: derived from one `is_set`,
@@ -1526,8 +1544,16 @@ bool CoreEngine::param_answer_payload(const uint8_t* resp, size_t len, uint8_t e
         // module that sets bit1 on a response carrying THIS REQUEST'S own opcode is declaring
         // the operation failed, so reading that payload as a success would deliver the one
         // outcome FR-023 rules out: a failure the module declared, reported as an acceptance.
-        // No code of its own, because the module named none — a code travels in an ERROR, read
-        // on the arm below, where bit1 is the opcode's own mark rather than a contradiction.
+        // Reported with NO code of its own — and that is a decision about an UNDEFINED shape,
+        // not an observation that the module named none: §3.1 gives this message no payload
+        // format at all, so a module CAN put a well-formed ERROR body here, and this branch does
+        // not read it. Deliberate, because reading byte 0 as an error code is a guess that
+        // misreports on the Get side: a GET_PARAM response body begins with param_id, so a
+        // `param_id` that collides with an allocated code would be delivered as a reason the
+        // module never stated — the fabrication FR-023's reason field must not carry. The
+        // conforming route keeps its code: an ERROR, read on the arm below, where bit1 is the
+        // opcode's own mark rather than a contradiction. Recorded for ruling in
+        // docs/OPEN-QUESTIONS.md (2026-11-24), not resolved here. Red team round 4, F2.
         if ((hdr.flags & FLAG_error) == 0u) {
             return true;
         }
@@ -1631,7 +1657,7 @@ void CoreEngine::report_param_outcome(TxKind kind, const ParamResult& result) {
     (void)enqueue_lifecycle(ev);
 }
 
-void CoreEngine::report_param_dropped(const ParamOpItem& item) {
+bool CoreEngine::report_param_dropped(const ParamOpItem& item) {
     // FR-023/FR-024 for an operation that never became a transaction: the drain loop discards a
     // queued item whose node is gone (FR-010) rather than misaddress it, and discarding it in
     // silence is what FR-023 forbids — "a failed parameter operation is REPORTED, never
@@ -1644,7 +1670,25 @@ void CoreEngine::report_param_dropped(const ParamOpItem& item) {
     // DELIVERED, so an unreported Get retires its id for the life of the engine (LIMIT_max_nodes
     // of them wedge get_param()). Read from the ITEM, not from the tx_* correlation state, which
     // belongs to whatever transaction is outstanding and has nothing to do with this one.
+    //
+    // Returns WHETHER the report was taken, and tests for room rather than attempting the push:
+    // §8a's drop-newest rule counts a refused push in dropped_deliveries_, which is the right
+    // answer for an outcome that is being given up on and the wrong one for an item the caller
+    // is about to carry over — it would report a loss that never happened. The two rings are
+    // tested separately because a Set's report and a Get's go to different ones.
+    //
+    // Only the SET arm's ring can actually be full here, and the asymmetry is worth stating
+    // rather than leaving as an accident: pending_param_results_ is as deep as R-10's id pool and
+    // each outstanding id owns at most one entry in it, so a ring full of 128 results has
+    // consumed every id and no queued Get can exist to be dropped. The Get arm's test below is
+    // therefore defensive — by construction, not demonstrated — while the Set arm's is the one
+    // the drop burst reaches, because pending_lifecycle_ is shared with the health stream and has
+    // no such accounting. Kept on both arms so the caller's contract does not depend on which
+    // ring a report happens to go to.
     if (item.kind == ParamOpItem::Kind::Get) {
+        if (pending_param_results_.full()) {
+            return false;
+        }
         // The WHOLE ParamResult comes from this one call, so Mull's cxx_replace_scalar_call —
         // which replaces a scalar-returning call with 42 — reaches all three of its fields at
         // once. ParamResult is 6 bytes, so it comes back in a register rather than through
@@ -1664,15 +1708,17 @@ void CoreEngine::report_param_dropped(const ParamOpItem& item) {
         // guarantee (CLAUDE.md rule 11): give kParamFailureNoErrorCode a non-zero value and the
         // test above kills this mutant, at which point the label goes stale and is reported.
         // mutant-ok(equivalent, cxx_replace_scalar_call): every field reads as the real call's.
-        (void)enqueue_param_result(item.request_id, param_failure(kParamFailureNoErrorCode));
-        return;
+        return enqueue_param_result(item.request_id, param_failure(kParamFailureNoErrorCode));
+    }
+    if (pending_lifecycle_.full()) {
+        return false;
     }
     LifecycleEvent ev{};
     ev.kind = LifecycleKind::ParamSetFailed;
     ev.node_id = item.node_id;
     ev.failed_param_id = item.param_id;
     ev.failed_reason = kParamFailureNoErrorCode;
-    (void)enqueue_lifecycle(ev);
+    return enqueue_lifecycle(ev);
 }
 
 DescriptorCacheEntry* CoreEngine::find_descriptor(uint8_t module_type, uint16_t desc_len,

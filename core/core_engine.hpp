@@ -352,7 +352,13 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     // the tx_* state (which belongs to another transaction entirely), and always a failure with
     // kParamFailureNoErrorCode: no node answered, so there is no L3 code to report. The Get arm
     // is also what returns the item's request id to R-10's pool, via its delivery.
-    void report_param_dropped(const ParamOpItem& item);
+    //
+    // Returns whether the report was TAKEN. False means the §8a ring it belongs on is full, and
+    // nothing was counted in dropped_deliveries_: a drop burst (one departure strands up to
+    // LIMIT_max_nodes items, all discarded inside one run_superframe() call) would otherwise aim
+    // more reports at a shared, LIMIT_max_nodes-deep ring than it can hold, and no application
+    // drain cadence could create room mid-burst. The caller carries the item over instead.
+    bool report_param_dropped(const ParamOpItem& item);
 
     // --- the descriptor cache (spec FR-008, R-12) -------------------------------------------
 

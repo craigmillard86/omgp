@@ -6607,3 +6607,48 @@ existing artefact, and a protocol-prose change is a human ruling by policy eithe
 **Ruling:** pending — human. **Amends:** proposes `docs/protocol-l3.md` §3.1 (human-authored;
 agents do not edit the three authoritative documents). **Related:** #701, `tasks.md` T030, spec
 FR-023, `docs/protocol-l3.md` §3/§3.1, `tools/refimpl/genvectors.py`, `tests/vectors/`.
+
+## 2026-11-24 — T030 (#701): what does a response carrying the REQUEST's own opcode with flags bit1 set contain?
+
+**Context:** raised by the red team on PR #973 (round 4, F2), and the mirror of the entry above —
+the same artefact gap seen from the other side. `docs/protocol-l3.md` §3.1 defines the answers to
+`SET_PARAM`/`GET_PARAM` as an empty acceptance and an echoed reading respectively, and failures as
+`ERROR`. It defines NO message carrying the request's own opcode with flags bit1 (error) set, so
+when a module sends one — `OP_SET_PARAM`, flags `response|error` — the document says nothing about
+what its payload holds. A module can put a well-formed `ERROR` body there: the red team's
+reproducer is exactly `OP_SET_PARAM | response|error` carrying `ERR_BUSY`, which CLAUDE.md golden
+rule 6 makes the bridge's standard refusal.
+
+**Why it matters, precisely.** `CoreEngine::param_answer_payload()` treats the error bit on an
+own-opcode response as the module declaring the operation failed (correct: reading it as §3.1's
+acceptance would report a refused write as having been made — the hole closed at `7ce625a`), and
+reports `kParamFailureNoErrorCode`. FR-023 holds: the failure IS reported. What is lost is the
+REASON, and for a bridge answering `ERR_BUSY` that is the one reason a host most wants.
+DEMONSTRATED by the case `a response with the ERROR flag SET is a failure, whatever its own opcode
+says` in `tests/unit/test_core_params.cpp`, which now pins both halves: the own-opcode form
+carrying an `ERROR` body reports `kParamFailureNoErrorCode`, and the conforming `OP_ERROR` form
+delivers `ERR_BUSY`.
+
+**What was done:** the behaviour was left as it is; the inline rationale at the branch was
+corrected, because it had claimed the module "named none" — false for this shape. Reading byte 0
+of an undefined payload as an error code was rejected as a guess that MISREPORTS on the Get side:
+a `GET_PARAM` response body begins with `param_id`, so a `param_id` colliding with an allocated
+code (`ERR_BUSY` is `0x04`) would be delivered as a reason the module never stated — fabricating
+the reason FR-023 asks to be carried, which is worse than withholding it.
+
+**Recommendation:** amend `docs/protocol-l3.md` §3.1 to state that a failure is an `ERROR`, and
+that a response carrying the request's own opcode with flags bit1 set is MALFORMED — the host
+reports the failure with no code and does not interpret the payload. That is what the code does
+and it costs no branch. Alternatives: (b) define the payload of such a response to BE an `ERROR`
+body and read the code from it — this recovers the `ERR_BUSY` case, but it is a protocol addition
+(YAML + docs, a human ruling) and needs the Get-side collision ruled on, since `param_id` and
+`code` would then occupy the same byte; (c) read the code only where the opcode's own response
+body is defined EMPTY (`SET_PARAM`), which has no collision but makes the rule opcode-dependent
+and is stated nowhere. (a) is recommended: it makes the current, conservative behaviour right by
+the document and leaves the conforming `ERROR` route — which already carries the code — as the
+only way to name one.
+
+**Ruling:** pending — human. **Amends:** proposes `docs/protocol-l3.md` §3.1 (human-authored;
+agents do not edit the three authoritative documents). **Related:** #701, `tasks.md` T030, spec
+FR-023, CLAUDE.md golden rule 6, `docs/protocol-l3.md` §3/§3.1, and the bit0 entry immediately
+above, which this one mirrors.
