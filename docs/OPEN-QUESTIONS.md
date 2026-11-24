@@ -6767,3 +6767,49 @@ events keep FR-020's priority in the superframes between; skipped event items ke
 are human-ruling artefacts and have NOT been edited by an agent — a human-authored amendment is
 still owed. **Implementation:** PR #952, tests first. **Supersedes:** the "PROPOSED" status of the
 entry above; **amends:** nothing in this file's history.
+
+## 2026-11-24 — T039 (#710): PROPOSED ruling — FR-026's flood fault must not depend on the drain rate the floor allows
+
+**Status: PROPOSED, awaiting human ratification.** Drafted by an agent at the maintainer's request
+after PR #952's round-6 review `[HIGH]` finding 1. Not a ruling; `spec.md` FR-026 and SC-002 are
+unchanged by it. (`spec.md` FR-020 WAS amended in the same change, because that ruling is ratified —
+see the RATIFIED entry above.)
+
+**The finding, with its labels (CLAUDE.md rule 11).** FR-025's K = 1 caps a node at one drain per
+superframe; the ratified FR-020 floor skips the event ring in the superframe after one that issued an
+event drain whenever non-event work is pending. Composed: one drain per TWO superframes while the
+floor is engaged. `kEventRateBudgetPerWindow` is 4 per `kEventRateWindowSuperframes` = 8 — the same
+4 per 8 — and the fault needs a STRICT excess (`note_event_drained()` returns at `<=`;
+`roll_event_window()` judges `>`). So a node can never exceed the budget while the floor is engaged,
+and FR-026's fault never fires in exactly the flood-plus-discovery rig the floor exists for (a
+flooder A beside a module B that never answers IDENTIFY keeps the floor engaged for ever).
+**Proved by construction** from those sites; the reviewer's ~8.4-superframes-per-window pacing
+(a phase accident could admit a fifth drain) is ASSUMED, not measured here. **No committed case
+observes `NodeEventFault` with the floor engaged.**
+
+**Why changing the constants does not fix it.** Any budget at or below the floor-limited rate faults
+an HONEST node with budget+1 queued events, because the rate is the same for an honest backlog and a
+flood — the false positive the 2026-11-23 entry records. The rate is the wrong signal: with K = 1
+and the floor it measures the scheduler, not the node.
+
+**Proposed ruling: the flood fault is raised by a run, not a rate (alternative (d) of the 2026-11-23
+entry, specified).** A node is faulted when it answers N consecutive GET_EVENTs each with
+`remaining_count > 0` — a stream that, from an honest module, must end because its queue is finite.
+The count resets when the node answers with `remaining_count == 0` or `EVT_NONE`, or leaves
+Discovered. It is independent of how many superframes separate the drains, so the floor cannot
+disarm it; a flooder is faulted after N drains (about 2N superframes under the floor). The rate
+budget and window are then retired for FR-026 (or kept as a second, coarser signal — a ruling).
+N must exceed the deepest honest queue; **no limit in `protocol/omgp-protocol.yaml` bounds a
+module's event queue depth**, so N is a NEW constant that needs a human value (the test mock's
+capacity, `MockL3Node::kEventQueueCapacity`, is a fixture, not a spec figure) — or a protocol limit
+added by the protocol owner, which this entry does not do.
+
+**What this does not establish.** That a run-length fault never faults an honest module is ASSUMED
+until N is ruled against a stated maximum queue depth. That `remaining_count` is trustworthy is not
+assumed: a node that lies low (always 0) is not a flood by this signal and is already bounded by K = 1
+and the floor. **Tests first (rule 8) when ratified:** a flooder beside a never-identifying module
+with the floor engaged must raise exactly one `NodeEventFault` — a case that fails at this head.
+
+**Amends:** on ratification, `spec.md` FR-026 and SC-002 (the 2026-11-24 SC-002/FR-026 entry's
+proposal; this entry specifies FR-026's signal). **Supersedes:** none. **Related:** the 2026-11-23 and
+2026-11-24 entries above, #709, #710, PR #952 round 6, FR-020, FR-025, FR-026, SC-002.

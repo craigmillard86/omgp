@@ -411,7 +411,20 @@ confirm the application is told it has become unreachable and later told when it
   holds even while a parameter-set or descriptor-chunk burst is competing for the same
   budget (clarified 2026-09-20; no priority order is stated in the authoritative
   sources' description of "demand slots" as one undifferentiated category — see
-  `docs/OPEN-QUESTIONS.md`).
+  `docs/OPEN-QUESTIONS.md`). **Floor (amended 2026-11-24, ratified by the maintainer;
+  `docs/OPEN-QUESTIONS.md` "T039 (#710): PROPOSED ruling — FR-020's event priority gets a
+  floor", and its RATIFIED entry):** event priority is not strict. Whenever non-event
+  demand work (an IDENTIFY, a descriptor-chunk read, a parameter operation) is pending,
+  the superframe after one whose demand slot went to an event drain MUST serve that
+  non-event work first, so non-event work gets at least every second superframe's first
+  demand slot whatever the event ring holds; events keep this priority in the superframes
+  between. An event item the floor passes over MUST keep its place (it is not dropped or
+  reordered), and when no non-event work can be issued the slot goes to the event ring.
+  (Strict priority let a steady source of events — an endless honest backlog from two
+  modules, or unjustified attribution probes from several backplanes — take every demand
+  slot for ever and stop all discovery.) The latency bound above therefore holds for a
+  burst of finite length, not an unbounded one; see SC-002's amendment, which is
+  PROPOSED and not yet ruled.
 
 ### Key Entities
 
