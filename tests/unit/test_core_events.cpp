@@ -477,6 +477,17 @@ class Rig {
         install(addr, pending, events);
     }
 
+    // A backplane with one occupied slot whose module NEVER answers IDENTIFY (the slot map and the
+    // status block are scripted, nothing else), so it stays Identifying for ever and non-event
+    // demand work stays pending for ever — the shape that keeps the FR-020 floor engaged.
+    void install_stuck(uint8_t addr) {
+        std::vector<L3Step>& steps = scripts_[addr];
+        steps.clear();
+        steps.push_back(L3Step::of(SlotMapStep{1, 0x01u, 0x01u}));
+        steps.push_back(L3Step::of(StatusStep{ready_status(0u)}));
+        node_.set_script(addr, steps.data(), steps.size());
+    }
+
     void step() {
         now_us_ += byte_us();
         node_.advance_to(now_us_);
@@ -1143,6 +1154,65 @@ TEST_CASE("FR-020 floor: events keep making progress while non-event work is pen
             CHECK(at[i] - at[i - 1] <= 2u); // the floor's "at least every second superframe"
         }
     }
+}
+
+TEST_CASE("FR-026: a flooder is faulted by its run of 'more' answers, at the 256th, even while the "
+          "FR-020 floor is engaged [events][us4]") {
+    // #952 review round 6 [HIGH] 1. The floor spaces one node's drains two superframes apart
+    // while non-event work is pending, which is the rate budget's own figure (4 per 8
+    // superframes), and the rate fault needs a STRICT excess — so with the floor engaged it fires
+    // only when a window happens to run a little over eight superframes and admit a fifth drain:
+    // by accident, early, and against an HONEST node with a long backlog as readily as a flood.
+    // The ratified signal (OPEN-QUESTIONS 2026-11-24, RATIFIED) is a RUN of N = 256 consecutive
+    // GET_EVENT answers each reporting remaining_count > 0 (N = UINT8_MAX + 1: the most an honest
+    // u8 remaining_count can announce, plus one). It fires on the 256th such answer, not before,
+    // and drain spacing cannot disarm it.
+    //
+    // WRITTEN FIRST, RED at d01da52: the fault fires after a handful of drains (see the INFO line),
+    // not at the 256th. The flooder is re-armed every eight superframes (MockL3Node holds only
+    // kEventQueueCapacity events; the floor serves it four drains per eight, so its queue is
+    // never empty and no EVT_NONE resets the run). The other module never answers IDENTIFY, so
+    // non-event work stays pending and the floor stays engaged throughout.
+    constexpr size_t kRun = static_cast<size_t>(UINT8_MAX) + 1u;
+    constexpr uint32_t kHorizon = 600; // 2 x 256 superframes at one drain per two, plus slack
+    Rig rig;
+    const uint8_t flooder_bp = omgp::ADDR_backplane_min;
+    const uint8_t stuck_bp = static_cast<uint8_t>(omgp::ADDR_backplane_min + 14u);
+    const std::vector<ScriptedEvent> flood = flood_script(false);
+    rig.install(flooder_bp, 0xFFu, flood);
+    rig.install_stuck(stuck_bp);
+    size_t drains_at_first_fault = 0;
+    uint32_t at_superframe = 0;
+    for (uint32_t sf = 0; sf < kHorizon; ++sf) {
+        rig.run_superframes(1u);
+        if (sf % 8u == 7u) {
+            rig.arm(flooder_bp, 0xFFu, flood);
+        }
+        if (drains_at_first_fault == 0 && rig.recorder().count(LifecycleKind::NodeEventFault) > 0) {
+            drains_at_first_fault = rig.transcript().count(omgp::OP_GET_EVENT);
+            at_superframe = sf;
+        }
+    }
+    const size_t drains = rig.transcript().count(omgp::OP_GET_EVENT);
+    size_t stuck_discovered = 0;
+    for (const uint8_t id : rig.discovered_ids()) {
+        if (Bk::node(rig.engine(), id).backplane_addr == stuck_bp) {
+            ++stuck_discovered;
+        }
+    }
+    INFO("first NodeEventFault after "
+         << drains_at_first_fault << " GET_EVENTs (superframe " << at_superframe
+         << "); total GET_EVENT=" << drains
+         << ", NodeEventFault=" << rig.recorder().count(LifecycleKind::NodeEventFault)
+         << ", stuck module discovered=" << stuck_discovered);
+    // The rig is the one this case is about: the stuck module never reaches Discovered, so
+    // non-event work is pending throughout, and the floor holds the flooder to about one drain per
+    // two superframes (strict priority would be about one per superframe: ~600).
+    REQUIRE(stuck_discovered == 0u);
+    CHECK(drains <= (kHorizon / 2u) + 8u);
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeEventFault) >= 1u);
+    CHECK(drains_at_first_fault == kRun); // the 256th answer, no earlier and no later
+    CHECK(rig.recorder().count(LifecycleKind::NodeEventFault) == 1u); // once per episode
 }
 
 TEST_CASE("FR-026: an over-budget node is reported NodeEventFault and stops being drained "
