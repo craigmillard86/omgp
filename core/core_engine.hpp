@@ -324,7 +324,7 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     // deliver nothing and re-queue nothing (CLAUDE.md rule 7).
     void on_event_drain(const link::MasterEvent& ev, uint64_t now_us);
 
-    // --- event detection and the event-rate budget (spec FR-015/FR-026) ---------------------
+    // --- event detection and the event flood fault (spec FR-015/FR-026) ---------------------
 
     // spec FR-015, with the attribution reading on_status_block() states: ONE step of a
     // backplane's event-attribution rotation — queues an EventDrainItem for the next Discovered
@@ -345,17 +345,18 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     // Whether any demand work other than an event drain is waiting: a descriptor chunk, a
     // parameter operation, or a node still owed IDENTIFY or a descriptor read.
     bool non_event_demand_pending() const;
-    // spec FR-026: counts one drained event against this node's current rate window and raises
-    // LifecycleKind::NodeEventFault on the drain that takes it past kEventRateBudgetPerWindow.
-    void note_event_drained(NodeRecord& node, uint8_t node_id, uint64_t now_us);
-    // spec FR-026: closes a window whose kEventRateWindowUs has elapsed — judging the count it
-    // accumulated, starting a fresh one, and clearing a fault
-    // (LifecycleKind::NodeEventFaultCleared) when the window that just closed was within budget.
-    void roll_event_window(NodeRecord& node, uint8_t node_id, uint64_t now_us);
-    // Rolls every in-use node's window, once per superframe (open_superframe()). The only place a
-    // faulted node's recovery can be noticed: while faulted it is drained not at all, so no
-    // drain of its own could ever close its window.
-    void tick_event_windows(uint64_t now_us);
+    // spec FR-026: records one drained event's answer against this node's run of consecutive
+    // "more" answers (`more` = remaining_count > 0) and raises LifecycleKind::NodeEventFault on the
+    // answer that makes the run kEventRunFaultThreshold long. An answer that is not "more" resets
+    // it.
+    void note_event_drained(NodeRecord& node, uint8_t node_id, uint64_t now_us, bool more);
+    // spec FR-026: ends a faulted node's hold once kEventFaultHoldUs has elapsed since the fault,
+    // reporting LifecycleKind::NodeEventFaultCleared. A node that is not faulted is untouched.
+    void release_event_fault_after_hold(NodeRecord& node, uint8_t node_id, uint64_t now_us);
+    // Visits every in-use node once per superframe (open_superframe()). The only place a faulted
+    // node's recovery can be noticed: while faulted it is drained not at all, so no drain of its
+    // own could ever end its hold.
+    void tick_event_fault_holds(uint64_t now_us);
 
     // --- the descriptor cache (spec FR-008, R-12) -------------------------------------------
 

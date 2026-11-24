@@ -85,47 +85,32 @@ static_assert(LIMIT_max_descriptor_bytes <= UINT16_MAX,
               "DescriptorCacheEntry::len is uint16_t: LIMIT_max_descriptor_bytes must fit it "
               "(data-model.md §5)");
 
-// --- Event-rate budget (spec FR-026, research.md R-07 correction) --------------------------
-// FR-026 says "a configured budget" and names neither a window nor a count, and there is no
-// such symbol in protocol/omgp-protocol.yaml to reference: an event-delivery rate budget is a
-// HOST policy with no wire meaning — nothing on the trunk depends on it and no module or other
-// implementation has to agree about it, so CLAUDE.md rule 1 does not reach it (the same
-// reasoning kDemoteAfterOverrunSuperframes and kMinFairShareUs are argued from in
-// core/core_engine.cpp). Declared HERE rather than in core_engine.cpp because
-// tests/unit/test_core_events.cpp asserts FR-026's behaviour against these two values rather
-// than against literals of its own (tasks.md T039, issue #710).
+// --- Event flood fault (spec FR-026, research.md R-07 correction) --------------------------
+// FR-026 says a node over "a configured budget" is faulted, and names neither a window nor a
+// count. Ruled 2026-11-24 (docs/OPEN-QUESTIONS.md "RATIFIED — FR-026's flood fault is a run of 256
+// 'more' answers"): the signal is a RUN, not a rate. A rate is the wrong measure — with FR-025's
+// K = 1 and the FR-020 floor it measures the scheduler, not the node, and a budget at or below the
+// rate the scheduler allows faults an honest node with budget + 1 queued events while one above it
+// can never fire (the 2026-11-23 and 2026-11-24 entries record the collision and the measurement).
 //
-// WHAT THE TWO VALUES MEAN. The window is a span of SIMULATED time, measured from
-// NodeRecord::event_rate_window_start_us through the injected Clock only (CLAUDE.md rule 3), and
-// it is DERIVED from trunk §6's superframe period rather than restated in microseconds (rule 4):
-// eight superframes. The budget is how many events one node may have drained within one such
-// window before it is reported faulted — the (budget + 1)-th drain in a window raises
-// LifecycleKind::NodeEventFault.
-//
-// WHY THESE VALUES. FR-025's K = 1 already caps a node at one drained event per its own
-// superframe turn, so the budget only has to separate "a module reporting real events" from "a
-// module that answers every GET_EVENT with another event for ever". Four per eight superframes
-// is a sustained 250 events/s at TRUNK_T_poll_us, which no honest v1 module approaches — the
-// protocol gives it four event types (protocol-l3 §3.4), of which the only self-generated ones
-// are a settle completion and a fault raise/clear, all human- or hardware-paced — while a
-// flooding node drains at one per turn and crosses it within five turns. Both sides are pinned
-// by cases rather than argued here: `FR-026: an over-budget node is reported NodeEventFault and
-// stops being drained` fails if a flood does not cross the budget, and `AS1/SC-002: a nonzero
-// event_pending count drains fully within the bound` fails if an honest three-event drain does.
-//
-// WHAT THESE VALUES DO NOT DO, measured rather than argued (CLAUDE.md rule 11). K = 1 paces a
-// settled one-module rig at one drained event per ~1900 us, so a node with budget + 1 genuinely
-// queued events crosses the budget and is reported NodeEventFault even though its backlog is
-// finite and its remaining_count is decrementing — and SC-002's own bound (4 x TRUNK_T_poll_us)
-// is already past by that event under K = 1 alone. No choice of these two constants removes that:
-// a budget above the achievable per-window rate would make FR-026's defence unreachable. The
-// collision is recorded, with the measured run and a recommendation, in docs/OPEN-QUESTIONS.md
-// 2026-11-23 ("FR-025's K=1, SC-002's bound and FR-026's rate budget cannot all hold ...");
-// ruling pending, and these values stay as they are until it lands.
-constexpr uint32_t kEventRateWindowSuperframes = 8;
-constexpr uint64_t kEventRateWindowUs =
-    static_cast<uint64_t>(kEventRateWindowSuperframes) * static_cast<uint64_t>(TRUNK_T_poll_us);
-constexpr uint8_t kEventRateBudgetPerWindow = 4;
+// N: a node is faulted on its N-th consecutive GET_EVENT answer that reports remaining_count > 0.
+// remaining_count and event_pending are u8 on the wire (protocol-l3 §3.1/§3.3), so an honest module
+// can announce at most UINT8_MAX queued events and a run of UINT8_MAX + 1 such answers cannot come
+// from a finite queue alone; it needs events arriving as fast as they are served, which is a flood.
+// Derived from the wire type, not chosen — CLAUDE.md rule 4's reading — and it is a HOST policy
+// value with no wire meaning, so rule 1 does not reach it. If the protocol owner adds a module
+// event-queue-depth limit to protocol/omgp-protocol.yaml, this becomes that limit + 1, generated.
+constexpr uint16_t kEventRunFaultThreshold = static_cast<uint16_t>(UINT8_MAX) + 1u;
+
+// The fault's HOLD: a faulted node is not drained for one full window of SIMULATED time, measured
+// from NodeRecord::event_fault_start_us through the injected Clock only (CLAUDE.md rule 3), and
+// derived from trunk §6's superframe period rather than restated in microseconds (rule 4): eight
+// superframes. At its end the fault is cleared (LifecycleKind::NodeEventFaultCleared) and draining
+// resumes on the node's next turn; a node that is still flooding earns a new fault after another
+// N answers. The eight is the value the retired rate window had, kept so the hold is unchanged.
+constexpr uint32_t kEventFaultHoldSuperframes = 8;
+constexpr uint64_t kEventFaultHoldUs =
+    static_cast<uint64_t>(kEventFaultHoldSuperframes) * static_cast<uint64_t>(TRUNK_T_poll_us);
 
 // protocol-l3 §3.1/§3.4: a GET_EVENT response is `u8 event_type, u8 remaining_count, u8[] detail`,
 // so the longest detail an L3 payload can carry is what is left of LIMIT_max_l3_payload after
@@ -237,9 +222,12 @@ struct NodeRecord {
     // and for the same reason — "per superframe turn" is a property of the plan's number, not
     // of a count or a clock reading (CLAUDE.md rule 3). Added by T029.
     uint32_t event_drained_superframe = 0;
-    uint8_t events_drained_this_window = 0; // count within event_rate_window_start_us
-    uint64_t event_rate_window_start_us = 0;
-    bool event_faulted = false; // true once the rate budget is exceeded; stops draining
+    // FR-026: consecutive GET_EVENT answers from this node that reported remaining_count > 0
+    // (reset by an answer that did not, by EVT_NONE, and on (re)entering Discovered). uint16_t
+    // because kEventRunFaultThreshold is UINT8_MAX + 1.
+    uint16_t event_more_run = 0;
+    uint64_t event_fault_start_us = 0; // when event_faulted was set; the hold is measured from here
+    bool event_faulted = false; // true from the N-th consecutive "more" answer until the hold ends
     // Whether this node already has an EventDrainItem queued, or a GET_EVENT outstanding for it.
     // NOT a data-model.md §3 field: added by T039 because FR-015's own trigger is a LEVEL — "any
     // node whose most recent status poll reported a nonzero event_pending count" — and a level

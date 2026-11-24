@@ -186,11 +186,11 @@ void CoreEngine::open_superframe(uint64_t now_us) {
     // trunk §7's one time-only transition (SUSPECT -> OFFLINE). Once per superframe, on the
     // tracker this engine owns; the engine itself never ages anything.
     health_.tick(now_us);
-    // spec FR-026: the one place a node's event-rate window is CLOSED (and a flood fault
-    // therefore cleared) — once per superframe, from the injected time source only. It has to be
-    // here rather than on the drain path: a faulted node is not drained at all, so no drain of
-    // its own could ever notice that its window had passed within budget.
-    tick_event_windows(now_us);
+    // spec FR-026: the one place a faulted node's hold is ENDED (and the fault therefore cleared)
+    // — once per superframe, from the injected time source only. It has to be here rather than on
+    // the drain path: a faulted node is not drained at all, so no drain of its own could ever
+    // notice that its hold had run out.
+    tick_event_fault_holds(now_us);
 }
 
 bool CoreEngine::issue_next(uint64_t now_us) {
@@ -640,7 +640,7 @@ CoreEngine::Resume CoreEngine::drain_events(uint64_t now_us) {
     }
     rotate_past_demoted(event_queue_);
     // Three reasons an item at the head is passed over rather than issued for, each below: its
-    // node is gone (dropped), its node is over FR-026's event-rate budget (rotated), or its node
+    // node is gone (dropped), its node is FR-026-faulted for flooding (rotated), or its node
     // has already had its turn this superframe (rotated, FR-025).
     // FR-025's K = 1 per node per superframe TURN, with R-07's correction: the remainder
     // re-queues behind every OTHER node's pending event, not behind this node's own next one.
@@ -686,8 +686,8 @@ CoreEngine::Resume CoreEngine::drain_events(uint64_t now_us) {
         }
         NodeRecord& node = nodes_[idx];
         if (node.event_faulted) {
-            // spec FR-026: a node over its event-rate budget "MUST NOT have further events
-            // drained from it until its rate returns within budget". Rotated to the back rather
+            // spec FR-026: a node faulted for its run of "more" answers MUST NOT have further
+            // events drained from it until the fault's hold has run out. Rotated to the back rather
             // than dropped, exactly as the K = 1 path below does: the backlog is still owed, and
             // the item is served again on the turn after the fault clears. One pass, so a ring
             // holding nothing but faulted nodes ends the phase instead of spinning.
@@ -1454,9 +1454,10 @@ void CoreEngine::on_event_drain(const link::MasterEvent& ev, uint64_t now_us) {
         return;
     }
     if (resp.event_type == EVT_NONE) {
-        // protocol-l3 §3.4: the queue is empty. Draining terminates — no ModuleEvent, no rate
-        // charge, no re-queue — which is what makes the fan-out above safe for a module that
-        // never had an event at all.
+        // protocol-l3 §3.4: the queue is empty. Draining terminates — no ModuleEvent, no re-queue,
+        // and the node's run of "more" answers ends (FR-026) — which is what makes the fan-out
+        // above safe for a module that never had an event at all.
+        node.event_more_run = 0;
         return;
     }
     // spec FR-016: delivered verbatim, in the order the module reported them (one event per
@@ -1490,7 +1491,7 @@ void CoreEngine::on_event_drain(const link::MasterEvent& ev, uint64_t now_us) {
     // spec FR-026, charged on every event DRAINED rather than on every one the §8a ring accepted:
     // a full pending ring is the application being slow (FR-021), and a flood defence that a slow
     // application disarms is no defence. The refused delivery is counted in dropped_deliveries_.
-    note_event_drained(node, tx_node_, now_us);
+    note_event_drained(node, tx_node_, now_us, resp.remaining_count > 0);
     if (resp.remaining_count > 0) {
         // spec FR-015/FR-025: the remainder is this node's NEXT turn, never a second GET_EVENT
         // inside this superframe — event_drained_superframe (set at issue time) is what makes
@@ -1499,23 +1500,26 @@ void CoreEngine::on_event_drain(const link::MasterEvent& ev, uint64_t now_us) {
     }
 }
 
-void CoreEngine::note_event_drained(NodeRecord& node, uint8_t node_id, uint64_t now_us) {
-    // Saturating: a count that wrapped would un-fault a flooding node. kEventRateBudgetPerWindow
-    // is far below UINT8_MAX, so this boundary is not reachable while the window is rolled every
-    // superframe (tick_event_windows()) — a CONTROL on that, not a guarantee (CLAUDE.md rule 11).
-    if (node.events_drained_this_window < UINT8_MAX) {
-        ++node.events_drained_this_window;
-    }
-    if (node.event_faulted || node.events_drained_this_window <= kEventRateBudgetPerWindow) {
+void CoreEngine::note_event_drained(NodeRecord& node, uint8_t node_id, uint64_t now_us, bool more) {
+    if (!more) {
+        node.event_more_run = 0; // the module said it has no more: whatever came before was finite
         return;
     }
-    // spec FR-026: over budget. The node stops being drained (drain_events() skips it) and is
-    // reported ONCE for this episode — a fresh window starts here, so the next window that
-    // closes is a full kEventRateWindowUs during which it was drained not at all, which is what
-    // clears the fault in roll_event_window().
+    // Saturating at the threshold: the run is only ever compared against it, and a faulted node is
+    // not drained, so the count cannot meaningfully pass it — the clamp keeps a defensive caller
+    // (the seam) from wrapping a uint16_t.
+    if (node.event_more_run < kEventRunFaultThreshold) {
+        ++node.event_more_run;
+    }
+    if (node.event_faulted || node.event_more_run < kEventRunFaultThreshold) {
+        return;
+    }
+    // spec FR-026: the N-th consecutive "more" answer. The node stops being drained
+    // (drain_events() skips it) and is reported ONCE for this episode; the hold runs from here
+    // and ends in release_event_fault_after_hold().
     node.event_faulted = true;
-    node.events_drained_this_window = 0;
-    node.event_rate_window_start_us = now_us;
+    node.event_more_run = 0;
+    node.event_fault_start_us = now_us;
     LifecycleEvent faulted{};
     faulted.kind = LifecycleKind::NodeEventFault;
     faulted.node_id = node_id;
@@ -1526,42 +1530,37 @@ void CoreEngine::note_event_drained(NodeRecord& node, uint8_t node_id, uint64_t 
     (void)enqueue_lifecycle(faulted);
 }
 
-void CoreEngine::roll_event_window(NodeRecord& node, uint8_t node_id, uint64_t now_us) {
+void CoreEngine::release_event_fault_after_hold(NodeRecord& node, uint8_t node_id,
+                                                uint64_t now_us) {
+    if (!node.event_faulted) {
+        return;
+    }
     // Monotonic by the Clock contract, so this subtraction cannot wrap; written defensively all
     // the same, as complete_request() does — a caller that rewound now_us would otherwise open a
-    // window of ~2^64 us that never closes.
-    const uint64_t start = node.event_rate_window_start_us;
+    // hold of ~2^64 us that never ends.
+    const uint64_t start = node.event_fault_start_us;
     // mutant-ok(equivalent, cxx_ge_to_gt): at now_us == start both forms give elapsed 0.
     const uint64_t elapsed = now_us >= start ? now_us - start : 0u;
-    if (elapsed < kEventRateWindowUs) {
+    if (elapsed < kEventFaultHoldUs) {
         return;
     }
-    // The window has run its course: judge what it accumulated, then start a fresh one. The
-    // judgement and the reset are one step deliberately — a window that reset without comparing
-    // would make the budget unreachable, and one that compared without resetting would make a
-    // single busy window a permanent fault.
-    const bool over = node.events_drained_this_window > kEventRateBudgetPerWindow;
-    node.events_drained_this_window = 0;
-    node.event_rate_window_start_us = now_us;
-    if (!node.event_faulted || over) {
-        return;
-    }
-    // spec FR-026: "MUST NOT have further events drained from it until its rate returns within
-    // budget". A full window inside budget is that return, and draining resumes on this node's
-    // next turn.
+    // spec FR-026: "MUST NOT have further events drained from it until ..." — the hold has run its
+    // course, so the fault is cleared and draining resumes on this node's next turn. The run starts
+    // again from zero: a node that is still flooding earns a fresh fault after another N answers.
     // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
     node.event_faulted = false;
+    node.event_more_run = 0;
     LifecycleEvent cleared{};
     cleared.kind = LifecycleKind::NodeEventFaultCleared;
     cleared.node_id = node_id;
     (void)enqueue_lifecycle(cleared);
 }
 
-void CoreEngine::tick_event_windows(uint64_t now_us) {
+void CoreEngine::tick_event_fault_holds(uint64_t now_us) {
     for (uint8_t id = ADDR_module_min; id <= ADDR_module_max; ++id) {
         NodeRecord& node = nodes_[node_index(id)];
         if (node.in_use) {
-            roll_event_window(node, id, now_us);
+            release_event_fault_after_hold(node, id, now_us);
         }
     }
 }
@@ -1890,6 +1889,8 @@ void CoreEngine::mark_discovered(NodeRecord& node, uint8_t node_id,
     node.model_fw_rev = entry.model_fw_rev;
     ++const_cast<DescriptorCacheEntry&>(entry).refcount;
     node.discovery = DiscoveryState::Discovered;
+    node.event_more_run =
+        0; // FR-026: a (re)discovered node starts its run of "more" answers afresh
     // data-model.md §7 / spec FR-017: presence is reported on reaching Discovered ("fully
     // identified and described"), never on the slot merely being occupied — and this and
     // reconcile_slot_map()'s NodeRemoved are the only two emission points for it.
