@@ -1,27 +1,32 @@
-// CoreEngine::set_param()/get_param() — the ENQUEUE side of spec FR-023/FR-024 (tasks.md T026,
-// made to pass by T027). Driven against a real CoreEngine over the real link::Master and
-// link::HealthTracker it owns, answered by MockL3Node (R-08) on a FakeClock: no hand-built
-// frames, no wall clock (CLAUDE.md rule 3).
+// CoreEngine::set_param()/get_param() — spec FR-023/FR-024 end to end: the ENQUEUE side
+// (tasks.md T026, made to pass by T027) and, below the `--- T030 ---` banner, the REPORTING side
+// (T026's remaining cases, made to pass by T030). Driven against a real CoreEngine over the real
+// link::Master and link::HealthTracker it owns, answered by MockL3Node (R-08) on a FakeClock: no
+// hand-built frames, no wall clock (CLAUDE.md rule 3).
 // Spec: specs/003-host-core-engine/spec.md FR-023 (a failed parameter operation is REPORTED,
 // never dropped), FR-024 (GET_PARAM returns immediately with a correlation tag), FR-021 (no
 // callback from run_superframe()); data-model.md §6 (ParamOpItem), §8 (ParamRequestId/
 // ParamResult), §8a (the pending-delivery rings); research.md R-07 (three fixed rings), R-10
 // (the opaque, reusable request id); contracts/core-cpp.md §Engine (set_param/get_param).
 //
-// WHAT THIS FILE IS AN ORACLE FOR, AND WHAT IT IS NOT (CLAUDE.md rule 11). Every case below is
-// about what the two API calls ACCEPT, REFUSE and QUEUE, and about the request-id pool. None of
-// it is about issuing a queued operation onto the wire or decoding its answer: at this head
-// nothing drains param_queue_ — core_engine.cpp's issue_demand() says so in as many words
-// ("the parameter queue (US2) [is] drained by T029's loop") — so SET_PARAM/GET_PARAM frames,
-// LifecycleKind::ParamSetFailed and on_param_result delivery are T029's and T030's to
-// demonstrate, and T026's remaining cases land with them. What IS asserted here about the wire
-// is the negative FR-024 needs: that accepting an operation writes nothing.
+// WHAT THIS FILE IS AN ORACLE FOR, AND WHAT IT IS NOT (CLAUDE.md rule 11). The cases above the
+// `--- T030 ---` banner are about what the two API calls ACCEPT, REFUSE and QUEUE, and about the
+// request-id pool; what they assert about the wire is the negative FR-024 needs, that accepting an
+// operation writes nothing. The cases below that banner are about the OUTCOME of an operation that
+// has been issued: one scripted answer per transaction (MockL3Node's ParamStep) or none at all
+// (SilenceStep), and the delivery it produces. Still NOT an oracle here: the REQUEST payload's own
+// bytes (nothing reads a SET_PARAM off the wire, so a param_id carried wrongly into the request is
+// invisible to this file unless the answer's echo disagrees with it — which the `an answer for a
+// parameter or scope nobody asked about` case below does pin, since the double echoes the
+// request's own fields back); the channel-switch and event paths (US3/US4); and anything about
+// L2 retry policy, which is link::Master's and is consumed here, never asserted.
 #include "core/core_engine.hpp"
 
 #include "catch_amalgamated.hpp"
 #include "fake_clock.hpp"
 #include "heap_guard.hpp"
 #include "l3/l3_descriptor.hpp"
+#include "l3/l3_header.hpp"
 #include "l3/l3_payload.hpp"
 #include "l3/l3_types.hpp"
 #include "link/link_types.hpp"
@@ -38,6 +43,7 @@ using omgp::core::CoreEngine;
 using omgp::core::CoreStatus;
 using omgp::core::DiscoveryState;
 using omgp::core::LifecycleEvent;
+using omgp::core::LifecycleKind;
 using omgp::core::ParamOpItem;
 using omgp::core::ParamRequestId;
 using omgp::core::ParamResult;
@@ -46,6 +52,7 @@ using omgp_test::FakeClock;
 using omgp_test::IdentifyStep;
 using omgp_test::L3Step;
 using omgp_test::MockL3Node;
+using omgp_test::ParamStep;
 using omgp_test::SilenceStep;
 using omgp_test::SlotMapStep;
 using omgp_test::StatusStep;
@@ -67,11 +74,40 @@ struct CoreEngineTestSeam {
     static NodeRecord& node(CoreEngine& engine, uint8_t node_id) {
         return engine.nodes_[CoreEngine::node_index(node_id)];
     }
-    // The producer T030 will be: a decoded answer enqueued against its request id. Used here to
-    // reach delivery — and so the release of the id — without the issue path T029 owns.
+    // The producer T030 is on the real path: a decoded answer enqueued against its request id.
+    // Used directly by the cases that want to reach delivery — and so the release of the id —
+    // without an issued transaction, and to FILL the §8a ring to its capacity.
     static bool enqueue_param_result(CoreEngine& engine, ParamRequestId id,
                                      const ParamResult& result) {
         return engine.enqueue_param_result(id, result);
+    }
+    // The two §8a rings' depths, read WITHOUT delivering anything. This is what makes spec
+    // FR-021's two halves separable: that a superframe ENQUEUED an outcome, and that it invoked
+    // no callback while doing so. Reading them by draining would conflate the two.
+    static size_t results_pending(CoreEngine& engine) {
+        return engine.pending_param_results_.size();
+    }
+    static size_t lifecycle_pending(CoreEngine& engine, LifecycleKind kind) {
+        size_t n = 0;
+        for (size_t i = 0; i < engine.pending_lifecycle_.size(); ++i) {
+            if (engine.pending_lifecycle_.at(i).kind == kind) {
+                ++n;
+            }
+        }
+        return n;
+    }
+    // The answer decoders themselves (protocol-l3 §3.1), called with bytes no MockL3Node script
+    // can produce: the double answers every parameter request with that request's own response
+    // opcode or an ERROR, so a truncated message, an unexpected opcode and an echo for the wrong
+    // parameter are reachable only here. Same instrument, and the same reason, as
+    // CoreEngine::reconcile_slot_map() being public — "for tests that want to hand the engine a
+    // response the wire cannot carry" (core_engine.hpp).
+    static ParamResult decode_get_answer(CoreEngine& engine, const uint8_t* resp, size_t len,
+                                         uint8_t param_id, uint8_t scope) {
+        return engine.decode_get_answer(resp, len, param_id, scope);
+    }
+    static ParamResult decode_set_answer(CoreEngine& engine, const uint8_t* resp, size_t len) {
+        return engine.decode_set_answer(resp, len);
     }
 };
 } // namespace omgp::core
@@ -108,6 +144,34 @@ struct Recorder {
     }
     size_t deliveries() const {
         return lifecycle.size() + result_ids.size();
+    }
+    void clear() {
+        lifecycle.clear();
+        result_ids.clear();
+        results.clear();
+    }
+    // Counted by KIND, not by ring depth: a case that silences a backplane to fail a parameter
+    // transaction also earns that backplane's own BackplaneSuspect notices (R-03), which are a
+    // different report about a different thing. Filtering is what keeps "exactly one
+    // ParamSetFailed" an assertion about FR-023 and not about the health stream.
+    size_t count(LifecycleKind kind) const {
+        size_t n = 0;
+        for (const LifecycleEvent& ev : lifecycle) {
+            if (ev.kind == kind) {
+                ++n;
+            }
+        }
+        return n;
+    }
+    // The first delivered event of `kind`, or nullptr — so a case names the event it asserts on
+    // rather than indexing a position the health stream could shift.
+    const LifecycleEvent* first(LifecycleKind kind) const {
+        for (const LifecycleEvent& ev : lifecycle) {
+            if (ev.kind == kind) {
+                return &ev;
+            }
+        }
+        return nullptr;
     }
 };
 
@@ -156,6 +220,7 @@ class Rig {
     // One backplane with `slots` occupied slots, each answering IDENTIFY and READ_DESC from the
     // same descriptor — so every module reaches Discovered and is a legal parameter target.
     void install(uint8_t addr, uint8_t slot_count, uint32_t occupied) {
+        bp_addr_ = addr;
         std::vector<L3Step>& steps = scripts_[addr];
         steps.clear();
         steps.push_back(L3Step::of(SlotMapStep{slot_count, occupied, occupied}));
@@ -164,6 +229,53 @@ class Rig {
         steps.push_back(L3Step::of(DescChunkStep{descriptor_.bytes.data(),
                                                  static_cast<uint16_t>(descriptor_.bytes.size())}));
         node_.set_script(addr, steps.data(), steps.size());
+    }
+
+    // Appends the answers this address gives to parameter requests, in order — one ParamStep per
+    // SET_PARAM/GET_PARAM request, taken by the Param opcode class's own cursor
+    // (contracts/mock-l3-node.md: "steps consumed in order per opcode class"), and the last one
+    // repeating once they are spent. Re-installing the script resets every cursor, which is
+    // harmless here: install()'s four discovery steps are then re-offered, and a rig whose modules
+    // are already Discovered issues no further IDENTIFY or READ_DESC. Deliberately NO wildcard in
+    // this script — a SilenceStep or ErrorStep is taken by the first request of ANY class, so the
+    // status poll that opens every superframe would consume it before any parameter request could.
+    void arm_params(const ParamStep* params, size_t count) {
+        std::vector<L3Step>& steps = scripts_[bp_addr_];
+        REQUIRE(steps.size() + count <= MockL3Node::kMaxScript);
+        for (size_t i = 0; i < count; ++i) {
+            steps.push_back(L3Step::of(params[i]));
+        }
+        node_.set_script(bp_addr_, steps.data(), steps.size());
+    }
+    void arm_params(const ParamStep& one) {
+        arm_params(&one, 1);
+    }
+
+    // Makes this backplane answer NOTHING at all, so a transaction addressed to it or to one of
+    // its modules ends in link::Master's own retry exhaustion (trunk §7) rather than in an L3
+    // answer. A one-step {SilenceStep} script: the wildcard is the NODE's disposition, so every
+    // opcode class falls back to it (contracts/mock-l3-node.md, and MockL3Node::set_script()'s
+    // own note). Its modules keep their DiscoveryState — nothing un-discovers a node on a failed
+    // transaction — so a queued parameter operation is still issued to one.
+    void go_silent() {
+        scripts_[bp_addr_].assign(1, L3Step::of(SilenceStep{}));
+        node_.set_script(bp_addr_, scripts_[bp_addr_].data(), 1);
+    }
+
+    // Drives superframes until `done()`, failing by NAME at the budget rather than leaving a
+    // later assertion to report the absence. The budget is in superframe steps, not in time: a
+    // parameter transaction concludes inside link::Master's own retry window and this rig never
+    // waits on a clock reading (CLAUDE.md rule 3).
+    template <typename Done> void run_until(const char* what, Done done) {
+        for (uint64_t i = 0; i < kSettleSteps; ++i) {
+            if (done()) {
+                return;
+            }
+            step(byte_us());
+        }
+        if (!done()) {
+            FAIL("timed out after " << kSettleSteps << " superframes waiting for " << what);
+        }
     }
 
     // Advance the simulated clock, let the double release what is due, hand the engine the same
@@ -242,6 +354,13 @@ class Rig {
     // A generous bound on run_until_discovered()'s no-progress window: three status polls, a
     // handful of demand items and one enrolment probe, at one engine call per byte time.
     static constexpr uint64_t kStallSteps = 1200;
+    // run_until()'s budget. Generous against the longest wait any case here asks for: a parameter
+    // transaction that gets no answer, behind a status poll that got none either, is two full
+    // link::Master retry windows (trunk §7, MEASURED ~1270 us each) at one engine call per byte
+    // time. Well inside TRUNK_offline_after_suspect_ms, so a silenced backplane in these cases
+    // never reaches a declared bus fault — which would stop demand traffic (FR-003) and so stop
+    // the very transaction the case is waiting on.
+    static constexpr uint64_t kSettleSteps = 4000;
 
     static omgp::l3::StatusBlock ready_status() {
         omgp::l3::StatusBlock b{};
@@ -273,6 +392,7 @@ class Rig {
     std::vector<L3Step> scripts_[omgp::link::kAddrCount];
     L3Step absent_[omgp::link::kAddrCount];
     uint64_t now_us_ = 0;
+    uint8_t bp_addr_ = omgp::ADDR_backplane_min; // the one install() scripted
 };
 
 // One backplane, four modules, all Discovered — the parameter target of every case below.
@@ -281,6 +401,17 @@ class Rig {
 void bring_up(Rig& rig) {
     rig.install(omgp::ADDR_backplane_min, 4, 0x0Fu);
     rig.run_until_discovered(4);
+}
+
+// bring_up() plus a clean slate: discovery's own NodeDiscovered events delivered and forgotten,
+// and nothing left queued on either §8a ring, so what a case then reads off those rings is its
+// own parameter traffic and not User Story 1's.
+void bring_up_quiet(Rig& rig) {
+    bring_up(rig);
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.engine().dropped_deliveries() == 0u);
+    REQUIRE(Bk::results_pending(rig.engine()) == 0u);
+    rig.recorder().clear();
 }
 
 } // namespace
@@ -588,6 +719,488 @@ TEST_CASE("FR-021: accepting a parameter operation and running superframes invok
     }
 
     CHECK(rig.recorder().deliveries() == 0u);
+}
+
+// === --- T030 --- the REPORTING side: FR-023/FR-024, one outcome per operation, never silence ==
+
+TEST_CASE("FR-024: a Get answered with a GET_PARAM response delivers that value under the id "
+          "get_param returned [params][us2]") {
+    // spec FR-024's later half (the immediate half is the `the request id is returned by the call
+    // itself` case above): "the value or failure is delivered later, tagged for matching".
+    // protocol-l3 §3.1: GET_PARAM's response carries param_id, scope and a u16 value, decoded
+    // here by l3::decode_get_param_resp and by nothing hand-rolled (R-02).
+    Rig rig;
+    bring_up_quiet(rig);
+    const uint8_t node = rig.a_discovered_node();
+    // Distinct from each other, from the param_id and scope asked below, and from 42 (Mull's
+    // cxx_assign_const constant), so a field or id carried from the wrong place is visible.
+    rig.arm_params(ParamStep{true, 1234, 0});
+
+    ParamRequestId id = 0xA5;
+    REQUIRE(rig.engine().get_param(node, 7, 2, id) == CoreStatus::Ok);
+    rig.run_until("the GET_PARAM answer to be enqueued",
+                  [&] { return Bk::results_pending(rig.engine()) == 1u; });
+
+    // spec FR-021: the superframes that issued and completed this transaction called back zero
+    // times. Asserted BEFORE the drain, which is the only thing that can change it.
+    CHECK(rig.recorder().deliveries() == 0u);
+
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().results.size() == 1u);
+    CHECK(rig.recorder().result_ids[0] == id);
+    CHECK(rig.recorder().results[0].ok);
+    CHECK(rig.recorder().results[0].value == 1234u);
+    // A Get's outcome is a ParamResult, never a lifecycle event (data-model.md §7's own note on
+    // ParamSetFailed: "Set only; a Get failure is a ParamResult").
+    CHECK(rig.recorder().count(LifecycleKind::ParamSetFailed) == 0u);
+}
+
+TEST_CASE("FR-023: a Get answered ERROR is delivered as a not-ok result carrying that code, under "
+          "the same id [params][us2]") {
+    // spec FR-023: a module error response "MUST reach the application naming the operation and
+    // the reason". protocol-l3 §3.1: the failure arrives as opcode OP_ERROR with flags.error set,
+    // whose code l3::decode_error_resp reads. The code is a generated symbol (CLAUDE.md rule 1),
+    // so a YAML renumbering moves this case with it.
+    Rig rig;
+    bring_up_quiet(rig);
+    const uint8_t node = rig.a_discovered_node();
+    rig.arm_params(ParamStep{false, 0, omgp::ERR_UNKNOWN_TARGET});
+
+    ParamRequestId id = 0xA5;
+    REQUIRE(rig.engine().get_param(node, 3, 0, id) == CoreStatus::Ok);
+    rig.run_until("the ERROR answer to be enqueued",
+                  [&] { return Bk::results_pending(rig.engine()) == 1u; });
+    CHECK(rig.recorder().deliveries() == 0u);
+
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().results.size() == 1u);
+    CHECK(rig.recorder().result_ids[0] == id);
+    CHECK_FALSE(rig.recorder().results[0].ok);
+    CHECK(rig.recorder().results[0].reason == omgp::ERR_UNKNOWN_TARGET);
+    CHECK(rig.recorder().count(LifecycleKind::ParamSetFailed) == 0u);
+}
+
+TEST_CASE("FR-023: a Get whose transaction never answers is delivered as a not-ok result, not "
+          "left pending for ever [params][us2]") {
+    // FR-023's "or exhaustion of the link layer's own retry": link::Master has already retried
+    // this transaction per trunk §7 and given up, and no core-level retry exists (that policy is
+    // L2's — docs/OPEN-QUESTIONS.md 2026-09-06). The report carries no L3 error code, because
+    // there was no answer to read one from.
+    Rig rig;
+    bring_up_quiet(rig);
+    const uint8_t node = rig.a_discovered_node();
+
+    ParamRequestId id = 0xA5;
+    REQUIRE(rig.engine().get_param(node, 5, 1, id) == CoreStatus::Ok);
+    rig.go_silent(); // after queuing, so the operation is issued before the answers stop
+    rig.run_until("the retry-exhausted Get to be reported",
+                  [&] { return Bk::results_pending(rig.engine()) == 1u; });
+    CHECK(rig.recorder().deliveries() == 0u);
+
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().results.size() == 1u);
+    CHECK(rig.recorder().result_ids[0] == id);
+    CHECK_FALSE(rig.recorder().results[0].ok);
+    CHECK(rig.recorder().results[0].reason == omgp::core::kParamFailureNoErrorCode);
+    // The reason is NOT a protocol error code dressed up as one: the two vocabularies stay
+    // distinguishable, which is what lets an application tell "the module refused" from "the
+    // module never answered" (data-model.md §8's "or a link/transaction-level failure").
+    CHECK(rig.recorder().results[0].reason != omgp::ERR_BUSY);
+    CHECK(rig.recorder().results[0].reason != omgp::ERR_INTERNAL);
+}
+
+TEST_CASE("FR-023: a Set answered ERROR enqueues exactly one ParamSetFailed naming the parameter "
+          "and the reason [params][us2]") {
+    // data-model.md §7: a Set's failure is a LifecycleEvent (ParamSetFailed, failed_param_id +
+    // failed_reason), because a Set carries no request id to tag a ParamResult with (§6).
+    Rig rig;
+    bring_up_quiet(rig);
+    const uint8_t node = rig.a_discovered_node();
+    rig.arm_params(ParamStep{false, 0, omgp::ERR_NOT_PERMITTED});
+
+    REQUIRE(rig.engine().set_param(node, 9, 1, 300) == CoreStatus::Ok);
+    rig.run_until("the failed Set to be reported", [&] {
+        return Bk::lifecycle_pending(rig.engine(), LifecycleKind::ParamSetFailed) == 1u;
+    });
+    CHECK(rig.recorder().deliveries() == 0u);
+    // A Set takes no request id, so its failure must not arrive on the result ring under some
+    // id the caller never saw.
+    CHECK(Bk::results_pending(rig.engine()) == 0u);
+
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::ParamSetFailed) == 1u);
+    const LifecycleEvent* ev = rig.recorder().first(LifecycleKind::ParamSetFailed);
+    REQUIRE(ev != nullptr);
+    CHECK(ev->node_id == node);
+    CHECK(ev->failed_param_id == 9u);
+    CHECK(ev->failed_reason == omgp::ERR_NOT_PERMITTED);
+    CHECK(rig.recorder().results.empty());
+}
+
+TEST_CASE("FR-023: a Set whose transaction never answers is reported too, with no L3 code "
+          "[params][us2]") {
+    // The second of FR-023's two routes for a Set, and the one a module cannot produce: trunk
+    // §7's retries are spent inside link::Master and the transaction's own Failed event is the
+    // only notice of it.
+    Rig rig;
+    bring_up_quiet(rig);
+    const uint8_t node = rig.a_discovered_node();
+
+    REQUIRE(rig.engine().set_param(node, 11, 0, 7) == CoreStatus::Ok);
+    rig.go_silent();
+    rig.run_until("the retry-exhausted Set to be reported", [&] {
+        return Bk::lifecycle_pending(rig.engine(), LifecycleKind::ParamSetFailed) == 1u;
+    });
+    CHECK(rig.recorder().deliveries() == 0u);
+
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().count(LifecycleKind::ParamSetFailed) == 1u);
+    const LifecycleEvent* ev = rig.recorder().first(LifecycleKind::ParamSetFailed);
+    REQUIRE(ev != nullptr);
+    CHECK(ev->node_id == node);
+    CHECK(ev->failed_param_id == 11u);
+    CHECK(ev->failed_reason == omgp::core::kParamFailureNoErrorCode);
+    CHECK(rig.recorder().results.empty());
+}
+
+TEST_CASE("protocol-l3 §3.1: a Set accepted with the empty response is SILENT — nothing is "
+          "delivered for it at all [params][us2]") {
+    // §3.1: "a SET_PARAM success response is empty (acceptance); failures arrive as ERROR". A
+    // Set carries no request id (data-model.md §6), so success has nothing to report against and
+    // must report nothing — the other half of FR-023, which is about failures only.
+    //
+    // The DISCRIMINATING part is the Get queued behind it: without it, "no delivery yet" and "no
+    // delivery ever" are the same observation. The Get's own result arrives only after the Set's
+    // transaction has concluded (R-07's ring is FIFO), so one delivery in total is what proves
+    // the accepted Set contributed none.
+    Rig rig;
+    bring_up_quiet(rig);
+    const uint8_t node = rig.a_discovered_node();
+    const ParamStep answers[] = {ParamStep{true, 0, 0},    // the Set: accepted
+                                 ParamStep{true, 555, 0}}; // the Get behind it
+    rig.arm_params(answers, 2);
+
+    ParamRequestId id = 0xA5;
+    REQUIRE(rig.engine().set_param(node, 6, 0, 2048) == CoreStatus::Ok);
+    REQUIRE(rig.engine().get_param(node, 6, 0, id) == CoreStatus::Ok);
+    rig.run_until("the Get behind the accepted Set to be answered",
+                  [&] { return Bk::results_pending(rig.engine()) == 1u; });
+
+    CHECK(Bk::lifecycle_pending(rig.engine(), LifecycleKind::ParamSetFailed) == 0u);
+    rig.engine().drain_callbacks();
+    CHECK(rig.recorder().count(LifecycleKind::ParamSetFailed) == 0u);
+    REQUIRE(rig.recorder().results.size() == 1u);
+    CHECK(rig.recorder().result_ids[0] == id);
+    CHECK(rig.recorder().results[0].value == 555u);
+    CHECK(rig.recorder().deliveries() == 1u); // the Get's, and nothing else
+}
+
+TEST_CASE("FR-021/R-04: a Set failure and a Get value complete inside superframes that call back "
+          "zero times, and idle superframes deliver nothing more [params][us2]") {
+    // The FR-021 case above this banner is explicit that it guards only the engine body that
+    // existed before a queued operation could complete, and that "their own tests must re-assert
+    // it once a queued operation can complete". This is that re-assertion, with both report
+    // channels in flight at once.
+    Rig rig;
+    bring_up_quiet(rig);
+    const uint8_t node = rig.a_discovered_node();
+    const ParamStep answers[] = {ParamStep{false, 0, omgp::ERR_INTERNAL}, ParamStep{true, 77, 0}};
+    rig.arm_params(answers, 2);
+
+    ParamRequestId id = 0xA5;
+    REQUIRE(rig.engine().set_param(node, 8, 0, 1) == CoreStatus::Ok);
+    REQUIRE(rig.engine().get_param(node, 8, 0, id) == CoreStatus::Ok);
+    rig.run_until("both parameter operations to be reported", [&] {
+        return Bk::results_pending(rig.engine()) == 1u &&
+               Bk::lifecycle_pending(rig.engine(), LifecycleKind::ParamSetFailed) == 1u;
+    });
+    CHECK(rig.recorder().deliveries() == 0u);
+
+    rig.engine().drain_callbacks();
+    CHECK(rig.recorder().count(LifecycleKind::ParamSetFailed) == 1u);
+    REQUIRE(rig.recorder().results.size() == 1u);
+    CHECK(rig.recorder().results[0].value == 77u);
+
+    // And the delivery count does not grow with idle superframes: one outcome per operation, not
+    // one per superframe that observes the operation's record.
+    const size_t delivered = rig.recorder().deliveries();
+    for (int i = 0; i < 40; ++i) {
+        rig.step(byte_us());
+    }
+    rig.engine().drain_callbacks();
+    CHECK(rig.recorder().deliveries() == delivered);
+}
+
+TEST_CASE("R-10: two Gets outstanding for the same node, parameter and scope are delivered under "
+          "their own ids with their own values [params][us2]") {
+    // The delivery half of the `two outstanding requests ... get distinct ids` case above: an
+    // opaque id is only useful if the VALUE it carries is the one its own request asked for.
+    // Keyed by (node_id, param_id) these two would be indistinguishable on delivery, which is
+    // research.md R-10's whole reason for existing.
+    Rig rig;
+    bring_up_quiet(rig);
+    const uint8_t node = rig.a_discovered_node();
+    const ParamStep answers[] = {ParamStep{true, 111, 0}, ParamStep{true, 222, 0}};
+    rig.arm_params(answers, 2);
+
+    ParamRequestId first = 0, second = 0;
+    REQUIRE(rig.engine().get_param(node, 7, 0, first) == CoreStatus::Ok);
+    REQUIRE(rig.engine().get_param(node, 7, 0, second) == CoreStatus::Ok);
+    REQUIRE(first != second);
+    rig.run_until("both Gets to be answered",
+                  [&] { return Bk::results_pending(rig.engine()) == 2u; });
+    CHECK(rig.recorder().deliveries() == 0u);
+
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().results.size() == 2u);
+    // R-07's ring is FIFO and the double answers in script order, so the first request's own
+    // answer is 111 and the second's is 222 — the correlation, not merely two deliveries.
+    CHECK(rig.recorder().result_ids[0] == first);
+    CHECK(rig.recorder().results[0].value == 111u);
+    CHECK(rig.recorder().result_ids[1] == second);
+    CHECK(rig.recorder().results[1].value == 222u);
+}
+
+TEST_CASE("FR-023: an ERR_BUSY answer is REPORTED, not retried, and leaves the parameter ring "
+          "empty [params][us2]") {
+    // trunk §8/§10.5 leave the persistent-busy bound at L2 (docs/OPEN-QUESTIONS.md 2026-09-06),
+    // and no core-level retry, backoff or coalescing policy exists. So ERR_BUSY is an ANSWER
+    // here: one report, and the operation is over. A re-queue would be visible as a non-empty
+    // ring, and would be the start of a core-level retry policy nobody ruled.
+    Rig rig;
+    bring_up_quiet(rig);
+    const uint8_t node = rig.a_discovered_node();
+    rig.arm_params(ParamStep{false, 0, omgp::ERR_BUSY});
+
+    ParamRequestId id = 0xA5;
+    REQUIRE(rig.engine().get_param(node, 4, 0, id) == CoreStatus::Ok);
+    rig.run_until("the ERR_BUSY answer to be reported",
+                  [&] { return Bk::results_pending(rig.engine()) == 1u; });
+
+    rig.engine().drain_callbacks();
+    REQUIRE(rig.recorder().results.size() == 1u);
+    CHECK_FALSE(rig.recorder().results[0].ok);
+    CHECK(rig.recorder().results[0].reason == omgp::ERR_BUSY);
+    CHECK(Bk::param_queued(rig.engine()) == 0u);
+
+    SECTION("and stays empty: no later superframe re-issues it") {
+        for (int i = 0; i < 200; ++i) {
+            rig.step(byte_us());
+        }
+        CHECK(Bk::param_queued(rig.engine()) == 0u);
+        rig.engine().drain_callbacks();
+        CHECK(rig.recorder().results.size() == 1u);
+    }
+}
+
+TEST_CASE("data-model.md §8a: a full result ring refuses the NEWEST arrival and counts it, never "
+          "evicting a queued delivery [params][us2]") {
+    // §8a's drop-newest rule on the reporting side. Filled through the seam rather than by 128
+    // real transactions, because what is under test is the enqueue point's behaviour on a full
+    // ring, not the wire. The ARRIVAL is a real one: a Get answered over the wire, so the
+    // refusal happens where T030's own enqueue is.
+    Rig rig;
+    bring_up_quiet(rig);
+    const uint8_t node = rig.a_discovered_node();
+    rig.arm_params(ParamStep{true, 1234, 0});
+
+    for (size_t i = 0; i < kParamCapacity; ++i) {
+        ParamResult filler{};
+        filler.ok = true;
+        filler.value = static_cast<uint16_t>(0x100u + i); // distinct from the real answer's 1234
+        REQUIRE(Bk::enqueue_param_result(rig.engine(), static_cast<ParamRequestId>(i), filler));
+    }
+    REQUIRE(Bk::results_pending(rig.engine()) == kParamCapacity);
+    const uint32_t dropped_before = rig.engine().dropped_deliveries();
+
+    ParamRequestId id = 0xA5;
+    REQUIRE(rig.engine().get_param(node, 7, 2, id) == CoreStatus::Ok);
+    rig.run_until("the answered Get to be refused by the full ring",
+                  [&] { return rig.engine().dropped_deliveries() == dropped_before + 1u; });
+
+    // Nothing was evicted to make room: the ring is still exactly as deep as it was, and the
+    // OLDEST filler is still the first thing delivered.
+    CHECK(Bk::results_pending(rig.engine()) == kParamCapacity);
+    rig.engine().drain_callbacks(1);
+    REQUIRE(rig.recorder().results.size() == 1u);
+    CHECK(rig.recorder().results[0].value == 0x100u);
+}
+
+TEST_CASE("CLAUDE.md rule 7: an answer that is not this request's own response yields a not-ok "
+          "result, never a fabricated value [params][us2]") {
+    // TOTAL for any bytes (spec FR-030's forward-compatibility rule): the decoders below are
+    // called with messages MockL3Node cannot produce — it answers every parameter request with
+    // that request's own response opcode or an ERROR. Run under the native preset's ASan/UBSan,
+    // so an over-read on a truncated or arbitrary message fails the case rather than passing it.
+    Rig rig;
+    bring_up_quiet(rig);
+    CoreEngine& engine = rig.engine();
+
+    // A well-formed GET_PARAM response, built by the real encoders, as the control: the same
+    // bytes that DO decode to an ok result are then mutated below, so each case's failure is
+    // attributable to its own mutation and not to the message being wrong all along.
+    uint8_t good[omgp::LIMIT_max_l3_message] = {};
+    size_t good_len = 0;
+    {
+        omgp::l3::GetParamResp r{};
+        r.param_id = 7;
+        r.scope = 2;
+        r.value = 1234;
+        uint8_t payload[omgp::LIMIT_max_l3_payload] = {};
+        size_t plen = 0;
+        REQUIRE(omgp::l3::encode_get_param_resp(r, payload, sizeof payload, plen) ==
+                omgp::l3::Status::Ok);
+        omgp::l3::Header h{};
+        h.opcode = omgp::OP_GET_PARAM;
+        h.node_id = rig.a_discovered_node();
+        h.seq = 1;
+        h.flags = omgp::FLAG_response;
+        h.payload_len = static_cast<uint8_t>(plen);
+        REQUIRE(omgp::l3::encode_header(h, good, sizeof good, good_len) == omgp::l3::Status::Ok);
+        for (size_t i = 0; i < plen; ++i) {
+            good[good_len + i] = payload[i];
+        }
+        good_len += plen;
+    }
+    const ParamResult control = Bk::decode_get_answer(engine, good, good_len, 7, 2);
+    REQUIRE(control.ok);
+    REQUIRE(control.value == 1234u);
+
+    SECTION("an answer for a parameter or scope nobody asked about is not that request's value") {
+        const ParamResult wrong_param = Bk::decode_get_answer(engine, good, good_len, 8, 2);
+        CHECK_FALSE(wrong_param.ok);
+        CHECK(wrong_param.value == 0u);
+        CHECK(wrong_param.reason == omgp::core::kParamFailureNoErrorCode);
+        const ParamResult wrong_scope = Bk::decode_get_answer(engine, good, good_len, 7, 3);
+        CHECK_FALSE(wrong_scope.ok);
+        CHECK(wrong_scope.value == 0u);
+    }
+
+    SECTION("a truncated message at every length short of the whole is not ok") {
+        for (size_t n = 0; n < good_len; ++n) {
+            const ParamResult r = Bk::decode_get_answer(engine, good, n, 7, 2);
+            CHECK_FALSE(r.ok);
+            CHECK(r.value == 0u);
+        }
+    }
+
+    SECTION("an unexpected opcode is not ok, and a GET_PARAM response is not a Set acceptance") {
+        // The decoders are each scoped to their OWN request's opcode: a Get's answer read as a
+        // Set's acceptance, or the reverse, is an answer to a question that was not asked.
+        CHECK_FALSE(Bk::decode_set_answer(engine, good, good_len).ok);
+        uint8_t empty_set[omgp::LIMIT_max_l3_message] = {};
+        size_t empty_len = 0;
+        omgp::l3::Header h{};
+        h.opcode = omgp::OP_SET_PARAM;
+        h.node_id = rig.a_discovered_node();
+        h.seq = 2;
+        h.flags = omgp::FLAG_response;
+        h.payload_len = 0;
+        REQUIRE(omgp::l3::encode_header(h, empty_set, sizeof empty_set, empty_len) ==
+                omgp::l3::Status::Ok);
+        CHECK(Bk::decode_set_answer(engine, empty_set, empty_len).ok);
+        CHECK_FALSE(Bk::decode_get_answer(engine, empty_set, empty_len, 7, 2).ok);
+    }
+
+    SECTION("an ERROR answer carries its own code through, and an unallocated one does not") {
+        uint8_t msg[omgp::LIMIT_max_l3_message] = {};
+        size_t len = 0;
+        uint8_t payload[omgp::LIMIT_max_l3_payload] = {};
+        size_t plen = 0;
+        omgp::l3::ErrorResp err{};
+        err.code = omgp::ERR_BAD_PAYLOAD;
+        err.detail.data = nullptr;
+        err.detail.len = 0;
+        REQUIRE(omgp::l3::encode_error_resp(err, payload, sizeof payload, plen) ==
+                omgp::l3::Status::Ok);
+        omgp::l3::Header h{};
+        h.opcode = omgp::OP_ERROR;
+        h.node_id = rig.a_discovered_node();
+        h.seq = 3;
+        h.flags = static_cast<uint8_t>(omgp::FLAG_response | omgp::FLAG_error);
+        h.payload_len = static_cast<uint8_t>(plen);
+        REQUIRE(omgp::l3::encode_header(h, msg, sizeof msg, len) == omgp::l3::Status::Ok);
+        for (size_t i = 0; i < plen; ++i) {
+            msg[len + i] = payload[i];
+        }
+        len += plen;
+        const ParamResult reported = Bk::decode_get_answer(engine, msg, len, 7, 2);
+        CHECK_FALSE(reported.ok);
+        CHECK(reported.reason == omgp::ERR_BAD_PAYLOAD);
+        CHECK(Bk::decode_set_answer(engine, msg, len).reason == omgp::ERR_BAD_PAYLOAD);
+
+        // An ERROR whose code this protocol version does not allocate: l3::decode_error_resp
+        // refuses it (OutOfRange), so there is no code to report and the failure falls back to
+        // the one core constant. Forward compatibility, not a crash (CLAUDE.md rule 7).
+        msg[len - plen] = 0x5A; // over the encoded code byte; no code in ERROR_CODES
+        const ParamResult unknown = Bk::decode_get_answer(engine, msg, len, 7, 2);
+        CHECK_FALSE(unknown.ok);
+        CHECK(unknown.reason == omgp::core::kParamFailureNoErrorCode);
+    }
+
+    SECTION("arbitrary bytes at every length never decode to an ok result") {
+        // A deterministic sweep, not a random one (rule 3's sibling: nothing here reads a clock
+        // or a seed). One xorshift sequence over every length a response can have — the fuzz
+        // targets in tests/ own the deeper search; this is the engine-level bound.
+        uint32_t x = 0x12345678u;
+        uint8_t buf[omgp::LIMIT_max_l3_message] = {};
+        for (size_t len = 0; len <= sizeof buf; ++len) {
+            for (int trial = 0; trial < 8; ++trial) {
+                for (size_t i = 0; i < len; ++i) {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    buf[i] = static_cast<uint8_t>(x);
+                }
+                const ParamResult g = Bk::decode_get_answer(engine, buf, len, 7, 2);
+                if (g.ok) {
+                    // Not a failure in itself — arbitrary bytes CAN form a well-formed GET_PARAM
+                    // response for exactly this request, and refusing one would be wrong. What
+                    // must hold is that an ok result's value came from the MESSAGE: checked here
+                    // with the same l3 codecs, independently of the engine's own call.
+                    omgp::l3::Header hdr{};
+                    omgp::l3::Bytes pl{};
+                    REQUIRE(omgp::l3::decode_message(buf, len, hdr, pl) == omgp::l3::Status::Ok);
+                    REQUIRE(hdr.opcode == omgp::OP_GET_PARAM);
+                    omgp::l3::GetParamResp r{};
+                    REQUIRE(omgp::l3::decode_get_param_resp(pl.data, pl.len, r) ==
+                            omgp::l3::Status::Ok);
+                    CHECK(r.param_id == 7u);
+                    CHECK(r.scope == 2u);
+                    CHECK(g.value == r.value);
+                }
+                const ParamResult s = Bk::decode_set_answer(engine, buf, len);
+                // A Set acceptance is an EMPTY SET_PARAM response, which arbitrary bytes can
+                // legitimately form — what must never happen is a crash or an over-read, which
+                // the sanitizers decide. So this half asserts only that the value is not
+                // fabricated (a Set answer carries none).
+                CHECK(s.value == 0u);
+            }
+        }
+    }
+}
+
+TEST_CASE("CLAUDE.md rule 5: completing and reporting a parameter operation allocates nothing "
+          "[params][us2]") {
+    // rule 5 across the whole reporting path — the superframes that issue the transaction,
+    // decode its answer and enqueue the delivery — in the same shape
+    // tests/unit/test_link_master.cpp:149 uses one layer down. Separate from the API-boundary
+    // case below, which covers only the two calls.
+    Rig rig;
+    bring_up_quiet(rig);
+    const uint8_t node = rig.a_discovered_node();
+    const ParamStep answers[] = {ParamStep{false, 0, omgp::ERR_INTERNAL}, ParamStep{true, 99, 0}};
+    rig.arm_params(answers, 2);
+
+    ParamRequestId id = 0;
+    REQUIRE(rig.engine().set_param(node, 2, 0, 5) == CoreStatus::Ok);
+    REQUIRE(rig.engine().get_param(node, 2, 0, id) == CoreStatus::Ok);
+    HEAP_FREE_SCOPE({
+        rig.run_until("both operations to be reported", [&] {
+            return Bk::results_pending(rig.engine()) == 1u &&
+                   Bk::lifecycle_pending(rig.engine(), LifecycleKind::ParamSetFailed) == 1u;
+        });
+    });
 }
 
 TEST_CASE("CLAUDE.md rule 5: neither API call allocates [params][us2]") {
