@@ -6486,3 +6486,169 @@ second sentence of point 1 of the 2026-10-08 "T028/T029 (#699, #700): the fair s
 demotion threshold and the demoted-item rotation are all undefined" entry. **Related:** #699,
 #700, PR #907 red team round 3 findings 1 and 2, spec FR-027/FR-028, SC-007, R-11, `tasks.md`
 T028.
+
+## 2026-11-24 — T030 (#701): `ParamResult::reason` has no encoding for a failure that carries no L3 error code
+
+**Context:** spec FR-023 requires that a `SET_PARAM`/`GET_PARAM` failure reach the application
+"naming the operation and the reason", and names routes to one that carry no error response at
+all: exhaustion of the link layer's own retry, and — this task's addition, from CLAUDE.md rule 7
+— an answer that cannot be read as an answer to the request that was sent (undecodable, an
+unexpected opcode, an `ERROR` whose code this protocol version does not allocate, or a
+`GET_PARAM` response echoing a parameter or scope nobody asked about). `data-model.md` §8
+L169-171 says `ParamResult::reason` carries "a protocol-l3 §3.1 error code, or a
+link/transaction-level failure (contracts/core-cpp.md)" and defers that second encoding to
+`contracts/core-cpp.md`, which never defines it. `LifecycleEvent::failed_reason` (§7) has the
+same gap, since `ParamSetFailed` reports the same two failure classes. So there was no
+representable value for "this operation failed and no module said why", and `reason` is a
+`uint8_t` with no room for a tag bit.
+
+**What was done:** `kParamFailureNoErrorCode = 0x00` in `core/core_types.hpp`, ONE named
+constant for every failure with no L3 code of its own. `0x00` is the value
+`protocol/omgp-protocol.yaml`'s `error_codes` block leaves unallocated (the codes run
+`0x01`-`0x06`).
+
+**What makes it distinguishable from a module's own code, and what that does NOT establish**
+(CLAUDE.md rule 11). Proved BY CONSTRUCTION, on two independent legs: a `static_assert` in
+`core_types.hpp` reads the generated `ERROR_CODES` table and fails the build if a future YAML
+allocates `0x00`; and `l3::decode_error_resp` range-checks a received code against that same
+table, so an `ERROR` carrying `0x00` is refused by the codec and can never be reported up to the
+application as a module's own code. DEMONSTRATED BY the case `FR-023: a Get whose transaction
+never answers is delivered as a not-ok result, not left pending for ever`, which pins the value
+and its inequality with two allocated codes. What this does NOT establish is that an application
+can tell the failure classes above apart from one another: they all arrive as this single value,
+and only `ParamSetFailed`'s presence (versus a `ParamResult`) distinguishes a Set's failure from
+a Get's. That was a deliberate choice over several constants, because the artefacts define no
+vocabulary to name them in and FR-023 asks for the operation and A reason, not for a taxonomy.
+
+**Recommendation:** rule on one of three. (a) Ratify `0x00` and record it in `data-model.md` §8
+beside the `reason` field — the smallest change, and what the code now documents. (b) Allocate a
+distinct non-protocol range (e.g. `0xF0`-`0xFF`) in `core_types.hpp` and give those classes their
+own constants, which costs nothing on the wire (these values never leave the host) and makes
+"never answered" distinguishable from "answered unreadably" — worth doing if an application is
+expected to act differently on the two, and nothing in User Story 2 says it is. (c) Carry the
+distinction in a separate field rather than in `reason`, which widens `ParamResult` and
+`LifecycleEvent` for a case no requirement names. (a) is recommended now, with (b) as the
+follow-up if a host-side consumer ever needs the split.
+
+**Ruling:** pending — human. **Amends:** none (`data-model.md` §8 defers this encoding and
+`contracts/core-cpp.md` does not define it; the constant is this implementation's choice).
+**Related:** #701, `tasks.md` T030, spec FR-023/FR-024, `data-model.md` §7/§8,
+`contracts/core-cpp.md`, `protocol/omgp-protocol.yaml` `error_codes`.
+
+## 2026-11-24 — T030 (#701): a `ParamResult` the §8a ring refuses retires its `ParamRequestId` for ever
+
+**Context:** found while implementing T030, and NOT a question T030 has to answer to land — the
+behaviour below is `data-model.md` §8a's own, applied literally. Two rules meet badly.
+`data-model.md` §8a is drop-NEWEST: a full pending-delivery ring refuses the arriving delivery,
+counts it in `dropped_deliveries_`, and never evicts a queued one. `research.md` R-10 releases a
+`ParamRequestId` when its result is DELIVERED, and `drain_callbacks()` is the only release point.
+A `GET_PARAM` outcome the ring refuses is therefore never delivered, so its id is never released:
+it is retired for the life of the engine. `LIMIT_max_nodes` (128) such refusals leave `get_param()`
+answering `CoreStatus::RequestIdReused` for ever, on a rig that is otherwise healthy. Nothing in
+spec FR-023/FR-024, §8 or §8a addresses the interaction; `contracts/core-cpp.md` does not either.
+
+**Reachability, stated precisely** (CLAUDE.md rule 11). This needs an application that calls
+`get_param()` and does not call `drain_callbacks()` often enough, 128 times over — so it is a
+consequence of an application-side fault, not of a trunk or module one, and it degrades quietly
+where that fault is otherwise merely latency. DEMONSTRATED only to the first step: the case
+`data-model.md §8a: a full result ring refuses the NEWEST arrival and counts it` shows the refusal
+and the count; nothing drives it 128 times, and nothing asserts the id's fate either way.
+
+**What was done:** nothing. The literal §8a behaviour is what T030 implements, with the
+consequence labelled at the enqueue site in `core/core_engine.cpp`.
+
+**Recommendation:** release the request id when `enqueue_param_result()` REFUSES the delivery.
+The request is over at that point — the outcome is lost and counted, and no queued record
+references the id — so reusing it cannot alias a live request, which is the whole property R-10
+exists for. It makes R-10's rule "released when its result is delivered, or when that delivery
+is refused", needs one case (fill the ring, complete a Get, show the id comes back) and turns a
+permanent degradation into a counted loss. The alternative — leave it — is defensible only if a
+host that drops 128 deliveries is considered already broken, which is a judgement for a human.
+
+**Ruling:** pending — human. **Amends:** none (neither §8a nor R-10 addresses the interaction).
+**Related:** #701, `tasks.md` T030, `data-model.md` §8/§8a, `research.md` R-10, spec FR-024.
+
+## 2026-11-24 — T030 (#701): does an `ERROR` carry flags bit0 (response) as well as bit1 (error)?
+
+**Context:** raised by the red team on PR #973 (round 3, follow-up 2), and a genuine artefact
+ambiguity rather than a defect in either reading. `docs/protocol-l3.md` §3 defines the flags byte
+as "bit0: response, bit1: error, bits 2–7 reserved". §3.1's `ERROR` row reads "`0x7F` | ERROR |
+N→H | flags.error set" — it names bit1 and says NOTHING about bit0, and `l3/l3_header.cpp` does
+not require bit0 on an `ERROR` either (direction is not an L3 header property). The reference
+implementation and the golden vectors do pin it: `tools/refimpl/genvectors.py:29` encodes every
+`ERROR` as `ERRF = FLAG_response | FLAG_error`, and `tools/refimpl/test_canonical.py:28`'s
+canonical `ERROR` carries both bits. So the only machine-readable artefacts say BOTH bits, while
+the prose says only bit1 — and the prose is the authoritative document.
+
+**Why it matters, precisely.** `CoreEngine::param_answer_payload()` requires bit0 on every answer
+(the hole closed at `68a0309`: without it, a request's own bytes echoing a `param_id`/`scope` are
+delivered as that request's value). Under that rule an `ERROR` whose flags are bit1 ALONE — which
+§3.1's prose permits — is refused, and the module's own error code is replaced by
+`kParamFailureNoErrorCode`. FR-023 still holds: the failure IS reported, under the one constant.
+What is lost is the REASON, which FR-023 asks to be carried. DEMONSTRATED by the existing case
+`CLAUDE.md rule 7: ... a message with the response flag CLEAR is not an answer, whatever its
+opcode`, whose third message is exactly this `ERROR` and asserts `kParamFailureNoErrorCode`.
+
+**What was done:** nothing changed — the strict reading is kept as the safe default, for two
+reasons. The golden vectors are immutable evidence and they encode bit0 on every `ERROR`, so no
+conforming node built against them emits the bit1-only form; and relaxing bit0 generally would
+re-open the request-bytes-as-an-answer hole, which is a correctness loss against a documentation
+loss. Only an `ERROR` that disagrees with the vectors is affected, and only in its reason field.
+
+**Recommendation:** amend `docs/protocol-l3.md` §3.1 to state that `ERROR`, being an N→H
+*response*, carries flags bit0 as well as bit1 — making the vectors' two-bit encoding normative
+and the current code right by the document. Alternatives: (b) exempt `OP_ERROR` alone from the
+bit0 check, since opcode `0x7F` is N→H only and so can never be a host request's bytes — this
+preserves the module's code under the prose's literal reading and costs one branch, but makes the
+host accept a form the vectors never produce; (c) police neither bit, which is the pre-`68a0309`
+hole and is rejected. (a) is recommended: it is a documentation change that matches every
+existing artefact, and a protocol-prose change is a human ruling by policy either way.
+
+**Ruling:** pending — human. **Amends:** proposes `docs/protocol-l3.md` §3.1 (human-authored;
+agents do not edit the three authoritative documents). **Related:** #701, `tasks.md` T030, spec
+FR-023, `docs/protocol-l3.md` §3/§3.1, `tools/refimpl/genvectors.py`, `tests/vectors/`.
+
+## 2026-11-24 — T030 (#701): what does a response carrying the REQUEST's own opcode with flags bit1 set contain?
+
+**Context:** raised by the red team on PR #973 (round 4, F2), and the mirror of the entry above —
+the same artefact gap seen from the other side. `docs/protocol-l3.md` §3.1 defines the answers to
+`SET_PARAM`/`GET_PARAM` as an empty acceptance and an echoed reading respectively, and failures as
+`ERROR`. It defines NO message carrying the request's own opcode with flags bit1 (error) set, so
+when a module sends one — `OP_SET_PARAM`, flags `response|error` — the document says nothing about
+what its payload holds. A module can put a well-formed `ERROR` body there: the red team's
+reproducer is exactly `OP_SET_PARAM | response|error` carrying `ERR_BUSY`, which CLAUDE.md golden
+rule 6 makes the bridge's standard refusal.
+
+**Why it matters, precisely.** `CoreEngine::param_answer_payload()` treats the error bit on an
+own-opcode response as the module declaring the operation failed (correct: reading it as §3.1's
+acceptance would report a refused write as having been made — the hole closed at `7ce625a`), and
+reports `kParamFailureNoErrorCode`. FR-023 holds: the failure IS reported. What is lost is the
+REASON, and for a bridge answering `ERR_BUSY` that is the one reason a host most wants.
+DEMONSTRATED by the case `a response with the ERROR flag SET is a failure, whatever its own opcode
+says` in `tests/unit/test_core_params.cpp`, which now pins both halves: the own-opcode form
+carrying an `ERROR` body reports `kParamFailureNoErrorCode`, and the conforming `OP_ERROR` form
+delivers `ERR_BUSY`.
+
+**What was done:** the behaviour was left as it is; the inline rationale at the branch was
+corrected, because it had claimed the module "named none" — false for this shape. Reading byte 0
+of an undefined payload as an error code was rejected as a guess that MISREPORTS on the Get side:
+a `GET_PARAM` response body begins with `param_id`, so a `param_id` colliding with an allocated
+code (`ERR_BUSY` is `0x04`) would be delivered as a reason the module never stated — fabricating
+the reason FR-023 asks to be carried, which is worse than withholding it.
+
+**Recommendation:** amend `docs/protocol-l3.md` §3.1 to state that a failure is an `ERROR`, and
+that a response carrying the request's own opcode with flags bit1 set is MALFORMED — the host
+reports the failure with no code and does not interpret the payload. That is what the code does
+and it costs no branch. Alternatives: (b) define the payload of such a response to BE an `ERROR`
+body and read the code from it — this recovers the `ERR_BUSY` case, but it is a protocol addition
+(YAML + docs, a human ruling) and needs the Get-side collision ruled on, since `param_id` and
+`code` would then occupy the same byte; (c) read the code only where the opcode's own response
+body is defined EMPTY (`SET_PARAM`), which has no collision but makes the rule opcode-dependent
+and is stated nowhere. (a) is recommended: it makes the current, conservative behaviour right by
+the document and leaves the conforming `ERROR` route — which already carries the code — as the
+only way to name one.
+
+**Ruling:** pending — human. **Amends:** proposes `docs/protocol-l3.md` §3.1 (human-authored;
+agents do not edit the three authoritative documents). **Related:** #701, `tasks.md` T030, spec
+FR-023, CLAUDE.md golden rule 6, `docs/protocol-l3.md` §3/§3.1, and the bit0 entry immediately
+above, which this one mirrors.
