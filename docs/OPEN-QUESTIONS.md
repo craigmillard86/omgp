@@ -6672,3 +6672,40 @@ SC-002 and FR-026, both human-ruling artefacts. **Supersedes:** none. **Related:
 #952 red-team finding 2, spec FR-015/FR-016/FR-025/FR-026, SC-002, SC-006, R-07's 2026-09-21
 correction, the 2026-11-23 "WHOSE events a status poll's `event_pending` count is" entry,
 `tasks.md` T039/T040.
+
+## 2026-11-24 — T039 (#710): PROPOSED ruling on the entry above — amend SC-002 to bound the first delivery, restate FR-026 as an unbounded-stream defence
+
+**Status: PROPOSED, awaiting human ratification.** This entry was drafted by an agent at the
+maintainer's request, from the recommendation already recorded in the 2026-11-23 entry above; it
+is not itself a ruling. It becomes one when a human marks it so (a later dated entry that
+references this one, or the same decision stated on PR #952). Until then the 2026-11-23 entry's
+"Ruling: pending — human" stands, the constants stay as they are, and `spec.md` is unchanged.
+
+**Proposed ruling: alternatives (c) + (d) of the 2026-11-23 entry, together.**
+1. **SC-002** is amended to bound the FIRST delivery of a backlog by the node's backplane's
+   status-poll period, and to bound EVERY event only for a backlog the bound can serve with one
+   GET_EVENT per node per superframe turn (FR-025's K = 1). That is what K = 1 plus the bound can
+   actually deliver; the current text promises more.
+2. **FR-026** is restated as a defence against a node that answers every GET_EVENT with another
+   event without end — an unbounded stream measured over a window long enough that a finite honest
+   backlog cannot fill it — not as a rate that an honest backlog of budget+1 can exceed.
+3. **`kEventRateBudgetPerWindow` and `kEventRateWindowSuperframes` are re-derived** from the
+   amended text in a later task, with the test file's SC-002/FR-026 cases updated in the same
+   commit as the constants (tests first, CLAUDE.md rule 8).
+
+**Why not the others (restated from the 2026-11-23 entry, not re-argued).** (a) raising the budget
+makes FR-026 unreachable and only moves where an honest backlog is faulted; (b) charging only while
+`remaining_count` is not decreasing makes the defence depend on a field FR-025 calls advisory and
+#110 F6 says must size and bound nothing.
+
+**What this does not establish (CLAUDE.md rule 11).** Nothing here changes behaviour: the six-event
+measurement in the 2026-11-23 entry (deliveries at +1900 … +9420, +26520 µs against an 8000 µs bound)
+remains the behaviour at this head, demonstrated by that entry's scratch run. The proposal is
+ASSUMED to resolve the conflict; no amended text exists yet to test it against.
+
+**Merge position.** PR #952 may merge with this entry PROPOSED, because the constants and behaviour
+are unchanged and disclosed. It must not be read as evidence that SC-002 holds for a backlog of five
+or more events. **Amends:** nothing until ratified; on ratification, `spec.md` SC-002 and FR-026
+(human-ruling artefacts — the amendment is human-authored or human-ratified). **Supersedes:** none.
+**Related:** the 2026-11-23 entry above, #709, #710, PR #952, spec FR-015/FR-016/FR-025/FR-026,
+SC-002, SC-006, `tasks.md` T039/T040.
