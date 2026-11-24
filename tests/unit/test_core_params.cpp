@@ -1102,6 +1102,87 @@ TEST_CASE("CLAUDE.md rule 7: an answer that is not this request's own response y
         CHECK_FALSE(Bk::decode_get_answer(engine, empty_set, empty_len, 7, 2).ok);
     }
 
+    SECTION("a message with the response flag CLEAR is not an answer, whatever its opcode") {
+        // protocol-l3 §3: flags bit0 is the response bit, and an answer to a host request IS a
+        // response. core/ is the only layer that can test this — L2 is opaque to L3 by the
+        // architecture invariant, and l3::decode_message validates length, not direction — so a
+        // request's own bytes arriving where an answer belongs must be refused here. Each message
+        // below differs from one that decodes to an ok/coded result ONLY in that flags byte.
+        uint8_t req_shaped[omgp::LIMIT_max_l3_message] = {};
+        size_t req_len = 0;
+        {
+            omgp::l3::GetParamResp r{};
+            r.param_id = 7;
+            r.scope = 2;
+            r.value = 1234;
+            uint8_t payload[omgp::LIMIT_max_l3_payload] = {};
+            size_t plen = 0;
+            REQUIRE(omgp::l3::encode_get_param_resp(r, payload, sizeof payload, plen) ==
+                    omgp::l3::Status::Ok);
+            omgp::l3::Header h{};
+            h.opcode = omgp::OP_GET_PARAM;
+            h.node_id = rig.a_discovered_node();
+            h.seq = 1;
+            h.flags = 0; // the only difference from `good`, whose result is the control above
+            h.payload_len = static_cast<uint8_t>(plen);
+            REQUIRE(omgp::l3::encode_header(h, req_shaped, sizeof req_shaped, req_len) ==
+                    omgp::l3::Status::Ok);
+            for (size_t i = 0; i < plen; ++i) {
+                req_shaped[req_len + i] = payload[i];
+            }
+            req_len += plen;
+        }
+        const ParamResult got = Bk::decode_get_answer(engine, req_shaped, req_len, 7, 2);
+        CHECK_FALSE(got.ok);
+        CHECK(got.value == 0u);
+        CHECK(got.reason == omgp::core::kParamFailureNoErrorCode);
+
+        // The same question on the Set side: §3.1's empty acceptance payload, flag clear, is not
+        // an acceptance — otherwise a flags-cleared SET_PARAM would report a write as accepted.
+        uint8_t set_shaped[omgp::LIMIT_max_l3_message] = {};
+        size_t set_len = 0;
+        omgp::l3::Header hs{};
+        hs.opcode = omgp::OP_SET_PARAM;
+        hs.node_id = rig.a_discovered_node();
+        hs.seq = 2;
+        hs.flags = 0;
+        hs.payload_len = 0;
+        REQUIRE(omgp::l3::encode_header(hs, set_shaped, sizeof set_shaped, set_len) ==
+                omgp::l3::Status::Ok);
+        const ParamResult set_got = Bk::decode_set_answer(engine, set_shaped, set_len);
+        CHECK_FALSE(set_got.ok);
+        CHECK(set_got.reason == omgp::core::kParamFailureNoErrorCode);
+
+        // And an ERROR with the flag clear is not a failure REPORT either (§3.1: ERROR is N→H
+        // with flags.error set on a response), so its code is not read back as this request's
+        // reason — the failure is still reported, with the one core constant instead.
+        uint8_t err_shaped[omgp::LIMIT_max_l3_message] = {};
+        size_t err_len = 0;
+        uint8_t err_payload[omgp::LIMIT_max_l3_payload] = {};
+        size_t err_plen = 0;
+        omgp::l3::ErrorResp err{};
+        err.code = omgp::ERR_BAD_PAYLOAD;
+        err.detail.data = nullptr;
+        err.detail.len = 0;
+        REQUIRE(omgp::l3::encode_error_resp(err, err_payload, sizeof err_payload, err_plen) ==
+                omgp::l3::Status::Ok);
+        omgp::l3::Header he{};
+        he.opcode = omgp::OP_ERROR;
+        he.node_id = rig.a_discovered_node();
+        he.seq = 3;
+        he.flags = omgp::FLAG_error; // an error, but not marked a response
+        he.payload_len = static_cast<uint8_t>(err_plen);
+        REQUIRE(omgp::l3::encode_header(he, err_shaped, sizeof err_shaped, err_len) ==
+                omgp::l3::Status::Ok);
+        for (size_t i = 0; i < err_plen; ++i) {
+            err_shaped[err_len + i] = err_payload[i];
+        }
+        err_len += err_plen;
+        const ParamResult err_got = Bk::decode_get_answer(engine, err_shaped, err_len, 7, 2);
+        CHECK_FALSE(err_got.ok);
+        CHECK(err_got.reason == omgp::core::kParamFailureNoErrorCode);
+    }
+
     SECTION("an ERROR answer carries its own code through, and an unallocated one does not") {
         uint8_t msg[omgp::LIMIT_max_l3_message] = {};
         size_t len = 0;
@@ -1162,6 +1243,10 @@ TEST_CASE("CLAUDE.md rule 7: an answer that is not this request's own response y
                     omgp::l3::Bytes pl{};
                     REQUIRE(omgp::l3::decode_message(buf, len, hdr, pl) == omgp::l3::Status::Ok);
                     REQUIRE(hdr.opcode == omgp::OP_GET_PARAM);
+                    // ...and that it was a RESPONSE (protocol-l3 §3, flags bit0), not a request's
+                    // bytes read as one. Reserved bits are not policed: §4's skip-the-unknown
+                    // rule applies to them, so only bit0 is required of an answer.
+                    CHECK((hdr.flags & omgp::FLAG_response) != 0u);
                     omgp::l3::GetParamResp r{};
                     REQUIRE(omgp::l3::decode_get_param_resp(pl.data, pl.len, r) ==
                             omgp::l3::Status::Ok);
