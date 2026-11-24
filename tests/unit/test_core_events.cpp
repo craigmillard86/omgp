@@ -131,6 +131,33 @@ struct CoreEngineTestSeam {
     static uint8_t queue_head(CoreEngine& engine) {
         return engine.event_queue_.at(0).node_id;
     }
+    // The FR-020 floor's own private steps and state (issue_demand()'s deferral), driven directly.
+    static bool issue_demand(CoreEngine& engine, uint64_t now_us) {
+        return engine.issue_demand(now_us);
+    }
+    static bool non_event_pending(CoreEngine& engine) {
+        return engine.non_event_demand_pending();
+    }
+    static bool floor_defers(CoreEngine& engine) {
+        return engine.event_floor_defers();
+    }
+    static void set_floor_anchor(CoreEngine& engine, uint32_t issued_in, uint32_t now_in) {
+        engine.event_issued_superframe_ = issued_in;
+        engine.superframe_ = now_in;
+    }
+    static void push_desc(CoreEngine& engine, uint8_t node_id) {
+        omgp::core::DescChunkItem item{};
+        item.node_id = node_id;
+        (void)engine.desc_queue_.push(item);
+    }
+    static void push_param(CoreEngine& engine, uint8_t node_id) {
+        omgp::core::ParamOpItem item{};
+        item.node_id = node_id;
+        (void)engine.param_queue_.push(item);
+    }
+    static void hold_desc(CoreEngine& engine, bool held) {
+        engine.desc_held_ = held;
+    }
     static void drain_events(CoreEngine& engine, uint64_t now_us) {
         (void)engine.drain_events(now_us);
     }
@@ -1614,6 +1641,98 @@ TEST_CASE("FR-025/FR-026: the drain loop drops what is gone and keeps what is fa
         REQUIRE(Bk::event_queued(b.engine()) == 1);
         CHECK(Bk::queue_head(b.engine()) == 0x20);
         CHECK(Bk::node(b.engine(), 0x20).event_drain_pending); // still owed
+    }
+}
+
+TEST_CASE("FR-020 floor: what counts as pending non-event work, when the floor defers, and that it "
+          "never idles the phase [events][us4][mutation]") {
+    SECTION("nothing pending on a bare engine") {
+        Bare b;
+        CHECK_FALSE(Bk::non_event_pending(b.engine()));
+    }
+    SECTION("a node owed IDENTIFY or a descriptor read is pending work, in each of those states") {
+        for (const DiscoveryState st : {DiscoveryState::Undiscovered, DiscoveryState::Identifying,
+                                        DiscoveryState::ReadingDescriptor}) {
+            Bare b;
+            b.module(0x20, kBp, st);
+            CHECK(Bk::non_event_pending(b.engine()));
+        }
+    }
+    SECTION("a Discovered node is not pending work, and neither is an unused slot") {
+        Bare b;
+        b.module(0x20, kBp, DiscoveryState::Discovered);
+        CHECK_FALSE(Bk::non_event_pending(b.engine()));
+        Bk::node(b.engine(), 0x21).discovery = DiscoveryState::Identifying; // not in_use
+        CHECK_FALSE(Bk::non_event_pending(b.engine()));
+    }
+    SECTION("the highest module id is scanned too") {
+        Bare b;
+        b.module(omgp::ADDR_module_max, kBp, DiscoveryState::Identifying);
+        CHECK(Bk::non_event_pending(b.engine()));
+    }
+    SECTION("a queued descriptor chunk, a held one, or a queued parameter operation is pending") {
+        {
+            Bare b;
+            Bk::push_desc(b.engine(), 0x20);
+            CHECK(Bk::non_event_pending(b.engine()));
+        }
+        {
+            Bare b;
+            Bk::hold_desc(b.engine(), true);
+            CHECK(Bk::non_event_pending(b.engine()));
+        }
+        {
+            Bare b;
+            Bk::push_param(b.engine(), 0x20);
+            CHECK(Bk::non_event_pending(b.engine()));
+        }
+    }
+    SECTION("the floor defers only the superframe right after an event drain, and only with work") {
+        Bare b;
+        b.module(0x20, kBp, DiscoveryState::Identifying);
+        Bk::set_floor_anchor(b.engine(), 5u, 6u);
+        CHECK(Bk::floor_defers(b.engine()));
+        Bk::set_floor_anchor(b.engine(), 5u, 7u); // two superframes on: events are due again
+        CHECK_FALSE(Bk::floor_defers(b.engine()));
+        Bk::set_floor_anchor(b.engine(), 5u, 5u); // the same superframe
+        CHECK_FALSE(Bk::floor_defers(b.engine()));
+        Bk::set_floor_anchor(b.engine(), 0u, 1u); // never issued an event
+        CHECK_FALSE(Bk::floor_defers(b.engine()));
+        Bare idle;
+        Bk::set_floor_anchor(idle.engine(), 5u, 6u); // nothing non-event to serve
+        CHECK_FALSE(Bk::floor_defers(idle.engine()));
+    }
+    SECTION("in a floor superframe the pending IDENTIFY goes first and the event keeps its place") {
+        Bare b;
+        b.module(0x20, kBp, DiscoveryState::Discovered);
+        b.module(0x21, kBp, DiscoveryState::Undiscovered);
+        Bk::queue_drain(b.engine(), 0x20);
+        Bk::set_floor_anchor(b.engine(), 5u, 6u);
+        CHECK(Bk::issue_demand(b.engine(), 0));
+        CHECK(Bk::event_queued(b.engine()) == 1u); // not drained: the IDENTIFY took the slot
+        CHECK(Bk::queue_head(b.engine()) == 0x20);
+        CHECK(Bk::node(b.engine(), 0x21).discovery == DiscoveryState::Identifying);
+    }
+    SECTION("outside a floor superframe the same rig drains the event first") {
+        Bare b;
+        b.module(0x20, kBp, DiscoveryState::Discovered);
+        b.module(0x21, kBp, DiscoveryState::Undiscovered);
+        Bk::queue_drain(b.engine(), 0x20);
+        Bk::set_floor_anchor(b.engine(), 0u, 6u);
+        CHECK(Bk::issue_demand(b.engine(), 0));
+        CHECK(Bk::event_queued(b.engine()) == 0u); // drained
+        CHECK(Bk::node(b.engine(), 0x21).discovery == DiscoveryState::Undiscovered);
+    }
+    SECTION("work-conserving: pending work that cannot be issued does not idle the slot") {
+        Bare b;
+        b.module(0x20, kBp, DiscoveryState::Discovered);
+        b.module(0x21, kBp, DiscoveryState::ReadingDescriptor);
+        Bk::node(b.engine(), 0x21).desc_stalled_superframe = 6u; // already had this superframe's go
+        Bk::queue_drain(b.engine(), 0x20);
+        Bk::set_floor_anchor(b.engine(), 5u, 6u);
+        REQUIRE(Bk::floor_defers(b.engine())); // the floor is engaged: 0x21 counts as pending
+        CHECK(Bk::issue_demand(b.engine(), 0));
+        CHECK(Bk::event_queued(b.engine()) == 0u); // the event took the slot
     }
 }
 
