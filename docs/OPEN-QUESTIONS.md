@@ -6813,3 +6813,36 @@ with the floor engaged must raise exactly one `NodeEventFault` — a case that f
 **Amends:** on ratification, `spec.md` FR-026 and SC-002 (the 2026-11-24 SC-002/FR-026 entry's
 proposal; this entry specifies FR-026's signal). **Supersedes:** none. **Related:** the 2026-11-23 and
 2026-11-24 entries above, #709, #710, PR #952 round 6, FR-020, FR-025, FR-026, SC-002.
+
+## 2026-11-24 — T039 (#710): RATIFIED — FR-026's flood fault is a run of 256 "more" answers; the rate budget is retired
+
+**Ruling: RATIFIED by the maintainer in session ("Accept", to the recommendations made on the PROPOSED
+entry "FR-026's flood fault must not depend on the drain rate the floor allows" above).** That entry's
+proposal stands as specified, with these values:
+
+1. **N = 256**, derived and not chosen: `remaining_count` and `event_pending` are `u8`
+   (protocol-l3 §3.1/§3.3), so an honest module cannot announce more than 255 queued events and a run
+   of 256 consecutive GET_EVENT answers each reporting `remaining_count > 0` cannot come from a
+   finite queue alone. It is written in code as `UINT8_MAX + 1`, never as a literal. The 256th such
+   answer faults the node (`LifecycleKind::NodeEventFault`, once per episode); it is then not
+   drained.
+2. **The run resets** on an answer with `remaining_count == 0`, on `EVT_NONE`, and when the node
+   (re)enters Discovered or its slot is cleared.
+3. **The rate budget is retired for FR-026.** `kEventRateBudgetPerWindow` and the per-window drain
+   count that only judged it are removed. The fault's time HOLD is kept — a faulted node is skipped for
+   one full window and then `NodeEventFaultCleared` is reported — under honest names
+   (`kEventFaultHoldSuperframes` / `kEventFaultHoldUs`, the same 8 superframes), not a new constant.
+4. **Detection time accepted:** a flooder is faulted after 256 drains, which the floor spaces two
+   superframes apart: 2 x 256 = 512 superframes. A superframe is `TRUNK_T_poll_us` = 2000 us in the
+   generated header (and the existing hold is defined as superframes x that symbol), so about
+   1.02 s — DERIVED from those two values, not measured end to end by a committed case.
+
+**Revisit down, not up.** If the protocol owner adds a module event-queue-depth limit symbol to
+`protocol/omgp-protocol.yaml` (this entry does not touch the YAML), N should become that limit + 1,
+generated. 256 is the safe default until then.
+
+**Does not establish (rule 11).** That N faults no honest module is ASSUMED beyond the wire bound: a
+module whose events ARRIVE as fast as they are served would, by definition, be indistinguishable from a
+flood and be faulted. **Amends:** `spec.md` FR-026 (edited in the same change); SC-002's amendment
+(the 2026-11-24 SC-002/FR-026 entry) is still only PROPOSED and is not edited. **Supersedes:** none.
+**Related:** the PROPOSED entry above, #709, #710, PR #952 round 6 finding 1.
