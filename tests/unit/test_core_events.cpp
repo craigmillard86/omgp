@@ -975,17 +975,38 @@ TEST_CASE("SC-006/US1 AS3: SEVERAL backplanes' standing event_pending does not d
 
     // One liar, then a majority of them: the pathology the one-backplane case cannot see
     // appears between the two, so both arms are asserted rather than only the worst.
-    const uint8_t liars = static_cast<uint8_t>(GENERATE(1, 2, 4, 8));
-    size_t liar_drains = 0;
-    const size_t discovered =
-        discovered_behind_many(kBps, liars, kSlotsEach, 0xFFu, kHorizon, liar_drains);
-    INFO("attack  (" << static_cast<unsigned>(liars) << " of " << static_cast<unsigned>(kBps)
-                     << " backplanes report event_pending=255): " << discovered << "/" << kTotal
-                     << " discovered, GET_EVENT=" << liar_drains);
-    CHECK(discovered == kTotal);
-    // It really did ask — an engine that ignored the count would pass the line above for
-    // the wrong reason.
-    CHECK(liar_drains >= 1u);
+    //
+    // A LOOP and not GENERATE(1, 2, 4, 8), which is what this was written as. Catch2 re-enters
+    // the whole test-case body once per generated value, and the control arm above does not
+    // depend on the arm at all, so it was being measured four times over — four 400-superframe
+    // runs of a 40-node rig whose result is identical every time. This binary is also the
+    // mutation oracle for core/ (tools/mutate.sh picks test_core_*), and the oracle is executed
+    // ONCE PER MUTANT under mull's timeout (tools/mutate.cfg timeout_ms = 20 s), so its
+    // unmutated runtime is a budget and not just a convenience: at eight runs the instrumented
+    // -O0 binary exceeded that timeout in its warm-up run and the gate saw 108 survivors that
+    // no oracle had executed (CI run 45486495032). Every arm, every assertion and every horizon
+    // below is the one GENERATE ran; what is gone is three redundant re-measurements of the
+    // control. Anyone adding a 400-superframe arm here should price the oracle budget first.
+    // MEASURED on CI, this binary on the native ctest path: 0.29 s before this case existed and
+    // 1.85 s with it at eight runs. MEASURED in the same two runs (45476944552, 45486495032),
+    // mull's own timing loop over the same six oracle binaries, five of them untouched between
+    // those heads: 17.4 s and 36.8 s — so +19.4 s of instrumented -O0 time bought with +1.56 s
+    // of native, about 12 instrumented seconds per native second of this case's own work.
+    // DERIVED from that slope and NOT measured, mull being absent from the fixing environment:
+    // ~3.6 s and ~23 s for the binary alone, the second of which is the 20 s overrun.
+    static constexpr uint8_t kLiarArms[] = {1u, 2u, 4u, 8u}; // the same four GENERATE named
+    for (const uint8_t liars : kLiarArms) {
+        size_t liar_drains = 0;
+        const size_t discovered =
+            discovered_behind_many(kBps, liars, kSlotsEach, 0xFFu, kHorizon, liar_drains);
+        INFO("attack  (" << static_cast<unsigned>(liars) << " of " << static_cast<unsigned>(kBps)
+                         << " backplanes report event_pending=255): " << discovered << "/" << kTotal
+                         << " discovered, GET_EVENT=" << liar_drains);
+        CHECK(discovered == kTotal);
+        // It really did ask — an engine that ignored the count would pass the line above for
+        // the wrong reason.
+        CHECK(liar_drains >= 1u);
+    }
     // MEASURED on this rig (stated, not claimed — CLAUDE.md rule 11): 32/32 discovered in
     // every arm, and GET_EVENT = 198 at one, two and eight reporting backplanes alike, so
     // the aggregate probe rate is INDEPENDENT of how many backplanes report. That is the
