@@ -41,5 +41,23 @@ check('a very large Dependencies section is capped, not silently truncated-and-p
 })());
 check('a normal-sized range is not capped', depRefs('- #1–#4 (every preceding task)').capped === false);
 
+// --- #964: an excuse that sits ALONE in the clause after its ref ----------------------------------
+// `- #N - why; not blocking.` puts the ref in clause 1 and the excuse in clause 2, so the per-clause
+// filter kept the ref and #701/#702/#703 deadlocked each other. A clause that is PURELY an excuse
+// excuses the clause before it (and only that one). Anything wider stays blocking: the direction
+// that fails closed.
+check('#964: "ref - why; not blocking." is excused (the #701 line shape)',
+  refsOf('- #702 \u2014 T031, a successor through the same loop; not blocking.') === '[]');
+check('#964: the pure excuse may be on a continuation line',
+  refsOf('- #703 \u2014 T032, the closing pipeline task;\n  not blocking.') === '[]');
+check('#964: a pure excuse excuses only the clause directly before it',
+  refsOf('- #1 must land first; #2 closes the loop; not blocking.') === '[1]');
+check('#964: an excuse with prose around it is NOT a pure excuse and excuses nothing before it',
+  refsOf('- #5 must land first; not blocking anything else is a claim about #6') === '[5]');
+check('#964: a leading excuse with nothing before it leaves the next clause alone',
+  refsOf('- not blocking; #5 must land first') === '[5]');
+check('#964: the pure excuse does not leak to the next list item',
+  refsOf('- #7 - why; not blocking.\n- #8 - a real blocker') === '[8]');
+
 for (const [n, ok] of results) console.log((ok ? 'ok   ' : 'FAIL ') + n);
 console.log(`${results.filter(r => r[1]).length}/${results.length} cases passed`);
