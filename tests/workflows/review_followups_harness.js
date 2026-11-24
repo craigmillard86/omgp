@@ -18,7 +18,9 @@ function world({existing = []} = {}) {
     paginate: async (fn, args) => fn(args).then(r => r.data),
     rest: {
       issues: {
-        listForRepo: async ({labels}) => ({data: existing.filter(i => (i.labels || ['task']).includes(labels))}),
+        // `state` defaults to open, as on the real API; an existing issue is open unless it says otherwise.
+        listForRepo: async ({labels, state = 'open'}) => ({data: existing.filter(i =>
+          (i.labels || ['task']).includes(labels) && (state === 'all' || (i.state || 'open') === state))}),
         create: async ({title, labels, body}) => { created.push({title, labels, body}); return {data: {html_url: `https://gh/issues/${created.length}`}}; },
       },
     },
@@ -344,6 +346,19 @@ const check = (name, cond) => { results.push([name, !!cond]); if (!cond) process
   await run(w, {body: comment('- `[MEDIUM]` Bound the descriptor TLV loop — real hardening')});
   check('the severity tag is stripped from the filed title',
         w.created.length === 1 && !/MEDIUM/.test(w.created[0].title));
+
+  // A human closing a proposal as "not planned" is a ruling on it: a restated proposal must not
+  // refile (#951; 487 such closures on 2026-11-22). A proposal closed as COMPLETED is different —
+  // the reviewer raising it again means it regressed, so it is filed.
+  w = world({existing: [{title: 'Bound the descriptor TLV loop', labels: ['task'], state: 'closed', state_reason: 'not_planned'}]});
+  await run(w, {body: comment('- Bound the descriptor TLV loop — restated')});
+  check('a proposal closed as not planned is not refiled', w.created.length === 0);
+  w = world({existing: [{title: 'Bound the descriptor TLV loop', labels: ['task'], state: 'closed', state_reason: 'completed'}]});
+  await run(w, {body: comment('- Bound the descriptor TLV loop — it regressed')});
+  check('a proposal closed as completed IS refiled (it regressed)', w.created.length === 1);
+  w = world({existing: [{title: 'Wire quality into CI', labels: ['task'], state: 'closed', state_reason: 'not_planned'}]});
+  await run(w, {body: comment('- Bound the descriptor TLV loop — unrelated')});
+  check('an unrelated not-planned closure does not suppress a new proposal', w.created.length === 1);
 
   const pass = results.filter(([, ok]) => ok).length;
   for (const [n, ok] of results) console.log(`${ok ? 'ok  ' : 'FAIL'} ${n}`);
