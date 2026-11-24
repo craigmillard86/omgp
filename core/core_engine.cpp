@@ -72,6 +72,14 @@ uint64_t worst_case_transaction_us(uint32_t bit_rate) {
 // it from anywhere — `value` is meaningful only when ok (§8).
 ParamResult param_failure(uint8_t reason) {
     ParamResult r{};
+    // `ok` is a bool, and Mull's cxx_assign_const replacement is 42: clang reads a bool back by
+    // its low bit, so the mutant stores 42 and every read of `r.ok` still sees false — no
+    // assertion on it can tell the two apart. DEMONSTRATED, not assumed, by the run that reports
+    // this survivor (CI 45487114015): the `ok.ok = true` stores in decode_get_answer() and
+    // decode_set_answer() are changed lines carrying the same mutator and are KILLED, which
+    // happens only if 42 read back as a bool is false. Same mutator, same argument, already
+    // ratified on link/health.cpp:701 and link/responder.cpp:320.
+    // mutant-ok(equivalent, cxx_assign_const): a bool assigned false; 42 reads back false as well.
     r.ok = false;
     r.value = 0;
     r.reason = reason;
