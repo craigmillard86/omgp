@@ -125,8 +125,11 @@ struct CoreEngineTestSeam {
     static void sweep(CoreEngine& engine, uint8_t addr) {
         engine.sweep_one_module_for_events(backplane(engine, addr), addr);
     }
-    static void queue_drain(CoreEngine& engine, uint8_t node_id) {
-        engine.queue_event_drain(node(engine, node_id), node_id);
+    // `speculative` defaults to false: every case that uses this seam is about a drain of an
+    // event the host has been TOLD about, which is the kind EventDrainItem::speculative is
+    // false for. The sweep's own probes are queued by production code, never here.
+    static void queue_drain(CoreEngine& engine, uint8_t node_id, bool speculative = false) {
+        engine.queue_event_drain(node(engine, node_id), node_id, speculative);
     }
     static uint8_t queue_head(CoreEngine& engine) {
         return engine.event_queue_.at(0).node_id;

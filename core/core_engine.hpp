@@ -330,12 +330,15 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     // backplane's event-attribution rotation — queues an EventDrainItem for the next Discovered
     // module behind `backplane_addr` that has none outstanding, and advances
     // BackplaneRecord::event_sweep_next_id past it. One step per poll that reports a count, which
-    // is what keeps a count the backplane cannot justify from holding its own slots' discovery.
+    // is what keeps a count the backplane cannot justify from holding its own slots' discovery;
+    // the item is marked EventDrainItem::speculative, which is what keeps B such backplanes from
+    // holding EVERY backplane's slots out of discovery (drain_events(), US1 AS3 / SC-006).
     void sweep_one_module_for_events(BackplaneRecord& backplane, uint8_t backplane_addr);
     // spec FR-015: queues one EventDrainItem for `node_id` unless one is already queued or a
     // GET_EVENT for it is outstanding (NodeRecord::event_drain_pending). Idempotent, so a level
-    // re-observed by every status poll cannot fill the ring.
-    void queue_event_drain(NodeRecord& node, uint8_t node_id);
+    // re-observed by every status poll cannot fill the ring. `speculative` marks the item an
+    // attribution PROBE rather than a drain of a known event (EventDrainItem's own note).
+    void queue_event_drain(NodeRecord& node, uint8_t node_id, bool speculative);
     // spec FR-026: counts one drained event against this node's current rate window and raises
     // LifecycleKind::NodeEventFault on the drain that takes it past kEventRateBudgetPerWindow.
     void note_event_drained(NodeRecord& node, uint8_t node_id, uint64_t now_us);
@@ -491,6 +494,17 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     // lower id taking every retry the budget admits — for the same reason identify_cursor_
     // exists. Persists across superframes, deliberately.
     uint8_t desc_retry_cursor_ = 0;
+    // The superframe an event-attribution PROBE (EventDrainItem::speculative) was last issued in,
+    // 0 for never — the same once-per-superframe marker as event_drained_superframe. drain_events()
+    // passes over every probe in the superframe immediately after one was issued, which is the
+    // alternation issue_demand() already gives the IDENTIFY scan and the stalled-read retry, for
+    // the same reason: a backplane whose count is never justified has probe work FOR EVER, and
+    // probes are drained ahead of every other demand kind (FR-020), so without it B reporting
+    // backplanes take every demand slot there is and nothing is ever discovered (US1 AS3, SC-006).
+    // Anchored to the last probe ISSUED rather than to superframe parity so that the first probe
+    // after a count appears is never delayed — every backplane's GET_STATUS falls on one parity
+    // (issue_next()), so parity alone would have cost every probe a superframe or none.
+    uint32_t event_probe_superframe_ = 0;
     bool probe_issued_ = false;  // this superframe's one enrolment probe (FR-003)
     bool demand_issued_ = false; // whether the first-item exception has been spent
     // The head of the descriptor-chunk queue, popped but not yet admitted by the budget: held

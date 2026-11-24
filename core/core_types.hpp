@@ -385,6 +385,17 @@ struct ParamResult {
 // drain per its own superframe turn (spec FR-025, R-07 correction).
 struct EventDrainItem {
     uint8_t node_id = 0;
+    // Whether this item is an ATTRIBUTION PROBE rather than a drain of an event known to exist.
+    // NOT a data-model.md §6 field: added by T039 for the same reason the fan-out itself exists —
+    // v1 carries one event_pending count per BACKPLANE (protocol-l3 §3.3) and no per-slot
+    // attribution, so a count makes the host ask the modules behind that backplane in rotation,
+    // and such a probe usually answers EVT_NONE (§3.4). An item queued by on_event_drain()'s
+    // `remaining_count > 0` continuation, or by a status poll addressed to the MODULE itself, is
+    // a drain of an event the host has been told about; one queued by the sweep is a guess. The
+    // distinction is load-bearing in drain_events(), which admits a guess at most every other
+    // superframe so that B reporting backplanes cannot hold the demand phase against discovery
+    // (spec US1 AS3 / SC-006).
+    bool speculative = false;
 };
 
 // Next READ_DESC chunk for node_id, starting at offset (R-09).
