@@ -380,11 +380,22 @@ confirm the application is told it has become unreachable and later told when it
   much of one superframe's event budget a single node's backlog can consume, regardless
   of how large `remaining_count` claims it is (amended 2026-09-21, `docs/OPEN-QUESTIONS.md`
   "#110 F6"; `remaining_count` is advisory and MUST NOT size a buffer or bound a loop).
-- **FR-026**: The engine MUST track each node's event-delivery rate; a node whose rate
-  exceeds a configured budget MUST be reported to the application as faulted (a distinct
-  lifecycle event, separate from FR-022's health transitions) and MUST NOT have further
-  events drained from it until its rate returns within budget (amended 2026-09-21,
-  `docs/OPEN-QUESTIONS.md` "#110 F6").
+- **FR-026**: The engine MUST track, per node, its run of consecutive GET_EVENT answers each
+  reporting more events pending (`remaining_count` above zero); a node whose run reaches N
+  MUST be reported to the application as faulted (a distinct lifecycle event, separate from
+  FR-022's health transitions) and MUST NOT have further events drained from it until the
+  fault's hold has run out, at which point the fault is cleared and that is reported too.
+  N is one more than the largest backlog the wire can announce — `remaining_count` is a
+  `u8`, so N = 256 — which makes a run of N something a finite queue alone cannot produce.
+  The run ends on an answer with `remaining_count` of zero, on an empty-queue answer
+  (`EVT_NONE`), and when the node is (re)discovered. The hold is one full window of eight
+  superframes. (Amended 2026-09-21, `docs/OPEN-QUESTIONS.md` "#110 F6"; the rate-budget
+  wording this replaces was retired 2026-11-24, ratified by the maintainer —
+  `docs/OPEN-QUESTIONS.md` "T039 (#710): PROPOSED ruling — FR-026's flood fault must not
+  depend on the drain rate the floor allows" and its RATIFIED entry. A rate cannot serve as the
+  signal: with FR-025's one drain per node per superframe and FR-020's floor it measures the
+  scheduler, not the node. SC-002's amendment is a separate PROPOSED entry and is not
+  applied here.)
 - **FR-016**: The engine MUST deliver every drained event to the application through the
   callback interface, in the order the module reported them.
 - **FR-017**: The engine MUST report node lifecycle transitions — discovered/live,
