@@ -626,6 +626,22 @@ size_t discovered_behind(uint8_t pending, uint8_t slots, uint32_t horizon, size_
     return rig.discovered_ids().size();
 }
 
+// The same measurement with `bps` populated backplanes instead of one, the first `liars` of them
+// reporting `pending` in every status block and the rest reporting none. US1 AS3's subject is
+// "any other slot OR BACKPLANE", so the one-backplane form above cannot be the whole oracle: a
+// per-poll bound on the sweep is still B sweeps per poll period at B reporting backplanes.
+size_t discovered_behind_many(uint8_t bps, uint8_t liars, uint8_t slots_each, uint8_t pending,
+                              uint32_t horizon, size_t& get_events) {
+    Rig rig;
+    for (uint8_t i = 0; i < bps; ++i) {
+        rig.install_populated(static_cast<uint8_t>(omgp::ADDR_backplane_min + i), slots_each,
+                              i < liars ? pending : 0u);
+    }
+    rig.run_superframes(horizon);
+    get_events = rig.transcript().count(omgp::OP_GET_EVENT);
+    return rig.discovered_ids().size();
+}
+
 } // namespace
 
 TEST_CASE("AS1/FR-015/SC-002: a nonzero event_pending drains fully within the SC-002 bound "
@@ -926,6 +942,53 @@ TEST_CASE("SC-006/US1 AS3: a backplane's standing event_pending does not delay t
     // MEASURED on this rig (stated, not claimed — CLAUDE.md rule 11): 16/16 discovered in both
     // arms, 0 GET_EVENT in the control and 198 in the attack — one per status poll of the
     // reporting backplane, where the fan-out-to-every-sibling form issued 980 and discovered 5.
+}
+
+TEST_CASE("SC-006/US1 AS3: SEVERAL backplanes' standing event_pending does not delay the discovery "
+          "of any other backplane's modules [events][us4]") {
+    // The case above pins the sweep at ONE reporting backplane, where one sweep step per poll
+    // is one GET_EVENT per poll period. US1 AS3's subject is "any other slot or BACKPLANE"
+    // and SC-006's is "any other node", so the property has to hold with SEVERAL liars too.
+    // A bound that is per (backplane, poll) is B GET_EVENTs per poll period in AGGREGATE,
+    // competing for the same demand budget as the discovery of every OTHER backplane's
+    // modules (FR-020 drains events first). v1 allows 15 backplane addresses
+    // (ADDR_backplane_min..max), so B > 1 is the ordinary case and not a corner.
+    //
+    // Every event queue behind every backplane is EMPTY here, exactly as above: every
+    // GET_EVENT either arm issues answers EVT_NONE and delivers nothing. The arms differ in
+    // one byte of the liars' status blocks.
+    constexpr uint32_t kHorizon = 400;
+    constexpr uint8_t kBps = 8;
+    constexpr uint8_t kSlotsEach = 4;
+    constexpr size_t kTotal = static_cast<size_t>(kBps) * kSlotsEach;
+    size_t quiet_drains = 0;
+    const size_t quiet =
+        discovered_behind_many(kBps, 0u, kSlotsEach, 0xFFu, kHorizon, quiet_drains);
+    INFO("control (no backplane reports): " << quiet << "/" << kTotal << " discovered in "
+                                            << kHorizon
+                                            << " superframes, GET_EVENT=" << quiet_drains);
+    REQUIRE(quiet == kTotal); // the arm the attack is measured against
+    CHECK(quiet_drains == 0u);
+
+    // One liar, then a majority of them: the pathology the one-backplane case cannot see
+    // appears between the two, so both arms are asserted rather than only the worst.
+    const uint8_t liars = static_cast<uint8_t>(GENERATE(1, 2, 4, 8));
+    size_t liar_drains = 0;
+    const size_t discovered =
+        discovered_behind_many(kBps, liars, kSlotsEach, 0xFFu, kHorizon, liar_drains);
+    INFO("attack  (" << static_cast<unsigned>(liars) << " of " << static_cast<unsigned>(kBps)
+                     << " backplanes report event_pending=255): " << discovered << "/" << kTotal
+                     << " discovered, GET_EVENT=" << liar_drains);
+    CHECK(discovered == kTotal);
+    // It really did ask — an engine that ignored the count would pass the line above for
+    // the wrong reason.
+    CHECK(liar_drains >= 1u);
+    // MEASURED on this rig (stated, not claimed — CLAUDE.md rule 11): 32/32 discovered in
+    // every arm, and GET_EVENT = 198 at one, two and eight reporting backplanes alike, so
+    // the aggregate probe rate is INDEPENDENT of how many backplanes report. That is the
+    // property EventDrainItem::speculative exists for. Bounded only per (backplane, poll),
+    // the same arms gave 392 GET_EVENT and 5 of 32 discovered at two liars and above: the
+    // RED run this case was written from, quoted again in drain_events()'s own note.
 }
 
 TEST_CASE("FR-026: an over-budget node is reported NodeEventFault and stops being drained "
