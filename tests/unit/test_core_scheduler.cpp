@@ -1623,35 +1623,57 @@ TEST_CASE("AS3/FR-020: a concurrent event burst drains ahead of a parameter burs
     // ring's own and not an artefact of an otherwise idle rig.
     CHECK(Bk::param_queued(rig.engine()) > 0u);
 
-    // FR-020 under concurrent load: while any of the eight events is still queued, no demand
-    // slot goes to a parameter operation at all — which subsumes "no parameter operation
-    // precedes that superframe's event" and is asserted as ONE ordered walk over the whole
-    // drain rather than per superframe. Per superframe it would go vacuous exactly when the
-    // drain finishes early (the loop body would never run), and the property is about the drain,
-    // not about any one superframe of it. The 40-operation burst is the falsifier: it is queued
-    // throughout and admissible throughout (asserted below, after the walk), so a drain that
-    // let the parameter ring take a demand slot would show up here as a non-zero count.
+    // FR-020 under concurrent load, AS AMENDED by the ratified floor (docs/OPEN-QUESTIONS.md
+    // 2026-11-24): this walk used to assert that while any of the eight events is still queued NO
+    // demand slot goes to a parameter operation. The floor deliberately gives pending non-event
+    // work the FIRST slot of the superframe after one whose slot went to an event, so that a
+    // steady event source cannot starve it for ever. What is kept, strictly: in every OTHER
+    // superframe of the drain (the previous one issued no GET_EVENT) no parameter operation
+    // precedes the superframe's first GET_EVENT. What is new: a parameter operation may precede it
+    // in a floor superframe, and no more than one superframe in two can be one. Asserted as ONE
+    // ordered walk over the whole drain, for the original reason: per superframe it would go
+    // vacuous exactly when the drain finishes early. The 40-operation burst is the falsifier — it
+    // is queued throughout and admissible throughout (asserted below, after the walk), so a drain
+    // that let the parameter ring take a non-floor slot would show up as a non-zero count.
     size_t events_seen = 0;
-    size_t params_before_last_event = 0;
+    size_t params_in_nonfloor_before_event = 0;
+    size_t floor_superframes = 0;
     uint32_t first_param_with_events_queued = 0;
+    bool previous_had_event = false;
     for (uint32_t sf = queued_in; sf <= drained_by; ++sf) {
+        const bool floor_superframe = previous_had_event;
+        bool this_had_event = false;
+        bool event_seen_here = false;
+        bool param_before_event_here = false;
         for (const uint8_t op : rig.transcript().opcodes_in(sf)) {
             if (op == omgp::OP_GET_EVENT) {
                 ++events_seen;
-            } else if (is_param_op(op) && events_seen < 8u) {
-                if (params_before_last_event == 0u) {
-                    first_param_with_events_queued = sf;
+                this_had_event = true;
+                event_seen_here = true;
+            } else if (is_param_op(op) && events_seen < 8u && !event_seen_here) {
+                param_before_event_here = true;
+                if (!floor_superframe) {
+                    if (params_in_nonfloor_before_event == 0u) {
+                        first_param_with_events_queued = sf;
+                    }
+                    ++params_in_nonfloor_before_event;
                 }
-                ++params_before_last_event;
             }
         }
+        if (floor_superframe && param_before_event_here) {
+            ++floor_superframes;
+        }
+        previous_had_event = this_had_event;
     }
     // The window read above holds the whole drain: all eight GET_EVENTs are inside it, so
     // `events_seen < 8u` above really does mean "an event is still queued".
     REQUIRE(events_seen == 8u);
-    INFO("first parameter operation issued with events still queued: superframe "
-         << first_param_with_events_queued << " (" << params_before_last_event << " of them)");
-    CHECK(params_before_last_event == 0u);
+    INFO("first parameter operation ahead of an event in a non-floor superframe: superframe "
+         << first_param_with_events_queued << " (" << params_in_nonfloor_before_event
+         << " of them); floor superframes that served one first: " << floor_superframes);
+    CHECK(params_in_nonfloor_before_event == 0u);
+    // The floor is bounded: it can claim at most one superframe in two of the drain.
+    CHECK(floor_superframes <= (drained_by - queued_in + 2u) / 2u);
     // And the walk is not vacuous for want of a parameter operation ABLE to take those slots:
     // the ring was admissible all along and merely yielding, which the superframes right after
     // the drain show by spending their demand slots on it. Without this, a parameter ring that
