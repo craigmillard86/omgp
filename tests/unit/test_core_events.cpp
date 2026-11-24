@@ -645,6 +645,37 @@ size_t discovered_behind_many(uint8_t bps, uint8_t liars, uint8_t slots_each, ui
     return rig.discovered_ids().size();
 }
 
+// FR-020 floor (docs/OPEN-QUESTIONS.md 2026-11-24, ratified): `flooders` backplanes each holding
+// one module that answers every GET_EVENT with another real event ("255 more"), re-armed so the
+// backlog never ends, beside a QUIET backplane of `slots` modules still to be discovered. Answers
+// how many of the quiet backplane's modules reached Discovered within `horizon` superframes, plus
+// (out-parameters) the GET_EVENTs issued and the superframes in which one was issued. Every one of
+// those drains is a drain of an event the host was TOLD about, so none is an attribution probe.
+size_t discovered_beside_flood(uint8_t flooders, uint8_t slots, uint32_t horizon,
+                               size_t& get_events) {
+    Rig rig;
+    const uint8_t quiet_bp = static_cast<uint8_t>(omgp::ADDR_backplane_min + 14u);
+    rig.install_populated(quiet_bp, slots, 0u); // no count at all
+    const std::vector<ScriptedEvent> flood = flood_script(false);
+    for (uint8_t i = 0; i < flooders; ++i) {
+        rig.install(static_cast<uint8_t>(omgp::ADDR_backplane_min + i), 0xFFu, flood);
+    }
+    for (uint32_t sf = 0; sf < horizon; sf += 8u) {
+        rig.run_superframes(8u);
+        for (uint8_t i = 0; i < flooders; ++i) { // MockL3Node holds only kEventQueueCapacity
+            rig.arm(static_cast<uint8_t>(omgp::ADDR_backplane_min + i), 0xFFu, flood);
+        }
+    }
+    get_events = rig.transcript().count(omgp::OP_GET_EVENT);
+    size_t found = 0;
+    for (const uint8_t id : rig.discovered_ids()) {
+        if (Bk::node(rig.engine(), id).backplane_addr == quiet_bp) {
+            ++found;
+        }
+    }
+    return found;
+}
+
 } // namespace
 
 TEST_CASE("AS1/FR-015/SC-002: a nonzero event_pending drains fully within the SC-002 bound "
@@ -992,6 +1023,77 @@ TEST_CASE("SC-006/US1 AS3: SEVERAL backplanes' standing event_pending does not d
     // property EventDrainItem::speculative exists for. Bounded only per (backplane, poll),
     // the same arms gave 392 GET_EVENT and 5 of 32 discovered at two liars and above: the
     // RED run this case was written from, quoted again in drain_events()'s own note.
+}
+
+TEST_CASE("FR-020 floor: an endless honest event backlog does not starve discovery [events][us4]") {
+    // #952 red team round 5, finding 1 [HIGH]. The speculative-item alternation bounds attribution
+    // PROBES only; a drain of an event the host was told about (on_event_drain()'s
+    // remaining_count > 0 continuation) keeps strict FR-020 priority, so enough nodes with an
+    // endless backlog hold every demand slot and nothing is ever identified. The ratified floor
+    // (OPEN-QUESTIONS 2026-11-24): while non-event demand work is pending, at least every second
+    // superframe's demand phase serves it first. WRITTEN FIRST, RED at 479bf34 for flooders 3 and
+    // 4 (0 of 4 quiet modules discovered in 400 superframes; the red team measured the same).
+    constexpr uint32_t kHorizon = 400;
+    constexpr uint8_t kSlots = 4;
+    size_t drains = 0;
+    REQUIRE(discovered_beside_flood(0u, kSlots, kHorizon, drains) == kSlots); // control
+    CHECK(drains == 0u);
+    for (const uint8_t flooders : {uint8_t{1}, uint8_t{2}, uint8_t{3}, uint8_t{4}}) {
+        drains = 0;
+        const size_t found = discovered_beside_flood(flooders, kSlots, kHorizon, drains);
+        INFO(static_cast<unsigned>(flooders)
+             << " flooding backplane(s): " << found << "/" << static_cast<unsigned>(kSlots)
+             << " quiet modules discovered in " << kHorizon
+             << " superframes, GET_EVENT=" << drains);
+        CHECK(found == static_cast<size_t>(kSlots));
+        CHECK(drains >= 1u); // it really drained, so a pass is not an engine that ignores the flood
+    }
+}
+
+TEST_CASE("FR-020 floor: events keep making progress while non-event work is pending, and are not "
+          "delayed when none is [events][us4]") {
+    // The floor's other edge. It must not turn FR-020 into "discovery first": a finite honest
+    // backlog (within kEventRateBudgetPerWindow, so FR-026 does not engage) is drained at least
+    // every SECOND superframe even while four other modules are being discovered, and with no
+    // non-event work pending the floor is not engaged at all, so the drains are in CONSECUTIVE
+    // superframes (FR-025's K = 1, undelayed). Both arms PASS at 479bf34 — strict priority gives
+    // events every slot — so this is a guard on the implementation, not a RED case.
+    constexpr uint8_t kBacklog = 4;
+    static_assert(kBacklog <= kEventRateBudgetPerWindow, "the backlog must stay inside FR-026");
+    const std::vector<ScriptedEvent> backlog = {
+        event_of(omgp::EVT_FAULT_RAISED, 3u, {1u}), event_of(omgp::EVT_FAULT_RAISED, 2u, {2u}),
+        event_of(omgp::EVT_FAULT_RAISED, 1u, {3u}), event_of(omgp::EVT_FAULT_RAISED, 0u, {4u})};
+    REQUIRE(backlog.size() == kBacklog);
+    const uint8_t bp = omgp::ADDR_backplane_min;
+    const uint8_t quiet_bp = static_cast<uint8_t>(omgp::ADDR_backplane_min + 14u);
+
+    // Arm A: nothing else to do. Consecutive superframes.
+    {
+        Rig rig;
+        const uint8_t node = rig.bring_up(bp);
+        rig.arm(bp, kBacklog, backlog);
+        rig.run_superframes(24u);
+        const std::vector<uint32_t> at = rig.transcript().superframes_for(omgp::OP_GET_EVENT, node);
+        REQUIRE(at.size() >= kBacklog);
+        for (size_t i = 1; i < kBacklog; ++i) {
+            INFO("drain " << i << " at superframe " << at[i] << ", previous " << at[i - 1]);
+            CHECK(at[i] - at[i - 1] == 1u);
+        }
+    }
+    // Arm B: four modules behind another backplane are being discovered meanwhile.
+    {
+        Rig rig;
+        const uint8_t node = rig.bring_up(bp);
+        rig.install_populated(quiet_bp, 4u, 0u);
+        rig.arm(bp, kBacklog, backlog);
+        rig.run_superframes(48u);
+        const std::vector<uint32_t> at = rig.transcript().superframes_for(omgp::OP_GET_EVENT, node);
+        REQUIRE(at.size() >= kBacklog);
+        for (size_t i = 1; i < kBacklog; ++i) {
+            INFO("drain " << i << " at superframe " << at[i] << ", previous " << at[i - 1]);
+            CHECK(at[i] - at[i - 1] <= 2u); // the floor's "at least every second superframe"
+        }
+    }
 }
 
 TEST_CASE("FR-026: an over-budget node is reported NodeEventFault and stops being drained "
