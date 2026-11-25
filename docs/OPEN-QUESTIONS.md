@@ -6846,3 +6846,54 @@ module whose events ARRIVE as fast as they are served would, by definition, be i
 flood and be faulted. **Amends:** `spec.md` FR-026 (edited in the same change); SC-002's amendment
 (the 2026-11-24 SC-002/FR-026 entry) is still only PROPOSED and is not edited. **Supersedes:** none.
 **Related:** the PROPOSED entry above, #709, #710, PR #952 round 6 finding 1.
+
+## 2026-11-25 — T039 (#710): RATIFIED — FR-026's hold must scale with its run trigger (hold = 512 superframes); SC-006 amended
+
+**Ruling: RATIFIED by the maintainer in session ("1", to the recommendation made when the red team's
+round-9 `[HIGH]` was reported: scale the hold, amend SC-006).** This entry corrects the 2026-11-24
+"RATIFIED — FR-026's flood fault is a run of 256" entry's item 3, which kept the hold at 8 superframes.
+
+**What was measured (demonstrated by a committed case at `f87fef7`, red team round 9).** The case
+`FR-026: a flooder is faulted by its run of 'more' answers, at the 256th …` drives a module that
+answers `remaining_count > 0` for ever: in 600 superframes it was drained 302 times, faulted once, and
+the hold suppressed about 4 of those 302 drains. Steady state is arithmetic from two constants: detection
+needs 256 consecutive "more" answers, which the FR-020 floor spaces one per two superframes = 512
+superframes; the hold then suppresses 8. 8 / (512 + 8) = **1.5 %** of the flooder's event-priority share
+removed; it keeps 98.5 % for ever. Under the retired rate budget the fault fired on the 5th drain and the
+same 8-superframe hold removed roughly 44 %.
+
+**My miss (stated, not excused).** When the trigger went from 5 drains to 256 (a 51x slowdown of
+detection) the hold was carried over unexamined — item 3 of the ratified entry says "the same 8
+superframes, not a new constant" and the code comment said "kept so the hold is unchanged". A hold is
+only meaningful RELATIVE to its trigger; holding it fixed while multiplying the trigger by 51 reduced the
+defence to decoration. SC-006, which this branch did not amend, also still says a flooder is "reported
+faulted … rather than continuing to consume event-priority share" and names a "delivery rate … budget"
+that no longer exists, so it was false at that head.
+
+**Ruling.**
+1. **Hold = 512 superframes**, written as `kEventFaultHoldSuperframes = 2 x kEventRunFaultThreshold`
+   (the "2" is the FR-020 floor's drain spacing: one event drain per two superframes while non-event
+   work is pending, FR-020 as amended 2026-11-24). Derived, not chosen: it is the time the node took to
+   earn the fault, so a node that keeps flooding spends about as long held as it spent being detected,
+   i.e. about 50 % duty (512 held / 1024 per cycle), against 1.5 % before. At `TRUNK_T_poll_us` that is
+   about 1.02 s held (DERIVED from the symbol, not measured end to end).
+2. The hold's mechanics are unchanged: measured from `NodeRecord::event_fault_start_us` through the
+   injected Clock, then `NodeEventFaultCleared`, draining resumes on the node's next turn, the run
+   restarts from zero.
+3. **SC-006 is amended** (`spec.md`): "…its own backlog is drained no faster than one event per its own
+   superframe turn (FR-025), and once its run of consecutive 'more' answers reaches FR-026's threshold it
+   is reported faulted and not drained for FR-026's hold, so it stops consuming event-priority share for
+   that hold." The "delivery rate exceeds budget" wording is removed.
+4. FR-026's own text gains the hold length (512 superframes) so the constant is specified, not only coded.
+
+**Does not establish (rule 11).** That 50 % is the right duty cycle is a judgement (the symmetric
+choice: hold = detection time), not a derived necessity; a longer hold lowers a flooder's share further
+and delays an honest-but-bursty node's recovery by the same amount (ASSUMED acceptable: such a node is
+already indistinguishable from a flood by the 256-run). A node that floods only a little over 256 answers
+per episode and resets its run in between evades the fault entirely (red team round 9 MEDIUM, accepted by
+the 2026-11-24 ruling, unchanged here). **Tests first (rule 8):** a flooder with the floor engaged must
+lose about half its drains to the hold over a long horizon, and the fault must release at exactly 512
+superframes — both fail at `f87fef7`. **Amends:** `spec.md` FR-026 and SC-006. SC-002's amendment is still
+only PROPOSED and is not edited. **Supersedes:** item 3 of the 2026-11-24 RATIFIED FR-026 entry (hold
+"the same 8 superframes"). **Related:** #709, #710, PR #952 round 9 red team, FR-020, FR-025, FR-026,
+SC-006.
