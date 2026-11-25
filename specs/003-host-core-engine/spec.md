@@ -283,9 +283,10 @@ confirm the application is told it has become unreachable and later told when it
 - What happens when a single node keeps reporting more events pending than the schedule
   can ever fully drain (a flooding or malfunctioning module)? Its own backlog is drained
   no faster than one event per its own superframe turn (FR-025), never faster regardless
-  of how large its self-reported count claims to be; once its delivery rate exceeds
-  budget it is reported faulted (FR-026) and stops being drained, rather than continuing
-  to consume the event-priority share every other node's own events are waiting on.
+  of how large its self-reported count claims to be; once its run of consecutive "more"
+  answers reaches FR-026's threshold it is reported faulted and not drained for FR-026's hold,
+  so it stops consuming the event-priority share every other node's own events are waiting on
+  for that hold (amended 2026-11-25; the delivery-rate wording was retired with the rate budget).
 - What happens when a backplane's own status poll, or the demand traffic bridged
   through it, consistently costs several times an honest transaction's duration (a
   legally-formed but padded response, or a slow module bus)? The superframe's remaining
@@ -388,8 +389,12 @@ confirm the application is told it has become unreachable and later told when it
   N is one more than the largest backlog the wire can announce — `remaining_count` is a
   `u8`, so N = 256 — which makes a run of N something a finite queue alone cannot produce.
   The run ends on an answer with `remaining_count` of zero, on an empty-queue answer
-  (`EVT_NONE`), and when the node is (re)discovered. The hold is one full window of eight
-  superframes. (Amended 2026-09-21, `docs/OPEN-QUESTIONS.md` "#110 F6"; the rate-budget
+  (`EVT_NONE`), and when the node is (re)discovered. The hold is 512 superframes, twice N —
+  the time the node took to earn the fault under FR-020's floor (one drain per two superframes),
+  so a node that keeps flooding spends about as long held as it spent being detected.
+  (Hold amended 2026-11-25, ratified by the maintainer: `docs/OPEN-QUESTIONS.md` "T039 (#710):
+  RATIFIED — FR-026's hold must scale with its run trigger"; the eight superframes it replaces
+  removed 1.5 % of a flooder's share. Amended 2026-09-21, `docs/OPEN-QUESTIONS.md` "#110 F6"; the rate-budget
   wording this replaces was retired 2026-11-24, ratified by the maintainer —
   `docs/OPEN-QUESTIONS.md` "T039 (#710): PROPOSED ruling — FR-026's flood fault must not
   depend on the drain rate the floor allows" and its RATIFIED entry. A rate cannot serve as the
@@ -488,8 +493,10 @@ confirm the application is told it has become unreachable and later told when it
 - **SC-006**: A single node whose status poll always reports events pending never
   prevents any other node's own pending event from being drained within the SC-002
   bound — its own backlog is drained no faster than one event per its own superframe
-  turn (FR-025), and once its delivery rate exceeds budget it is reported faulted
-  (FR-026) rather than continuing to consume event-priority share.
+  turn (FR-025), and once its run of consecutive "more" answers reaches FR-026's threshold
+  it is reported faulted and not drained for FR-026's hold, so it stops consuming
+  event-priority share for that hold (amended 2026-11-25, `docs/OPEN-QUESTIONS.md` "T039
+  (#710): RATIFIED — FR-026's hold must scale with its run trigger").
 - **SC-007**: A backplane or node whose transactions cost several times an honest
   transaction's duration (the amplification scenario in `docs/OPEN-QUESTIONS.md` "#110
   F2c": a legal but padded `ERROR` response) is demoted and reported within a bounded
