@@ -1030,7 +1030,13 @@ TEST_CASE("SC-006/US1 AS3: SEVERAL backplanes' standing event_pending does not d
     // Every event queue behind every backplane is EMPTY here, exactly as above: every
     // GET_EVENT either arm issues answers EVT_NONE and delivers nothing. The arms differ in
     // one byte of the liars' status blocks.
-    constexpr uint32_t kHorizon = 400;
+    // 128 superframes, down from 400. MEASURED on this rig (a temporary horizon edit, then
+    // reverted): the control arm and all four attack arms discover 32/32 at a horizon of 100 and
+    // fail at 60, so completion lies between them and 128 is about a quarter above the slowest arm.
+    // The starvation this case exists to catch discovers 5/32 at 400 and never recovers, so a
+    // shorter horizon discriminates it identically; what it buys is oracle budget (see the
+    // timeout note below) - this case was ~60% of the binary's instrumented -O0 runtime.
+    constexpr uint32_t kHorizon = 128;
     constexpr uint8_t kBps = 8;
     constexpr uint8_t kSlotsEach = 4;
     constexpr size_t kTotal = static_cast<size_t>(kBps) * kSlotsEach;
