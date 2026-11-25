@@ -105,15 +105,15 @@ constexpr uint16_t kEventRunFaultThreshold = static_cast<uint16_t>(UINT8_MAX) + 
 // The fault's HOLD: a faulted node is not drained for one full window of SIMULATED time, measured
 // from NodeRecord::event_fault_start_us through the injected Clock only (CLAUDE.md rule 3), and
 // derived from trunk §6's superframe period rather than restated in microseconds (rule 4). At its
-// end the fault is cleared (LifecycleKind::NodeEventFaultCleared) and draining resumes on the node's
-// next turn; a node that is still flooding earns a new fault after another N answers.
+// end the fault is cleared (LifecycleKind::NodeEventFaultCleared) and draining resumes on the
+// node's next turn; a node that is still flooding earns a new fault after another N answers.
 //
-// The length is 2 x N superframes = 512 (docs/OPEN-QUESTIONS.md 2026-11-25, RATIFIED). The "2" is the
-// FR-020 floor's drain spacing (one event drain per two superframes while non-event work is pending),
-// so 2 x N is exactly the time the node took to EARN the fault: a node that keeps flooding spends about
-// as long held as it spent being detected, about 50 % duty. The hold is only meaningful relative to
-// its trigger; at the 8 superframes the retired rate window had it removed 8 / 520 = 1.5 % of a
-// flooder's share (red team round 9 [HIGH]).
+// The length is 2 x N superframes = 512 (docs/OPEN-QUESTIONS.md 2026-11-25, RATIFIED). The "2" is
+// the FR-020 floor's drain spacing (one event drain per two superframes while non-event work is
+// pending), so 2 x N is exactly the time the node took to EARN the fault: a node that keeps
+// flooding spends about as long held as it spent being detected, about 50 % duty. The hold is only
+// meaningful relative to its trigger; at the 8 superframes the retired rate window had it removed 8
+// / 520 = 1.5 % of a flooder's share (red team round 9 [HIGH]).
 constexpr uint32_t kEventFaultHoldSuperframes = 2u * static_cast<uint32_t>(kEventRunFaultThreshold);
 constexpr uint64_t kEventFaultHoldUs =
     static_cast<uint64_t>(kEventFaultHoldSuperframes) * static_cast<uint64_t>(TRUNK_T_poll_us);

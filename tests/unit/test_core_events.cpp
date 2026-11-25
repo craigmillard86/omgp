@@ -1278,11 +1278,12 @@ TEST_CASE("FR-026: a node that answers a run of 'more' is reported NodeEventFaul
         };
         // Patience in SIMULATED TIME, not superframes: the hold is 512 superframe periods of
         // simulated time (2026-11-25), and run_until counts the rig's superframes, which (observed:
-        // 619 of them did not span it) need not equal periods of simulated time, so run_until's flat
-        // 400 could not reach the end of the hold. Not an assertion: the hold's length is asserted below (>= kEventFaultHoldUs)
-        // and, against the RATIFIED figure, by the boundary case.
-        const uint64_t patience_until = faulted.at_us + kEventFaultHoldUs +
-                                        40u * static_cast<uint64_t>(omgp::TRUNK_T_poll_us);
+        // 619 of them did not span it) need not equal periods of simulated time, so run_until's
+        // flat 400 could not reach the end of the hold. Not an assertion: the hold's length is
+        // asserted below (>= kEventFaultHoldUs) and, against the RATIFIED figure, by the boundary
+        // case.
+        const uint64_t patience_until =
+            faulted.at_us + kEventFaultHoldUs + 40u * static_cast<uint64_t>(omgp::TRUNK_T_poll_us);
         while (!cleared_once() && rig.now_us() < patience_until) {
             rig.run_superframes(1u);
         }
@@ -1302,11 +1303,11 @@ TEST_CASE("FR-026: a node that answers a run of 'more' is reported NodeEventFaul
 }
 
 // FR-026's hold scales with its run trigger (docs/OPEN-QUESTIONS.md 2026-11-25, RATIFIED): the hold
-// is 2 x kEventRunFaultThreshold superframes (the FR-020 floor's drain spacing x the run) = 512, the
-// time the node took to earn the fault. Stated here from the ruling, NOT read from kEventFaultHold*,
-// so these cases fail for a constant that drifts in either direction. Red team round 9 [HIGH]: at the
-// old 8-superframe hold a flooder kept 98.5 % of its share (302 drains, 1 fault, ~4 suppressed in 600
-// superframes).
+// is 2 x kEventRunFaultThreshold superframes (the FR-020 floor's drain spacing x the run) = 512,
+// the time the node took to earn the fault. Stated here from the ruling, NOT read from
+// kEventFaultHold*, so these cases fail for a constant that drifts in either direction. Red team
+// round 9 [HIGH]: at the old 8-superframe hold a flooder kept 98.5 % of its share (302 drains, 1
+// fault, ~4 suppressed in 600 superframes).
 constexpr uint64_t kRatifiedHoldSuperframes = 2u * static_cast<uint64_t>(UINT8_MAX + 1u);
 constexpr uint64_t kRatifiedHoldUs =
     kRatifiedHoldSuperframes * static_cast<uint64_t>(omgp::TRUNK_T_poll_us);
@@ -1338,11 +1339,11 @@ TEST_CASE("FR-026: the fault's hold is 512 superframes, released at exactly that
     CHECK(rig.transcript().count_between(omgp::OP_GET_EVENT, node, faulted.at_us, rig.now_us()) ==
           0u);
 
-    rig.run_until(
-        [&] { return rig.recorder().count(LifecycleKind::NodeEventFaultCleared) == 1u; }, 40u);
+    rig.run_until([&] { return rig.recorder().count(LifecycleKind::NodeEventFaultCleared) == 1u; },
+                  40u);
     REQUIRE(rig.recorder().count(LifecycleKind::NodeEventFaultCleared) == 1u);
-    const uint64_t held = rig.recorder().first(LifecycleKind::NodeEventFaultCleared).at_us -
-                          faulted.at_us;
+    const uint64_t held =
+        rig.recorder().first(LifecycleKind::NodeEventFaultCleared).at_us - faulted.at_us;
     INFO("held " << held << " us; ratified hold " << kRatifiedHoldUs << " us");
     CHECK(held >= kRatifiedHoldUs);              // not a superframe early
     CHECK(held <= kRatifiedHoldUs + 2u * kTick); // and not a tick late
