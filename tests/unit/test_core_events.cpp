@@ -1276,7 +1276,17 @@ TEST_CASE("FR-026: a node that answers a run of 'more' is reported NodeEventFaul
         const auto cleared_once = [&] {
             return rig.recorder().count(LifecycleKind::NodeEventFaultCleared) == 1u;
         };
-        rig.run_until(cleared_once, 400u);
+        // Patience in SIMULATED TIME, not superframes: the hold is 512 superframe periods of
+        // simulated time (2026-11-25), and run_until counts the rig's superframes, which (observed:
+        // 619 of them did not span it) need not equal periods of simulated time, so run_until's flat
+        // 400 could not reach the end of the hold. Not an assertion: the hold's length is asserted below (>= kEventFaultHoldUs)
+        // and, against the RATIFIED figure, by the boundary case.
+        const uint64_t patience_until = faulted.at_us + kEventFaultHoldUs +
+                                        40u * static_cast<uint64_t>(omgp::TRUNK_T_poll_us);
+        while (!cleared_once() && rig.now_us() < patience_until) {
+            rig.run_superframes(1u);
+        }
+        REQUIRE(cleared_once());
         const Delivery cleared = rig.recorder().first(LifecycleKind::NodeEventFaultCleared);
         CHECK(cleared.ev.node_id == node);
         CHECK_FALSE(Bk::node(rig.engine(), node).event_faulted);
