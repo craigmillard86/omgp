@@ -1291,6 +1291,85 @@ TEST_CASE("FR-026: a node that answers a run of 'more' is reported NodeEventFaul
     }
 }
 
+// FR-026's hold scales with its run trigger (docs/OPEN-QUESTIONS.md 2026-11-25, RATIFIED): the hold
+// is 2 x kEventRunFaultThreshold superframes (the FR-020 floor's drain spacing x the run) = 512, the
+// time the node took to earn the fault. Stated here from the ruling, NOT read from kEventFaultHold*,
+// so these cases fail for a constant that drifts in either direction. Red team round 9 [HIGH]: at the
+// old 8-superframe hold a flooder kept 98.5 % of its share (302 drains, 1 fault, ~4 suppressed in 600
+// superframes).
+constexpr uint64_t kRatifiedHoldSuperframes = 2u * static_cast<uint64_t>(UINT8_MAX + 1u);
+constexpr uint64_t kRatifiedHoldUs =
+    kRatifiedHoldSuperframes * static_cast<uint64_t>(omgp::TRUNK_T_poll_us);
+
+TEST_CASE("FR-026: the fault's hold is 512 superframes, released at exactly that, not before "
+          "[events][us4]") {
+    // WRITTEN FIRST, RED at f87fef7 (hold 8 superframes). Seeded run as in the case above (stated,
+    // not claimed): the fault arrives on the fourth drain; the full count from zero is the case
+    // `FR-026: a flooder is faulted by its run of 'more' answers, at the 256th`.
+    constexpr size_t kSeedShort = 4;
+    constexpr uint64_t kTick = static_cast<uint64_t>(omgp::TRUNK_T_poll_us);
+    Rig rig;
+    const uint8_t bp = omgp::ADDR_backplane_min;
+    const uint8_t node = rig.bring_up(bp);
+    Bk::node(rig.engine(), node).event_more_run =
+        static_cast<uint16_t>(kEventRunFaultThreshold - kSeedShort);
+    rig.arm(bp, 0xFFu, flood_script(false));
+    rig.run_until([&] { return rig.recorder().count(LifecycleKind::NodeEventFault) == 1u; }, 60u);
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeEventFault) == 1u);
+    const Delivery faulted = rig.recorder().first(LifecycleKind::NodeEventFault);
+
+    // One superframe short of the hold (plus the tick's own granularity): still faulted, silent.
+    const uint64_t almost = faulted.at_us + kRatifiedHoldUs - 2u * kTick;
+    while (rig.now_us() < almost) {
+        rig.run_superframes(1u);
+    }
+    CHECK(Bk::node(rig.engine(), node).event_faulted);
+    CHECK(rig.recorder().count(LifecycleKind::NodeEventFaultCleared) == 0u);
+    CHECK(rig.transcript().count_between(omgp::OP_GET_EVENT, node, faulted.at_us, rig.now_us()) ==
+          0u);
+
+    rig.run_until(
+        [&] { return rig.recorder().count(LifecycleKind::NodeEventFaultCleared) == 1u; }, 40u);
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeEventFaultCleared) == 1u);
+    const uint64_t held = rig.recorder().first(LifecycleKind::NodeEventFaultCleared).at_us -
+                          faulted.at_us;
+    INFO("held " << held << " us; ratified hold " << kRatifiedHoldUs << " us");
+    CHECK(held >= kRatifiedHoldUs);              // not a superframe early
+    CHECK(held <= kRatifiedHoldUs + 2u * kTick); // and not a tick late
+}
+
+TEST_CASE("FR-026: a flooder with the FR-020 floor engaged loses about half its drains to the "
+          "hold [events][us4]") {
+    // WRITTEN FIRST, RED at f87fef7: the hold removed ~8 of every 520 superframes (1.5 %).
+    // After its first fault the flooder must receive NO GET_EVENT for the ratified hold, then
+    // resume, so over one detect + hold cycle it gets about half the drains the floor allows.
+    constexpr uint32_t kHorizon = 1100; // 512 to detect + 512 held + slack for the resume
+    Rig rig;
+    const uint8_t flooder_bp = omgp::ADDR_backplane_min;
+    const uint8_t stuck_bp = static_cast<uint8_t>(omgp::ADDR_backplane_min + 14u);
+    const std::vector<ScriptedEvent> flood = flood_script(false);
+    rig.install(flooder_bp, 0xFFu, flood);
+    rig.install_stuck(stuck_bp);
+    for (uint32_t sf = 0; sf < kHorizon; ++sf) {
+        rig.run_superframes(1u);
+        if (sf % 8u == 7u) {
+            rig.arm(flooder_bp, 0xFFu, flood);
+        }
+    }
+    REQUIRE(rig.recorder().count(LifecycleKind::NodeEventFault) >= 1u);
+    const Delivery faulted = rig.recorder().first(LifecycleKind::NodeEventFault);
+    const uint8_t node = faulted.ev.node_id;
+    constexpr uint64_t kTick = static_cast<uint64_t>(omgp::TRUNK_T_poll_us);
+    const size_t inside = rig.transcript().count_between(
+        omgp::OP_GET_EVENT, node, faulted.at_us, faulted.at_us + kRatifiedHoldUs - 2u * kTick);
+    INFO("GET_EVENTs addressed to the faulted node inside the hold: " << inside);
+    CHECK(inside == 0u);
+    // ...and it is drained again once the hold is over (the fault is not a permanent ban).
+    CHECK(rig.transcript().count_between(omgp::OP_GET_EVENT, node,
+                                         faulted.at_us + kRatifiedHoldUs + 2u * kTick,
+                                         rig.now_us()) >= 1u);
+}
+
 TEST_CASE("CLAUDE.md rule 7: a reserved or user-defined event type is passed through "
           "uninterpreted [events][us4]") {
     // protocol-l3 §3.4 allocates PARAM_CHANGED_LOCALLY (reserved in v1) and the whole
