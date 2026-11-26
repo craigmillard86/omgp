@@ -6920,3 +6920,17 @@ entry, still ruling-pending); `spec.md` SC-002 says so. (2) No test asserts the 
 such: the test file's SC-002 cases remain an oracle for backlogs up to four events, by construction of
 their scripts, and nothing asserts "the fifth event is late" as expected behaviour. (3) The arithmetic
 (four events) is the 2026-11-23 scratch measurement, not a committed case.
+
+## 2026-11-26 — T039 (#710): CORRECTION to the RATIFIED SC-002 entry above — the guaranteed backlog is TWO events, four only in the best phase
+
+Found by PR #952's round-14 red team. The ratified principle stands (SC-002 bounds the first
+delivery; later events only while K = 1 can serve them inside the bound). What is corrected is a
+NUMBER the agent wrote into that entry and into `spec.md` SC-002: "at most four events". Four was the
+2026-11-23 scratch run's best phase (event occurring just before its STATUS poll; detection ~0). SC-002
+is a "never exceeds" criterion, so the figure must hold in the worst phase: detection can cost one
+poll period (4000 us), leaving 4000 us at K = 1's ~1875 us per event, i.e. TWO events (DERIVED from
+SC-002's own decomposition and the measured pacing; not executed). **Amends:** `spec.md` SC-002
+(edited in the same change) now says two in the worst phase, up to four in the best; the SC-002 cases'
+header comment likewise. **Supersedes:** the "(at most four events)" figure of the entry above,
+nothing else. **Not established:** no committed case sweeps the arm phase, so neither figure is
+asserted by a test (owed: a phase-swept case, tracked as a follow-up).

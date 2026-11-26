@@ -43,13 +43,14 @@
 //     l3::decode_get_event_resp refuses an event_type outside §3.4's own set, so such an answer
 //     is IGNORED one layer below core/ (asserted directly, and recorded in
 //     docs/OPEN-QUESTIONS.md 2026-11-23).
-//   * The SC-002 cases below script a backlog of at most FOUR events, and that is a LIMIT on what
-//     they establish, not a calibration: measured at the earlier head the rate budget was
-//     written against, K=1 paces a node at one event per ~1900 us, so the fifth event of any
-//     backlog is past SC-002's 8000 us bound by FR-025 alone. So this file is an oracle for
-//     SC-002 on backlogs up to four events ONLY; beyond it the behaviour is the collision
-//     recorded in docs/OPEN-QUESTIONS.md 2026-11-23 and 2026-11-24 (SC-002's amendment is still
-//     only PROPOSED), awaiting a ruling. No case here asserts the breach as expected behaviour.
+//   * The SC-002 cases below script a backlog of at most THREE events, all armed at ONE detection
+//     phase, and that is a LIMIT on what they establish, not a calibration: K=1 paces a node at one
+//     event per ~1900 us, so inside SC-002's 8000 us bound a backlog of four fits only if the event
+//     occurs right before its backplane's STATUS poll (best phase), and only two events are
+//     guaranteed in the worst phase (detection can cost one poll period, 4000 us; derived, not
+//     executed). No case sweeps the arm phase. Beyond it the behaviour is the collision recorded in
+//     docs/OPEN-QUESTIONS.md 2026-11-23 and the RATIFIED 2026-11-26 SC-002 entry (as corrected the
+//     same day). No case here asserts a breach as expected behaviour.
 //   * FR-026's fault threshold (a run of kEventRunFaultThreshold "more" answers, ruled 2026-11-24)
 //     and the fault's hold are core/core_types.hpp constants, read from there by every case
 //     below and never restated as literals — the engine's own policy where FR-026 says only

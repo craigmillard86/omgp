@@ -483,9 +483,11 @@ confirm the application is told it has become unreachable and later told when it
   backplane's status-poll period plus two superframe periods, in every scripted scenario
   exercised, including scenarios with concurrent parameter-set traffic. Every event of a
   backlog is bounded the same way only while the backlog is one the engine can serve at
-  FR-025's one `GET_EVENT` per node per superframe turn inside that period (at most four
-  events); a longer backlog is delivered at one event per superframe turn and its later
-  events are not bounded by this criterion. (Amended 2026-11-26, ratified by the
+  FR-025's one `GET_EVENT` per node per superframe turn inside that period: in the WORST
+  phase (the event occurs just after its backplane's STATUS poll, so detection takes one poll
+  period) that is two events; up to four when it occurs just before the poll. A longer
+  backlog is delivered at one event per superframe turn and its later events are not bounded
+  by this criterion. (Amended 2026-11-26, ratified by the
   maintainer — `docs/OPEN-QUESTIONS.md` "T039 (#710): PROPOSED ruling on the entry above —
   amend SC-002 to bound the first delivery" and its RATIFIED entry. NOT covered by this
   amendment: a first delivery whose attribution behind one of several reporting
