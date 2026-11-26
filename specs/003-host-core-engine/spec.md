@@ -283,9 +283,10 @@ confirm the application is told it has become unreachable and later told when it
 - What happens when a single node keeps reporting more events pending than the schedule
   can ever fully drain (a flooding or malfunctioning module)? Its own backlog is drained
   no faster than one event per its own superframe turn (FR-025), never faster regardless
-  of how large its self-reported count claims to be; once its delivery rate exceeds
-  budget it is reported faulted (FR-026) and stops being drained, rather than continuing
-  to consume the event-priority share every other node's own events are waiting on.
+  of how large its self-reported count claims to be; once its run of consecutive "more"
+  answers reaches FR-026's threshold it is reported faulted and not drained for FR-026's hold,
+  so it stops consuming the event-priority share every other node's own events are waiting on
+  for that hold (amended 2026-11-25; the delivery-rate wording was retired with the rate budget).
 - What happens when a backplane's own status poll, or the demand traffic bridged
   through it, consistently costs several times an honest transaction's duration (a
   legally-formed but padded response, or a slow module bus)? The superframe's remaining
@@ -380,11 +381,25 @@ confirm the application is told it has become unreachable and later told when it
   much of one superframe's event budget a single node's backlog can consume, regardless
   of how large `remaining_count` claims it is (amended 2026-09-21, `docs/OPEN-QUESTIONS.md`
   "#110 F6"; `remaining_count` is advisory and MUST NOT size a buffer or bound a loop).
-- **FR-026**: The engine MUST track each node's event-delivery rate; a node whose rate
-  exceeds a configured budget MUST be reported to the application as faulted (a distinct
-  lifecycle event, separate from FR-022's health transitions) and MUST NOT have further
-  events drained from it until its rate returns within budget (amended 2026-09-21,
-  `docs/OPEN-QUESTIONS.md` "#110 F6").
+- **FR-026**: The engine MUST track, per node, its run of consecutive GET_EVENT answers each
+  reporting more events pending (`remaining_count` above zero); a node whose run reaches N
+  MUST be reported to the application as faulted (a distinct lifecycle event, separate from
+  FR-022's health transitions) and MUST NOT have further events drained from it until the
+  fault's hold has run out, at which point the fault is cleared and that is reported too.
+  N is one more than the largest backlog the wire can announce — `remaining_count` is a
+  `u8`, so N = 256 — which makes a run of N something a finite queue alone cannot produce.
+  The run ends on an answer with `remaining_count` of zero, on an empty-queue answer
+  (`EVT_NONE`), and when the node is (re)discovered. The hold is 512 superframes, twice N —
+  the time the node took to earn the fault under FR-020's floor (one drain per two superframes),
+  so a node that keeps flooding spends about as long held as it spent being detected.
+  (Hold amended 2026-11-25, ratified by the maintainer: `docs/OPEN-QUESTIONS.md` "T039 (#710):
+  RATIFIED — FR-026's hold must scale with its run trigger"; the eight superframes it replaces
+  removed 1.5 % of a flooder's share. Amended 2026-09-21, `docs/OPEN-QUESTIONS.md` "#110 F6"; the rate-budget
+  wording this replaces was retired 2026-11-24, ratified by the maintainer —
+  `docs/OPEN-QUESTIONS.md` "T039 (#710): PROPOSED ruling — FR-026's flood fault must not
+  depend on the drain rate the floor allows" and its RATIFIED entry. A rate cannot serve as the
+  signal: with FR-025's one drain per node per superframe and FR-020's floor it measures the
+  scheduler, not the node. SC-002 is amended separately, 2026-11-26.)
 - **FR-016**: The engine MUST deliver every drained event to the application through the
   callback interface, in the order the module reported them.
 - **FR-017**: The engine MUST report node lifecycle transitions — discovered/live,
@@ -411,7 +426,20 @@ confirm the application is told it has become unreachable and later told when it
   holds even while a parameter-set or descriptor-chunk burst is competing for the same
   budget (clarified 2026-09-20; no priority order is stated in the authoritative
   sources' description of "demand slots" as one undifferentiated category — see
-  `docs/OPEN-QUESTIONS.md`).
+  `docs/OPEN-QUESTIONS.md`). **Floor (amended 2026-11-24, ratified by the maintainer;
+  `docs/OPEN-QUESTIONS.md` "T039 (#710): PROPOSED ruling — FR-020's event priority gets a
+  floor", and its RATIFIED entry):** event priority is not strict. Whenever non-event
+  demand work (an IDENTIFY, a descriptor-chunk read, a parameter operation) is pending,
+  the superframe after one whose demand slot went to an event drain MUST serve that
+  non-event work first, so non-event work gets at least every second superframe's first
+  demand slot whatever the event ring holds; events keep this priority in the superframes
+  between. An event item the floor passes over MUST keep its place (it is not dropped or
+  reordered), and when no non-event work can be issued the slot goes to the event ring.
+  (Strict priority let a steady source of events — an endless honest backlog from two
+  modules, or unjustified attribution probes from several backplanes — take every demand
+  slot for ever and stop all discovery.) The latency bound above therefore holds for a
+  burst of finite length, not an unbounded one; see SC-002's amendment (2026-11-26,
+  ratified).
 
 ### Key Entities
 
@@ -451,9 +479,20 @@ confirm the application is told it has become unreachable and later told when it
   assigned a node ID, and the recorded sequence of operations to get there is identical
   across repeated runs of the same scripted scenario.
 - **SC-002**: The simulated time from a module event occurring to the application's
-  callback receiving it never exceeds that module's backplane's status-poll period plus
-  two superframe periods, in every scripted scenario exercised, including scenarios with
-  concurrent parameter-set traffic.
+  callback receiving the FIRST event of that node's backlog never exceeds that module's
+  backplane's status-poll period plus two superframe periods, in every scripted scenario
+  exercised, including scenarios with concurrent parameter-set traffic. Every event of a
+  backlog is bounded the same way only while the backlog is one the engine can serve at
+  FR-025's one `GET_EVENT` per node per superframe turn inside that period: in the WORST
+  phase (the event occurs just after its backplane's STATUS poll, so detection takes one poll
+  period) that is two events; up to four when it occurs just before the poll. A longer
+  backlog is delivered at one event per superframe turn and its later events are not bounded
+  by this criterion. (Amended 2026-11-26, ratified by the
+  maintainer — `docs/OPEN-QUESTIONS.md` "T039 (#710): PROPOSED ruling on the entry above —
+  amend SC-002 to bound the first delivery" and its RATIFIED entry. NOT covered by this
+  amendment: a first delivery whose attribution behind one of several reporting
+  backplanes has to be guessed by a probe is still not bounded by this period — see the
+  2026-11-23 entry and the attribution ruling.)
 - **SC-003**: A burst of 40 parameter-set operations submitted at once completes without
   a single superframe, from submission to completion, skipping its status poll to any
   enrolled backplane.
@@ -464,8 +503,10 @@ confirm the application is told it has become unreachable and later told when it
 - **SC-006**: A single node whose status poll always reports events pending never
   prevents any other node's own pending event from being drained within the SC-002
   bound — its own backlog is drained no faster than one event per its own superframe
-  turn (FR-025), and once its delivery rate exceeds budget it is reported faulted
-  (FR-026) rather than continuing to consume event-priority share.
+  turn (FR-025), and once its run of consecutive "more" answers reaches FR-026's threshold
+  it is reported faulted and not drained for FR-026's hold, so it stops consuming
+  event-priority share for that hold (amended 2026-11-25, `docs/OPEN-QUESTIONS.md` "T039
+  (#710): RATIFIED — FR-026's hold must scale with its run trigger").
 - **SC-007**: A backplane or node whose transactions cost several times an honest
   transaction's duration (the amplification scenario in `docs/OPEN-QUESTIONS.md` "#110
   F2c": a legal but padded `ERROR` response) is demoted and reported within a bounded

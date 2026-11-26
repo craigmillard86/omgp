@@ -119,6 +119,8 @@ omgp_add_catch_test(test_core_discovery tests/unit/test_core_discovery.cpp)
 # set_param()/get_param()'s enqueue side and R-10's request-id pool (spec 003 T026/T027).
 omgp_add_catch_test(test_core_params tests/unit/test_core_params.cpp)
 omgp_add_catch_test(test_core_scheduler tests/unit/test_core_scheduler.cpp)
+# event_pending detection, the K=1 GET_EVENT drain and FR-026's flood defence (spec 003 T038/T039).
+omgp_add_catch_test(test_core_events tests/unit/test_core_events.cpp)
 
 # --- host-only tools ---
 add_executable(crc_helper tools/crc_helper.cpp)

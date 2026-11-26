@@ -127,10 +127,10 @@ CoreEngine::CoreEngine(link::ByteWire& wire, Clock& clock, uint8_t host_addr,
     // named consumer is the task that removes its line:
     //   clock_        — T029's superframe cadence bookkeeping (every time this engine reads
     //                   today arrives as run_superframe()'s own now_us argument, rule 3)
-    //   event_queue_  — T029's demand drain for User Story 4 (R-07); param_queue_ left this
-    //                   list at T027, which fills it from set_param()/get_param()
+    // event_queue_ left this list at T039, which fills it from a status poll's own event_pending
+    // count (FR-015, on_status_block()); param_queue_ left it at T027, which fills it from
+    // set_param()/get_param().
     (void)clock_;
-    (void)event_queue_;
 }
 
 void CoreEngine::run_superframe(uint64_t now_us) {
@@ -186,6 +186,11 @@ void CoreEngine::open_superframe(uint64_t now_us) {
     // trunk §7's one time-only transition (SUSPECT -> OFFLINE). Once per superframe, on the
     // tracker this engine owns; the engine itself never ages anything.
     health_.tick(now_us);
+    // spec FR-026: the one place a faulted node's hold is ENDED (and the fault therefore cleared)
+    // — once per superframe, from the injected time source only. It has to be here rather than on
+    // the drain path: a faulted node is not drained at all, so no drain of its own could ever
+    // notice that its hold had run out.
+    tick_event_fault_holds(now_us);
 }
 
 bool CoreEngine::issue_next(uint64_t now_us) {
@@ -266,12 +271,32 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
     // traffic with no ring of its own (R-07 names three kinds, not four) and sits after the
     // descriptor chunks deliberately: finishing a descriptor read already in flight releases a
     // node to Discovered, while starting another node's identity does not.
-    const Resume ev_outcome = drain_events(now_us);
-    if (ev_outcome == Resume::Issued) {
-        return true;
-    }
-    if (ev_outcome == Resume::Refused) {
-        return false; // FR-005: the budget is spent; every unsent item carries over
+    //
+    // FR-020 FLOOR (docs/OPEN-QUESTIONS.md 2026-11-24, ratified by the maintainer; spec.md still
+    // owes a human-authored amendment). Read as a strict priority, "events first" lets any steady
+    // source of events take every demand slot for ever: probes a backplane's unjustified count
+    // provokes, or an endless HONEST backlog (remaining_count > 0 on every answer). Both were
+    // measured on PR #952 — 5 of 32 and 0 of 4 modules discovered in 400 superframes. So when
+    // non-event work is pending, the superframe after one whose slot went to an event serves that
+    // work FIRST, which is at least every second superframe's demand phase; events keep FR-020's
+    // priority in the superframes between. Work-conserving: if the non-event passes issue nothing
+    // the event ring still gets the slot below, so the floor never idles the phase. A skipped event
+    // item keeps its place at the head (nothing is popped), so FR-005's carry-over by identity and
+    // FR-025's turn order are untouched.
+    //
+    // Demonstrated by `FR-020 floor: an endless honest event backlog does not starve discovery`
+    // (0 of 4 at three and four flooding backplanes before the floor) and `SC-006/US1 AS3:
+    // SEVERAL backplanes' ...` (5 of 32 before). NOT demonstrated: a bound in superframes on any
+    // one module's discovery under an arbitrary mix — the cases measure a horizon.
+    const bool floor = event_floor_defers();
+    if (!floor) {
+        const Resume ev_outcome = drain_events(now_us);
+        if (ev_outcome == Resume::Issued) {
+            return true;
+        }
+        if (ev_outcome == Resume::Refused) {
+            return false; // FR-005: the budget is spent; every unsent item carries over
+        }
     }
     // Iterative, not recursive: the queue holds up to LIMIT_max_nodes items and a stale-item
     // chain must not become that many stack frames on a target with a fixed task stack
@@ -397,7 +422,37 @@ bool CoreEngine::issue_demand(uint64_t now_us) {
             return false;
         }
     }
+    if (floor) {
+        // The floor deferred the event ring and nothing else could be issued: the slot goes to it.
+        return drain_events(now_us) == Resume::Issued;
+    }
     return false;
+}
+
+bool CoreEngine::non_event_demand_pending() const {
+    if (desc_held_ || !desc_queue_.empty() || !param_queue_.empty()) {
+        return true;
+    }
+    for (uint8_t id = ADDR_module_min; id <= ADDR_module_max; ++id) {
+        const NodeRecord& node = nodes_[node_index(id)];
+        if (!node.in_use) {
+            continue;
+        }
+        // Owed IDENTIFY (Undiscovered, or Identifying: an unanswered module is retried, never
+        // abandoned — AS3) or a descriptor read. A module that never answers keeps this true for
+        // ever, which is the stated cost: events then get every second superframe's demand phase.
+        if (node.discovery == DiscoveryState::Undiscovered ||
+            node.discovery == DiscoveryState::Identifying ||
+            node.discovery == DiscoveryState::ReadingDescriptor) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool CoreEngine::event_floor_defers() const {
+    return event_issued_superframe_ != 0u && event_issued_superframe_ + 1u == superframe_ &&
+           non_event_demand_pending();
 }
 
 CoreEngine::Resume CoreEngine::scan_identify(uint64_t now_us) {
@@ -584,6 +639,9 @@ CoreEngine::Resume CoreEngine::drain_events(uint64_t now_us) {
         return Resume::Nothing;
     }
     rotate_past_demoted(event_queue_);
+    // Three reasons an item at the head is passed over rather than issued for, each below: its
+    // node is gone (dropped), its node is FR-026-faulted for flooding (rotated), or its node
+    // has already had its turn this superframe (rotated, FR-025).
     // FR-025's K = 1 per node per superframe TURN, with R-07's correction: the remainder
     // re-queues behind every OTHER node's pending event, not behind this node's own next one.
     // One pass, so a ring holding only nodes that already had their turn ends the phase instead
@@ -616,9 +674,28 @@ CoreEngine::Resume CoreEngine::drain_events(uint64_t now_us) {
             nodes_[idx].discovery != DiscoveryState::Discovered) {
             EventDrainItem dropped{};
             (void)event_queue_.pop(dropped);
+            if (idx != kNoNodeIndex) {
+                // Nothing of this node's is queued any more; a node still in the table that
+                // returns to Discovered is offered again by the next poll that reports a count
+                // (FR-015). A node whose record was cleared by reconcile_slot_map() already has
+                // the flag false — this is for the one still in the table but out of Discovered.
+                // mutant-ok(equivalent, cxx_assign_const): 42 in a bool reads false (assumed).
+                nodes_[idx].event_drain_pending = false;
+            }
             continue; // the slot emptied (FR-010), or was never discovered: drop, never address
         }
         NodeRecord& node = nodes_[idx];
+        if (node.event_faulted) {
+            // spec FR-026: a node faulted for its run of "more" answers MUST NOT have further
+            // events drained from it until the fault's hold has run out. Rotated to the back rather
+            // than dropped, exactly as the K = 1 path below does: the backlog is still owed, and
+            // the item is served again on the turn after the fault clears. One pass, so a ring
+            // holding nothing but faulted nodes ends the phase instead of spinning.
+            EventDrainItem skipped{};
+            (void)event_queue_.pop(skipped);
+            (void)event_queue_.push(skipped);
+            continue;
+        }
         if (node.event_drained_superframe == superframe_) {
             // Had its turn: this is the ONE reordering FR-025 asks for — the item goes behind
             // every OTHER node's event (R-07's correction), not behind this node's own next one.
@@ -635,6 +712,14 @@ CoreEngine::Resume CoreEngine::drain_events(uint64_t now_us) {
                           TxKind::EventDrain, now_us)) {
             EventDrainItem issued{};
             (void)event_queue_.pop(issued); // removed only once it is actually on the wire
+            // Anchors the FR-020 floor in issue_demand(): the NEXT superframe serves pending
+            // non-event work first. Set for every event drain, a continuation of a known backlog
+            // included, because the backlog is exactly what the floor exists to bound.
+            event_issued_superframe_ = superframe_;
+            // event_drain_pending stays TRUE across the transaction: the node has no item in the
+            // ring any more but a GET_EVENT of its own outstanding, and a status poll landing in
+            // between must not queue a second one. complete_request() clears it when the
+            // transaction concludes, before on_event_drain() decides whether another is owed.
             // Disarms admit_demand()'s first-item exception for the rest of this superframe.
             // Without it every item looks like the first one, the whole ring is admitted into
             // one superframe, and FR-005's budget bounds nothing at all.
@@ -1116,6 +1201,14 @@ void CoreEngine::complete_request(const link::MasterEvent& ev, uint64_t now_us) 
     if (node_idx != kNoNodeIndex) {
         nodes_[node_idx].last_measured_duration_us = duration_us;
     }
+    if (kind == TxKind::EventDrain && node_idx != kNoNodeIndex) {
+        // This node's outstanding GET_EVENT is over, whatever it answered: whether another is
+        // owed is decided by on_event_drain() below (a nonzero remaining_count) or by the next
+        // status poll of its backplane that still reports a count (FR-015). Cleared BEFORE both
+        // branches, so a failed drain leaves no node permanently marked as having one in flight.
+        // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
+        nodes_[node_idx].event_drain_pending = false;
+    }
     if (!answered) {
         // trunk §7 already retried this inside link::Master. Nothing is re-queued here: a node
         // still Identifying is picked up again by the next superframe's own scan, and an
@@ -1162,10 +1255,7 @@ void CoreEngine::complete_request(const link::MasterEvent& ev, uint64_t now_us) 
     account_overrun(duration_us, kind);
     switch (kind) {
     case TxKind::StatusPoll:
-        // on_status_block() is empty today (it only discards now_us), so removing the call changes
-        // nothing observable. It becomes killable the moment User Story 4 gives it a body.
-        // mutant-ok(equivalent, cxx_remove_void_call): on_status_block() has an empty body today.
-        on_status_block(now_us);
+        on_status_block(ev, now_us);
         break;
     case TxKind::SlotMap:
         on_slot_map(ev, now_us);
@@ -1177,13 +1267,15 @@ void CoreEngine::complete_request(const link::MasterEvent& ev, uint64_t now_us) 
         on_desc_chunk(ev, now_us);
         break;
     case TxKind::EventDrain:
+        on_event_drain(ev, now_us);
+        break;
     case TxKind::ParamSet:
     case TxKind::ParamGet:
-        // T029 ISSUES these; T030 and T039 read their answers. Until then the answer's whole
+        // T029 ISSUES these; T030 reads their answers. Until then a parameter answer's whole
         // contribution is its timing, already taken above for the budget and the demotion
-        // accounting (FR-027) — a GetParamResp is not decoded, no FR-023 report is made, and no
-        // event detail is delivered. Named here rather than left to a default, so that adding a
-        // kind cannot silently fall through this switch (-Werror=switch is what enforces it).
+        // accounting (FR-027) — a GetParamResp is not decoded and no FR-023 report is made.
+        // Named here rather than left to a default, so that adding a kind cannot silently fall
+        // through this switch (-Werror=switch is what enforces it).
         break;
     case TxKind::Probe:
     case TxKind::None:
@@ -1193,12 +1285,284 @@ void CoreEngine::complete_request(const link::MasterEvent& ev, uint64_t now_us) 
     }
 }
 
-void CoreEngine::on_status_block(uint64_t now_us) {
-    // trunk §6: the status poll "also collects event_pending counts" (spec FR-002). Draining
-    // those events is User Story 4's (T038 and the event ring), not this story's — and a
-    // backplane's own status block is decoded there, where the fields are used. Nothing here
-    // depends on its contents; the transaction's success is the whole of what discovery needs.
+void CoreEngine::on_status_block(const link::MasterEvent& ev, uint64_t now_us) {
     (void)now_us;
+    // trunk §6 / spec FR-002: the status poll "also collects event_pending counts", and FR-015
+    // makes a nonzero count the trigger for draining that node's queue. protocol-l3 §3.3's block
+    // is seven fixed bytes; only `event_pending` is read here — the other six are User Story 3's
+    // and User Story 5's business, and reading a field nothing acts on would be a claim about
+    // behaviour that does not exist.
+    l3::Header hdr{};
+    l3::Bytes payload{};
+    if (l3::decode_message(ev.response.payload, ev.response.len, hdr, payload) != l3::Status::Ok) {
+        return;
+    }
+    // protocol-l3 §3.1: an ERROR answer is opcode OP_ERROR with flags.error set, not a status
+    // block. A target that refuses the poll reports no events this superframe; the next poll of
+    // the same address re-reads the same LEVEL (FR-015 is "the most recent poll's count"), so
+    // nothing is lost by declining to interpret this one.
+    if (hdr.opcode != OP_GET_STATUS) {
+        return;
+    }
+    l3::StatusBlock blk{};
+    if (l3::decode_status_block(payload.data, payload.len, blk) != l3::Status::Ok) {
+        return;
+    }
+    if (blk.event_pending == 0) {
+        return; // nothing queued behind this address: FR-015's trigger is a NONZERO count
+    }
+    // WHOSE events a status poll's count is, and why the fan-out below (CLAUDE.md rule 11 — this
+    // is a STATED reading of an under-specified artefact, recorded with its alternatives in
+    // docs/OPEN-QUESTIONS.md 2026-11-23, not a property proved here).
+    //
+    // FR-002 says the engine must collect that poll's event_pending count "for every node it
+    // reports on", but protocol-l3 §3.3's block carries exactly ONE count and §3.1 addresses
+    // GET_STATUS to a node — and trunk §6's superframe gives a status poll to every enrolled
+    // BACKPLANE, never to a module (FR-002, issue_next() above). v1 has no per-slot event
+    // attribution anywhere on the wire: no per-slot mask in the status block, and IRQ# sampling
+    // and backplane event caching are hardware/f4-simrig matters (docs/omgp-spec-v0.7.md A12).
+    // So a backplane's count is read as a SUMMARY over the modules it bridges for — the reading
+    // docs/OPEN-QUESTIONS.md's 2026-09-03 entry already assumes ("a backplane that answers event
+    // reads from its own prefetch cache, which the event_pending status summary already gestures
+    // at") — and the host resolves WHICH module by asking them: ONE EventDrainItem per poll that
+    // reports a count, for the next Discovered module behind that backplane in rotation
+    // (BackplaneRecord::event_sweep_next_id), each answered EVT_NONE by a module with nothing
+    // queued, which terminates its own drain (protocol-l3 §3.4, on_event_drain() below).
+    //
+    // ONE PER POLL, not one per sibling, and this is the measured half rather than a stated
+    // reading: an EventDrainItem for every Discovered module on every poll that reports a count
+    // costs k GET_EVENTs per poll period for ever for a count the backplane cannot justify, and
+    // since events are drained ahead of the other demand kinds (FR-020) those sweeps hold the
+    // backplane's own slots out of discovery — 5 of 16 modules in 400 superframes against 16 of 16
+    // for a backplane reporting none, which is what US1 AS3 and SC-006 forbid. Demonstrated by
+    // `SC-006/US1 AS3: a backplane's standing event_pending does not delay the discovery of the
+    // modules behind it`, which fails on the fan-out-to-every-sibling form. The rotation costs a
+    // module behind a reporting backplane up to k polls to be ASKED, which is latency the missing
+    // attribution already owed and which no case can observe at k = 1.
+    //
+    // ONE PER POLL IS NOT THE WHOLE BOUND, and this too is measured. US1 AS3's subject is "any
+    // other slot or BACKPLANE": a bound per (backplane, poll) is still B sweeps per poll period at
+    // B reporting backplanes, which took every demand slot there was — 5 of 32 modules discovered
+    // in 400 superframes at B >= 2, against 32 of 32 at B = 0 (demonstrated by `SC-006/US1 AS3:
+    // SEVERAL backplanes' ...`, red before the floor). The host-wide bound is issue_demand()'s
+    // FR-020 floor, which also covers an endless honest backlog that no sweep-side bound could.
+    //
+    // Bounded, and idempotent (CLAUDE.md rule 2): at most one item per node (event_drain_pending),
+    // one GET_EVENT per node per superframe turn (FR-025), one sweep step per status poll here,
+    // and GET_EVENT is the protocol's own "drain one, repeat until empty" operation. While
+    // non-event work is pending, events get at least every second superframe's demand phase and
+    // that work gets the rest (issue_demand()); with none pending the floor is not engaged. That
+    // is demonstrated by the FR-020 floor cases for the numbers they measure and ASSUMED beyond
+    // them. The cost of the missing attribution is paid in demand slots, never in a status poll's
+    // or the probe's place (FR-028).
+    const size_t polled = node_index(tx_node_);
+    if (polled != kNoNodeIndex) {
+        // The poll named a MODULE id. Not a path trunk §6's plan creates today; written as the
+        // first case because it is the unambiguous one — a module's own count is its own — so a
+        // later story that polls a module directly needs no change here.
+        if (nodes_[polled].in_use && nodes_[polled].discovery == DiscoveryState::Discovered) {
+            queue_event_drain(nodes_[polled], tx_node_);
+        }
+        return;
+    }
+    const size_t bp = backplane_index(tx_addr_);
+    if (bp == kNoNodeIndex) {
+        return; // neither a module nor a backplane address: no record to sweep
+    }
+    sweep_one_module_for_events(backplanes_[bp], tx_addr_);
+}
+
+void CoreEngine::sweep_one_module_for_events(BackplaneRecord& backplane, uint8_t backplane_addr) {
+    // One step of the rotation described in on_status_block(): the first Discovered module behind
+    // `backplane_addr`, starting from where the last sweep left off and wrapping once. Bounded by
+    // the module-id span, allocation-free, and it queues at most one item (CLAUDE.md rule 5).
+    constexpr unsigned kSpan =
+        static_cast<unsigned>(ADDR_module_max) - static_cast<unsigned>(ADDR_module_min) + 1u;
+    unsigned start = static_cast<unsigned>(backplane.event_sweep_next_id);
+    // mutant-ok(equivalent, cxx_lt_to_le): start == ADDR_module_min resets to the same value.
+    if (start < ADDR_module_min || start > ADDR_module_max) {
+        start = ADDR_module_min; // a cursor outside the span (never written here) restarts it
+    }
+    const unsigned offset = start - static_cast<unsigned>(ADDR_module_min);
+    // mutant-ok(equivalent, cxx_lt_to_le): the extra pass repeats n == 0, already passed over.
+    for (unsigned n = 0; n < kSpan; ++n) {
+        const uint8_t id = static_cast<uint8_t>(ADDR_module_min + ((offset + n) % kSpan));
+        NodeRecord& node = nodes_[node_index(id)];
+        // Discovered only: a node still being identified or read has no descriptor yet, and
+        // drain_events() drops an item for one rather than addressing it. A node that already has
+        // an item queued or a GET_EVENT outstanding is passed over rather than counted as this
+        // poll's step, so one busy module does not consume every sweep its siblings are owed.
+        if (!node.in_use || node.backplane_addr != backplane_addr ||
+            node.discovery != DiscoveryState::Discovered || node.event_drain_pending) {
+            continue;
+        }
+        queue_event_drain(node, id); // a probe: the count names the backplane, not this slot
+        // Advanced whether or not the ring accepted the push: a refusal is a latency cost the
+        // next poll pays for this module (queue_event_drain()), and holding the cursor still would
+        // spend every poll of a full ring on the same module.
+        backplane.event_sweep_next_id =
+            static_cast<uint8_t>(ADDR_module_min + ((offset + n + 1u) % kSpan));
+        return;
+    }
+}
+
+void CoreEngine::queue_event_drain(NodeRecord& node, uint8_t node_id) {
+    if (node.event_drain_pending) {
+        return; // already queued, or a GET_EVENT for it is outstanding
+    }
+    EventDrainItem item{};
+    item.node_id = node_id;
+    if (event_queue_.push(item)) {
+        node.event_drain_pending = true;
+        return;
+    }
+    // R-07's ring refused (drop-newest, core/core_types.hpp): nothing is queued and the flag
+    // stays false, so the next poll that still reports a count offers this node again. A refusal
+    // costs latency, never the event itself — the events stay on the module, which is where
+    // GET_EVENT's own "repeat until empty" contract leaves them (protocol-l3 §3.1).
+}
+
+void CoreEngine::on_event_drain(const link::MasterEvent& ev, uint64_t now_us) {
+    const size_t idx = node_index(tx_node_);
+    if (idx == kNoNodeIndex || !nodes_[idx].in_use) {
+        return; // the slot emptied (FR-010) while this GET_EVENT was in flight
+    }
+    NodeRecord& node = nodes_[idx];
+    l3::Header hdr{};
+    l3::Bytes payload{};
+    if (l3::decode_message(ev.response.payload, ev.response.len, hdr, payload) != l3::Status::Ok) {
+        return; // CLAUDE.md rule 7: an answer this host cannot read is ignored, never fatal
+    }
+    if (hdr.opcode != OP_GET_EVENT) {
+        // An ERROR answer — trunk §8 MANDATES ERR_BUSY from a bridge whose module bus is not
+        // ready, so this is the common first answer, not a corner. Nothing is delivered and
+        // nothing is re-queued HERE: the node is offered again by the next poll of its backplane
+        // that still reports a count (FR-015's level), which is what keeps a permanently-refusing
+        // node from holding the event ring — drained first (FR-020) — against every other node's
+        // own events, the pathology NodeRecord::desc_stalled_superframe records for READ_DESC.
+        return;
+    }
+    l3::GetEventResp resp{};
+    if (l3::decode_get_event_resp(payload.data, payload.len, resp) != l3::Status::Ok) {
+        // Rule 7 again, and the one place this host's forward compatibility is NARROWER than the
+        // rule's "unknown event types are ignored" would allow: l3::decode_get_event_resp refuses
+        // an event_type outside protocol-l3 §3.4's own set (l3/l3_payload.cpp's valid_event),
+        // so an unallocated 0x05..0xEF code is ignored HERE rather than delivered verbatim.
+        // Ignoring it is exactly rule 7; delivering it would need an l3/ change, which is this
+        // task's own Out of scope (recorded in docs/OPEN-QUESTIONS.md 2026-11-23). Reserved and
+        // user-defined codes the codec DOES accept are passed through below untouched.
+        return;
+    }
+    if (resp.event_type == EVT_NONE) {
+        // protocol-l3 §3.4: the queue is empty. Draining terminates — no ModuleEvent, no re-queue,
+        // and the node's run of "more" answers ends (FR-026) — which is what makes the fan-out
+        // above safe for a module that never had an event at all.
+        node.event_more_run = 0;
+        return;
+    }
+    // spec FR-016: delivered verbatim, in the order the module reported them (one event per
+    // GET_EVENT, in the module's own queue order, and K = 1 means each of this node's later
+    // events is a later turn's — so the order the application sees IS the module's).
+    LifecycleEvent lifecycle{};
+    lifecycle.kind = LifecycleKind::ModuleEvent;
+    lifecycle.node_id = tx_node_;
+    lifecycle.module_event_type = resp.event_type;
+    // `remaining_count` is carried to the application as the module sent it and is read below
+    // only against zero: it sizes nothing and bounds no loop (#110 F6, spec FR-025).
+    lifecycle.module_event_remaining = resp.remaining_count;
+    // The detail bytes go into this engine's own arena (core_engine.hpp's event_detail_), never
+    // the decoder's view of link::Master's buffer: that buffer is reused by the next poll()
+    // (link/master.hpp:16-23) and this delivery is drained arbitrarily later (FR-021).
+    const bool copyable = resp.detail.data != nullptr && resp.detail.len > 0 &&
+                          resp.detail.len <= kMaxEventDetailBytes;
+    if (copyable && !pending_lifecycle_.full()) {
+        uint8_t* slot = event_detail_[event_detail_next_];
+        for (uint8_t i = 0; i < resp.detail.len; ++i) {
+            slot[i] = resp.detail.data[i];
+        }
+        lifecycle.module_event_detail = slot;
+        lifecycle.module_event_detail_len = resp.detail.len;
+    }
+    if (enqueue_lifecycle(lifecycle) && lifecycle.module_event_detail != nullptr) {
+        // Consumed only by an enqueue that succeeded, which is half of the arena's
+        // by-construction argument (core_engine.hpp).
+        event_detail_next_ = (event_detail_next_ + 1u) % LIMIT_max_nodes;
+    }
+    // spec FR-026, charged on every event DRAINED rather than on every one the §8a ring accepted:
+    // a full pending ring is the application being slow (FR-021), and a flood defence that a slow
+    // application disarms is no defence. The refused delivery is counted in dropped_deliveries_.
+    note_event_drained(node, tx_node_, now_us, resp.remaining_count > 0);
+    if (resp.remaining_count > 0) {
+        // spec FR-015/FR-025: the remainder is this node's NEXT turn, never a second GET_EVENT
+        // inside this superframe — event_drained_superframe (set at issue time) is what makes
+        // that true, so the re-queue here cannot shorten the turn it waits for.
+        queue_event_drain(node, tx_node_);
+    }
+}
+
+void CoreEngine::note_event_drained(NodeRecord& node, uint8_t node_id, uint64_t now_us, bool more) {
+    if (!more) {
+        node.event_more_run = 0; // the module said it has no more: whatever came before was finite
+        return;
+    }
+    // Saturating at the threshold: the run is only ever compared against it, and a faulted node is
+    // not drained, so the count cannot meaningfully pass it — the clamp keeps a defensive caller
+    // (the seam) from wrapping a uint16_t.
+    if (node.event_more_run < kEventRunFaultThreshold) {
+        ++node.event_more_run;
+    }
+    if (node.event_faulted || node.event_more_run < kEventRunFaultThreshold) {
+        return;
+    }
+    // spec FR-026: the N-th consecutive "more" answer. The node stops being drained
+    // (drain_events() skips it) and is reported ONCE for this episode; the hold runs from here
+    // and ends in release_event_fault_after_hold().
+    node.event_faulted = true;
+    node.event_more_run = 0;
+    node.event_fault_start_us = now_us;
+    LifecycleEvent faulted{};
+    faulted.kind = LifecycleKind::NodeEventFault;
+    faulted.node_id = node_id;
+    // The flag is set whether or not the report is accepted: §8a's ring is drop-newest and a
+    // refused report is counted in dropped_deliveries_, but the DEFENCE must not depend on the
+    // application having room for the news (CLAUDE.md rule 11 — proved by construction here:
+    // the assignment above precedes this call and nothing below undoes it).
+    (void)enqueue_lifecycle(faulted);
+}
+
+void CoreEngine::release_event_fault_after_hold(NodeRecord& node, uint8_t node_id,
+                                                uint64_t now_us) {
+    if (!node.event_faulted) {
+        return;
+    }
+    // Monotonic by the Clock contract, so this subtraction cannot wrap; written defensively all
+    // the same, as complete_request() does — a caller that rewound now_us would otherwise open a
+    // hold of ~2^64 us that never ends.
+    const uint64_t start = node.event_fault_start_us;
+    // mutant-ok(equivalent, cxx_ge_to_gt): at now_us == start both forms give elapsed 0.
+    const uint64_t elapsed = now_us >= start ? now_us - start : 0u;
+    if (elapsed < kEventFaultHoldUs) {
+        return;
+    }
+    // spec FR-026: "MUST NOT have further events drained from it until ..." — the hold has run its
+    // course, so the fault is cleared and draining resumes on this node's next turn. The run starts
+    // again from zero: a node that is still flooding earns a fresh fault after another N answers.
+    // mutant-ok(equivalent, cxx_assign_const): 42 stored in a bool reads false (assumed).
+    node.event_faulted = false;
+    node.event_more_run = 0;
+    LifecycleEvent cleared{};
+    cleared.kind = LifecycleKind::NodeEventFaultCleared;
+    cleared.node_id = node_id;
+    (void)enqueue_lifecycle(cleared);
+}
+
+void CoreEngine::tick_event_fault_holds(uint64_t now_us) {
+    for (uint8_t id = ADDR_module_min; id <= ADDR_module_max; ++id) {
+        NodeRecord& node = nodes_[node_index(id)];
+        if (node.in_use) {
+            release_event_fault_after_hold(node, id, now_us);
+        }
+    }
 }
 
 void CoreEngine::on_slot_map(const link::MasterEvent& ev, uint64_t now_us) {
@@ -1525,6 +1889,8 @@ void CoreEngine::mark_discovered(NodeRecord& node, uint8_t node_id,
     node.model_fw_rev = entry.model_fw_rev;
     ++const_cast<DescriptorCacheEntry&>(entry).refcount;
     node.discovery = DiscoveryState::Discovered;
+    node.event_more_run =
+        0; // FR-026: a (re)discovered node starts its run of "more" answers afresh
     // data-model.md §7 / spec FR-017: presence is reported on reaching Discovered ("fully
     // identified and described"), never on the slot merely being occupied — and this and
     // reconcile_slot_map()'s NodeRemoved are the only two emission points for it.

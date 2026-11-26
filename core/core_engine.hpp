@@ -313,10 +313,50 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
                        uint8_t len, TxKind kind, uint64_t now_us);
     // Applies one terminal MasterEvent to whatever begin_request() last sent.
     void complete_request(const link::MasterEvent& ev, uint64_t now_us);
-    void on_status_block(uint64_t now_us);
+    void on_status_block(const link::MasterEvent& ev, uint64_t now_us);
     void on_slot_map(const link::MasterEvent& ev, uint64_t now_us);
     void on_identify(const link::MasterEvent& ev, uint64_t now_us);
     void on_desc_chunk(const link::MasterEvent& ev, uint64_t now_us);
+    // One answered GET_EVENT (spec FR-015/FR-016/FR-025/FR-026, protocol-l3 §3.4): decodes the
+    // GetEventResp, delivers it as LifecycleKind::ModuleEvent with its detail copied into this
+    // engine's own arena, charges the node's event-rate window, and re-queues the node while it
+    // still reports events pending. EVT_NONE, an ERROR answer and an undecodable one each
+    // deliver nothing and re-queue nothing (CLAUDE.md rule 7).
+    void on_event_drain(const link::MasterEvent& ev, uint64_t now_us);
+
+    // --- event detection and the event flood fault (spec FR-015/FR-026) ---------------------
+
+    // spec FR-015, with the attribution reading on_status_block() states: ONE step of a
+    // backplane's event-attribution rotation — queues an EventDrainItem for the next Discovered
+    // module behind `backplane_addr` that has none outstanding, and advances
+    // BackplaneRecord::event_sweep_next_id past it. One step per poll that reports a count, which
+    // is what keeps a count the backplane cannot justify from holding its own slots' discovery;
+    // the host-wide bound that keeps B such backplanes from holding EVERY backplane's slots out
+    // of discovery is issue_demand()'s FR-020 floor, not anything per backplane (US1 AS3 / SC-006).
+    void sweep_one_module_for_events(BackplaneRecord& backplane, uint8_t backplane_addr);
+    // spec FR-015: queues one EventDrainItem for `node_id` unless one is already queued or a
+    // GET_EVENT for it is outstanding (NodeRecord::event_drain_pending). Idempotent, so a level
+    // re-observed by every status poll cannot fill the ring.
+    void queue_event_drain(NodeRecord& node, uint8_t node_id);
+    // FR-020 floor (docs/OPEN-QUESTIONS.md 2026-11-24, ratified): whether this superframe's demand
+    // phase must serve NON-event work first. True when the previous superframe's demand slot went
+    // to an event drain AND non-event demand work is pending; see issue_demand().
+    bool event_floor_defers() const;
+    // Whether any demand work other than an event drain is waiting: a descriptor chunk, a
+    // parameter operation, or a node still owed IDENTIFY or a descriptor read.
+    bool non_event_demand_pending() const;
+    // spec FR-026: records one drained event's answer against this node's run of consecutive
+    // "more" answers (`more` = remaining_count > 0) and raises LifecycleKind::NodeEventFault on the
+    // answer that makes the run kEventRunFaultThreshold long. An answer that is not "more" resets
+    // it.
+    void note_event_drained(NodeRecord& node, uint8_t node_id, uint64_t now_us, bool more);
+    // spec FR-026: ends a faulted node's hold once kEventFaultHoldUs has elapsed since the fault,
+    // reporting LifecycleKind::NodeEventFaultCleared. A node that is not faulted is untouched.
+    void release_event_fault_after_hold(NodeRecord& node, uint8_t node_id, uint64_t now_us);
+    // Visits every in-use node once per superframe (open_superframe()). The only place a faulted
+    // node's recovery can be noticed: while faulted it is drained not at all, so no drain of its
+    // own could ever end its hold.
+    void tick_event_fault_holds(uint64_t now_us);
 
     // --- the descriptor cache (spec FR-008, R-12) -------------------------------------------
 
@@ -413,6 +453,24 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     Ring<LifecycleEvent, LIMIT_max_nodes> pending_lifecycle_;
     Ring<ParamResultDelivery, LIMIT_max_nodes> pending_param_results_;
     uint32_t dropped_deliveries_ = 0;
+
+    // The engine-owned detail arena LifecycleEvent::module_event_detail points into
+    // (core/core_types.hpp's LIFETIME block, docs/OPEN-QUESTIONS.md 2026-09-27's recommendation,
+    // implemented by T039). l3::GetEventResp::detail is a view into link::Master's receive buffer,
+    // valid only until the next poll() (link/master.hpp:16-23), while a queued ModuleEvent is
+    // delivered arbitrarily later by drain_callbacks() (FR-021) — so the bytes are COPIED here on
+    // enqueue, and only the copy is ever handed to the application.
+    //
+    // Sized to pending_lifecycle_'s own capacity and handed out round-robin, which is what makes
+    // "no live pending event's bytes can be overwritten" true BY CONSTRUCTION rather than by a
+    // rate argument: a slot is consumed only by an enqueue that SUCCEEDED, and the bytes are
+    // written only when the ring is not full. For the cursor to return to a slot still held by a
+    // pending event, LIMIT_max_nodes successful ModuleEvent enqueues must have happened since that
+    // event's own, and since the ring is FIFO and that event is still queued, every one of them is
+    // queued too — so the ring holds LIMIT_max_nodes events, is full, and the write does not
+    // happen. The refusal is counted in dropped_deliveries_ like any other (§8a).
+    uint8_t event_detail_[LIMIT_max_nodes][kMaxEventDetailBytes] = {};
+    size_t event_detail_next_ = 0;
     // drain_callbacks() state, both of them flags rather than anything the application sets:
     // which ring the NEXT delivery comes from (carried across calls — a per-call reset would
     // re-starve the second ring whenever the budget is one), and whether a drain is already in
@@ -443,6 +501,13 @@ class CoreEngine final : public link::HealthListener { // R-03: this engine IS t
     // lower id taking every retry the budget admits — for the same reason identify_cursor_
     // exists. Persists across superframes, deliberately.
     uint8_t desc_retry_cursor_ = 0;
+    // The superframe an event drain was last issued in, 0 for never — the same once-per-superframe
+    // marker as event_drained_superframe. It anchors the FR-020 floor: the superframe AFTER one
+    // that spent its demand slot on an event serves pending non-event work first (issue_demand()).
+    // Anchored to the last drain ISSUED rather than to superframe parity so that the first event
+    // after a quiet spell is never delayed — every backplane's GET_STATUS falls on one parity
+    // (issue_next()), so parity alone would have cost every first drain a superframe or none.
+    uint32_t event_issued_superframe_ = 0;
     bool probe_issued_ = false;  // this superframe's one enrolment probe (FR-003)
     bool demand_issued_ = false; // whether the first-item exception has been spent
     // The head of the descriptor-chunk queue, popped but not yet admitted by the budget: held

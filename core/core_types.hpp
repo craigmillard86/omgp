@@ -85,6 +85,46 @@ static_assert(LIMIT_max_descriptor_bytes <= UINT16_MAX,
               "DescriptorCacheEntry::len is uint16_t: LIMIT_max_descriptor_bytes must fit it "
               "(data-model.md §5)");
 
+// --- Event flood fault (spec FR-026, research.md R-07 correction) --------------------------
+// FR-026 says a node over "a configured budget" is faulted, and names neither a window nor a
+// count. Ruled 2026-11-24 (docs/OPEN-QUESTIONS.md "RATIFIED — FR-026's flood fault is a run of 256
+// 'more' answers"): the signal is a RUN, not a rate. A rate is the wrong measure — with FR-025's
+// K = 1 and the FR-020 floor it measures the scheduler, not the node, and a budget at or below the
+// rate the scheduler allows faults an honest node with budget + 1 queued events while one above it
+// can never fire (the 2026-11-23 and 2026-11-24 entries record the collision and the measurement).
+//
+// N: a node is faulted on its N-th consecutive GET_EVENT answer that reports remaining_count > 0.
+// remaining_count and event_pending are u8 on the wire (protocol-l3 §3.1/§3.3), so an honest module
+// can announce at most UINT8_MAX queued events and a run of UINT8_MAX + 1 such answers cannot come
+// from a finite queue alone; it needs events arriving as fast as they are served, which is a flood.
+// Derived from the wire type, not chosen — CLAUDE.md rule 4's reading — and it is a HOST policy
+// value with no wire meaning, so rule 1 does not reach it. If the protocol owner adds a module
+// event-queue-depth limit to protocol/omgp-protocol.yaml, this becomes that limit + 1, generated.
+constexpr uint16_t kEventRunFaultThreshold = static_cast<uint16_t>(UINT8_MAX) + 1u;
+
+// The fault's HOLD: a faulted node is not drained for one full window of SIMULATED time, measured
+// from NodeRecord::event_fault_start_us through the injected Clock only (CLAUDE.md rule 3), and
+// derived from trunk §6's superframe period rather than restated in microseconds (rule 4). At its
+// end the fault is cleared (LifecycleKind::NodeEventFaultCleared) and draining resumes on the
+// node's next turn; a node that is still flooding earns a new fault after another N answers.
+//
+// The length is 2 x N superframes = 512 (docs/OPEN-QUESTIONS.md 2026-11-25, RATIFIED). The "2" is
+// the FR-020 floor's drain spacing (one event drain per two superframes while non-event work is
+// pending), so 2 x N is exactly the time the node took to EARN the fault: a node that keeps
+// flooding spends about as long held as it spent being detected, about 50 % duty. The hold is only
+// meaningful relative to its trigger; at the 8 superframes the retired rate window had it removed 8
+// / 520 = 1.5 % of a flooder's share (red team round 9 [HIGH]).
+constexpr uint32_t kEventFaultHoldSuperframes = 2u * static_cast<uint32_t>(kEventRunFaultThreshold);
+constexpr uint64_t kEventFaultHoldUs =
+    static_cast<uint64_t>(kEventFaultHoldSuperframes) * static_cast<uint64_t>(TRUNK_T_poll_us);
+
+// protocol-l3 §3.1/§3.4: a GET_EVENT response is `u8 event_type, u8 remaining_count, u8[] detail`,
+// so the longest detail an L3 payload can carry is what is left of LIMIT_max_l3_payload after
+// that two-byte head. Derived from the symbol, never restated (rule 4) — the same shape
+// core_engine.cpp's kDescChunkMax takes for READ_DESC. It sizes the engine-owned detail arena
+// that LifecycleEvent::module_event_detail points into (see the LIFETIME block below).
+constexpr uint8_t kMaxEventDetailBytes = static_cast<uint8_t>(LIMIT_max_l3_payload - 2);
+
 // --- §Types (contracts/core-cpp.md) --------------------------------------------------------
 
 // Result of the CoreEngine operations that can be refused at admission time. Errors by return
@@ -188,9 +228,23 @@ struct NodeRecord {
     // and for the same reason — "per superframe turn" is a property of the plan's number, not
     // of a count or a clock reading (CLAUDE.md rule 3). Added by T029.
     uint32_t event_drained_superframe = 0;
-    uint8_t events_drained_this_window = 0; // count within event_rate_window_start_us
-    uint64_t event_rate_window_start_us = 0;
-    bool event_faulted = false; // true once the rate budget is exceeded; stops draining
+    // FR-026: consecutive GET_EVENT answers from this node that reported remaining_count > 0
+    // (reset by an answer that did not, by EVT_NONE, and on (re)entering Discovered). uint16_t
+    // because kEventRunFaultThreshold is UINT8_MAX + 1.
+    uint16_t event_more_run = 0;
+    uint64_t event_fault_start_us = 0; // when event_faulted was set; the hold is measured from here
+    bool event_faulted = false; // true from the N-th consecutive "more" answer until the hold ends
+    // Whether this node already has an EventDrainItem queued, or a GET_EVENT outstanding for it.
+    // NOT a data-model.md §3 field: added by T039 because FR-015's own trigger is a LEVEL — "any
+    // node whose most recent status poll reported a nonzero event_pending count" — and a level
+    // re-observed by every poll of that node's backplane would push one item per poll into §6's
+    // ring until it refused, which is drop-NEWEST and would then refuse the re-enqueue of a node
+    // that really does have a backlog. The alternative, scanning the ring for an existing item on
+    // every enqueue decision, is LIMIT_max_nodes comparisons per candidate node per poll; this is
+    // one bool. Set when an item is queued, cleared when that item leaves the ring (issued,
+    // dropped) and when the GET_EVENT it became concludes — so the only thing it can over-report
+    // is a drain that is genuinely still in flight.
+    bool event_drain_pending = false;
     // Transaction cost / demotion (spec FR-027/FR-028, research.md R-11 correction):
     uint64_t last_measured_duration_us = 0; // 0 = never measured; seeded conservatively on use
     uint8_t consecutive_overrun_superframes = 0;
@@ -246,6 +300,18 @@ struct BackplaneRecord {
     // slot_count. NOT a data-model.md §4 field — added with LifecycleKind::NodeIdPoolExhausted,
     // which cannot be reported at a bounded rate without it (docs/OPEN-QUESTIONS.md 2026-09-28).
     uint8_t exhaustion_reported[(LIMIT_bp_slot_map_max_slots + 7) / 8] = {};
+    // Where this backplane's next event-attribution sweep step resumes: the module id to start
+    // looking from, never a slot index. v1 carries no per-slot event attribution on the wire, so
+    // a backplane's nonzero `event_pending` is resolved by asking the modules behind it
+    // (docs/OPEN-QUESTIONS.md 2026-11-23) — and this field is what makes that ONE module per poll
+    // that reports a count, in rotation, instead of every sibling at once. NOT a data-model.md §4
+    // field, added for a measured reason: events are drained ahead of IDENTIFY and READ_DESC
+    // (FR-020), so a sweep of every sibling per poll lets one backplane's standing count hold its
+    // own slots' discovery indefinitely — 5 of 16 modules discovered in 400 superframes where a
+    // backplane reporting no events gets all 16. Pinned by `SC-006/US1 AS3: a backplane's standing
+    // event_pending does not delay the discovery of the modules behind it`, which fails without
+    // it. The same shape desc_stalled_superframe takes for the descriptor ring (core_engine.cpp).
+    uint8_t event_sweep_next_id = ADDR_module_min;
     // Transaction cost / demotion for this backplane's OWN status poll (spec FR-027/FR-028,
     // R-11 correction) — separate from any NodeRecord's own fields: a backplane's status poll
     // and its modules' demand traffic are measured and demoted independently, since a slow
@@ -394,9 +460,12 @@ enum class LifecycleKind : uint8_t {
 //     callback that needs the bytes afterwards copies them.
 // Where that engine-owned storage lives is not settled by §7 or §8a and is not decided here —
 // docs/OPEN-QUESTIONS.md, 2026-09-27 entry, recommends an owned detail arena alongside the §8a
-// rings, for ruling with T015 (#684). Until then this is an unproved precondition on T015, NOT
-// a property of the current repo: nothing in core/ copies detail bytes today, and nothing here
-// can make the compiler check it.
+// rings, for ruling with T015 (#684). T039 implemented that recommendation: CoreEngine owns the
+// arena (core/core_engine.hpp's event_detail_) and copies the decoder's bytes into it before the
+// enqueue, with the "no live pending event's bytes are overwritten" argument stated there and
+// exercised by `FR-016: detail is delivered verbatim and survives to drain_callbacks()`. It
+// remains a precondition on every OTHER enqueuer rather than a property this header establishes:
+// the field is still a raw non-owning pointer and nothing here can make the compiler check it.
 struct LifecycleEvent {
     LifecycleKind kind = LifecycleKind::NodeDiscovered;
     uint8_t node_id = 0; // module or backplane trunk address; 0 for BusFault/BusRecovered

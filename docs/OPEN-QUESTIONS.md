@@ -6486,3 +6486,451 @@ second sentence of point 1 of the 2026-10-08 "T028/T029 (#699, #700): the fair s
 demotion threshold and the demoted-item rotation are all undefined" entry. **Related:** #699,
 #700, PR #907 red team round 3 findings 1 and 2, spec FR-027/FR-028, SC-007, R-11, `tasks.md`
 T028.
+
+---
+
+## 2026-11-23 — T039 (#710): WHOSE events a status poll's `event_pending` count is, when only backplanes are polled
+
+**Context:** FR-015 makes "a nonzero `event_pending` count" the trigger for draining a node's
+queued events, and FR-002 requires the engine to collect that count "for every node it reports
+on". Three facts in the artefacts do not meet:
+
+- `protocol-l3` §3.3's status block carries exactly ONE `event_pending` byte, for the node that
+  answered. There is no per-slot count and no per-slot event mask anywhere in the v1 wire
+  format.
+- `protocol-l3` §3.1 addresses `GET_STATUS` to any node, but trunk §6's superframe — and FR-002
+  itself — give a status poll to every enrolled BACKPLANE and to no module. `CoreEngine` has
+  never issued a `GET_STATUS` to a module id, and no task in `tasks.md` adds one.
+- `EventDrainItem` (`data-model.md` §6) names a MODULE: `core/`'s event ring is indexed into the
+  `NodeRecord` table, and T029's drain loop drops an item whose `node_id` is not a Discovered
+  module. So a backplane address cannot be the subject of an event drain even in principle.
+
+Read together, the only count the host can actually observe is a BACKPLANE's, and the only thing
+it can drain is a MODULE. Nothing in the artefacts bridges the two. The nearest statement is the
+2026-09-03 "Bridged replies after ERR_BUSY" entry, which already assumes the bridge-side reading:
+"a backplane that answers event reads from its own prefetch cache (which the `event_pending`
+status summary already gestures at)". The hardware side agrees — `docs/omgp-spec-v0.7.md` A12's
+IRQ# is an SMBALERT-style per-module alert line the backplane aggregates — but IRQ# sampling,
+per-slot masking and backplane event caching are all F4/firmware matters, not L3 ones.
+
+**What T039 implemented, and what it costs.** A backplane's count is read as a SUMMARY over the
+modules it bridges for: a `GET_STATUS` answer with `event_pending > 0` enqueues ONE
+`EventDrainItem` for the next Discovered module behind that backplane in rotation
+(`BackplaneRecord::event_sweep_next_id`), and WHICH module actually had events is resolved by
+asking them over successive polls — a module with nothing queued answers `EVT_NONE` (§3.4), which
+terminates its own drain with nothing delivered and nothing re-queued. A poll naming a module id
+directly (no path produces one today) enqueues for that module alone, so a later story that polls
+modules needs no change here.
+
+Bounded and idempotent: at most one item per node at a time (`NodeRecord::event_drain_pending`),
+at most one `GET_EVENT` per node per superframe turn (FR-025), one sweep step per status poll, and
+`GET_EVENT` is the protocol's own drain-one-repeat-until-empty operation (CLAUDE.md rule 2). The
+cost of the missing attribution is one `GET_EVENT` per poll that reports a count — paid in demand
+slots only, never in a status poll's or the enrolment probe's place (FR-028) — plus up to k polls
+before the module that actually holds an event is the one asked, where k is the number of
+Discovered modules behind that backplane.
+
+**Why one per poll and not one per sibling** (this is the measured half, not a reading). The first
+implementation enqueued an item for every Discovered module on every poll that reported a count.
+Because events are drained ahead of the other demand kinds (FR-020), that lets a backplane
+reporting a standing count it cannot justify hold its own slots out of discovery: on a 16-slot
+rig, 5 of 16 modules discovered in 400 superframes and 980 `GET_EVENT`s issued, against 16 of 16
+and no `GET_EVENT` for the same rig reporting no events — the pathology
+`NodeRecord::desc_stalled_superframe` already records for `READ_DESC`, and what US1 AS3 ("does not
+block the discovery of any other slot or backplane") and SC-006 forbid. With one sweep step per
+poll the same two arms read 16 of 16 and 16 of 16, with 198 `GET_EVENT`s in the reporting arm —
+*demonstrated by* `SC-006/US1 AS3: a backplane's standing event_pending does not delay the
+discovery of the modules behind it`, which fails on the every-sibling form. Note that the reading
+ITSELF is unchanged by this and still wants a ruling; the rotation only bounds its cost.
+
+**Alternatives considered.** (a) Treat the count as the polled node's own and enqueue only when
+the polled id is a module — rejected: nothing in production ever polls a module, so FR-015 would
+be dead code and US4 unimplementable without a second scheduler change no task owns. (b) Add
+module-level `GET_STATUS` polling to the superframe — rejected as speculative scope: it changes
+FR-002's own traffic, costs one transaction per module per period, and belongs to a human ruling
+on the superframe plan, not to T039. (c) Wait for a per-slot event mask in `BP_SLOT_MAP` or a new
+backplane opcode — the cleanest answer and a T3 protocol change (rule 1), outside this task.
+
+**Recommendation:** ratify (the implemented reading) by stating in `protocol-l3` §3.3 that a
+BACKPLANE's `event_pending` is a summary count over the modules it bridges for, with no per-slot
+attribution in v1, and in `spec.md` FR-002/FR-015 that the host resolves attribution by draining
+each Discovered module behind a reporting backplane. If per-slot attribution is wanted instead,
+(c) is the shape to rule on — a slot bitmap alongside `BP_SLOT_MAP`'s own, which would make the
+fan-out above exact and is a YAML + docs change in one commit.
+
+**Also recorded, and NOT questions** (both are this implementation's choices where the artefacts
+are silent, in the shape `kMinFairShareUs` and `kDemoteAfterOverrunSuperframes` already took):
+
+1. **FR-026's "configured budget"** is `kEventRateWindowSuperframes = 8` (the window, derived
+   from `TRUNK_T_poll_us`, never restated in microseconds) and `kEventRateBudgetPerWindow = 4`
+   events, both in `core/core_types.hpp` and both read from there by
+   `tests/unit/test_core_events.cpp` rather than restated as literals. No YAML symbol names an
+   event-rate budget and none should: it is a host policy with no wire meaning. Reasoning and the
+   two cases that pin either side of it are at the declaration.
+2. **`NodeRecord::event_drain_pending`** is a new field, not a `data-model.md` §3 one, appended
+   for the reason given at its declaration: FR-015's trigger is a LEVEL re-observed by every
+   poll, and without the flag one item per poll would fill §6's drop-newest ring and then refuse
+   the re-enqueue of a node that really does have a backlog.
+
+**Ruling:** pending — human. **Amends:** nothing yet; the recommendation above would amend
+`protocol-l3` §3.3 and `spec.md` FR-002/FR-015, both human-ruling artefacts. **Supersedes:**
+none. **Related:** #709, #710, the 2026-09-03 "Bridged replies after ERR_BUSY" entry (same
+prefetch-cache reading), 2026-09-06 "#110 F6", spec FR-002/FR-015/FR-025/FR-026, SC-002, SC-006,
+`data-model.md` §3/§6, R-07's 2026-09-21 correction, `tasks.md` T039.
+
+---
+
+## 2026-11-23 — T039 (#710): an UNALLOCATED event type never reaches `core/` — the L3 codec refuses it
+
+**Context:** CLAUDE.md rule 7 and `protocol-l3` §4.2 require unknown event types to be IGNORED,
+and #710's own acceptance criteria asked for one step more than that: that "any unallocated code"
+arrive at the application "as a plain `ModuleEvent` carrying the type verbatim". It cannot, and
+the obstacle is one layer below `core/`: `l3::decode_get_event_resp` returns `OutOfRange` for any
+`event_type` outside §3.4's own set (`l3/l3_payload.cpp`'s `valid_event()` — the allocated codes
+plus `EVT_USER_DEFINED_MIN..MAX`), and `l3::encode_get_event_resp` refuses to build one, so
+`MockL3Node` cannot even script such an answer. An unallocated `0x05..0xEF` code is therefore
+dropped by the codec and `core/` sees an undecodable answer, which it ignores.
+
+**Why T039 left it there.** Ignoring is exactly what rule 7 mandates ("unknown event types are
+ignored"), nothing crashes, over-reads or hangs, and the node stays enrolled — *demonstrated by*
+`CLAUDE.md rule 7: a reserved or user-defined event type is passed through uninterpreted`, whose
+own section asserts both codec refusals so that a later widening of the codec shows up as that
+file's business too. Delivering such a code verbatim would mean widening an `l3/` codec and its
+golden vectors and Python reference — F1 ground truth, named Out of scope on #710, and arguably a
+rule-1 question about what `events:` in the YAML means.
+
+**What is genuinely undecided.** Whether a strictly forward-compatible host should distinguish
+"an event type I do not know" (deliver it, let the application decide) from "a malformed GET_EVENT
+answer" (ignore it). Today both are the same outcome. The reserved and user-defined codes the
+codec DOES accept — `EVT_PARAM_CHANGED_LOCALLY` and the whole `0xF0..0xFF` range — are already
+delivered verbatim with no per-type branch, so the question only bites for codes the YAML has not
+allocated at all.
+
+**Recommendation:** leave the codec as it is for v1 and record the narrowing in `protocol-l3`
+§3.4 ("a host MAY ignore an event type outside this set; the codecs refuse it"), OR — if
+forward compatibility is to be strict — widen `valid_event()` to accept any code and let the
+consumer decide, with the golden vector and Python reference moved in the same commit. The first
+is recommended: an unallocated code on a v1 wire is a protocol violation, and the second spends a
+T3 change on a case no conforming module can produce.
+
+**Ruling:** pending — human. **Amends:** none. **Supersedes:** none. **Related:** #709, #710,
+CLAUDE.md rule 7, `protocol-l3` §3.4/§4.2, `l3/l3_payload.cpp` `valid_event()`,
+`protocol/omgp-protocol.yaml` `events:`.
+
+---
+
+## 2026-11-23 — T039 (#710): FR-025's K=1, SC-002's bound and FR-026's rate budget cannot all hold for a backlog of five events or more
+
+**Context:** raised by the red-team pass on PR #952 (finding 2) and re-measured here. Three
+requirements meet at one number and disagree:
+
+- **FR-025** paces a node at one drained event per its own superframe turn (K=1). On a settled
+  one-module rig that is one event per status-poll period of its backplane — **measured 1900 µs**
+  per event at this head.
+- **SC-002** bounds delivery at "that node's backplane's poll period + two superframe periods" =
+  `4 × TRUNK_T_poll_us` = **8000 µs**. At 1900 µs per event only the first FOUR of a node's queued
+  events can ever meet it; the fifth lands at 9420 µs by K=1 alone.
+- **FR-026**'s budget, as this task configured it (`kEventRateBudgetPerWindow = 4` per
+  `kEventRateWindowSuperframes = 8`), then reports the FIFTH drain in a window as a flood:
+  `LifecycleKind::NodeEventFault`, after which the node is not drained for the rest of a window,
+  which pushes the sixth event to 26520 µs.
+
+Measured at this head (a scratch case, run and then deleted — it cannot be committed without
+asserting a spec breach as expected behaviour): six events queued on one module, each truthfully
+reporting its own `remaining_count` (5,4,3,2,1,0), status block reporting 6. All six are delivered
+(FR-015/FR-016 hold), `GET_EVENT` issued 17 times, `NodeEventFault` reported once, deliveries at
++1900, +3760, +5660, +7520, **+9420**, **+26520** µs against an 8000 µs bound.
+
+**What this is and is not.** Not a defect in the detection or drain code: every individual
+requirement is implemented as written, and the arithmetic above follows from FR-025 and SC-002
+alone for events 5 and beyond. What belongs to this task is the CONSTANT: with K=1 capping a
+node at ~4 drains per `kEventRateWindowUs`, any budget low enough for FR-026's defence to be
+reachable at all is also low enough to fault an honest module with budget+1 genuinely queued
+events — `note_event_drained()` counts drained events and has no way to tell a finite backlog from
+an unbounded flood (by construction: it reads neither `remaining_count` nor any finiteness
+signal). So no choice of the two constants fixes this; raising the budget above the achievable
+per-window rate would instead make FR-026 unreachable and is refused by
+`FR-026: an over-budget node is reported NodeEventFault and stops being drained`.
+
+**Alternatives considered.** (a) Raise `kEventRateBudgetPerWindow` — rejected above: unreachable
+defence, and it only moves where the honest backlog is faulted. (b) Charge the budget only while
+the node's reported `remaining_count` is NOT decreasing, so that a decrementing backlog is never a
+flood — plausible, and it makes the defence depend on a field FR-025 calls advisory and #110 F6
+says must size and bound nothing; a ruling, not an implementation detail. (c) Amend SC-002 to
+bound the FIRST event of a backlog rather than every event, which is what K=1 plus the bound can
+actually deliver. (d) Amend FR-026 to be a defence against a node that answers every `GET_EVENT`
+with another event for ever (unbounded), measured over a long window rather than a rate.
+
+**Recommendation:** (c) + (d) together — amend SC-002 to bound the first delivery of a backlog
+(every event, for backlogs within the window the bound can serve) and restate FR-026 as an
+unbounded-stream defence, then re-derive the two constants from the amended text. Until then the
+constants stay as they are, the behaviour above is the behaviour, and this PR should not be read
+as evidence that SC-002 holds for backlogs of five or more.
+
+**Ruling:** pending — human. **Amends:** nothing yet; the recommendation would amend `spec.md`
+SC-002 and FR-026, both human-ruling artefacts. **Supersedes:** none. **Related:** #709, #710, PR
+#952 red-team finding 2, spec FR-015/FR-016/FR-025/FR-026, SC-002, SC-006, R-07's 2026-09-21
+correction, the 2026-11-23 "WHOSE events a status poll's `event_pending` count is" entry,
+`tasks.md` T039/T040.
+
+## 2026-11-24 — T039 (#710): PROPOSED ruling on the entry above — amend SC-002 to bound the first delivery, restate FR-026 as an unbounded-stream defence
+
+**Status: PROPOSED, awaiting human ratification.** This entry was drafted by an agent at the
+maintainer's request, from the recommendation already recorded in the 2026-11-23 entry above; it
+is not itself a ruling. It becomes one when a human marks it so (a later dated entry that
+references this one, or the same decision stated on PR #952). Until then the 2026-11-23 entry's
+"Ruling: pending — human" stands, the constants stay as they are, and `spec.md` is unchanged.
+
+**Proposed ruling: alternatives (c) + (d) of the 2026-11-23 entry, together.**
+1. **SC-002** is amended to bound the FIRST delivery of a backlog by the node's backplane's
+   status-poll period, and to bound EVERY event only for a backlog the bound can serve with one
+   GET_EVENT per node per superframe turn (FR-025's K = 1). That is what K = 1 plus the bound can
+   actually deliver; the current text promises more.
+2. **FR-026** is restated as a defence against a node that answers every GET_EVENT with another
+   event without end — an unbounded stream measured over a window long enough that a finite honest
+   backlog cannot fill it — not as a rate that an honest backlog of budget+1 can exceed.
+3. **`kEventRateBudgetPerWindow` and `kEventRateWindowSuperframes` are re-derived** from the
+   amended text in a later task, with the test file's SC-002/FR-026 cases updated in the same
+   commit as the constants (tests first, CLAUDE.md rule 8).
+
+**Why not the others (restated from the 2026-11-23 entry, not re-argued).** (a) raising the budget
+makes FR-026 unreachable and only moves where an honest backlog is faulted; (b) charging only while
+`remaining_count` is not decreasing makes the defence depend on a field FR-025 calls advisory and
+#110 F6 says must size and bound nothing.
+
+**What this does not establish (CLAUDE.md rule 11).** Nothing here changes behaviour: the six-event
+measurement in the 2026-11-23 entry (deliveries at +1900 … +9420, +26520 µs against an 8000 µs bound)
+remains the behaviour at this head, demonstrated by that entry's scratch run. The proposal is
+ASSUMED to resolve the conflict; no amended text exists yet to test it against.
+
+**Merge position.** PR #952 may merge with this entry PROPOSED, because the constants and behaviour
+are unchanged and disclosed. It must not be read as evidence that SC-002 holds for a backlog of five
+or more events. **Amends:** nothing until ratified; on ratification, `spec.md` SC-002 and FR-026
+(human-ruling artefacts — the amendment is human-authored or human-ratified). **Supersedes:** none.
+**Related:** the 2026-11-23 entry above, #709, #710, PR #952, spec FR-015/FR-016/FR-025/FR-026,
+SC-002, SC-006, `tasks.md` T039/T040.
+
+## 2026-11-24 — T039 (#710): PROPOSED ruling — FR-020's event priority gets a floor, so no steady event source can starve discovery
+
+**Status: PROPOSED, awaiting human ratification.** Drafted by an agent at the maintainer's request
+after PR #952's round-5 red team and review. It is not a ruling and amends nothing until a human
+marks it so (a later dated entry that references this one, or the same decision on PR #952).
+`spec.md` is unchanged.
+
+**The problem, as measured at `479bf34` (red team, ASan/UBSan, logged on #952).** FR-020 says event
+drains go ahead of descriptor-chunk reads and parameter sets; R-07 also puts the IDENTIFY scan after
+them. Read literally that is a strict priority, and a strict priority lets any steady source of
+events take every demand slot for ever. Two sources of it exist: (1) attribution PROBES — a
+backplane whose count is never justified queues one per poll (bounded since `479bf34` by the
+speculative-item alternation); (2) an endless HONEST backlog — two modules each answering every
+GET_EVENT with another event (`remaining_count > 0`), which `479bf34` deliberately leaves at full
+priority and which the red team shows starves ALL discovery. Any bound that is local to probes, or
+to one backplane, leaves (2). The rule that closes both is a floor on the non-event side.
+
+**Proposed rule (amends FR-020; R-07's order is otherwise unchanged).** In every superframe that has
+any non-event demand work pending (an IDENTIFY, a descriptor chunk, a parameter operation), at least
+every SECOND superframe's demand phase serves that work first, whatever the event ring holds;
+events keep FR-020's priority in the superframes between. Equivalently: the alternation `479bf34`
+applies to speculative items is applied to the event ring as a whole. Event items skipped by the
+floor are rotated, not dropped (the debt is kept, as for a faulted node).
+
+**What it costs, stated.** Event drains get at most one demand phase in two while non-event work is
+waiting, so a backlog's per-event latency can double in a superframe that has competing work — still
+bounded by FR-025's K = 1 and by the amended SC-002 of the 2026-11-24 entry above, and it does not
+apply when no non-event work is pending. FR-020's own justification (a parameter-set or descriptor
+burst must not push an event past SC-002's bound) still holds for the amended SC-002, because a
+single burst is finite; it was never true for an unbounded one.
+
+**Alternatives.** (a) Leave FR-020 strict and bound each source — rejected: every new source needs
+its own bound, and the red team has now found two. (b) A larger floor (one in N, N > 2) — a
+tuning choice for a later task once the amended SC-002 exists; two matches the alternation already
+used between the IDENTIFY scan and the stalled-read retry. (c) A floor for discovery only, not for
+descriptor/parameter work — rejected as inconsistent: a parameter burst has the same starvation
+shape in the other direction, though it is finite.
+
+**What this does not establish (CLAUDE.md rule 11).** That the floor closes the red team's finding 1
+is ASSUMED until a two-module endless-backlog case is written first (rule 8) and run — none exists
+yet. That the doubling is the only latency effect is ASSUMED. Nothing here changes behaviour until
+ratified.
+
+**Amends:** on ratification, `spec.md` FR-020 (a human-ruling artefact — human-authored or
+human-ratified). **Supersedes:** none. **Related:** the 2026-11-24 SC-002/FR-026 entry, #709, #710,
+PR #952 rounds 4-5, spec FR-015/FR-020/FR-025/FR-026, R-07.
+
+## 2026-11-24 — T039 (#710): RATIFIED — the FR-020 floor proposed in the entry above
+
+**Ruling: RATIFIED by the maintainer, in session ("Assume ratified"), 2026-11-24.** The rule is the
+one in the PROPOSED entry above, unchanged: while non-event demand work (IDENTIFY, descriptor chunk,
+parameter operation) is pending, at least every second superframe's demand phase serves it first;
+events keep FR-020's priority in the superframes between; skipped event items keep their place.
+**Not done by this entry:** `specs/003-host-core-engine/spec.md` FR-020 and the SC-002/FR-026 text
+are human-ruling artefacts and have NOT been edited by an agent — a human-authored amendment is
+still owed. **Implementation:** PR #952, tests first. **Supersedes:** the "PROPOSED" status of the
+entry above; **amends:** nothing in this file's history.
+
+## 2026-11-24 — T039 (#710): PROPOSED ruling — FR-026's flood fault must not depend on the drain rate the floor allows
+
+**Status: PROPOSED, awaiting human ratification.** Drafted by an agent at the maintainer's request
+after PR #952's round-6 review `[HIGH]` finding 1. Not a ruling; `spec.md` FR-026 and SC-002 are
+unchanged by it. (`spec.md` FR-020 WAS amended in the same change, because that ruling is ratified —
+see the RATIFIED entry above.)
+
+**The finding, with its labels (CLAUDE.md rule 11).** FR-025's K = 1 caps a node at one drain per
+superframe; the ratified FR-020 floor skips the event ring in the superframe after one that issued an
+event drain whenever non-event work is pending. Composed: one drain per TWO superframes while the
+floor is engaged. `kEventRateBudgetPerWindow` is 4 per `kEventRateWindowSuperframes` = 8 — the same
+4 per 8 — and the fault needs a STRICT excess (`note_event_drained()` returns at `<=`;
+`roll_event_window()` judges `>`). So a node can never exceed the budget while the floor is engaged,
+and FR-026's fault never fires in exactly the flood-plus-discovery rig the floor exists for (a
+flooder A beside a module B that never answers IDENTIFY keeps the floor engaged for ever).
+**Proved by construction** from those sites; the reviewer's ~8.4-superframes-per-window pacing
+(a phase accident could admit a fifth drain) is ASSUMED, not measured here. **No committed case
+observes `NodeEventFault` with the floor engaged.**
+
+**Why changing the constants does not fix it.** Any budget at or below the floor-limited rate faults
+an HONEST node with budget+1 queued events, because the rate is the same for an honest backlog and a
+flood — the false positive the 2026-11-23 entry records. The rate is the wrong signal: with K = 1
+and the floor it measures the scheduler, not the node.
+
+**Proposed ruling: the flood fault is raised by a run, not a rate (alternative (d) of the 2026-11-23
+entry, specified).** A node is faulted when it answers N consecutive GET_EVENTs each with
+`remaining_count > 0` — a stream that, from an honest module, must end because its queue is finite.
+The count resets when the node answers with `remaining_count == 0` or `EVT_NONE`, or leaves
+Discovered. It is independent of how many superframes separate the drains, so the floor cannot
+disarm it; a flooder is faulted after N drains (about 2N superframes under the floor). The rate
+budget and window are then retired for FR-026 (or kept as a second, coarser signal — a ruling).
+N must exceed the deepest honest queue; **no limit in `protocol/omgp-protocol.yaml` bounds a
+module's event queue depth**, so N is a NEW constant that needs a human value (the test mock's
+capacity, `MockL3Node::kEventQueueCapacity`, is a fixture, not a spec figure) — or a protocol limit
+added by the protocol owner, which this entry does not do.
+
+**What this does not establish.** That a run-length fault never faults an honest module is ASSUMED
+until N is ruled against a stated maximum queue depth. That `remaining_count` is trustworthy is not
+assumed: a node that lies low (always 0) is not a flood by this signal and is already bounded by K = 1
+and the floor. **Tests first (rule 8) when ratified:** a flooder beside a never-identifying module
+with the floor engaged must raise exactly one `NodeEventFault` — a case that fails at this head.
+
+**Amends:** on ratification, `spec.md` FR-026 and SC-002 (the 2026-11-24 SC-002/FR-026 entry's
+proposal; this entry specifies FR-026's signal). **Supersedes:** none. **Related:** the 2026-11-23 and
+2026-11-24 entries above, #709, #710, PR #952 round 6, FR-020, FR-025, FR-026, SC-002.
+
+## 2026-11-24 — T039 (#710): RATIFIED — FR-026's flood fault is a run of 256 "more" answers; the rate budget is retired
+
+**Ruling: RATIFIED by the maintainer in session ("Accept", to the recommendations made on the PROPOSED
+entry "FR-026's flood fault must not depend on the drain rate the floor allows" above).** That entry's
+proposal stands as specified, with these values:
+
+1. **N = 256**, derived and not chosen: `remaining_count` and `event_pending` are `u8`
+   (protocol-l3 §3.1/§3.3), so an honest module cannot announce more than 255 queued events and a run
+   of 256 consecutive GET_EVENT answers each reporting `remaining_count > 0` cannot come from a
+   finite queue alone. It is written in code as `UINT8_MAX + 1`, never as a literal. The 256th such
+   answer faults the node (`LifecycleKind::NodeEventFault`, once per episode); it is then not
+   drained.
+2. **The run resets** on an answer with `remaining_count == 0`, on `EVT_NONE`, and when the node
+   (re)enters Discovered or its slot is cleared.
+3. **The rate budget is retired for FR-026.** `kEventRateBudgetPerWindow` and the per-window drain
+   count that only judged it are removed. The fault's time HOLD is kept — a faulted node is skipped for
+   one full window and then `NodeEventFaultCleared` is reported — under honest names
+   (`kEventFaultHoldSuperframes` / `kEventFaultHoldUs`, the same 8 superframes), not a new constant.
+4. **Detection time accepted:** a flooder is faulted after 256 drains, which the floor spaces two
+   superframes apart: 2 x 256 = 512 superframes. A superframe is `TRUNK_T_poll_us` = 2000 us in the
+   generated header (and the existing hold is defined as superframes x that symbol), so about
+   1.02 s — DERIVED from those two values, not measured end to end by a committed case.
+
+**Revisit down, not up.** If the protocol owner adds a module event-queue-depth limit symbol to
+`protocol/omgp-protocol.yaml` (this entry does not touch the YAML), N should become that limit + 1,
+generated. 256 is the safe default until then.
+
+**Does not establish (rule 11).** That N faults no honest module is ASSUMED beyond the wire bound: a
+module whose events ARRIVE as fast as they are served would, by definition, be indistinguishable from a
+flood and be faulted. **Amends:** `spec.md` FR-026 (edited in the same change); SC-002's amendment
+(the 2026-11-24 SC-002/FR-026 entry) is still only PROPOSED and is not edited. **Supersedes:** none.
+**Related:** the PROPOSED entry above, #709, #710, PR #952 round 6 finding 1.
+
+## 2026-11-25 — T039 (#710): RATIFIED — FR-026's hold must scale with its run trigger (hold = 512 superframes); SC-006 amended
+
+**Ruling: RATIFIED by the maintainer in session ("1", to the recommendation made when the red team's
+round-9 `[HIGH]` was reported: scale the hold, amend SC-006).** This entry corrects the 2026-11-24
+"RATIFIED — FR-026's flood fault is a run of 256" entry's item 3, which kept the hold at 8 superframes.
+
+**What was measured (demonstrated by a committed case at `f87fef7`, red team round 9).** The case
+`FR-026: a flooder is faulted by its run of 'more' answers, at the 256th …` drives a module that
+answers `remaining_count > 0` for ever: in 600 superframes it was drained 302 times, faulted once, and
+the hold suppressed about 4 of those 302 drains. Steady state is arithmetic from two constants: detection
+needs 256 consecutive "more" answers, which the FR-020 floor spaces one per two superframes = 512
+superframes; the hold then suppresses 8. 8 / (512 + 8) = **1.5 %** of the flooder's event-priority share
+removed; it keeps 98.5 % for ever. Under the retired rate budget the fault fired on the 5th drain and the
+same 8-superframe hold removed roughly 44 %.
+
+**My miss (stated, not excused).** When the trigger went from 5 drains to 256 (a 51x slowdown of
+detection) the hold was carried over unexamined — item 3 of the ratified entry says "the same 8
+superframes, not a new constant" and the code comment said "kept so the hold is unchanged". A hold is
+only meaningful RELATIVE to its trigger; holding it fixed while multiplying the trigger by 51 reduced the
+defence to decoration. SC-006, which this branch did not amend, also still says a flooder is "reported
+faulted … rather than continuing to consume event-priority share" and names a "delivery rate … budget"
+that no longer exists, so it was false at that head.
+
+**Ruling.**
+1. **Hold = 512 superframes**, written as `kEventFaultHoldSuperframes = 2 x kEventRunFaultThreshold`
+   (the "2" is the FR-020 floor's drain spacing: one event drain per two superframes while non-event
+   work is pending, FR-020 as amended 2026-11-24). Derived, not chosen: it is the time the node took to
+   earn the fault, so a node that keeps flooding spends about as long held as it spent being detected,
+   i.e. about 50 % duty (512 held / 1024 per cycle), against 1.5 % before. At `TRUNK_T_poll_us` that is
+   about 1.02 s held (DERIVED from the symbol, not measured end to end).
+2. The hold's mechanics are unchanged: measured from `NodeRecord::event_fault_start_us` through the
+   injected Clock, then `NodeEventFaultCleared`, draining resumes on the node's next turn, the run
+   restarts from zero.
+3. **SC-006 is amended** (`spec.md`): "…its own backlog is drained no faster than one event per its own
+   superframe turn (FR-025), and once its run of consecutive 'more' answers reaches FR-026's threshold it
+   is reported faulted and not drained for FR-026's hold, so it stops consuming event-priority share for
+   that hold." The "delivery rate exceeds budget" wording is removed.
+4. FR-026's own text gains the hold length (512 superframes) so the constant is specified, not only coded.
+
+**Does not establish (rule 11).** That 50 % is the right duty cycle is a judgement (the symmetric
+choice: hold = detection time), not a derived necessity; a longer hold lowers a flooder's share further
+and delays an honest-but-bursty node's recovery by the same amount (ASSUMED acceptable: such a node is
+already indistinguishable from a flood by the 256-run). A node that floods only a little over 256 answers
+per episode and resets its run in between evades the fault entirely (red team round 9 MEDIUM, accepted by
+the 2026-11-24 ruling, unchanged here). **Tests first (rule 8):** a flooder with the floor engaged must
+lose about half its drains to the hold over a long horizon, and the fault must release at exactly 512
+superframes — both fail at `f87fef7`. **Amends:** `spec.md` FR-026 and SC-006. SC-002's amendment is still
+only PROPOSED and is not edited. **Supersedes:** item 3 of the 2026-11-24 RATIFIED FR-026 entry (hold
+"the same 8 superframes"). **Related:** #709, #710, PR #952 round 9 red team, FR-020, FR-025, FR-026,
+SC-006.
+
+## 2026-11-26 — T039 (#710): RATIFIED — SC-002 bounds the first delivery of a backlog; later events are served at FR-025's K = 1
+
+**Status: RATIFIED by the maintainer** on PR #952 ("Yes", 2026-11-26) after the agent's
+recommendation to ratify the 2026-11-24 PROPOSED entry "amend SC-002 to bound the first delivery,
+restate FR-026 as an unbounded-stream defence" **as proposed**. **Supersedes:** the "Ruling: pending —
+human" of the 2026-11-23 entry "FR-025's K=1, SC-002's bound and FR-026's rate budget cannot all hold
+for a backlog of five events or more" and the SC-002 half of the 2026-11-24 PROPOSED entry; its FR-026
+half was ratified separately (2026-11-24 RATIFIED, N = 256) and amended again by the 2026-11-25 hold entry.
+
+**Ruling.** SC-002 bounds the FIRST event of a node's backlog by the backplane's status-poll period
+plus two superframe periods. Every event of a backlog is bounded the same way only while the backlog is
+one the engine can serve at K = 1 inside that period (at most four events, as measured: the fifth of a
+six-event backlog arrived at +9420 µs against the 8000 µs bound); a longer backlog is delivered one
+event per superframe turn and its later events are outside the criterion. **Amends:** `spec.md` SC-002
+(edited in the same change) and the two "SC-002's amendment is PROPOSED" notes in FR-026 and FR-020.
+
+**What this does not establish (CLAUDE.md rule 11).** (1) It does not bound a FIRST delivery behind one
+of several reporting backplanes whose attribution must be guessed by a probe (2026-11-23 attribution
+entry, still ruling-pending); `spec.md` SC-002 says so. (2) No test asserts the amended SC-002 as
+such: the test file's SC-002 cases remain an oracle for backlogs up to four events, by construction of
+their scripts, and nothing asserts "the fifth event is late" as expected behaviour. (3) The arithmetic
+(four events) is the 2026-11-23 scratch measurement, not a committed case.
+
+## 2026-11-26 — T039 (#710): CORRECTION to the RATIFIED SC-002 entry above — the guaranteed backlog is TWO events, four only in the best phase
+
+Found by PR #952's round-14 red team. The ratified principle stands (SC-002 bounds the first
+delivery; later events only while K = 1 can serve them inside the bound). What is corrected is a
+NUMBER the agent wrote into that entry and into `spec.md` SC-002: "at most four events". Four was the
+2026-11-23 scratch run's best phase (event occurring just before its STATUS poll; detection ~0). SC-002
+is a "never exceeds" criterion, so the figure must hold in the worst phase: detection can cost one
+poll period (4000 us), leaving 4000 us at K = 1's ~1875 us per event, i.e. TWO events (DERIVED from
+SC-002's own decomposition and the measured pacing; not executed). **Amends:** `spec.md` SC-002
+(edited in the same change) now says two in the worst phase, up to four in the best; the SC-002 cases'
+header comment likewise. **Supersedes:** the "(at most four events)" figure of the entry above,
+nothing else. **Not established:** no committed case sweeps the arm phase, so neither figure is
+asserted by a test (owed: a phase-swept case, tracked as a follow-up).
