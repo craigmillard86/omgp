@@ -45,12 +45,14 @@
 //     docs/OPEN-QUESTIONS.md 2026-11-23).
 //   * The SC-002 cases below script a backlog of at most THREE events, all armed at ONE detection
 //     phase, and that is a LIMIT on what they establish, not a calibration: K=1 paces a node at one
-//     event per ~1900 us, so inside SC-002's 8000 us bound a backlog of four fits only if the event
-//     occurs right before its backplane's STATUS poll (best phase), and only two events are
-//     guaranteed in the worst phase (detection can cost one poll period, 4000 us; derived, not
-//     executed). No case sweeps the arm phase. Beyond it the behaviour is the collision recorded in
-//     docs/OPEN-QUESTIONS.md 2026-11-23 and the RATIFIED 2026-11-26 SC-002 entry (as corrected the
-//     same day). No case here asserts a breach as expected behaviour.
+//     event per ~1900 us (measured 2026-11-23 with the FR-020 floor not engaged; with non-event
+//     work pending a drain gets one demand phase in two), so inside SC-002's 8000 us bound a
+//     backlog of four fits only if the event occurs right before its backplane's STATUS poll (best
+//     phase), and only two events are guaranteed in the worst phase (detection can cost one poll
+//     period, 4000 us; derived, not executed). No case sweeps the arm phase. Beyond it the
+//     behaviour is the collision recorded in docs/OPEN-QUESTIONS.md 2026-11-23 and the RATIFIED
+//     2026-11-26 SC-002 entry (as corrected the same day). No case here asserts a breach as
+//     expected behaviour.
 //   * FR-026's fault threshold (a run of kEventRunFaultThreshold "more" answers, ruled 2026-11-24)
 //     and the fault's hold are core/core_types.hpp constants, read from there by every case
 //     below and never restated as literals — the engine's own policy where FR-026 says only
@@ -792,7 +794,8 @@ TEST_CASE("AS3/FR-015: a node that keeps reporting events pending is not abandon
     const uint8_t bp = omgp::ADDR_backplane_min;
     const uint8_t node = rig.bring_up(bp);
 
-    // Four events: the most this file's SC-002 cases script (see the header comment).
+    // Four events: this case asserts DRAINING across superframes, not SC-002's bound (the header
+    // comment lists the cases that do).
     constexpr size_t kScriptedEvents = 4;
     std::vector<ScriptedEvent> scripted;
     for (size_t i = 0; i < kScriptedEvents; ++i) {
@@ -830,7 +833,7 @@ TEST_CASE("FR-025: at most one GET_EVENT per node per superframe turn, whatever 
     const uint8_t bp = omgp::ADDR_backplane_min;
     const uint8_t node = rig.bring_up(bp);
 
-    constexpr size_t kScriptedEvents = 4; // the most this file's SC-002 cases script
+    constexpr size_t kScriptedEvents = 4; // a finite backlog; this case does not assert SC-002
     std::vector<ScriptedEvent> scripted;
     for (size_t i = 0; i < kScriptedEvents; ++i) {
         scripted.push_back(event_of(omgp::EVT_FAULT_RAISED, 0xFFu, {static_cast<uint8_t>(i)}));
