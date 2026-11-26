@@ -399,8 +399,7 @@ confirm the application is told it has become unreachable and later told when it
   `docs/OPEN-QUESTIONS.md` "T039 (#710): PROPOSED ruling — FR-026's flood fault must not
   depend on the drain rate the floor allows" and its RATIFIED entry. A rate cannot serve as the
   signal: with FR-025's one drain per node per superframe and FR-020's floor it measures the
-  scheduler, not the node. SC-002's amendment is a separate PROPOSED entry and is not
-  applied here.)
+  scheduler, not the node. SC-002 is amended separately, 2026-11-26.)
 - **FR-016**: The engine MUST deliver every drained event to the application through the
   callback interface, in the order the module reported them.
 - **FR-017**: The engine MUST report node lifecycle transitions — discovered/live,
@@ -439,8 +438,8 @@ confirm the application is told it has become unreachable and later told when it
   (Strict priority let a steady source of events — an endless honest backlog from two
   modules, or unjustified attribution probes from several backplanes — take every demand
   slot for ever and stop all discovery.) The latency bound above therefore holds for a
-  burst of finite length, not an unbounded one; see SC-002's amendment, which is
-  PROPOSED and not yet ruled.
+  burst of finite length, not an unbounded one; see SC-002's amendment (2026-11-26,
+  ratified).
 
 ### Key Entities
 
@@ -480,9 +479,18 @@ confirm the application is told it has become unreachable and later told when it
   assigned a node ID, and the recorded sequence of operations to get there is identical
   across repeated runs of the same scripted scenario.
 - **SC-002**: The simulated time from a module event occurring to the application's
-  callback receiving it never exceeds that module's backplane's status-poll period plus
-  two superframe periods, in every scripted scenario exercised, including scenarios with
-  concurrent parameter-set traffic.
+  callback receiving the FIRST event of that node's backlog never exceeds that module's
+  backplane's status-poll period plus two superframe periods, in every scripted scenario
+  exercised, including scenarios with concurrent parameter-set traffic. Every event of a
+  backlog is bounded the same way only while the backlog is one the engine can serve at
+  FR-025's one `GET_EVENT` per node per superframe turn inside that period (at most four
+  events); a longer backlog is delivered at one event per superframe turn and its later
+  events are not bounded by this criterion. (Amended 2026-11-26, ratified by the
+  maintainer — `docs/OPEN-QUESTIONS.md` "T039 (#710): PROPOSED ruling on the entry above —
+  amend SC-002 to bound the first delivery" and its RATIFIED entry. NOT covered by this
+  amendment: a first delivery whose attribution behind one of several reporting
+  backplanes has to be guessed by a probe is still not bounded by this period — see the
+  2026-11-23 entry and the attribution ruling.)
 - **SC-003**: A burst of 40 parameter-set operations submitted at once completes without
   a single superframe, from submission to completion, skipping its status poll to any
   enrolled backplane.

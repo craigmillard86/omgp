@@ -6897,3 +6897,26 @@ superframes — both fail at `f87fef7`. **Amends:** `spec.md` FR-026 and SC-006.
 only PROPOSED and is not edited. **Supersedes:** item 3 of the 2026-11-24 RATIFIED FR-026 entry (hold
 "the same 8 superframes"). **Related:** #709, #710, PR #952 round 9 red team, FR-020, FR-025, FR-026,
 SC-006.
+
+## 2026-11-26 — T039 (#710): RATIFIED — SC-002 bounds the first delivery of a backlog; later events are served at FR-025's K = 1
+
+**Status: RATIFIED by the maintainer** on PR #952 ("Yes", 2026-11-26) after the agent's
+recommendation to ratify the 2026-11-24 PROPOSED entry "amend SC-002 to bound the first delivery,
+restate FR-026 as an unbounded-stream defence" **as proposed**. **Supersedes:** the "Ruling: pending —
+human" of the 2026-11-23 entry "FR-025's K=1, SC-002's bound and FR-026's rate budget cannot all hold
+for a backlog of five events or more" and the SC-002 half of the 2026-11-24 PROPOSED entry; its FR-026
+half was ratified separately (2026-11-24 RATIFIED, N = 256) and amended again by the 2026-11-25 hold entry.
+
+**Ruling.** SC-002 bounds the FIRST event of a node's backlog by the backplane's status-poll period
+plus two superframe periods. Every event of a backlog is bounded the same way only while the backlog is
+one the engine can serve at K = 1 inside that period (at most four events, as measured: the fifth of a
+six-event backlog arrived at +9420 µs against the 8000 µs bound); a longer backlog is delivered one
+event per superframe turn and its later events are outside the criterion. **Amends:** `spec.md` SC-002
+(edited in the same change) and the two "SC-002's amendment is PROPOSED" notes in FR-026 and FR-020.
+
+**What this does not establish (CLAUDE.md rule 11).** (1) It does not bound a FIRST delivery behind one
+of several reporting backplanes whose attribution must be guessed by a probe (2026-11-23 attribution
+entry, still ruling-pending); `spec.md` SC-002 says so. (2) No test asserts the amended SC-002 as
+such: the test file's SC-002 cases remain an oracle for backlogs up to four events, by construction of
+their scripts, and nothing asserts "the fifth event is late" as expected behaviour. (3) The arithmetic
+(four events) is the 2026-11-23 scratch measurement, not a committed case.
